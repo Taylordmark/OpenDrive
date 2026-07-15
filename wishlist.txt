@@ -1,0 +1,14 @@
+road should be darker in areas where average rainfall is greater
+full day/night cycle, 1 hr for full cycle for now, later 24 hrs/real world accurate
+make the car less floaty
+add offroad vs on road grip changes (per tire)
+add procedurally generated maps for all of north America
+add a map view
+a menu where the person can change cars or edit cars cosmetics
+performance modifications that lend themselves to street, drift, drag, rally, offroad - not using these explicit terms maybe raised suspension for rallying etc
+control scheme editing
+ability to use steering wheel/sim setups
+reduce road elevation increase compared to surrounding terrain by 1/2
+add realistic car sounds (not just a fake noise that scales up with rpms) - there are a few apps that accurately simulate engine noises, how much of this is feasible to implement
+ability to edit exhaust loudness, rasp, stuff like that
+

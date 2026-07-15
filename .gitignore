@@ -1,0 +1,18 @@
+# UE transients (all regenerable)
+OpenDriveUE/Binaries/
+OpenDriveUE/Intermediate/
+OpenDriveUE/Saved/
+OpenDriveUE/DerivedDataCache/
+OpenDriveUE/.vs/
+OpenDriveUE/*.sln
+
+# Imported content is rebuilt by pipeline + headless scripts by design
+OpenDriveUE/Content/
+OpenDriveUE/*.umap.bak
+
+# Pipeline data: fetched + built artifacts, deterministic re-runs
+data/
+
+# Python
+__pycache__/
+*.pyc

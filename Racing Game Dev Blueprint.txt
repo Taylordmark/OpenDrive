@@ -1,0 +1,89 @@
+Racing Game Dev Blueprint
+
+```markdown
+# 🗺️ Project Blueprint: 1:1 Scale Procedural US Racing Game (UE5 MVP)
+
+This document establishes the architecture, data pipeline, and execution roadmap for an MVP racing game. The system maps the United States at a 1:1 scale using free, offline geographical vector datasets, generating localized scenery dynamically within a 2,000-foot vision buffer as the player drives.
+
+---
+
+## 🏗️ Architectural Overview
+
+The game splits data rendering into an **Invisible Physics Layer** (mathematical precision) and a **Visible Scenery Layer** (procedural visual approximations) to optimize bandwidth and performance.
+
+
+```
+
+[ Raw OSM / NASA Data ] ──> [ File Ingestion Engine ]
+│
+┌──────────────────────────┴──────────────────────────┐
+▼                                                     ▼
+[ Physical Road Splines ]                               [ Metadata Tag Stream ]
+(Collision, Height, Trajectory)                        (Landuse: Forest, Desert, etc.)
+│                                                     │
+▼                                                     ▼
+[ Chaos Vehicle Physics ]                             [ UE5 PCG Runtime Graph ]
+(Smooth 100+ mph driving)                              (Spawns local 3D assets)
+│                                                     │
+└──────────────────────────┬──────────────────────────┘
+▼
+[ Exponential Height Fog ]
+(Smoothly hides pop-in at 2000ft)
+
+```
+
+---
+
+## 🛠️ Tech Stack & Core Data Dependencies
+
+### 1. Game Engine & Rendering
+*   **Engine:** Unreal Engine 5 (UE5.4 or newer).
+*   **Procedural Tool:** UE5 PCG (Procedural Content Generation) Framework.
+*   **Core Systems:** **Nanite** (for high-fidelity virtualized asset rendering) and **Chaos Vehicle Physics** (for vehicle dynamics).
+
+### 2. Geographical Datasets (100% Free & Localized)
+*   **Road Vectors:** OpenStreetMap (OSM) `.osm` / Protocolbuffer Binary (`.pbf`) files. Provides GPS nodes for coordinates, road speed classifications, and terrain boundary metadata.
+*   **Elevation Layer:** NASA SRTM (Shuttle Radar Topography Mission) Digital Elevation Models. Provides 30-meter global vertical height values.
+
+---
+
+## 📋 Step-by-Step Execution Plan
+
+### Phase 1: The Core Sandbox (No APIs)
+*   **Objective:** Validate vehicle physics, procedural triggering, and the vision mask.
+*   **Steps:**
+    1. Create an **Open World Template** map. Add a standard *Chaos Wheeled Vehicle* blueprint.
+    2. Add an **Exponential Height Fog** actor. Set `Fog Density` to an aggressive value and `Start Distance` around `1500` to ensure full opacity at **2,000 feet**. Everything beyond this horizon must fade smoothly to a solid backdrop.
+    3. Create a **PCG Graph** component attached to the vehicle. Designate a dynamic bounding volume ($2000 \times 2000$ feet) centering on the player.
+    4. Set up an *Enum parameter* in the PCG Graph called `CurrentBiome` (`Forest`, `Desert`, `Urban`). Set up three simple static mesh spawners inside the graph (e.g., Green boxes for trees, Yellow boxes for cacti, Grey boxes for structures) linked to that switch.
+    5. Verify that changing the enum in the editor instantly swaps the spawned meshes around the car within the fog radius.
+
+### Phase 2: Data Ingestion Pipeline
+*   **Objective:** Parse real-world geographical coordinates into functional UE5 landscape splines.
+*   **Steps:**
+    1. Navigate to OpenStreetMap.org and export a tiny 2-mile test clip containing distinct transitions (e.g., a highway passing by a park or municipal boundary).
+    2. Use an ingestion wrapper (such as the open-source *StreetMap Plugin for Unreal* or a dedicated market ingestion utility) to convert the `.osm` node lists into native **UE5 Landscape Splines**.
+    3. Project these splines onto your imported NASA elevation terrain. Implement a math routine or use the plugin tool to auto-flatten and smooth out the sharp vertical bumps inherent to raw GPS data, creating a clean "collision ribbon" for racing physics.
+
+### Phase 3: Metadata Binding
+*   **Objective:** Connect real-world string values to the engine's runtime asset generators.
+*   **Steps:**
+    1. Extract OSM data attributes accompanying the roads (e.g., keys like `landuse:forest`, `natural:sand`, or `building:residential`).
+    2. Write a lightweight Blueprint controller on the player pawn that continuously queries the nearest polyline boundary intersection.
+    3. Feed that string value directly into the vehicle's attached PCG Graph parameter component.
+    4. Replace your Phase 1 placeholder primitive boxes with rich 3D asset variants (such as Quixel Megascans foliage or modular urban assets).
+
+### Phase 4: Scale, Streaming, and Optimization
+*   **Objective:** Transition from a standalone 2-mile map test to loading the entire United States seamlessly.
+*   **Steps:**
+    1. Convert the massive raw national OSM file into a clustered regional database format.
+    2. Develop a background streaming script that dynamically parses, builds, and flushes data tiles (roads and biomes) in a thread-safe manner roughly 5 to 10 miles ahead of and behind the player's current speed trajectory.
+    3. Implement an asset blending filter in the PCG Graph to prevent assets from instantly snapping into existence on hard boundary lines (e.g., interpolate vegetation density down smoothly before transitioning into an urban asset tier).
+
+---
+
+## 📈 MVP Success Criteria
+
+Your project has successfully cleared Phase 1 when you can launch the game execution thread, spawn into a real-world town or highway loop fetched from text coordinates, drive smoothly at 100+ mph on a balanced terrain plane, and watch the surrounding biome transform accurately beneath an impenetrable sheet of distance fog exactly 2,000 feet away.
+
+```
