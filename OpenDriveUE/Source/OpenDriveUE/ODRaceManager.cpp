@@ -119,6 +119,13 @@ void AODRaceManager::Tick(float DeltaSeconds)
 		return;
 	}
 
+	// the start gate surrounds the spawn point: arm it only at rolling speed
+	// (horizontal - the spawn drop spikes vertical velocity) for a flying start
+	if (NextGate == 0 && Pawn->GetVelocity().Size2D() < 300.0f)
+	{
+		return;
+	}
+
 	if (NextGate == 0)
 	{
 		bRunning = true;
