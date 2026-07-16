@@ -219,6 +219,14 @@ C++, layouts by hand together).*
 
 Staged approach ("simulated engine audio" feasibility, decided):
 
+*Status 2026-07-15: 5.1 executed in C++ (standing decision 3: C++ for audio
+DSP) instead of MetaSounds — UODEngineSynth (firing-freq harmonics, rasp
+waveshaping, throttle-opened muffler LPF) + UODRoadNoiseSynth (surface-colored
+tire bed, speed² wind, impact thumps) + AODVehicleAudio conductor. Verified by
+FFT of an in-game recording: 60 Hz fundamental at 900 RPM idle (exact for
+8 cyl), ~380 Hz at full throttle. Exhaust params (Loudness/Rasp/MufflerCutoff)
+already exposed for 5.2's garage sliders. Awaiting Taylor's ears for tuning.*
+
 ### 5.1 MetaSounds procedural engine v1 (#12a)
 - MetaSound graph: per-cylinder pulse oscillators driven by RPM + firing order,
   load-crossfaded intake/exhaust noise layers, muffler = filter chain.

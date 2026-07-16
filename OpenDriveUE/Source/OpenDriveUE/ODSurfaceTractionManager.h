@@ -26,6 +26,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Traction")
 	float DefaultGrip = 1.0f;
 
+	/** Call after wheel friction values change (tuning preset swap) so the
+	 *  cached per-wheel baselines are re-captured. */
+	void InvalidateBaseFriction() { BaseFriction.Reset(); }
+
 private:
 	/** Base FrictionForceMultiplier per wheel, captured per vehicle. */
 	TMap<TWeakObjectPtr<APawn>, TArray<float>> BaseFriction;
