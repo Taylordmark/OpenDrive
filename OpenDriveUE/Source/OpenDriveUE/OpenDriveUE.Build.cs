@@ -16,7 +16,8 @@ public class OpenDriveUE : ModuleRules
 			"ChaosVehicles",
 			"PhysicsCore",
 			"Landscape",
-			"Foliage"
+			"Foliage",
+			"AudioMixer"
 		});
 	}
 }
