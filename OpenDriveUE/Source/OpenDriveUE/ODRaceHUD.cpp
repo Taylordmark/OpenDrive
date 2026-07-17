@@ -5,6 +5,7 @@
 #include "Engine/Font.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "ODPauseMenu.h"
 #include "ODRaceManager.h"
 #include "ODTuningManager.h"
 
@@ -101,5 +102,65 @@ void AODRaceHUD::DrawHUD()
 		Speed.Scale = FVector2D(1.8f, 1.8f);
 		Speed.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(Speed);
+	}
+
+	// ---- pause menu (stopgap shell; ESC toggles, AODPauseMenu owns state)
+	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+	{
+		AODPauseMenu* Menu = *It;
+		if (!Menu->IsOpen())
+		{
+			break;
+		}
+
+		FCanvasTileItem Dim(FVector2D(0, 0),
+			FVector2D(Canvas->SizeX, Canvas->SizeY),
+			FLinearColor(0, 0, 0, 0.55f));
+		Dim.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(Dim);
+
+		const float Mx = Canvas->SizeX * 0.5f - 220.0f;
+		float My = Canvas->SizeY * 0.5f - 150.0f;
+
+		FCanvasTextItem Title(FVector2D(Mx, My), FText::FromString(TEXT("PAUSED")),
+			Font, FLinearColor::White);
+		Title.Scale = FVector2D(2.2f, 2.2f);
+		Title.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(Title);
+		My += 70.0f;
+
+		for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
+		{
+			FString Label, Value;
+			Menu->GetRow(Row, Label, Value);
+			const bool bSel = Row == Menu->GetSelected();
+			const FLinearColor Color = bSel
+				? FLinearColor(1.0f, 0.8f, 0.3f) : FLinearColor(0.85f, 0.85f, 0.85f);
+
+			FCanvasTextItem L(FVector2D(Mx, My),
+				FText::FromString((bSel ? TEXT("> ") : TEXT("  ")) + Label),
+				Font, Color);
+			L.Scale = FVector2D(1.5f, 1.5f);
+			L.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(L);
+
+			if (!Value.IsEmpty())
+			{
+				FCanvasTextItem V(FVector2D(Mx + 220.0f, My),
+					FText::FromString(FString::Printf(TEXT("< %s >"), *Value)),
+					Font, Color);
+				V.Scale = FVector2D(1.5f, 1.5f);
+				V.EnableShadow(FLinearColor::Black);
+				Canvas->DrawItem(V);
+			}
+			My += 42.0f;
+		}
+
+		FCanvasTextItem Hint(FVector2D(Mx, My + 20.0f),
+			FText::FromString(TEXT("arrows change   enter select   esc resume")),
+			Font, FLinearColor(0.6f, 0.6f, 0.6f));
+		Hint.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(Hint);
+		break;
 	}
 }

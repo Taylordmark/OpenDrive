@@ -3,9 +3,11 @@
 #include "AudioMixerBlueprintLibrary.h"
 #include "ChaosVehicleWheel.h"
 #include "ChaosWheeledVehicleMovementComponent.h"
+#include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
+#include "ODDrivetrainManager.h"
 #include "ODEngineSynth.h"
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -21,6 +23,7 @@ void AODVehicleAudio::BeginPlay()
 {
 	Super::BeginPlay();
 	FParse::Value(FCommandLine::Get(), TEXT("odrev="), RevAt);
+	FParse::Value(FCommandLine::Get(), TEXT("odlift="), LiftAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odrec="), RecSeconds);
 }
 
@@ -85,12 +88,32 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 		return;
 	}
 
-	const float Rpm = Move->GetEngineRotationSpeed();
-	const float MaxRpm = FMath::Max(Move->GetEngineMaxRotationSpeed(), 1.0f);
-	const float Throttle = Move->GetThrottleInput();
-	// crude load: throttle biased up at low revs (lugging), down near redline
-	const float Load = FMath::Clamp(
-		Throttle * (1.25f - 0.5f * (Rpm / MaxRpm)), 0.0f, 1.0f);
+	// drivetrain sim owns engine telemetry when present (fuel cuts and shift
+	// cuts arrive via EffectiveThrottle); Chaos mechanical sim is the fallback
+	float Rpm, Throttle, Load;
+	if (!Drivetrain.IsValid())
+	{
+		for (TActorIterator<AODDrivetrainManager> It(GetWorld()); It; ++It)
+		{
+			Drivetrain = *It;
+			break;
+		}
+	}
+	if (Drivetrain.IsValid() && Drivetrain->IsBound())
+	{
+		Rpm = Drivetrain->GetRpm();
+		Throttle = Drivetrain->GetEffectiveThrottle();
+		Load = Drivetrain->GetLoad();
+	}
+	else
+	{
+		Rpm = Move->GetEngineRotationSpeed();
+		const float MaxRpm = FMath::Max(Move->GetEngineMaxRotationSpeed(), 1.0f);
+		Throttle = Move->GetThrottleInput();
+		// crude load: throttle biased up at low revs, down near redline
+		Load = FMath::Clamp(
+			Throttle * (1.25f - 0.5f * (Rpm / MaxRpm)), 0.0f, 1.0f);
+	}
 	Engine->SetEngineState(Rpm, Throttle, Load);
 
 	// surface color from the first grounded wheel's contact material
@@ -135,6 +158,20 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 	if (RevAt > 0.0f && Now > RevAt)
 	{
 		Move->SetThrottleInput(1.0f);
+	}
+	if (LiftAt > 0.0f && Now > LiftAt)   // after odrev so lift wins
+	{
+		Move->SetThrottleInput(0.0f);
+	}
+	// 10 Hz rpm/gear trace while scripted-driving hooks are active: lets the
+	// FFT of the recording be correlated against what Chaos actually did
+	if ((RevAt > 0.0f || LiftAt > 0.0f) && Now - LastTraceTime > 0.1)
+	{
+		LastTraceTime = Now;
+		UE_LOG(LogTemp, Display,
+			TEXT("ODAudioTrace: t=%.2f rpm=%.0f gear=%d thr=%.2f spd=%.0f"),
+			Now, Rpm, Move->GetCurrentGear(), Move->GetThrottleInput(),
+			Move->GetForwardSpeed());
 	}
 	if (RecSeconds > 0.0f && !bRecDone)
 	{

@@ -62,13 +62,17 @@ void AODGhost::Tick(float DeltaSeconds)
 	{
 		return;
 	}
-	const float T = (GetWorld()->GetTimeSeconds() - StartTime) / SampleInterval;
+	// max(0): GetTimeSeconds() is double but StartTime is float - the capture
+	// can round UP past "now", and a same-frame tick then sees T = -epsilon
+	// (floor -> index -1; crashed 2026-07-16)
+	const float T = FMath::Max(0.0f,
+		(GetWorld()->GetTimeSeconds() - StartTime) / SampleInterval);
 	if (T >= Positions.Num() - 1)
 	{
 		Stop();
 		return;
 	}
-	const int32 I = FMath::FloorToInt(T);
+	const int32 I = FMath::Clamp(FMath::FloorToInt(T), 0, Positions.Num() - 2);
 	const float A = T - I;
 	SetActorLocationAndRotation(
 		FMath::Lerp(Positions[I], Positions[I + 1], A),

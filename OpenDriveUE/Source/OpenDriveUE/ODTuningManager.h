@@ -29,6 +29,10 @@ public:
 	void CyclePreset();
 	void ApplyPreset(UODTuningPreset* Preset);
 
+	/** Menu-facing: apply by Presets index and remember it (T stays in sync). */
+	void ApplyPresetByIndex(int32 Index);
+	int32 GetPresetIndex() const { return PresetIndex; }
+
 	// --- HUD-facing ---
 	FString CurrentPresetName;
 	float SwapShownAt = -100.0f;

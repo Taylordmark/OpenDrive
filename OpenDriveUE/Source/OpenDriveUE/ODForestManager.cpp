@@ -178,8 +178,11 @@ void AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		const double Py = Y0 + Rng.FRand() * TileSizeCm;
 		const float Accept = Rng.FRand();
 		const float Yaw = Rng.FRand() * 360.0f;
-		const float Scale = bTree ? 0.9f + Rng.FRand() * 0.9f
-		                          : 1.0f + Rng.FRand() * 1.0f;
+		// tree heights follow a growth-curve distribution: full-grown (3x) most
+		// common, log-style tail down to saplings (0.5x)
+		const float Scale = bTree
+			? 3.0f * FMath::Exp(-1.8f * FMath::Square(1.0f - Rng.FRand()))
+			: 1.0f + Rng.FRand() * 1.0f;
 		const float SpeciesPick = Rng.FRand();
 		// RNG fully consumed above -> layout independent of accept/trace results
 		if (Accept >= ForestWeightAt(Px, Py))

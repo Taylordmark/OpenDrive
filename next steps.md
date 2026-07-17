@@ -69,6 +69,28 @@ start countdown are deliberate deferrals.
   owned transforms. Verified standalone: 90k instances, 48 live capsules,
   full-throttle car held by trunks. Also the seed of Arc 7.2 runtime world-gen
   and the 7.3 flora-recipe hook.
+  !Issue - tires never break traction, skid, understeer, oversteer, etc. we need to redesign the physics to be based on the tire grip, angle of grip and weight distributed to each tire * road traction rather than current system
+
+- **1.7 Drivetrain + tire redesign** *(started 2026-07-16, replaces the Chaos
+  mechanical sim — also the transmission modes + lift-off items from 5.1)*
+  - **Stage 1 ✅ (machine-verified, awaiting drive test)** — `AODDrivetrainManager`:
+    engine as own integrated state (torque curve, flywheel inertia, limiter
+    fuel cut, engine braking), shift controller (throttle-scaled upshifts,
+    kickdown, coast-hold — no downshift flare on lift), 120 ms torque-cut
+    shifts, reverse via brake-hold; Chaos mech sim disabled, torque injected
+    per driven wheel (Override combine, re-asserted every tick — physics-side
+    state resets on RecreatePhysicsState; brake/handbrake replicated on
+    driven wheels). RPM now follows *wheel spin*, not car speed: burnout
+    against obstacle holds ~4000 rpm at 3 mph; lift-off revs fall instantly.
+    Trace hook: `-odtrace` (10 Hz rpm/gear/coupled/speed). Known stage-1
+    limits: wheelspin capped by Chaos `MaxWheelspinRotation` (~60 rad/s);
+    airborne wheels excluded from coupling (Chaos freezes them at the cap).
+  - **Stage 2** — replace Chaos tire friction with slip-ratio/slip-angle
+    friction-circle model per wheel (load-sensitive, × 1.4 surface traction);
+    burnouts/drifts/lockups/throttle-steer. Heavy feel iteration.
+  - **Stage 3** — retune the five presets on the new physics; drift becomes
+    progressive rear breakaway. Transmission modes (DCT/PDK/manual + shift
+    cut feel) land here as preset/garage data.
 
 ## Arc 2 — Atmosphere ✅ *(2.1 + 2.2 executed 2026-07-15)*
 
@@ -81,6 +103,16 @@ start countdown are deliberate deferrals.
   → `road_moisture` 0.83 for the Dragon → darker albedo baked into T_Road +
   M_Road roughness 0.9 − 0.35·moisture. Stage scalar kept in `climate.json`
   for future weather systems.
+  !Issue - road and much of the landscape is getting whitewashed. need to reduce lighting or add more shadows or something. also the road doesnt look wet or darker at all despite us implementing.
+  *(addressed 2026-07-16, awaiting drive test: auto-exposure was metering the
+  dark forest and blowing out sunlit surfaces — Grade PPV now has −1 EV bias +
+  highlight local-exposure 0.6 (`apply_light_wet_fix.py`); M_Road roughness
+  0.61 → 0.39 so wetness reads as sheen. Screenshot-verified: dark asphalt +
+  gloss visible in sun.)*
+  !Issuetrees are not of varying sizes. trees should be up to 3x current size and down to .5 normal size with a log dist of height (bigger trees are most common as those are the ones that have reached full height)
+  *(addressed 2026-07-16, awaiting drive test: growth-curve scale distribution
+  0.5x–3x, full-grown most common, in `AODForestManager::BuildTile`;
+  screenshot-verified.)*
 
 ## Arc 3 — Race framework ✅ *(executed 2026-07-15)*
 
@@ -97,6 +129,12 @@ UI; full input recording (currently transforms only).
 *UMG/Blueprint-heavy; the weakest area for headless automation. Expect
 collaborative editor sessions; widget logic in C++, layouts by hand together.*
 
+- **4.0 Stopgap pause menu ✅** *(2026-07-16, canvas-drawn, replaced by the
+  real shell later)* — `AODPauseMenu` + ODRaceHUD drawing: ESC/P pauses;
+  rows = Tuning preset (1.5 assets, synced with T), Gearbox Comfort/Sport
+  (1.7 shift params), Engine V8/V6/V10/V12 (drivetrain curve + synth cylinders),
+  Exhaust Stock/Sport/Open (5.2 params), Resume, Quit. `-odmenu=T` QA hook.
+
 ### 4.1 Control rebinding (#9)
 - Migrate to Enhanced Input (if template hasn't); mapping contexts for
   keyboard/gamepad; rebinding settings screen writing to a user config
@@ -106,6 +144,7 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
 - Stage map widget: stylized terrain texture + road polyline + live player
   marker (world→map transform is one affine we already know). Toggle key +
   pause-screen full map. NA-scale map arrives with Arc 7 (tile-based).
+- We need to have a mini map, world map, and navigation between locations on the map/mini map
 
 ### 4.3 Garage (#7 cars + cosmetics, consumes 1.5 presets)
 - **Assets:** pipeline script downloads + license-records a CC0 low-poly car
@@ -133,6 +172,20 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   conductor. FFT-verified: 60 Hz fundamental at 900 RPM idle (exact for
   8 cyl) → ~380 Hz at full throttle. Awaiting Taylor's ears for character
   tuning (three constants).
+  !Issue - on liftoff, car engine tone increses for a moment before decreasing which negatively affects immersion
+  *(addressed 2026-07-16, awaiting drive test: RPM-trace instrumentation
+  (`-odlift` hook) showed the synth tracks RPM cleanly — the flare was the
+  auto box downshifting at 2000 rpm during coast-down and rev-matching UP
+  ~1.4x; ChangeDownRPM → 1150 (`apply_transmission_fix.py`).)*
+  !Issue - engine noise needs more lower level tones/harmonics - the car sounds like a crappy V8 version of a VQ engine right now
+  *(addressed 2026-07-16, awaiting drive test: crank-order stack (0.5/1/1.5/
+  2/3× crank) below the firing order, load-swelled; firing-harmonic decay
+  tightened. FFT-verified pitch tracking still passes.)*
+  !Issue automatic transmission is incresdibly slow to shift the engine sounds. Either we need to add transmission upgrades or have options for dct, pdk, manual, upgraded auto. I on some real cars there is a brief cut in the engine while shifting sometimes which is incredibly satisfying, much more than the current auto
+  *(partial 2026-07-16: synth RPM slew 140 ms → 50 ms so shifts sound crisp
+  instead of glided. Transmission modes (DCT/PDK/manual/upgraded auto) +
+  shift-cut are the remaining work — pairs with the tire-physics redesign
+  arc.)*
 
 ### 5.2 Exhaust customization (#13)
 - `Loudness` / `Rasp` / `MufflerCutoff` already exposed on the synth; add
@@ -145,6 +198,7 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   the pipeline; runtime: granular/crossfade playback behind the same
   interface. Exhaust edits = re-render bank with different muffler geometry.
 - The "accurately simulate" tier; the 5.1 synth stays as fallback.
+
 
 **Size:** 5.2 = small (garage-gated); 5.3 = separate multi-session project.
 

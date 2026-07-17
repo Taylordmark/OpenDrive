@@ -8,6 +8,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "TimerManager.h"
+#include "ODDrivetrainManager.h"
 #include "ODSurfaceTractionManager.h"
 #include "ODTuningPreset.h"
 #include "WheeledVehiclePawn.h"
@@ -43,12 +44,19 @@ void AODTuningManager::BeginPlay()
 
 void AODTuningManager::CyclePreset()
 {
-	if (Presets.Num() == 0)
+	if (Presets.Num() > 0)
 	{
-		return;
+		ApplyPresetByIndex((PresetIndex + 1) % Presets.Num());
 	}
-	PresetIndex = (PresetIndex + 1) % Presets.Num();
-	ApplyPreset(Presets[PresetIndex]);
+}
+
+void AODTuningManager::ApplyPresetByIndex(int32 Index)
+{
+	if (Presets.IsValidIndex(Index))
+	{
+		PresetIndex = Index;
+		ApplyPreset(Presets[Index]);
+	}
 }
 
 void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
@@ -103,6 +111,13 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 	for (TActorIterator<AODSurfaceTractionManager> It(GetWorld()); It; ++It)
 	{
 		It->InvalidateBaseFriction();
+	}
+
+	// the drivetrain sim owns engine torque when present (the MaxTorque edit
+	// above is then a dead knob - Chaos mechanical sim is disabled)
+	for (TActorIterator<AODDrivetrainManager> It(GetWorld()); It; ++It)
+	{
+		It->TorqueScale = Preset->TorqueScale;
 	}
 
 	CurrentPresetName = Preset->DisplayName;

@@ -39,8 +39,7 @@ Full roadmap and per-arc status: [`next steps.md`](next%20steps.md).
 | `OpenDriveUE/Source/` | C++ game module (all `OD*` classes) |
 | `OpenDriveUE/Config/` | Project settings |
 | `data/stages/<stage>/` | Built stage artifacts (git-ignored; deterministic re-runs) |
-| `wishlist.txt` | The original 14-item feature wishlist |
-| `next steps.md` | Plan of record: 7 arcs, statuses, decisions |
+| `next steps.md` | Plan of record: 7 arcs, statuses, decisions, wishlist index |
 
 `OpenDriveUE/Content/` is git-ignored by design: every imported asset is
 regenerable from the pipeline + headless scripts.
@@ -75,7 +74,9 @@ Apply scripts in order for a fresh level: `build_level_headless.py` →
 `apply_arc23_headless.py` (**needs `-AllowCommandletRendering` instead of
 `-nullrhi`** — the landscape heightmap re-import blits through a render
 target) → `apply_forest_manager.py` → `strip_ground_bushes.py` →
-`apply_vehicle_audio.py` → `apply_tuning_presets.py`.
+`apply_vehicle_audio.py` → `apply_tuning_presets.py` →
+`apply_transmission_fix.py` → `apply_light_wet_fix.py` →
+`apply_drivetrain.py` → `apply_pause_menu.py`.
 Verify with `diag_arc23.py`. Landscape transform drifted? `fix_landscape_headless.py`.
 
 One-time bootstrap on a fresh machine: create a UE 5.8 **Vehicle template**
@@ -90,12 +91,16 @@ fully scripted.
 
 | Key / flag | Effect |
 |---|---|
+| **ESC / P** | Pause menu: tuning, gearbox, engine, exhaust, quit (stopgap for Arc 4 UI) |
 | **T** | Cycle tuning preset (HUD toast shows which) |
 | **R** | Respawn at the last checkpoint gate |
 | `-odshot=N` | Screenshot N s after boot → `Saved/Screenshots/` (headless visual QA) |
 | `-odrev=T` | Full throttle from T s (audio/physics tests) |
+| `-odlift=T` | Throttle back to zero at T s (lift-off transients) |
 | `-odrec=D` | Record D s of audio → `Saved/AudioTest/odrec.wav` (`pipeline/analyze_audio_test.py` verifies) |
 | `-odtune=N` | Auto-cycle tuning presets every N s |
+| `-odtrace` | 10 Hz drivetrain trace (rpm/gear/coupled/speed) to the log |
+| `-odmenu=T` | Open the pause menu at T s + screenshot (headless menu QA) |
 
 Headless game run for verification:
 `UnrealEditor.exe <uproject> /Game/TailOfTheDragon -game -windowed -resx=1280 -resy=720 -odshot=25 -log`
