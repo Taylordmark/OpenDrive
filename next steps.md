@@ -1,6 +1,6 @@
 # OpenDrive — Plan of Record
 
-*Written 2026-07-14; statuses consolidated 2026-07-16. Setup, workflows, and
+*Written 2026-07-14; statuses consolidated 2026-07-19. Setup, workflows, and
 test hooks live in [`README.md`](README.md).*
 
 **Vision:** procedurally generated racing across real-world places at 1:1
@@ -10,20 +10,65 @@ sane defaults, and a data-attribution screen, but no store cert process.
 
 ---
 
-## Current status (2026-07-16)
+## Current status (2026-07-19)
 
-**Arcs 1, 2, 3, and 5.1 are executed and machine-verified.** The Dragon is a
-complete game loop: tuned surface-aware vehicle with five swappable tuning
-archetypes, runtime forest with trunk collision, day/night with headlights,
-wet-climate roads, timed runs with sector splits and a PB ghost, procedural
-engine/road/impact audio. Awaiting Taylor's drive-test verdict on feel
-(suspension, tree-wall density, audio character — all one-line constants to
-retune).
+**Arcs 1, 2, 3, and 5.1 are executed and machine-verified. The vehicle runs
+on 100% our own physics** (Chaos vehicles fully removed, § 1.8) **with a
+full driver-assist stack** (traction control High/Low/Off, ABS on/off,
+attack-mode gearbox, clutch-bite launches — § 1.9) **and a pulse-train
+engine synth with an audible rev-limiter chatter** (§ 5.1v2). The mini-map
+draws the REAL road centerline now, not a gate-spline guess (§ 4.2 v2). The
+Lumen atlas-overload warning is fixed (§ Cross-cutting) and keyboard/M&K
+braking no longer pulls off a straight line (§ 1.9 ABS). Packaging and
+Shipping config are both proven end-to-end. **Arc 7 (North America) is now
+underway for real**, not just planned: 7.1's foundation (self-hosted
+live-streamed terrain, dynamic tile loading, a genuine 73 mph scripted drive on
+real flat terrain) is machine-verified in an isolated test level — see § 7.1.
+**7.2 slice 1 (static OSM-network road mesh on that terrain) and slice 2
+(tile-based streaming of that mesh, ring-iteration/hysteresis + background
+loading) are both built and the Smart App Control block that was blocking
+in-game testing has since been cleared** — slice 1 caught and fixed a real
+~800 m elevation-frame bug via its own verification hook; slice 2 adds the
+first async/background-task code anywhere in `OpenDriveUE`. Extensive live
+drive-testing this session found and fixed **seven more real bugs**
+(unthrottled ground-snap retries stalling the game, wrong tile-processing
+priority, a premature timeout clock, a vehicle-spawn physics depenetration
+launch, no plausibility check on ground-snap hits letting a coarse streamed-
+terrain LOD placeholder corrupt geometry into a literal wall, road traces hitting
+the vehicle's own body, and a player-start pipeline bug placing spawn ~500m
+past the map edge) — full list in § 7.2.
 
-**Known debts:** no menus/settings/garage (Arc 4), no packaged-build proof —
-forest mask needs a cooked CPU copy (cross-cutting), silent on wheel/FFB
-(Arc 6), one hardcoded stage (Arc 7). Moon/stars night layer and standing-
-start countdown are deliberate deferrals.
+**Road/terrain fit RESOLVED 2026-07-20** via a pipeline restructure, not
+another reactive patch: load-terrain → load-road → overlay, with elevation
+sampled exactly once (`build_road_stations.py`) and the terrain CARVED to
+that profile offline (`build_terrain_tiles.py` — *since deleted, superseded by
+`build_terrain_mesh_tiles.py` in the 7.0 pivot; see § "Retired scripts"*)
+before it's ever encoded,
+instead of reconciling the two surfaces at runtime. Found and fixed two
+real bugs in the process (a carve-array transpose-order bug that alone
+explained the ~440 m worst-case mismatches, and a too-loose near-zoom
+simplification tolerance that left a few small but visible gap/overlap
+clusters) and deleted ~180 lines of the runtime ground-snap/wait-for-
+streamed-terrain machinery this used to depend on — there's nothing left to reconcile at
+runtime because the pipeline now guarantees the fit before the engine sees
+the data. Verified three independent ways (offline mesh-accurate check,
+live in-engine collision trace, screenshot). Full account in § 7.2.
+
+**Immediate to-do (revised 2026-07-27 after the implementation audit — see
+[`AUDIT.md`](AUDIT.md) and § 7.6 below):** the work queue is now
+(0) fix `build_road_barrier.py`'s non-deterministic `hash()` seed before any
+rebake, (1) adaptive martini terrain at base grid 257, (2) prune retired-area
+tiles from Content, (3) the bridge/tunnel elevation fix. Taylor's drive-test
+of the assist stack + gearbox/ABS changes remains the separate gate before
+stage-3 preset retune.
+
+**Known debts:** no menus/settings/garage beyond the stopgap (Arc 4.3/4.4),
+silent on wheel/FFB (Arc 6), still only one *drivable* stage in the classic
+sense (Arc 7's streaming foundation now has a small real road network
+streaming in tiles on it too, but it's still a slice-1/2 proof, not a
+playable stretch — no foliage on the streamed-terrain side yet, no HTTP-based fetch
+of the road tiles). Moon/stars night layer and standing-start countdown are
+deliberate deferrals.
 
 ## Standing decisions
 
@@ -44,6 +89,26 @@ start countdown are deliberate deferrals.
 
 ---
 
+## Retired scripts — read this before trusting a script name below
+
+Some pipeline scripts named in the historical accounts in this file **no longer
+exist**. They were correct at the time of writing; the sections are kept as the
+record of *why* things are the way they are. Three were deleted and are
+**unrecoverable — none was ever committed** (`git log --all` returns nothing):
+
+| Script | Status | Replacement |
+|---|---|---|
+| `pipeline/build_terrain_tiles.py` | deleted (7.0 pivot) | `build_terrain_mesh_tiles.py` |
+| `pipeline/verify_road_fit.py` | deleted, **not replaced** | none — only `verify_terrain_fit.py` (terrain-vs-stations) survives; road-vs-terrain is currently ungated |
+| `road_mesh_common.sample_mesh_height` | deleted, **reconstructed from scratch** | present, but explicitly not validated against the original — every fit number depends on it |
+| the from-scratch terrain-test-level build script | retired | `unreal/build_openworld_test_level.py` |
+
+**This is a live failure mode, not just history.** Losing *source* is distinct
+from the well-documented "one-off `apply_*.py` script doesn't survive a
+rebuild" theme, which loses *effects*. Commit early, even to a scratch branch.
+
+---
+
 ## Arc 1 — Vehicle feel ✅ *(complete 2026-07-16)*
 
 - **1.1 C++ module** ✅ — `Source/OpenDriveUE`, headless build via Build.bat.
@@ -53,9 +118,17 @@ start countdown are deliberate deferrals.
 - **1.3b Cut-wall carve** ✅ — carve blend narrowed 10–30 m → 6.5–13 m; the
   natural slope resumes at the shoulder (canyon proximity). Later refinement
   (streamed world): explicit near-vertical uphill cut + rock material band.
-- **1.4 Per-tire surface grip** ✅ — PM_Asphalt/Dirt/Grass physical materials;
-  `AODSurfaceTractionManager` scales each wheel's friction by contact physmat
-  (asphalt 1.0 / dirt 0.72 / grass 0.60); services any vehicle, no BP edits.
+- **1.4 Per-tire surface grip** ✅ — `UODVehicleMovement::SurfaceGrip()` (the
+  manager that originally did this, `AODSurfaceTractionManager`, was folded
+  in during the 1.7 drivetrain rewrite). **Simplified to 2-tier, not
+  per-material, 2026-07-20** (was asphalt 1.0/dirt 0.72/grass 0.60/unknown
+  0.85): road (`PM_Asphalt`, 1.0) vs. off-road (everything else, 0.6) — the
+  player is meant to stay on the road (the whole open-world corridor design
+  assumes it), so off-road grip only needs to read as "you left the road,"
+  not simulate a specific ground texture. Biome ground materials can still
+  carry distinct names/textures for visuals/audio (`UODVehicleAudio` still
+  branches Dirt/Grass for tire sound) - this only stopped physics from
+  branching on them.
 - **1.5 Tuning archetypes** ✅ — `UODTuningPreset` data assets
   (Street/Rally/Drift/Drag/Offroad in `/Game/OpenDrive/Tuning`), deltas over a
   captured per-car baseline; `AODTuningManager` cycles on **T** with HUD toast;
@@ -64,16 +137,19 @@ start countdown are deliberate deferrals.
 - **1.6 Tree collision** ✅ — redesigned after drive test: landscape-grass
   instances are editor-only (zero foliage in standalone `-game`, no queryable
   CPU transforms), so trees moved to `AODForestManager` — deterministic
-  tile-seeded C++ scatter (96 m tiles, mask forest weight, per-tile dominant
-  species, asphalt-physmat rejection), per-tile HISMs, trunk capsule pool from
-  owned transforms. Verified standalone: 90k instances, 48 live capsules,
-  full-throttle car held by trunks. Also the seed of Arc 7.2 runtime world-gen
-  and the 7.3 flora-recipe hook.
+  tile-seeded C++ scatter (96 m tiles, mask forest weight, per-tile species
+  mix from a biome recipe table (2026-07-20, see § 7.3), asphalt-physmat
+  rejection), per-tile HISMs, trunk capsule pool from owned transforms.
+  Verified standalone: 90k instances, 48 live capsules, full-throttle car
+  held by trunks. Also the seed of Arc 7.2 runtime world-gen and the 7.3
+  flora-recipe hook.
   !Issue - tires never break traction, skid, understeer, oversteer, etc. we need to redesign the physics to be based on the tire grip, angle of grip and weight distributed to each tire * road traction rather than current system
 
 - **1.7 Drivetrain + tire redesign** *(started 2026-07-16, replaces the Chaos
   mechanical sim — also the transmission modes + lift-off items from 5.1)*
-  - **Stage 1 ✅ (machine-verified, awaiting drive test)** — `AODDrivetrainManager`:
+  - **Stage 1 ✅ (drive-test PASSED 2026-07-17: revs better, shifts much
+    better, coast-hold/kickdown/reverse work, engines good; no launch
+    wheelspin — Chaos grip clamp, stage 2 scope)** — `AODDrivetrainManager`:
     engine as own integrated state (torque curve, flywheel inertia, limiter
     fuel cut, engine braking), shift controller (throttle-scaled upshifts,
     kickdown, coast-hold — no downshift flare on lift), 120 ms torque-cut
@@ -85,12 +161,91 @@ start countdown are deliberate deferrals.
     Trace hook: `-odtrace` (10 Hz rpm/gear/coupled/speed). Known stage-1
     limits: wheelspin capped by Chaos `MaxWheelspinRotation` (~60 rad/s);
     airborne wheels excluded from coupling (Chaos freezes them at the cap).
-  - **Stage 2** — replace Chaos tire friction with slip-ratio/slip-angle
-    friction-circle model per wheel (load-sensitive, × 1.4 surface traction);
-    burnouts/drifts/lockups/throttle-steer. Heavy feel iteration.
+  - **Stage 2 — core executed + machine-verified (2026-07-17), feel
+    iteration with Taylor next.** Chaos tire friction fully replaced
+    (multipliers zeroed every tick; `AODSurfaceTractionManager` stands down):
+    per-wheel slip ratio + slip angle through one friction circle, smooth
+    peak (κ 0.14 / α 9°) falling to sliding grip (0.72), per-wheel loads
+    computed analytically — static split from contact geometry + smoothed
+    dynamic weight transfer (Chaos `SpringForce` under-reports ~60%: it's
+    constraint suspension). Wheels integrate their own spin with the
+    engine's REFLECTED inertia (I·ratio² ≈ 12x wheel inertia in 1st — the
+    fix for driveline bang-bang), soft rev limiter for physics + hard cut
+    for audio, slip-guarded upshifts (burnouts hold gear), kickdown
+    cooldown vs hunting. Machine-verified: launch spins then hooks to slip
+    ~0.1 (grip peak) through 1st; power-limited spin near the limiter;
+    steering yaws the car (`-odsteer` hook); grass grip visibly lower;
+    lateral weight transfer in the trace; FFT audio regression passes.
+    Tunables for the feel pass: MuPeak/SlideFrac/PeakSlipRatio/
+    PeakSlipAngleDeg + per-preset Front/RearGripScale (presets route).
   - **Stage 3** — retune the five presets on the new physics; drift becomes
     progressive rear breakaway. Transmission modes (DCT/PDK/manual + shift
     cut feel) land here as preset/garage data.
+
+- **1.8 Chaos rip-out ✅** *(2026-07-18, machine-verified; subsumes the
+  template exorcism — Taylor drive-test pending)* — Chaos vehicles are GONE
+  (module dep + plugin disabled). Why: UE 5.8's constraint-based suspension
+  silently pinned our bone-less static-mesh pawn to the world (suspension
+  offset frozen at MaxRaise, 4.8 kN of tire force had zero effect), and
+  stages 1–2 had already replaced every other Chaos subsystem.
+  `UODVehicleMovement` (one component on `AODVehiclePawn`) now owns the
+  whole chain: raycast suspension (spring+damper per corner, ~6 cm static
+  sag, loads = real spring forces so weight transfer is no longer estimated),
+  steering (raw 38° with mild speed taper), the stage-1 engine/auto-box, the
+  stage-2 tire model, quadratic drag + downforce, and COM placement (box-mesh
+  COM was at z=48 — auto-nudged to z=10). Deleted: `AODDrivetrainManager`,
+  `AODSurfaceTractionManager` (tire model owns surface grip),
+  `ODVehicleWheel.h`, all Chaos CDO/combine-method workarounds. Presets and
+  pause menu now write component fields directly (no baseline capture, no
+  RecreatePhysicsState). M_Road got PM_Asphalt (complex traces read the
+  render material's physmat, not body_setup's). Machine-verified headless:
+  static sag 5.9 cm at corner weight 367 kN·cm⁻²-units; 45% throttle = grip
+  launch (slip 0.04) 0→28 mph; 100% throttle = wheelspin past slip 1.0 into
+  genuine tail-out power oversteer and a spin (previously impossible); lift
+  at redline = revs 6772→900 in ~1.2 s; half steer at 28 mph = 14° front
+  slip angle, 45°/s yaw, outside-wheel load 400k→774k; road reads PM_Asphalt,
+  shoulder PM_Dirt. Hooks moved to the pawn (they fought key input):
+  `-odrev/-odlift/-odsteer` + new `-odthr=0.45` throttle cap for controlled
+  tests (quote it in PowerShell: `"-odthr=0.45"` — PS 5.1 splits bare
+  `-x=0.45` at the decimal).
+
+- **1.9 Driver assists + gearbox realism ✅** *(2026-07-18, machine-verified
+  via trace — Taylor drive-test pending)* — all on `UODVehicleMovement`,
+  pause-menu rows for the two toggles:
+  - **Traction control** (High/Low/Off, cycles in menu): High closes a
+    torque-authority loop on the worst driven-wheel slip ratio (target 0.12,
+    fast cut/slow give-back) so the car simply hooks up; Low leaves engine
+    torque alone (slides/burnouts stay available) but brakes a single front
+    wheel when actual yaw rate exceeds what the steering input kinematically
+    calls for — ESC that catches spins without killing drift; Off is raw.
+  - **ABS** (on/off): per-wheel, releases brake torque once longitudinal
+    slip passes 13% lock instead of letting the wheel go dead - a real
+    pulsing release/reapply, not a binary cap. Off keeps honest lockups.
+  - **Attack-mode gearbox:** the box now HOLDS the current gear through
+    committed throttle (no early upshift mid-corner or mid-burnout) and only
+    returns to normal auto-shifting after ~1 s of settled low throttle - at
+    which point it corrects straight to the gear road speed calls for, keyed
+    off the SLOWEST wheel (immune to a spinning driven wheel inflating the
+    speed estimate). Fixed same-session: attack mode still upshifts AT the
+    limiter (redline), so a floored car climbs through the box instead of
+    bouncing in 1st forever.
+  - **Clutch-bite launch:** starting from a stop, the engine free-revs
+    (flare), the bite drags rpm back down to meet the still-slow wheels,
+    then it climbs with road speed - the real "catch" cars do, and the
+    reason a stalled/bogged uphill launch is now representable (the engine
+    no longer starts pre-matched into the powerband).
+  - Trace additions: `-odtrace` now logs `tc=`, `esc=`, `abs=`, `relax=`.
+  !Issue - keyboard/M&K braking is all-or-nothing (no analog pedal), and
+  slamming to 100% brake was putting the car into a slight slip angle
+  instead of a straight stop.
+  *(fixed 2026-07-19, machine-verified via a scripted full-throttle-then-
+  full-brake trace: root cause was ABS acting independently per wheel —
+  one front wheel could cut its own brake torque a frame before its
+  partner, injecting yaw torque exactly when grip margin was thinnest. ABS
+  is now select-low per axle (`UODVehicleMovement::TickTires`): both wheels
+  on an axle always share whichever wheel's slip demands the bigger
+  reduction, same as real production ABS. Straight-line panic stops from
+  130+ mph now hold within ±2°/s yaw noise, no sustained pull.)*
 
 ## Arc 2 — Atmosphere ✅ *(2.1 + 2.2 executed 2026-07-15)*
 
@@ -98,7 +253,7 @@ start countdown are deliberate deferrals.
   (lights must be Movable — editor-spawned default Stationary), per-vehicle
   headlight spots auto-on below 8° sun, exposure widened EV100 −3..16.
   *Remaining polish:* moon/stars night layer; "real-time accurate" sun mode
-  arrives with Cesium georeferencing (Arc 7).
+  arrives with real-world georeferencing (Arc 7).
 - **2.2 Rainfall-darkened roads** ✅ — `fetch_climate.py` (NASA POWER, no key)
   → `road_moisture` 0.83 for the Dragon → darker albedo baked into T_Road +
   M_Road roughness 0.9 − 0.35·moisture. Stage scalar kept in `climate.json`
@@ -129,11 +284,32 @@ UI; full input recording (currently transforms only).
 *UMG/Blueprint-heavy; the weakest area for headless automation. Expect
 collaborative editor sessions; widget logic in C++, layouts by hand together.*
 
-- **4.0 Stopgap pause menu ✅** *(2026-07-16, canvas-drawn, replaced by the
-  real shell later)* — `AODPauseMenu` + ODRaceHUD drawing: ESC/P pauses;
-  rows = Tuning preset (1.5 assets, synced with T), Gearbox Comfort/Sport
-  (1.7 shift params), Engine V8/V6/V10/V12 (drivetrain curve + synth cylinders),
+- **4.0 Stopgap pause menu ✅** *(2026-07-16, canvas-drawn — superseded by
+  4.0b below)* — `AODPauseMenu` + ODRaceHUD drawing: ESC/P pauses; rows =
+  Tuning preset (1.5 assets, synced with T), Gearbox Comfort/Sport (1.7
+  shift params), Engine V8/V6/V10/V12 (drivetrain curve + synth cylinders),
   Exhaust Stock/Sport/Open (5.2 params), Resume, Quit. `-odmenu=T` QA hook.
+
+- **4.0b Real front-end + simplified pause menu ✅** *(2026-07-25, canvas-
+  drawn, no UMG — same no-plugin philosophy as everything else)* —
+  `AODMainMenu` (`ODMainMenu.h/.cpp`, new): the actual "start the game" flow,
+  two stages drawn by `ODRaceHUD::DrawMainMenu`. **Car config** — arrows pick
+  Car / Engine / Drivetrain / Tuning, applied LIVE to a spinning showroom
+  pawn (`AODVehiclePawn::SetShowroom`); Enter on "Drive" advances. **Map
+  select** — the full route map with clickable town nodes (`AODRoadManager`'s
+  `TownNodes`, built from place-label data), hover highlights the nearest
+  town, click/Enter spawns there via `NearestRoadPoint` + `TeleportToSpawn`
+  (falls back to the level's `PlayerStart` if no town data/pick). Game stays
+  paused for the whole flow; `AODPauseMenu` simplified in step (Taylor's
+  call) to ONLY the two driver assists (Traction, ABS) plus Resume/Main
+  Menu/Quit — car/engine/drivetrain/tuning moved here since they're a
+  "before you drive" choice, not a mid-drive one. `-odmenumap=T`/`-odpick=
+  <Town>` QA hooks. **Extended 2026-07-26 — see the loading-screen and
+  Garage-row entries under Arc 7 below and § 4.3**, both found necessary by
+  Taylor's own live testing the same day this got wired into the rebuilt
+  `OpenWorldTest` level (it had been built 2026-07-25 but the level itself
+  wasn't rebuilt/re-applied against until the next session, see Arc 7 below
+  for that gap).
 
 ### 4.1 Control rebinding (#9)
 - Migrate to Enhanced Input (if template hasn't); mapping contexts for
@@ -141,19 +317,45 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   `SaveGame`. Include deadzone/sensitivity sliders (feeds Arc 6 wheel).
 
 ### 4.2 Map view (#6)
-- Stage map widget: stylized terrain texture + road polyline + live player
-  marker (world→map transform is one affine we already know). Toggle key +
-  pause-screen full map. NA-scale map arrives with Arc 7 (tile-based).
+- **v1 ✅** *(2026-07-18)* — canvas stage map: road polyline north-up, player
+  arrow, start/finish dots, next-gate marker, PB ghost dot. Mini-map
+  bottom-left (**M** toggles), full map beside the pause menu.
+- **v2 ✅** *(2026-07-18, machine-verified)* — fixed a real alignment bug:
+  v1 drew a Catmull-Rom guess between the 62 checkpoint gates (~300 m
+  apart), which visibly cut corners the real road doesn't take. The true
+  centerline was already sitting in `road_mesh.json` at 5 m station density
+  (same math that places the gates, just not subsampled) -
+  `pipeline/export_centerline_bin.py` exports all 3635 stations as a
+  `centerline.bin` sidecar (same load pattern as the forest mask, works in
+  packaged builds); `AODRaceManager` loads it, `ODRaceHUD` draws it verbatim
+  and falls back to the old spline guess only if the sidecar is missing.
+  Also new: mini-map is a round, player-centered, **zoomable** panel
+  (**[ / ]** keys, default 90 m radius) with a smoothed circular clip and a
+  gold bezel — corners stay transparent so the 3D scene shows through
+  instead of a black square.
+- **Stylized terrain-color background ✅** *(2026-07-26, open-world/
+  `AODRoadManager`-backed maps only — Tail of the Dragon's map is unaffected)*
+  — see Arc 7's map-texture entry below for the full pipeline/runtime
+  account; NA-scale map still arrives with Arc 7.4 (tile-based).
 - We need to have a mini map, world map, and navigation between locations on the map/mini map
+  *(mini map ✅ v2 + terrain-color background; world map + navigation = Arc 7.4)*
 
 ### 4.3 Garage (#7 cars + cosmetics, consumes 1.5 presets)
-- **Assets:** pipeline script downloads + license-records a CC0 low-poly car
-  pack (Kenney Car Kit or equivalent); headless import; per-car data asset
-  (mesh, wheel offsets, base tuning).
-- Chaos setup per car (wheel mapping) — some hand work per vehicle, accept it.
-- Cosmetics v1: paint color/wrap params on a shared car material; persisted.
-- Garage UI: car select, color picker, tuning preset picker (1.5 assets),
-  exhaust sliders (5.2 params — already exposed on `UODEngineSynth`).
+- **Live car/engine/drivetrain/tuning picker ✅** *(2026-07-25 via
+  `AODMainMenu`'s car-config screen; reachable mid-drive via the pause
+  menu's new "Garage" row as of 2026-07-26 — see § 4.0b and Arc 7 below)* —
+  arrows cycle Car / Engine (4 presets) / Drivetrain (RWD/FWD/AWD) / Tuning
+  (1.5 presets), each applied LIVE (`ApplyEngine`/`ApplyDrivetrain`/
+  `ApplyTuning`/`ChangeCar` on `AODMainMenu`) so the choice is real, not
+  just a UI value. This is the "and it actually does something" bar Taylor
+  asked the mid-drive garage access to clear, already satisfied by reusing
+  code that predates this session.
+- **Still open:** asset pipeline for MULTIPLE real car meshes (currently one
+  hardcoded coupe unless `UODVehicleDef` assets exist — the picker/cycling
+  code is ready, just has nothing to cycle through yet) — CC0 low-poly pack
+  download + license record + headless import, per-car data asset (mesh,
+  wheel offsets, base tuning), some hand-tuned Chaos-era wheel mapping work
+  per vehicle (accept it). Cosmetics v1 (paint color/wrap) not started.
 - Acceptance: 4–6 drivable cars, color choice, preset choice, all persisted.
 
 ### 4.4 Release settings shell
@@ -181,11 +383,33 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   *(addressed 2026-07-16, awaiting drive test: crank-order stack (0.5/1/1.5/
   2/3× crank) below the firing order, load-swelled; firing-harmonic decay
   tightened. FFT-verified pitch tracking still passes.)*
+- **5.1v2 Pulse-train synth ✅** *(2026-07-18, machine-verified — ear pass
+  pending)* — the harmonic-stack "note" replaced by real pulse-train
+  synthesis: each cylinder firing (once per 720°) triggers a damped
+  exhaust-pulse resonator (complex one-pole pool). New physical-ish params
+  Taylor asked for: **firing table** (per-cylinder pulse-strength patterns —
+  cross-plane V8 bank unevenness = the burble, V12 near-perfectly even =
+  the silk), **DisplacementL** (cylinder liters set pulse resonance + ring
+  time: V8 6.2L thumps low/long, V6 3.5L barks high/short), **TimingJitter**
+  (combustion variability, strongest at low load — the idle lope). Engine
+  menu defs now carry displacement; crank-order shake/rasp/muffler chain
+  unchanged. FFT regression passes: WOT dominant tracks firing frequency
+  (~445 Hz at redline); idle reads deep (30 Hz 2nd-order dominant).
   !Issue automatic transmission is incresdibly slow to shift the engine sounds. Either we need to add transmission upgrades or have options for dct, pdk, manual, upgraded auto. I on some real cars there is a brief cut in the engine while shifting sometimes which is incredibly satisfying, much more than the current auto
   *(partial 2026-07-16: synth RPM slew 140 ms → 50 ms so shifts sound crisp
-  instead of glided. Transmission modes (DCT/PDK/manual/upgraded auto) +
-  shift-cut are the remaining work — pairs with the tire-physics redesign
-  arc.)*
+  instead of glided. Transmission modes (DCT/PDK/manual/upgraded auto) are
+  the remaining work; shift-cut character ✅ below.)*
+  !Issue - rev limiter sounds "way too light and fluffy/flowy... should be super aggressive like the brap brap sound cars make, not a whoosh"
+  *(addressed 2026-07-18, machine-verified via envelope-modulation FFT
+  (`pipeline/analyze_brap.py`) then tuned live to Taylor's ear: the physics
+  limiter was always a soft torque fade (needed for driveline stability), so
+  it never produced an audible hard edge. The synth now gets its own raw,
+  unsmoothed `SetIgnitionCut()` - firings are skipped OUTRIGHT during a cut
+  (silence, not a fade) at a tunable bounce rate (`LimiterBounceHz`, tuned
+  down from 12→8 Hz per Taylor's "more time between braps"), with an
+  audible rpm droop during each cut (`CutRpmSag`) and a 1.9x amplitude +
+  noise-transient bang on every relight. Shift cuts get the same crack for
+  free.)*
 
 ### 5.2 Exhaust customization (#13)
 - `Loudness` / `Rasp` / `MufflerCutoff` already exposed on the synth; add
@@ -199,8 +423,23 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   interface. Exhaust edits = re-render bank with different muffler geometry.
 - The "accurately simulate" tier; the 5.1 synth stays as fallback.
 
+### 5.4 Ambient biome/city audio (backlog — Taylor asked 2026-07-27, nothing
+built yet)
+- Wind/rustling in trees for forested biomes, water sound along
+  beaches/coastline, general traffic/city ambience in dense urban tiles
+  (Honolulu downtown and similar). Just logging the ask here — no pipeline or
+  runtime work started.
+- Likely hook: the same tile-level biome/settlement classification data
+  `pipeline/classify_biomes.py` (14-archetype terrain biome per tile) and
+  `pipeline/classify_settlements.py` (populated-tile archetype — American
+  Town/City/etc.) already produce for `AODForestManager`/`AODBuildingManager`.
+  Ambient sound zones should follow the same tile grid the rest of world-gen
+  already keys off, rather than inventing a separate from-scratch spatial
+  system.
 
-**Size:** 5.2 = small (garage-gated); 5.3 = separate multi-session project.
+
+**Size:** 5.2 = small (garage-gated); 5.3 = separate multi-session project;
+5.4 = unscoped backlog, no work started.
 
 ## Arc 6 — Wheel / sim rig support  *(wishlist #10)*
 
@@ -214,35 +453,874 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
 
 **Size:** 1–2 sessions (+unknown for FFB later). **Depends on:** 4.1.
 
-## Arc 7 — North America  *(wishlist #5 — the campaign)*
+## Arc 7 — Mountain hot zones  *(wishlist #5 — the campaign)*
 
-Goal: drive anywhere in North America; curated stages become fast-travel
-points inside one continuous streamed world. Everything above survives intact.
+**Scope narrowed 2026-07-27 (Taylor) — this supersedes the original "drive
+anywhere in North America" framing.** Goal: drive the *mountain* areas of
+North America as a set of discrete, self-contained zones, each with its own
+local coordinate frame; travel between zones is fast-travel, not driving.
+Everything above survives intact.
 
-### 7.1 Cesium foundation
-- Cesium for Unreal plugin; georeference so the existing stage frame (X=east,
-  Y=south, Z=up — chosen for this from day one) maps 1:1.
-- Terrain source decision with **release licensing** in mind: Cesium ion free
-  tier is fine for dev but has terms/quotas for distribution — plan for
-  self-hosted terrain tiles from 3DEP/Copernicus (cesium-terrain-builder) or
-  direct quantized-mesh from AWS terrain tiles. Decide here.
-- Milestone: drive off the Dragon's edges onto streamed whole-earth terrain;
-  accurate sun hook-up (2.1 upgrade) lands here too.
+**In scope:** Cascades, Olympics, Sierra Nevada, CA/OR/WA coast ranges, the US
+Rockies (CO/WY/MT/ID/UT incl. Wasatch, Sawtooth, Bitterroots, San Juans), the
+Canadian Rockies and BC Coast Mountains, the Appalachians/Blue Ridge/Smokies
+and the northeastern ranges (Adirondacks, Greens, Whites), the
+Ozarks/Ouachitas, the Black Hills, **all of Hawaii**, and **all of Alaska**.
+No priority order set. Oahu stays as the debug testbed — it exercises
+coastline, dense urban grid, and dramatic relief in one bake.
+
+**Cut:** the Great Plains, the Midwest, the Gulf coast, and most of the desert
+Southwest.
+
+**Why this matters more than it sounds:** the full-continent framing implied
+~950 GB of baked content and made Arc 7 structurally impossible on the current
+delivery architecture. Hot zones bring that to ~25 GB today and ~1.7 GB after
+the storage fixes — the largest single limiting factor in the project was
+dissolved by a scope decision rather than by engineering. Full analysis and
+measured numbers in [`AUDIT.md`](AUDIT.md) § 1.1.
+
+**Coordinate frames: per-location, decided 2026-07-27.** Each zone keeps its
+own `origin_latlon` (what the pipeline already does). No shared continental
+space. This keeps float32 vertex precision at 0.5–4 cm per zone, bounds the
+equirectangular projection error, and means there are never any inter-zone
+seams to reconcile. Cost: no continuous driving between ranges. See
+`AUDIT.md` § 1.3.
+
+**Consequence to action before the second zone exists:** `pipeline/test_areas.py`
+holds one area as module-level constants (`AREA_NAME`, `BBOX_SNWE`,
+`ORIGIN_HEIGHT_M`), swapped by editing the file. Multiple zones means that
+becomes a table keyed by zone name, with every pipeline script taking the
+zone as an argument. Small refactor, touches every script, far cheaper now
+than at the fifth zone.
+
+**High-latitude costs, new with Alaska and not yet exercised by any test area:**
+Mercator tile counts scale as `1/cos²(lat)` — 4.28× at 63°N, 6.29× at the
+Brooks Range, versus Hawaii — which hits DEM fetch volume and bake time (not
+disk). And the single-`lat0` equirectangular frame reaches 6.9% edge scale
+error across a ±2° Alaskan bbox versus 0.17% at Oahu; mitigation is simply to
+keep Alaskan zones latitudinally short. `AUDIT.md` § 1.2.
+
+### 7.0 Pivot (2026-07-23): baked/tiled terrain replaces the live-streaming plugin
+
+**Decision (Taylor, 2026-07-23):** the third-party live-streamed-terrain
+plugin is not viable for a 200 mph racing sim — the whole Arc 7.2 saga
+(§ 7.2 below) was three independently-refining async systems (the plugin's
+own LOD, our road tiles, vehicle spawn) racing to agree at runtime with no
+reliable "settled" signal. The fix that actually worked there (carve-once-
+offline before the engine ever loads it) is the model for everything now,
+not just roads: **terrain must be generated exactly like Tail of the
+Dragon** — one static, deterministic, offline-baked dataset per region,
+verified before the engine sees it. The old live-streaming plugin (the
+plugin itself, its HTTP tile server, `AODRoadManager`'s async ground-snap/
+wait-for-streamed-terrain machinery) is being replaced, not patched
+further. § 7.1/7.2 below are kept as the historical record of *why* — the
+mechanism they proved (distance-gated detail) carries forward, just
+delivered through UE5's native Landscape World Partition streaming proxies
+(baked once, offline) instead of a live quantized-mesh server.
+
+**Standing constraints driving the design:**
+- Players only ever need to be within 5–10 m of the road centerline — full
+  detail (terrain + collision) is only required in that corridor.
+- Distant terrain still needs to be *visible* (mountain backdrops, horizon)
+  but not driveable — coarse/smoothed/no-collision is fine there, same
+  z15-gating trick already proven in `build_terrain_tiles.py`, generalized
+  from quantized-mesh zoom levels to Landscape streaming-proxy tiles.
+- Zero-per-instance-storage rule (standing decision 2) still applies:
+  buildings must be procedural-from-footprint, not hand-placed, same as the
+  tree scatter. Landmarks (~1000, curated exception) are the one place
+  per-instance data is acceptable, since the count is small and bounded.
+
+**Terrain archetypes (14, feel-based per standing decision 1, not strict
+botany) — supersedes/extends the 7-entry `EODBiome` table below (§ 7.3):**
+Dense Deciduous Forest, Evergreen/Boreal Forest, Sparse Scrub/Chaparral,
+Desert Scrub, Plains Grassland, Wetland/Swamp/Bayou, Alpine Bare Rock,
+Arctic Tundra, Farmland/Agricultural Patchwork, Savanna, Tropical
+Rainforest/Jungle, Coastal Dune/Beach, Canyon/Badlands, Rocky
+Foothill/Highland transition.
+
+**Populated archetypes (6, new system — no code yet):** European Village,
+American Town, City (real street grid + procedural extruded-footprint
+buildings — driving the actual real street layout, not a generic skyline),
+Rural Hamlet/Farmstead cluster, Industrial/Port district, Suburban Sprawl.
+
+**Landmark layer (new system — no code yet):** ~1000 real named structures
+(Empire State Building, The Bean, etc.), sourced algorithmically from OSM
+tags (`tourism=attraction`, `historic=*`, named `building=*`) filtered by a
+prominence heuristic, along actual driving routes. Each is an authored/
+kitbashed asset placed once at its real lat/lon — the deliberate exception
+to the zero-per-instance rule, since the count is small and bounded. Loaded
+only near the route.
+
+**Pipeline plan, in order:**
+1. **Terrain archetype classification, extended to all 14** — grow the
+   existing `EODBiome`/`BiomeRecipeTable`/`classify_biomes.py` system (7
+   entries today) to the full list above. Lowest-risk step: pure data/
+   classification work, no engine/Landscape changes, extends something
+   already proven end-to-end.
+2. **Baked Landscape + World Partition proof** — small test area, no
+   live-streaming plugin: import a heightmap-per-tile Landscape (World
+   Partition streaming proxies) with route-distance-gated resolution (full
+   detail + collision near the road, coarse/no-collision background
+   elsewhere) — this is the plugin-free re-proof of what § 7.1's slice 1
+   proved for quantized-mesh tiles.
+3. **Building footprint extrusion** — OSM building footprints inside
+   populated tiles → per-archetype height range + tiled facade material,
+   deterministic/seeded, same pattern as the tree HISM scatter.
+4. **Landmark sourcing + placement pipeline** — OSM query + prominence
+   filter + curated asset placement.
+5. **Full integration + verification gates** — offline fit/overlap checks
+   (extending `verify_road_fit.py`'s pattern) before any of this loads in
+   the engine; scale out past the current single test area.
+
+**Status (2026-07-23): step 1 done** (14-archetype terrain classification,
+build verified). **Step 2 pipeline/runtime code complete, offline gate
+passing well, BLOCKED on a live drive-test only Taylor can run** —
+`pipeline/build_terrain_mesh_tiles.py` (bakes `ODT1` world-space tiles,
+distance-gated near/far exactly like the old plugin's z15 gate, carved to the
+road profile in the local meter frame directly), `pipeline/verify_terrain_fit.py`
+(offline fit gate, mirrors `verify_road_fit.py`), `AODTerrainManager`
+(`ODTerrainManager.h/.cpp`, mirrors `AODRoadManager`'s tile-streaming
+pattern), the from-scratch terrain-test-level build script (since retired)
+updated to spawn `AODTerrainManager` instead of the old georeference/
+3D-tileset actor pair. Full 833-tile bake done for the Skagit test area
+(347k verts/644k tris, 165 near/collision + 668 far/background tiles).
+
+Two real bugs found and fixed by `verify_terrain_fit.py` this session (the
+gate doing its job, not a sign the approach is wrong):
+1. The carve blend radius was inherited from the old streaming pipeline's
+   CARVE_INNER_M/OUTER_M (10/40 m, tuned for a ~4 m/px raster) - too small
+   for this new grid's ~50 m sample spacing, so barycentric interpolation
+   near a station could blend in raw hillside elevation in the Cascades
+   foothills' steeper terrain (10-14 m spikes). Fixed with grid-sized
+   `TERRAIN_CARVE_INNER_M`/`TERRAIN_CARVE_OUTER_M` (50/150 m) in
+   `build_terrain_mesh_tiles.py`.
+2. One tile still failed after that: two real, DIFFERENT road segments
+   passing ~90 m apart with a 16 m elevation gap and no OSM bridge/tunnel
+   tag - same failure class as the original Skagit bridge-crossing bug,
+   just untagged this time. Rather than patch that one spot, added
+   `detect_elevation_conflicts()` - geometric (not tag-based) detection of
+   any different-segment station pair too close in XY with too large an
+   elevation gap to be explained by a plausible shared grade, auto-excluded
+   from the carve the same way `is_bridge` stations are. Found 354 such
+   stations project-wide, a strict superset of what tagging alone would
+   catch.
+
+**Offline gate result after both fixes:** median deviation 0.018 m, 99th
+percentile 0.77 m across 64,488 checked stations - a small residual tail
+(~0.04% of stations with terrain up to ~2.4 m above raw ground, ~1% with a
+tighter-than-ideal skirt-hiding margin) remains at the same two known
+crossing locations; Taylor's call (2026-07-23) was that further offline
+percentile-chasing has hit diminishing returns and a live look is more
+informative than more tuning, matching this project's own history with
+`verify_road_fit.py` (that gate also only reached full confidence via a
+live drive, not endless offline iteration).
+
+**Live rebuild + mechanical verification DONE (2026-07-23, ahead of Taylor's
+own drive) - the terrain-streaming test level rebuilt from scratch** via
+the from-scratch terrain-test-level build script (since retired; old `.umap`
+deleted first, editor closed, per that script's own docstring). One real bug
+found and fixed during the rebuild, two more tiles machine-verified correct via
+`-odtrace`+`-odshot` (ground-contact log + screenshot, not just a visual
+guess), then the level's spawn point restored to its exact rebuilt value
+(`8762, 50503, 1514`, yaw `168.4`) so it's untouched for Taylor:
+
+1. **Real bug: the level build script's `Sun` actor never set
+   `Mobility = Movable`.** This exact bug was fixed once before (Arc 2.1,
+   via a one-off `apply_flora_light_fixes.py` patch on the OLD level) but
+   the fix was never folded back into the from-scratch BUILD script, so
+   every full rebuild silently reintroduced it - PIE log spammed "Mobility
+   ... has to be 'Movable'" every frame, meaning `AODDayNightController`'s
+   sun rotation was being rejected the whole session. Fixed at the source
+   now (`sun_comp.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)`
+   right after spawn) instead of depending on a separate patch script to
+   catch it after the fact.
+2. **A methodology trap worth remembering for future headless spawn tests:**
+   moving `PlayerStart` to an arbitrary tile CENTER (not an actual road
+   point) triggers `AODVehiclePawn`'s intentional kinematic-hold-until-
+   `PM_Asphalt`-ground-trace safety logic (the Arc 7.2 slice-2 spawn-
+   depenetration fix) - the car never releases physics, stays frozen
+   exactly at spawn height, and the resulting screenshot (a flat, textureless
+   blue expanse) looked exactly like a rendering bug but was actually just
+   a static aerial view over a real lake ("Sunday Lake" - the HUD label was
+   accurate the whole time). Cost real debugging time before the `-odtrace`
+   ground-contact log (`gnd=0`, never `bound to` in the log) revealed
+   physics never engaged at all. Fix: spawn-test ACTUAL road stations
+   inside a tile, not tile centroids.
+3. **Both known tricky tiles re-tested correctly** (real road stations
+   inside each, via `build_terrain_mesh_tiles.build_tile`/station lookup):
+   tile `(-11,1)` (near Sunday Lake) and tile `(-15,-15)` (near Belfast) -
+   both landed clean (`gnd=4 surf=PM_Asphalt`, settled to ~0 speed),
+   screenshots show correct pavement, no poke-through/gaps, trees properly
+   grounded on the shoreline/roadside, road-name/city label accurate in
+   both ("I 5 · Sunday Lake", "I 5 · Belfast").
+4. **The "floating trees" Taylor spotted in the earlier (pre-rebuild) label
+   screenshots is confirmed resolved** - that was the OLD level's dead
+   3D-tileset actor never rendering any ground at all; trees on the freshly
+   rebuilt terrain sit correctly on visible ground in both tricky-tile
+   screenshots above.
+5. **Not independently re-checked:** triangle winding from a genuinely
+   top-down angle (both confirmatory screenshots above are normal chase-cam
+   angles, which do prove the mesh isn't fully backface-culled, but not a
+   dedicated straight-down view).
+
+**What's left is genuinely Taylor's alone:** actual driving-feel judgment
+(does 50 m near-tile spacing read as fine at speed, general vibe) - a
+screenshot proves correctness, not feel. Steps 3–5 not started.
+
+## Road name + city/town labels above the mini-map (2026-07-23)
+
+Taylor asked whether the map showed road/county/city names - it didn't
+(mini-map only ever drew geometry, and no OSM name data was fetched at
+all). Added end to end, scoped (Taylor's call) to road name + nearest
+city/town only (no county - needs OSM admin-boundary polygon parsing, a
+separate bigger task) and to the open-world/streamed-terrain test-area pipeline only
+(Tail of the Dragon's separate single-road pipeline is out of scope).
+
+- `pipeline/build_road_stations.py`: `merge_way_chains()` now also tracks
+  each edge's display name (`way_name()` - OSM `name` tag, falling back to
+  `ref` so an unnamed state route still shows e.g. "WA-20"), threaded
+  through chain-walking the same way `is_structure` already was. Resampled
+  stations get their NEAREST original station's name (categorical, not
+  interpolated) - new `road_name` array in `road_stations.json`. Verified
+  against the real Skagit data: real name transitions along a merged chain
+  (e.g. seg000 crosses "Oso Slide Memorial Highway" → "State Route 9" →
+  "State Route 530" as the actual named road changes).
+- `pipeline/fetch_osm_places.py` (new): Overpass query for named
+  city/town/village/hamlet nodes, bbox + 0.15° margin so border-adjacent
+  stations can still find a "nearest" town. 169 places fetched for Skagit.
+- `pipeline/build_place_labels.py` (new): downsamples stations (same
+  `SAMPLE_STRIDE` convention as `classify_biomes.py`, ~50 m spacing), pairs
+  each with its own `road_name` plus the nearest place node's name
+  (projected into the same local east/north frame). Spot-checked correct:
+  real towns (Rockport, Mount Vernon, Marysville) show up with the right
+  road names nearby.
+- `pipeline/export_place_labels_bin.py` (new): new `ODL1` binary sidecar
+  format - variable-length UTF-8 strings (uint16-length-prefixed), a first
+  for this project's binary sidecars (every prior one was fixed-size
+  records). Round-trip verified byte-for-byte against the C++ parser's
+  exact read sequence before trusting the runtime side.
+- `AODRoadManager` (extended): new `PlaceLabelFilePrefix` (empty = off,
+  same convention as `CenterlineFilePrefix`), loads the sidecar at
+  `BeginPlay` into `TArray<FPlaceLabel>`, throttled (~2 Hz) brute-force
+  nearest-point scan in `Tick()` caches `CurrentRoadLabel`/`CurrentCityLabel`
+  for the HUD to read directly.
+- `ODRaceHUD.cpp`: new `DrawPlaceLabel` lambda draws
+  `"<road> · <city>"` (or just whichever half is non-empty) directly above
+  both the mini-map and the full pause-screen map.
+- the from-scratch terrain-test-level build script (since retired) sets the new prefix for from-scratch
+  builds; `unreal/apply_place_labels.py` (new, same idempotent-by-label
+  pattern as `apply_road_centerline.py`) sets it on the already-built level
+  without a full rebuild - **run headlessly and confirmed successful**
+  (RoadManager found, property set, level saved, 0 errors).
+
+**Live verification DONE (2026-07-23), ahead of the terrain rebuild** - two
+`-game`/`-odshot` tests, each by temporarily moving `Start_TestArea`'s
+PlayerStart to a known point (via a scratch diagnostic script, not a
+permanent one) and screenshotting, then restoring the exact original
+transform (`8762, 50503, -486`, yaw `168.4`) afterward so the level was left
+untouched:
+1. Rockport-area point → HUD showed **"State Route 530 · Rockport"**, exact
+   match.
+2. Marysville-area point → HUD showed **"I 5 · Marysville"**, exact match;
+   this point also happened to land the car on real, correctly-rendered
+   road pavement, confirming `AODRoadManager`'s road mesh streams
+   independently of the terrain-streaming state.
+
+Both label + mini-map render correctly. **What these screenshots also
+showed, worth flagging so it isn't mistaken for a new bug during the real
+drive-test:** trees appeared to be floating in empty space with no ground
+visible under them. Root cause understood, not a forest-system bug - the
+level's old 3D-tileset actor is still pointed at a dead local tile server
+(`ConnectionError` in the log), so no terrain renders at all yet on this
+`.umap` (`AODTerrainManager` isn't spawned here until the pending rebuild
+happens). `AODForestManager` places trees from its own independent
+ground-truth elevation grid (`elev_<AREA>_test`), not a streamed-terrain raycast, so
+tree HEIGHTS are correct - there's just nothing else visible in the scene
+for them to visually sit on right now. Expected to resolve on its own once
+the level is rebuilt with real terrain; not something to chase separately.
+
+## Arc 7.0 step 3 — procedural buildings on populated tiles (2026-07-24)
+
+Mount Vernon proof, end to end: `pipeline/fetch_osm_buildings.py` (6519
+real footprints, town-bbox-gated), `classify_settlements.py` (8 populated
+tiles, density-gated, American Town archetype), `build_building_mesh.py`
+(6517 buildings extruded - 2 excluded for sitting too close to the road,
+verified inline as the road-corridor gate the plan called for),
+`export_building_mesh_bin.py` (new `ODU1` sidecar format), new
+`AODBuildingManager` (mirrors `AODRoadManager`/`AODTerrainManager`'s
+tile-streaming pattern exactly, one `UDynamicMeshComponent` per building
+per the plan), new `M_BuildingFacade` material
+(`unreal/apply_building_material.py`). Headless build clean throughout.
+Extrusion math verified correct offline (N-sided footprint → 5N+1 verts,
+3N tris, checked against real output). `AODBuildingManager` confirmed
+loading all 8 tiles/6517 buildings live and keeping them resident
+(steady-state diagnostic log across three separate live sessions).
+
+**Real bug found and fixed during live verification:** buildings were
+completely invisible on first live test despite loading correctly and
+sitting well above real terrain height (verified: nearest building's base
+was 1.95 m above the actual terrain mesh at that exact point, not buried).
+Root cause: Mount Vernon's biome sample reads `forest_weight=1.0`
+(max-density Evergreen) - `classify_biomes.py`'s imagery heuristic has no
+concept of "this is a town," so `AODForestManager` was scattering
+full-density forest straight through downtown, burying every building.
+Added the same kind of exclusion the road already had: new
+`BuildingCentroidFilePrefix`/`IsNearBuilding()` on `AODForestManager`
+(reuses the `ODC1` point-list format, `pipeline/export_building_centroids_bin.py`),
+18 m radius per building centroid. Confirmed loading (6517 centroids) and
+wired into the same `GroundAt()` gate the road centerline exclusion uses.
+
+**Follow-up RESOLVED same session:** added `TownForestDampen()` to
+`AODForestManager` - a SOFT, wider (250 m, `TownDampenRadiusCm`) forest-
+weight multiplier (down to `TownDampenMinFactor` = 0.08 at/inside the hard
+18 m exclusion, smoothstep back to full density by 250 m), applied once
+per 96 m tile in `BlendAt()` (cheap even at this radius, unlike a per-
+scatter-candidate check), reusing the already-loaded `BuildingCentroids`
+data - no new pipeline/sidecar needed. Re-verified live at the same ground-
+level test spot that previously showed solid, unbroken canopy: forest is
+now visibly sparse (a handful of trees with real gaps, not a wall), and a
+distinct light grey/white blocky shape - consistent with a building, not
+any tree/bush mesh in this project's set - is now visible through the
+remaining trees where nothing but canopy was visible before the fix.
+
+**Building collision CONFIRMED same session** via a scripted drive, not a
+static spawn test (which can't validate this - see above for why). Spawned
+on real pavement ~37 m from a known building, aimed directly at it
+(bearing computed from the two points), `-odrev=1 -odthr=0.3 -odtrace`
+(scripted throttle needs BOTH flags - `-odthr` alone silently does nothing,
+`bThrottleKey` only flips true at `-odrev`'s timestamp). Trace showed a
+clean, unambiguous impact signature: steady ~71-76 units/s cruise for
+several seconds, then corner load spiking to `fz=1220000` (~3.3x the
+~372000 steady-state value), suspension fully bottomed (`susp=0.0`),
+ground contact dropped from 4 wheels to 1, and forward speed collapsed to
+near-zero for several seconds despite sustained throttle and climbing RPM
+(wheelspin against something immovable) - exactly the distance/bearing to
+the target building, not a road feature. **Rough edge worth flagging, not
+a blocker:** the car was eventually launched into a wild, physically
+implausible tumble after the stuck period (speed readings jumping into the
+thousands) - similar in character to the Arc 7.2 spawn-depenetration bug
+class, just triggered by a building impact instead of a bad spawn. Collision
+itself is proven real; the crash RESPONSE could use tuning later (a clean
+stop/crumple would read better than a launch).
+
+**Follow-up also resolved same session (not left for later):** the "tree
+wall over town" issue above is fixed via `TownForestDampen()` - see that
+section for detail. Re-verified live at the same ground-level spot: forest
+visibly thinned (real gaps, not solid canopy) and a distinct building-like
+shape is now visible through the remaining trees where none was before.
+
+**Two bugs fixed along the way, worth remembering for future tile-
+streamed content:**
+1. A background-wait test-automation pattern (grep a log for a marker,
+   then `taskkill`) proved unreliable this session for reasons never fully
+   root-caused (repeatedly killed the game process seconds into boot,
+   before the marker could legitimately appear) - switched to manual
+   polling (repeated short `grep`/`tasklist` checks between tool calls)
+   instead, which worked reliably every time after. Worth using that
+   pattern first for any future live `-game` test rather than the
+   background-wait one.
+2. Camera **yaw matters** when spawn-testing via a moved `PlayerStart` -
+   an arbitrary fixed yaw can easily point away from the thing being
+   tested even when position is correct. Compute a bearing toward the
+   actual target before trusting a "nothing here" result.
+
+## Guaranteed road-corridor barrier ("wall of scenery") (2026-07-24)
+
+Live-tested same day: a hard cornering slide let the car reach open space
+and fall through within a few meters (confirmed by trace: `gnd=0
+surf=none` sustained, wild yaw/speed tumble) - `AODForestManager`'s organic
+tree scatter is only probabilistic (tile-level biome density), so it can
+leave real, drivable gaps; there was nothing GUARANTEED to stop the player
+leaving the road at all. Taylor's design intent (reconfirmed): within a
+few meters, a wall of scenery should stop you, not open space.
+
+**v1 (discrete capsules) shipped, then found broken by Taylor's own live
+test the same day - real bug, not user error.** First version placed a
+tree/bush point every 2.5 m on both sides (`BARRIER_OFFSET_M=13`, just
+outside `AODForestManager`'s 11.5 m shoulder clearance) with one dedicated
+`UCapsuleComponent` per point for collision. My own test (a single
+perpendicular slide) happened to hit a capsule and looked like a clean
+fix. Taylor then drove off-road "very slowly" and fell through anyway.
+Root cause once checked properly: **discrete point obstacles don't form a
+continuous wall** - two capsules 2.5 m apart (26 cm radius each) leave a
+real ~2 m gap between them, close to or wider than the car itself, so a
+slightly different departure point/angle just finds the gap, crosses the
+60 m near-tier collision boundary, and falls into the far-tier (no-
+collision) terrain beyond - exactly Taylor's report, and exactly what my
+own single lucky test failed to catch.
+
+**Fix: replaced discrete capsules with a genuinely continuous collision
+mesh.** `pipeline/build_road_barrier.py` now also emits a thin vertical
+ribbon mesh (`WALL_HEIGHT_M=4`) following the same offset line, chunked
+like road/building meshes and bucketed into tiles (`export_road_barrier_bin.py`,
+new `ODW2` format - bumped from `ODW1` since the payload shape changed).
+`AODBarrierManager` builds these as `UDynamicMeshComponent`s
+(`EnableComplexAsSimpleCollision`, invisible - same "thin sheet, real
+collision" pattern the road's own skirt cross-section already relies on
+successfully) - a real continuous surface, not points, so there is no gap
+size to get lucky or unlucky with. The tree/bush points from v1 are kept
+for the visual "wall of scenery" look (HISM instances, no collision of
+their own now) - only the collision mechanism changed. 501,806 verts /
+495,430 tris of wall mesh across 3,188 chunks for the Skagit route.
+
+**Re-verified live after the fix, not just re-built:** same perpendicular
+slow-drive test as before. Speed climbed smoothly, then a sudden
+deceleration event (corner load dropping, wheels losing contact one at a
+time, traction control maxing out fighting wheelspin against something
+solid) - and **`surf` stayed `PM_Asphalt` the entire time, never dropping
+to `none`** (confirmed the loaded tile actually had 20 real wall chunks,
+not zero - the stop wasn't a coincidence from some other geometry).
+
+**Worth remembering for any future "guarantee no gap" requirement:**
+discrete repeated objects (points, capsules, instances) are fundamentally
+the wrong tool no matter how tight the spacing gets, because there's
+always some spacing where a real gap exists - a continuous mesh is the
+only way to actually guarantee it. This cost one round of "looked fixed to
+me, wasn't" before being caught by Taylor's own test, not mine - a good
+reminder that one successful test path isn't the same as no gap existing
+anywhere along hundreds of kilometers of wall (both sides of a 347 km
+route, minus bridge/town gaps).
+
+### 7.1 Live-streaming-plugin foundation ✅ *(slice 1, 2026-07-19, machine-verified)*
+
+Proved self-hosted streamed terrain works end-to-end — georeferenced,
+dynamically streams as you drive, real vehicle physics on it — in total
+isolation from Tail of the Dragon (a separate terrain-streaming test
+level; nothing existing was touched). **Decision made:** self-hosted terrain
+tiles from day one (Taylor, 2026-07-19), not a hosted tile service — matches the
+free-public-release licensing goal.
+
+- **Plugin:** a third-party UE terrain-streaming plugin, the first release
+  with official UE 5.8 support (2026-07-01, landed just in time). Installed
+  from the vendor's GitHub release zip into `OpenDriveUE/Plugins/`
+  (gitignored, binary — re-fetch the matching UE 5.8 release asset per
+  machine, no Epic Marketplace/Fab needed).
+- **Terrain pipeline:** `pipeline/build_terrain_tiles.py` encodes a
+  self-hosted quantized-mesh tile pyramid via `pymartini` +
+  `quantized-mesh-encoder` (pure Python, no Docker/C++ build) from the
+  *same* Terrarium/AWS DEM source `fetch_data.py` already uses for the
+  Dragon (USGS 3DEP-derived, already credited in README) — shared fetch
+  logic lives in `pipeline/terrain_common.py`. Test area is a one-line
+  `AREA_NAME`/bbox config, not a rewrite — switching areas is cheap.
+  Tiles served locally for now (`python -m http.server`); real hosting is a
+  later concern.
+- **Level:** the from-scratch terrain-test-level build script (since
+  retired) built the test level headlessly — a georeference actor +
+  a 3D-tileset actor (FromUrl, explicitly linked to the georeference) +
+  `PlayerStart`, deliberately separate from `TailOfTheDragon.umap`
+  (`AODForestManager::LoadMask()` grabs the first `ALandscapeProxy` in the
+  world unconditionally — a second level sidesteps that collision entirely
+  rather than fixing it now).
+- **Proven, in order:** static terrain renders with real relief and vehicle
+  collision (`create_physics_meshes` defaults `true`, no extra setup) →
+  dynamic tiles stream in as the car drives, not just once at boot (watched
+  new z10-z15 tiles load in bursts on the tile-server log while a scripted
+  drive ran) → sustained highway-speed driving works cleanly on flat ground
+  (73 mph peak, `yaw≈0`, `slip≈0.06` on the current Palmdale test area, see
+  below) → driving off the edge of a bounded test area produces a clean
+  freefall (`gnd=0 surf=none`), not a crash — expected since only a finite
+  patch is built, not a bug.
+- **Test area: Palmdale, CA / Antelope Valley** (moved from an initial Green
+  Valley, CA proof spot — its 338 m/km mountain relief made scripted
+  physics tests unreliable, cars kept getting stuck on raw slopes).
+  Taylor asked for CA-14 Palmdale→I-5 specifically for flat/straight testing
+  terrain; a DEM sanity check showed that corridor **isn't** uniformly flat —
+  Palmdale/Antelope Valley itself is genuinely flat (~11 m relief in a z15
+  tile), but CA-14 continuing south from Palmdale toward I-5 quickly enters
+  the Soledad Canyon/Agua Dulce mountains (300-500+ m relief) — canyon, not
+  flat. Scoped to the flat Antelope Valley side only.
+- **Three real bugs hit and fixed, worth remembering:**
+  1. `pymartini.decode_ele` does `red*256` internally, which overflows a
+     uint8 array under numpy>=2's stricter scalar-promotion (NEP 50) — pass
+     the Terrarium PNG as `int32`, not `uint8`.
+  2. A 3D-tileset actor not explicitly linked to a georeference actor via
+     `set_editor_property("georeference", geo)` silently resolves its own
+     default one (origin at lon/lat 0,0, "Null Island") instead — always
+     set this explicitly.
+  3. **layer.json's `"scheme"` field only has ONE valid value, `"tms"`** (y
+     numbered from the south) — not `"xyz"`, and NOT `"slippyMap"` either
+     despite that appearing to be a valid option in an AI-summarized web
+     search result (it isn't — confirmed by reading the raw
+     `SPECIFICATION.md` directly, not a summary). Terrarium/mercantile
+     tiles are numbered XYZ/slippy (y from the north), so tile *files* need
+     `tms_y = 2**z - 1 - xyz_y` on write; tile *content*/geographic bounds
+     still come from the original xyz coordinates. This was the actual
+     reason refinement silently stalled at the root tiles for several
+     iterations — double-check raw spec text over AI web-summaries for
+     anything this load-bearing again.
+- **Known gap:** OS-level screenshots stopped working reliably mid-session
+  (Windows lock screen kicks in after ~20-90 s idle, outside automation's
+  control). The in-game `-odshot` hook would sidestep this (renders via
+  `FScreenshotRequest` inside the process, independent of desktop
+  visibility) but currently lives inside `AODForestManager::Tick()` and
+  no-ops without a traditional Landscape actor — true for any
+  streaming-terrain level.
+  `-odtrace` telemetry was sufficient evidence this session; a standalone
+  screenshot-hook actor decoupled from forest logic is worth adding if
+  visual verification of a streaming-terrain level is needed again.
+- **Deferred, deliberately not attempted yet:** stitching to Tail of the
+  Dragon / "drive off the Dragon's edges" (needs the seam reconciled with
+  the hand-built landscape, plus fixing the `AODForestManager`
+  first-landscape assumption above); the full Green Valley → Santa Clarita
+  → Vegas → San Bernardino NF loop (trivial to scale the now-proven
+  pipeline up to, just more tiles); road generation on top of the terrain
+  (7.2, the hardest bite); Large World Coordinates/Origin Rebasing
+  precision (only matters at cross-country scale — the
+  `"Enable World Bounds Checks"` warning the old plugin printed every run
+  was the visible reminder this is still owed before the real end-to-end
+  milestone). **Not yet decided which of these three comes next.**
+- **Road-gated finest-zoom terrain (2026-07-20):** `build_terrain_tiles.py`
+  now only builds z15 (collision-grade, MAX_ERROR_NEAR) tiles that have a
+  road station nearby (`road_near_tile()`) — everywhere else falls back to
+  whatever coarser zoom is already built, via the standard quantized-mesh
+  `layer.json` `available` field (the plugin stops refining at the nearest
+  BUILT tile; a missing z15 entry is not a hole). z0..z14 still cover the
+  whole bbox unconditionally, so distant terrain/mountains still render,
+  just at lower fidelity. Motivated directly by Taylor's 20 m stray
+  constraint (2026-07-20, § 7.2) — the player can never reach ground far
+  from the road, so there's no reason to pay z15's cost there. On the
+  current Palmdale bbox this skipped 37 of 80 z15 tiles (46%); the real
+  point is this is what makes the z15 tier scale toward the full North
+  America bbox at all — building collision-grade detail for the whole
+  continent is a non-starter, building it only for the ~20 m-wide road
+  corridor is not. `verify_road_fit.py` re-confirmed PASS at z15 after the
+  change (rebuilds its own required tiles directly, unaffected by the
+  skip). `availability_ranges()` replaced the old single-rectangle-per-zoom
+  `layer.json` writer with per-row contiguous-run grouping, since coverage
+  is no longer guaranteed to be one solid block.
 
 ### 7.2 Runtime road generation (C++)
-- Port `build_stage.py`'s core (OSM ways → stitched polylines → grade-smoothed
-  profile → banked road mesh) to a C++ `RoadTileBuilder`: tile request →
-  fetch/cache → worker-thread mesh build → spawn/despawn with hysteresis.
-  (`AODForestManager` already proves the tile pattern at small scale.)
-- Data: preprocessed OSM road tiles (offline pyosmium job converts Geofabrik
-  NA extracts into a compact binary tile pyramid; target ≤ a few KB/km²)
-  hosted as static files; client caches to disk (hybrid delivery decision).
-- Terrain interaction: no landscape carving in streamed world — roads carry
-  their own skirts/aprons (already do).
-- Physics/precision: Large World Coordinates checks; verify Chaos far from
-  origin (test Alaska).
-- Milestone: pick a random NA highway by lat/lon, it builds around you as you
-  drive at 100 mph with no hitches > 5 ms.
+
+**Slice 1 — static OSM-network road mesh on the streamed terrain, built
+2026-07-19/20, code complete and builds clean; final in-game re-verify
+blocked on a Windows Smart App Control issue (see below), not a code issue.**
+Scoped deliberately small, same "prove the mechanics first" approach as
+7.1's slice 1 — this does NOT yet do dynamic tile streaming/HTTP (that's
+slice 2+, sketched at the end of this section).
+
+- **Network generalization ✅:** `pipeline/fetch_osm_network.py` (broad
+  drivable-highway-class Overpass query, no single-route `ref` filter) +
+  `pipeline/build_road_network.py`'s `merge_way_chains()` — chains OSM ways
+  through degree-2 nodes into maximal polylines, breaking only at real
+  junctions/dead-ends. This replaces `build_stage.py`'s single-route
+  Dijkstra stitch (fine for the Dragon's one named road, not for a network).
+  Proven on the Palmdale bbox: 1470 raw OSM ways → 1015 merged chains → top
+  12 longest kept (a deliberate slice-1 scope cap, not all 1015) = 41.95 km
+  across real junctions, 63 mesh chunks, ~34k verts.
+- **Shared math extracted, zero behavior change:** `pipeline/road_mesh_common.py`
+  now holds the station-resample/grade-smooth/superelevation-bank/skirt-
+  cross-section/chunk-assembly math that used to be inlined in
+  `build_stage.py`; both `build_stage.py` (Dragon, unaffected) and
+  `build_road_network.py` (the streamed-terrain network) call into it.
+  `build_stage.py`'s `road_mesh.json` output verified **byte-identical**
+  before/after the refactor (md5 match) — the Dragon was not touched.
+- **Runtime C++ loader:** `AODRoadManager` (`ODRoadManager.h/.cpp`, new)
+  loads a binary sidecar (`pipeline/export_road_mesh_bin.py`'s `ODR1`
+  format — same magic+LE-header+payload convention as `centerline.bin`/
+  `terrain_mask.bin`) at `BeginPlay` and builds real, collidable geometry
+  via `UDynamicMeshComponent`/`FDynamicMesh3` (confirmed against the
+  installed UE 5.8 engine source — plain `GeometryFramework`/`GeometryCore`
+  Runtime modules, no plugin gating, added to `OpenDriveUE.Build.cs`). Same
+  collision recipe `unreal/import_stage.py` already uses for the Dragon
+  (`EnableComplexAsSimpleCollision` + `BlockAll`), just called directly in
+  C++ instead of through Python's GeometryScript reflection layer. Material
+  is `/Game/OpenDrive/Materials/M_Road` (same PM_Asphalt-carrying asset the
+  Dragon uses) — load-bearing, not cosmetic, since complex-hit suspension
+  traces read the *render material's* PhysMaterial.
+- **`AODScreenshotHook`** (new, trivial): the `-odshot=N` block lifted
+  verbatim out of `ODForestManager::Tick()` into a standalone actor, closing
+  the gap 7.1 flagged (the original only fires when a Landscape actor
+  exists, so it silently no-ops on streaming-terrain-only levels). Spawned
+  only into the terrain-streaming test level; `ODForestManager`/the Dragon
+  untouched.
+- **A real bug the seam-check verification caught, worth remembering:** the
+  road network initially floated **~800 m above** the actual streamed
+  terrain — not a small seam, a full frame mismatch. Root cause: the
+  pipeline wrote absolute DEM elevation (meters) straight into UE-frame cm
+  Z, but the level's georeference actor uses `origin_placement=
+  CARTOGRAPHIC_ORIGIN` with `origin_height=801 m`, which makes UE world Z
+  *relative to that origin height*, not absolute. `build_road_network.py`
+  now subtracts `test_areas.ORIGIN_HEIGHT_M` before the cm conversion. This
+  is exactly the kind of thing slice 1 was scoped to de-risk before any
+  tiling/streaming work got built on top of an unverified elevation
+  assumption — worth the dedicated `-odseam` diagnostic hook
+  (`AODRoadManager::RunSeamCheck`, triggered by `-odseam=N`, line-traces a
+  sample of skirt-bottom verts on `ECC_Visibility` — the same channel
+  `UODVehicleMovement`'s suspension uses — and logs
+  `mean|dz|`/`max|dz|`/over-vs-under counts) turning out to be worth
+  building.
+- **Two environment-only snags hit while verifying, for next time:**
+  1. Git Bash mangles a leading `/Game/...` map argument into a Windows
+     path (`/c/Program Files/Git/Game/...`) via MSYS's automatic POSIX-path
+     conversion — prefix the command with `MSYS_NO_PATHCONV=1`.
+  2. `unreal.LevelEditorSubsystem.new_level()` on an already-existing level
+     package fails "an asset already exists" even after the `.umap` is
+     deleted from disk in the SAME process (`os.remove()` +
+     `EditorAssetLibrary.delete_asset()` + a forced
+     `AssetRegistry.scan_paths_synchronous(force_rescan=True)` all still
+     hit it) — the registry's on-disk cache doesn't invalidate same-process.
+     `load_level()` isn't a safe existence probe either (silently succeeds
+     against the engine's blank transient level instead of failing). Fix:
+     delete the `.umap` from a **separate** process/step before launching
+     the one that calls `new_level()` — a fresh process with the file
+     already gone works every time.
+- **Smart App Control block (2026-07-20) — since cleared.** Windows briefly
+  refused to load the freshly-compiled `UnrealEditor-OpenDriveUE.dll` at all
+  (both `-game` and the pythonscript commandlet) — decoded error: "An
+  Application Control policy has blocked this file." `VerifiedAndReputablePolicyState`
+  (Smart App Control's reputation enforcement) was active on this machine;
+  a locally-rebuilt, unsigned DLL rewritten many times in one session has no
+  established reputation. Taylor turned Smart App Control off via Windows
+  Security (his call, since it's a one-way OS security setting — can't be
+  re-enabled without a clean Windows reinstall) later the same session,
+  which unblocked all further in-game testing, including slice 2's — see
+  below for what that testing actually found.
+
+**Slice 2 — tile-based road streaming, built 2026-07-19/20. The streaming
+*mechanism* is confirmed working via extensive live testing (not just
+headless checks), but the road-to-terrain fit is STILL not reliably
+correct as of this writing — see "Still outstanding" below before treating
+this as done.** Scoped deliberately: proves the tiling + streaming
+*mechanism* only, not HTTP — Taylor's call this session was to defer HTTP
+fetch + a disk cache to a later slice and keep tiles loading from local
+packaged Content (same model `AODForestManager`'s mask already uses), just
+cut into a grid instead of one whole-network file.
+
+- **Pipeline:** `pipeline/export_road_mesh_bin.py` now buckets the
+  already-computed flat chunk list by each chunk's centroid into a
+  `ROAD_TILE_SIZE_CM = 200000` (2 km, `pipeline/test_areas.py`) world-space
+  grid, writing one `ODR1` file per non-empty cell
+  (`road_<AREA>_test_tile_<tx>_<ty>.bin`) instead of one big sidecar.
+  `road_mesh_common.py`'s station/chunk math is untouched — pure bucketing
+  over already-built geometry. Verified on the Palmdale network: 63 chunks
+  → 18 tiles (grid x[-2..2] y[-3..2]), 33,788 verts / 50,304 tris total,
+  matching the original slice-1 totals. The old single-file
+  `road_palmdale_test.bin` is superseded and was deleted (gitignored,
+  regenerable, nothing references it anymore).
+- **Runtime (`AODRoadManager`, `ODRoadManager.h/.cpp`):** `Tick()` now
+  copies `ODForestManager`'s ring-iteration/hysteresis spawn-despawn
+  pattern, keyed by the same `FIntPoint` world-grid convention, but tile
+  *building* moved off the game thread — the first async/background-task
+  code anywhere in `OpenDriveUE` (`Async(EAsyncExecution::ThreadPool, ...)`
+  does the file-read + `ODR1` parse into plain arrays, hops back via
+  `AsyncTask(ENamedThreads::GameThread, ...)` to build the actual
+  `UDynamicMeshComponent`s — a `TWeakObjectPtr` + `GetWorld()` guard makes a
+  post-teardown completion a safe no-op). New `TSet<FIntPoint>
+  PendingTiles`/`MissingTiles` avoid re-requesting in-flight or
+  confirmed-absent tiles. Load/despawn radii are computed in world-space
+  cm (`SpawnRadius` + half the max chunk span + a fixed `DespawnMarginCm`),
+  not copied as a bare tile-count constant from Forest's 96 m-tile-tuned
+  `+2` — that would have badly under- or over-shot at road tiles' 2 km
+  size. `EndPlay` is new to this module too (nothing else here has had a
+  lifetime-crossing async op to clean up before) — just logs in-flight
+  count, since thread-pool work can't be cancelled, only safely ignored.
+  `-odseam` still works, now filling in `SkirtSamplePoints` incrementally
+  as tiles load rather than all at `BeginPlay`. Build verified clean
+  (`Build.bat OpenDriveUEEditor Win64 Development`, 0 errors) — no new
+  module dependencies needed (no HTTP/Json/Sockets; `Async`/`AsyncTask` are
+  Core-only).
+- the from-scratch terrain-test-level build script (since retired) updated:
+  sets the new `road_tile_prefix` property instead of the retired
+  `road_mesh_file`.
+- Design was reviewed against a Plan-agent pass before implementation
+  (correctness of the `TWeakObjectPtr` pattern, world-space hysteresis math,
+  dispatch-rate capping to avoid a thundering herd of file opens on level
+  start); confirmed directly that `DefaultGame.ini`'s
+  `DirectoriesToAlwaysStageAsUFS=(Path="OpenDrive/Masks")` is a
+  whole-directory staging rule, so the new per-tile files need no packaging
+  changes, and that Origin Rebasing is off in `DefaultEngine.ini`, so
+  absolute-world-cm `FIntPoint` tile keys stay valid. Full design at
+  the session's plan file if needed later, but the summary above plus the
+  code is the durable record.
+- **Level features decoupled from requiring a race (2026-07-20/21).** Found
+  investigating why none of Tail of the Dragon's HUD/audio/tuning/pause
+  showed up on the terrain-streaming test level: those actors
+  (`AODVehicleAudio`, `AODTuningManager`, `AODPauseMenu`) had only ever been
+  placed on the Dragon by one-off `unreal/apply_*.py` scripts hardcoded to that level, and
+  `ODRaceHUD::DrawHUD` gated its ENTIRE body on finding an `AODRaceManager`
+  (which only exists for checkpoint-gate races — deliberately not spawned
+  on this open-world/free-roam level). Fixed in two parts: (1)
+  the from-scratch terrain-test-level build script (since retired) now
+  spawns `VehicleAudio`/`PauseMenu`/`TuningManager`/`DayNight` directly
+  (same actors, same classes, just
+  authored per-level like the Dragon's own scripts do) and `ODRaceHUD.cpp`
+  now only gates the actual race timer/gate-progress text on `Race` —
+  tuning toast, speed readout, and the pause menu draw with no race at all;
+  (2) the mini-map/full map — the one piece that genuinely needs route
+  data — now falls back to **`AODRoadManager`'s own centerline**
+  (`CenterlineFilePrefix`/`RoadCenterline`, same `ODC1` sidecar format and
+  loader convention as `AODRaceManager`/`AODForestManager`) when no
+  `AODRaceManager` exists, instead of requiring one just to draw a route
+  it was never going to use for checkpoints. `DrawStageMap` takes plain
+  `Centerline`/`Gates` data now, not an `AODRaceManager&`, so it no longer
+  cares which actor supplied the route; start/finish/next-gate markers and
+  the PB ghost dot are skipped on the route-only path (nothing to mark).
+  `unreal/apply_road_centerline.py` (new, same idempotent-by-label pattern
+  as the other `apply_*.py` scripts) sets `CenterlineFilePrefix` on an
+  already-built level's `RoadManager` without a full rebuild; also wired
+  into the from-scratch terrain-test-level build script (since retired) for
+  from-scratch builds. **Verified live** (`-game`, `-odshot`): screenshot on
+  the terrain-streaming test level shows the round mini-map drawing the
+  real road route with the player arrow, and
+  the speed readout, with zero race actors on the level — confirming the
+  whole HUD stack now works independent of a race setup, not just headless.
+**What live testing found, once Smart App Control cleared (real `-game`
+runs, not just headless `-odseam`):** tile-streaming mechanics themselves
+checked out — dispatch, async parse, priority ordering, and despawn all
+behaved correctly per trace logs. But live driving/visual inspection
+surfaced real bugs headless testing alone hadn't caught, fixed one at a
+time over several iterations:
+
+1. **Ground-snap retries were unthrottled** — re-tracing every station of
+   the front-of-queue tile every single tick made the game unplayably slow
+   while waiting on terrain. Fixed: per-station memoization
+   (`FParsedChunk::SnappedMask`) + a shared per-tick trace budget
+   (`MaxGroundTracesPerTick = 64`).
+2. **`AwaitingTerrainQueue` processed tiles in async-completion order, not
+   ring-priority order** — a distant tile's file-parse could finish before
+   the one actually under the player, so it jumped the queue. Fixed:
+   `ProcessAwaitingTerrain` re-picks whichever queued tile is closest to
+   the player each call, not blindly index 0.
+3. **The per-tile timeout clock started at enqueue time, not
+   first-actively-processed time** — a tile queued behind several others
+   accumulated "wait debt" while completely untouched, and could time out
+   the instant its turn came without ever being traced. Fixed: lazily
+   stamped on first selection.
+4. **Vehicle spawn depenetration launch** (the original "car flies several
+   hundred meters up" report) — `PlayerStart`'s offline-baked height is
+   never touched by the road's own runtime ground-snap, and can disagree
+   with actual streamed terrain by tens of meters; spawning overlapping
+   solid collision made Chaos violently eject the car. Fixed:
+   `AODVehiclePawn` now holds the Body kinematic from `BeginPlay`, lifts
+   20 m clear immediately so the wait itself is never visibly embedded,
+   and only releases physics once a downward trace confirms the actual
+   road surface specifically (`PM_Asphalt` physmat — the same check
+   `ODForestManager::GroundAt` already used), not just any collision hit.
+5. **No plausibility check on ground-snap hits** — the streaming plugin can
+   return a hit against a coarse/low-LOD placeholder tile before it refines
+   near boot;
+   one implausible early hit stretched a station hundreds of meters from
+   its neighbors, turning a flat road segment into a literal vertical
+   wall (screenshot-confirmed). Fixed: `MaxPlausibleSnapDeltaCm` (50 m,
+   comfortably above the ~30 m worst-case *legitimate*
+   simplification-tolerance gap already measured via `-odseam`) rejects an
+   implausible hit and keeps waiting instead of baking it in.
+6. **Road ground-snap traces didn't exclude the vehicle pawn** — a station
+   right at the spawn point (where the car always sits) could hit the
+   car's own body instead of real terrain. Fixed: both
+   `SnapChunkToGround` and `RunSeamCheck` now ignore the player pawn too.
+7. **Player-start selection bug, in the pipeline, not the runtime:**
+   `build_road_network.py` picked the *longest* built segment's first
+   station as the spawn point regardless of where that segment actually
+   sat geographically — it happened to land ~500 m past the bbox's
+   northern edge (confirmed via direct coordinate math: the old spawn's Y
+   put it at ~34.6345°N vs. the bbox's 34.630°N boundary), squarely in the
+   ragged, least-reliable part of the built terrain. Fixed: now searches
+   every built segment's stations for whichever sits closest to the bbox's
+   geographic center instead.
+
+**RESOLVED 2026-07-20 — root-cause restructure, not another reactive patch.**
+The prior session's conclusion (below, kept for the record) was that
+reactive live-patching had stopped being productive. Taylor's instruction
+this session: stop patching the runtime reconciliation and restructure so
+the fit is *guaranteed offline*, matching Tail of the Dragon's model (one
+source of truth, computed once) instead of racing the streaming plugin's
+async loading every time a tile loads.
+
+- **Pipeline reordered to load-terrain → load-road → overlay, with
+  elevation sampled exactly once:** new `pipeline/build_road_stations.py`
+  owns all DEM sampling/grade-smoothing (moved out of
+  `build_road_network.py`) and writes `road_stations.json` — the single
+  geographic source of truth. `build_terrain_tiles.py` now CARVES every
+  terrain tile to that same profile (`road_mesh_common.carve_heightmap`,
+  inverse-distance stamp + smoothstep blend, same technique as the Dragon's
+  `carve_road` generalized to the streamed pipeline's lon/lat-bounded tiles) before
+  martini simplification runs, instead of leaving the two surfaces to be
+  reconciled at runtime. `build_road_network.py` now only does UE-frame
+  mesh assembly from `road_stations.json` - no DEM access of its own.
+- **New offline gate, `pipeline/verify_road_fit.py`:** re-requests the
+  exact tiles covering every road station through the real
+  `build_terrain_tiles.build_tile()` (not a reimplementation) and
+  barycentric-samples the ACTUAL simplified mesh that gets encoded and
+  served - the thing that actually mattered, since a correct carve on the
+  raw raster is necessary but not sufficient (simplification can still cut
+  across a corridor). Runs entirely engine-free.
+- **Two real bugs found by that gate, not guessed at:**
+  1. The carve was being applied to the elevation array BEFORE pymartini's
+     own `.T` transpose. pymartini indexes whatever array it's actually
+     given with standard row=y/col=x semantics, so carving pre-transpose
+     stamped every station at its geographic diagonal-mirror position
+     instead of its real one - confirmed with a controlled non-planar 2-D
+     gradient test, not assumed. This alone was the entire ~440 m worst-case
+     mismatch stations 2026-07-19's `-odseam` had been measuring - not a
+     carve-width problem at all. Moving the carve to after the transpose
+     dropped every measured station under ~3 m.
+  2. Even after that fix, z15's `MAX_ERROR=2.0` m simplification tolerance
+     still left a few real, LOCALIZED ~2.5-2.6 m gap/overlap clusters -
+     small enough to pass a "fits under the 2.5 m skirt" bar, but big
+     enough that Taylor watching an actual drive saw the road floating over
+     a visible gap in one spot and terrain poking through in another. Added
+     `MAX_ERROR_NEAR = 0.5` m, applied only at z15 (MAX_ZOOM) since coarser
+     zooms never render close to the vehicle and don't need the extra
+     vertex cost - dropped the worst z15 station to 0.90 m.
+- **All the runtime reconciliation code this used to lean on is deleted**
+  from `AODRoadManager` (`SnapChunkToGround`, the whole
+  `AwaitingTerrainQueue`/`Data`/`Since` wait-for-streamed-terrain machinery,
+  `MaxPlausibleSnapDeltaCm`, the per-station `SnappedMask`) - roughly 180
+  lines gone. `OnTileParsed` now finalizes a tile immediately; there is
+  nothing left to reconcile at runtime because the pipeline guarantees the
+  fit before the engine ever sees the data.
+- **Verified three independent ways, not just one:** `verify_road_fit.py`
+  (offline, mesh-accurate) passes at z15 (max 0.90 m); a live in-engine
+  `-odseam` collision-trace check (after fixing an unrelated pre-existing
+  bug in it - see below) found terrain sitting consistently 2.1-2.7 m
+  *above* every sampled skirt-bottom point, 138/138, matching the skirt's
+  own 2.5 m design drop exactly; and a screenshot of the car sitting on the
+  road shows a clean edge into the distance, no visible gap or overlap.
+- **Bonus fix, found while re-verifying: `-odseam`'s anchor selection was
+  wrong.** It anchored on `SkirtSamplePoints[0]` assuming tiles finish
+  loading in ring/dispatch order: they don't (thread-pool completions
+  race), so on this 18-tile network the first-ARRIVED sample landed 3.4 km
+  from spawn in an unrelated tile, and every "nearby" trace missed real
+  terrain that just hadn't streamed in that far away - a false `n=0` with
+  no actual data problem behind it. Fixed by capturing the player's actual
+  spawn location on the first `Tick()` (`AODRoadManager::SpawnAnchor`)
+  instead of trusting sample-arrival order.
+- **Also found, unrelated to elevation:** Git Bash mangles a leading
+  `/Game/...` map argument into a Windows path when launching
+  `UnrealEditor.exe` directly (not just the pythonscript commandlet path
+  documented earlier) - `MSYS_NO_PATHCONV=1` fixes it. And the streaming
+  plugin's own request cache (a local sqlite file, since deleted along with
+  the plugin) keyed by URL,
+  not content - it needed deleting before re-testing after any terrain
+  rebuild, or a stale cached tile can hide a real fix (or a real problem)
+  behind the last run's response.
+
+**Prior conclusion, kept for context (2026-07-19, superseded by the above):**
+"even after every fix above, a live drive-test still showed the road not
+correctly fitting the terrain... reactive live-patching had stopped being
+productive." That diagnosis was right - the fix wasn't another patch, it
+was moving the whole reconciliation offline.
+
+**Why this arc took so many iterations, worth remembering:** Tail of the
+Dragon's terrain+road never hit this class of bug because it's one static,
+deterministic dataset - a Landscape heightmap imported once, offline, with
+the road sampling the *exact same* raw DEM at full precision. There was
+only ever one source of truth, computed once. This live-streamed-terrain
+level's runtime reconciliation approach required THREE independently-streaming,
+asynchronously-refining systems to agree at runtime with no reliable
+"everything has settled" signal - restructuring to carve-once-offline
+collapses that back down to the Dragon's one-source-of-truth model instead
+of trying to make three moving parts agree live. The two real bugs found
+this session (transpose order, simplification tolerance) were both
+findable and fixable *because* they now live in a deterministic, engine-free
+pipeline stage with its own gate, not in async runtime behavior.
+
+**Slice 3 sketch (unchanged, not built yet):** NA-scale preprocessing +
+Large World Coordinates/origin-rebasing correctness at cross-country
+distances + intersection/junction mesh blending (deliberately not attempted
+in slice 1's independent per-segment banking, or slice 2's centroid-bucketed
+tiling).
 
 ### 7.3 Biomes + surfaces at scale
 - **ESA WorldCover 10 m** tiles replace satellite-color classification as the
@@ -253,13 +1331,31 @@ points inside one continuous streamed world. Everything above survives intact.
   Implementation: per-region foliage recipes (mesh set + palette + density
   curve) selected by land cover + climate rasters; `AODForestManager`'s
   per-tile species system is the hook — this is data + palette work.
+  **Recipe table ✅, classifier not started (2026-07-20):**
+  `EODBiome`/`FBiomeRecipe`/`BiomeRecipeTable` in `ODForestManager.h/.cpp`
+  now hold 7 named recipes (DeciduousForest, EvergreenForest, Chaparral,
+  DesertScrub, PlainsGrassland, Wetland, AlpineBare), each a species-mix
+  weighting + tree/bush density scale over the existing 3-species/1-bush
+  mesh set (no new assets needed) — the taxonomy is the same list Taylor
+  confirmed against the ESA WorldCover class set. `BiomeAt()` is the
+  seam a real per-tile classifier plugs into; until WorldCover fetch +
+  classification exists, every tile just reads `DefaultBiome` (one value,
+  editor-exposed, defaults to DeciduousForest - this manager currently only
+  runs on Tail of the Dragon, since `LoadMask()` requires an
+  `ALandscapeProxy` that the terrain-streaming test level didn't have yet, and the
+  Dragon's real location (US-129, Deals Gap) is Southeast Appalachian
+  mixed forest, not the streamed-terrain test area's high-desert character).
+  Traction (1.4) and forest density are now independent: traction collapsed
+  to road/off-road, this stayed per-biome/multi-value — different systems
+  answering different questions ("how much should this hurt" vs. "what does
+  this look like").
 - Imagery drape: USGS for US at stage fidelity; global stylized fallback =
   colorized land cover + hillshade (avoids imagery licensing/volume).
 - PRISM/WorldClim moisture becomes a world raster feeding road tint and
   future weather; region flavor presets extend the palette/mesh-set system.
-- **Packaged-build mask:** forest reads the terrain mask from editor-only
-  texture Source today — needs a cooked CPU copy (small binary asset written
-  at import). Required before any packaged release; small, standalone task.
+- **Packaged-build mask ✅** *(2026-07-18)* — `terrain_mask.bin` sidecar
+  (pipeline/make_forest_mask_bin.py) + `LoadMask()` bin fallback; verified
+  in the packaged build (90k instances, tiles streaming while driving).
 
 ### 7.4 World game layer
 - NA map view (tiled, zoomable — upgrade of 4.2), free-roam ↔ stage entry
@@ -269,16 +1365,365 @@ points inside one continuous streamed world. Everything above survives intact.
 **Size:** the campaign — months, parallel with everything after Arc 3.
 Bite order: 7.1 → 7.2 (hardest) → 7.3 → 7.4.
 
+### 7.5 Open-world menu/map/spawn robustness (2026-07-26/27)
+
+A cluster of real bugs and one small feature, all found via actual live
+`-game` testing (Taylor's own play sessions, not just headless checks) of
+the `OpenWorldTest` level after a gap where it hadn't been driven since the
+main-menu/pause-menu split (§ 4.0b) landed.
+
+- **Bug: `AODMainMenu` was silently absent from a freshly-rebuilt level.**
+  `unreal/build_openworld_test_level.py` (the from-scratch builder) never
+  spawned `AODMainMenu` itself — it was only ever added by a separate
+  follow-up script, `unreal/apply_main_menu.py`, run once against the level
+  right after `AODMainMenu` was written (2026-07-25). When the level got
+  rebuilt from scratch again later, that follow-up script wasn't re-run, so
+  the new `.umap` had no `AODMainMenu` actor at all. Symptom: the game
+  booted straight into driving instead of the car-config screen, and the
+  pause menu's "Main Menu" row silently did nothing (`FindManager<AODMainMenu>`
+  returned null, so its `if` just never fired). Exactly the same *class* of
+  bug as the `Sun` mobility issue from Arc 7.1/7.0 — a one-off patch script's
+  effect doesn't survive a from-scratch rebuild unless it's folded into the
+  builder itself. **Fixed:** ran `apply_main_menu.py` against the live level
+  to recover immediately, and added the same spawn call directly into
+  `build_openworld_test_level.py` (next to `PauseMenu`) so this can't happen
+  again on the next full rebuild.
+
+- **Feature: stylized terrain-color map background ✅** (`pipeline/
+  build_map_texture.py` + `unreal/apply_map_texture.py`, new) — the mini-map/
+  full map used to draw the road as a bare line on flat black, which read as
+  "a confusing mess of road" with no sense of water/forest/farmland/terrain
+  around it. Reuses `classify_biomes.py`'s existing imagery fetch +
+  forest/grass/rock/water RGB classification wholesale (that script already
+  computes this per-pixel for the whole road bbox, it just only ever
+  *sampled* it at road stations before) — palette-maps the four weights to
+  flat stylized colors, crops the fetched mosaic to a real-world-meters
+  SQUARE before downsampling (imagery tiles are lon/lat-aligned, not square
+  in meters away from the equator) so one `span_cm` value covers both
+  texture axes with no aspect-ratio bookkeeping needed on the engine side.
+  New `AODRoadManager` properties (`MapTexture`/`MapTextureCenterCm`/
+  `MapTextureSpanCm`, all optional — null/unset falls back to the original
+  flat-color background unchanged); `ODRaceHUD::DrawStageMap` draws it
+  behind the road line — a plain UV-cropped tile for the square full map, a
+  proper per-vertex-UV triangle fan (`FCanvasTriangleItem`'s explicit-UV
+  constructor) for the circular player-centered mini-map — with a light dim
+  overlay on top so the route line/dots/labels stay legible over busy
+  terrain colors.
+  - **Real bug found tuning the classifier for this, not previously
+    visible:** `classify_rgb()`'s water heuristic ("dark + blue-tinted")
+    misfires broadly on shadowed mountain slopes under blue-sky ambient
+    light — measured via a one-off diagnostic against this test area's
+    cached imagery mosaic: 22% of all pixels scored `water > 0.4` at a mean
+    brightness of 0.20 (squarely shadow range, not open water). This mostly
+    didn't matter for the ORIGINAL use of these weights (per-station biome
+    classification, which checks `w_rock` first and only reaches the water
+    branch past that) but painted whole shadowed ridgelines blue once fed
+    directly into a per-pixel color blend with no such precedence. Fixed
+    (in `build_map_texture.py` only, `classify_biomes.py`'s own heuristic
+    untouched) by gating water to a much stricter bar (`w_water > 0.9`) plus
+    a brightness floor — cut the false-positive area to ~1.4%, reading as
+    real rivers/lakes instead of a wash over every dark slope.
+- **Cleanup: the old live-streaming-terrain plugin's reference is fully
+  removed** from `OpenDriveUE.uproject`. Arc 7.0's pivot (2026-07-23)
+  replaced it with baked/tiled terrain, but the plugin entry was still
+  present and `Enabled: true`, so it kept loading (confirmed zero actual
+  C++ dependency first — every historical mention in `Source/` is a prose
+  comment or an old asset name, never an include/API call) and spamming a
+  `LogClass: Error` about an uninitialized enum semantic on the plugin's own
+  metadata-property type, on every single boot.
+- **Bug + fix: `M_BuildingFacade` material missing from Content.** Same
+  "one-off script, not folded into anything, doesn't survive a rebuild"
+  class of issue as the main-menu one above — `unreal/apply_building_material.py`
+  builds this material fresh but is never called from anywhere else, and
+  `Content/` is entirely git-ignored/regenerable, so it was simply absent
+  after some rebuild. Symptom: `LogUObjectGlobals: Warning: Failed to find
+  object 'MaterialInterface /Game/OpenDrive/Materials/M_BuildingFacade...'`
+  every boot, buildings silently missing their facade material. Fixed: ran
+  the script to recreate it, and added the same "warn if missing" guard
+  `build_openworld_test_level.py` already uses for missing tuning-preset
+  assets, right where `BuildingManager` is spawned.
+- **Real bug found + fixed: default spawn hovers thousands of feet up,
+  immobile, forever (as reported live — "spawn straight into the air").**
+  Root cause, found by direct investigation of `AODVehiclePawn`'s ground-
+  snap trace log (`hit=1 onRoad=0 physmat=DefaultPhysicalMaterial` for the
+  entire 20 s timeout) plus checking which tile files actually exist on
+  disk: `pipeline/build_road_network.py`'s player-start picker searched for
+  whichever road station sits closest to the LOCAL ORIGIN `(0,0)` — but
+  `(0,0)` is ALSO exactly a corner of the road-tile grid `export_road_mesh_bin.py`
+  buckets chunks into (tiles are floored from 0), so the pick landed only
+  ~2 m from a tile boundary. The chunk covering that station centroid-
+  bucketed into a NEIGHBORING tile instead of the one the spawn point
+  nominally sits in, leaving the home tile with zero road mesh. The ground-
+  snap trace (which deliberately waits for a `PM_Asphalt` hit, not just any
+  surface — see its own class comment) hit bare terrain instead the entire
+  wait and only settled onto it once the 20 s timeout elapsed — matching
+  "I could see the ground, I was just thousands of feet above it and
+  immobile" exactly (something WAS visible below the whole time; it just
+  was never going to read as road). **Fixed:** the picker now requires real
+  margin (500 m — comfortably past the ~375 m worst-case a station's own
+  position can drift from its chunk's centroid, since chunks are fixed
+  150-station/750 m windows along the route, not centered on any particular
+  station) from every tile boundary on both axes, falling back to the old
+  closest-to-center behavior only if literally no station qualifies (never
+  hit in practice — this network has ~922k stations). Verified the new
+  pick's home tile has both road AND terrain files on disk before treating
+  it as fixed (the old one had neither for road). The already-baked level's
+  `PlayerStart` actor was moved to the new point in place via a new
+  `unreal/apply_player_start_fix.py` (no full level rebuild needed) — future
+  from-scratch rebuilds pick up the corrected `road_test_meta.json`
+  automatically since `build_openworld_test_level.py` always reads it fresh.
+- **Feature: loading screen for map-picked spawns ✅** (2026-07-26,
+  `AODMainMenu`/`ODRaceHUD`) — picking a town on the map teleports the car
+  via the same `TeleportToSpawn`/ground-snap machinery as the fix above, but
+  a freshly-picked, far-off location can have NOTHING streamed in yet
+  (`AODRoadManager`/`AODTerrainManager` only load tiles around the player's
+  CURRENT position, and neither one appears to tick at all while the game
+  is paused, which it is for the entire car-config/map-browsing flow) - the
+  player used to see the car hovering, uncontrollable, for however long the
+  wait took. New `EODMenuStage::Loading`: `StartAt()` now unpauses
+  immediately after teleporting (so streaming can actually start) but shows
+  a full opaque "Loading..." overlay and polls the pawn's ground-snap state
+  each tick, only handing back control once it's actually settled — the
+  same mid-air-hover CONDITION still happens underneath, it's just never
+  shown to the player anymore. Confirmed live both ways: Taylor's own
+  interactive test ("that worked") and a scripted `-odpick=Marysville
+  -odshot=20` repro that caught the loading screen mid-wait
+  (screenshot-verified: clean black overlay + "Loading..." text, no popped-
+  in geometry visible).
+  - **Also fixed the same day: the pause-menu camera/framing complaint**
+    ("sitting inside the car, like under it") — `AODPauseMenu` never gave
+    the camera any special treatment at all, just froze whatever the chase
+    cam happened to be doing at pause time. New "Garage" row
+    (`AODPauseMenu`, between ABS and Main Menu) opens `AODMainMenu`'s
+    EXISTING car-config screen in place (`AODMainMenu::OpenGarage()`, new) -
+    same showroom camera treatment (`SetShowroom(true)`: levels the car,
+    detaches the spring-arm's yaw inheritance) the fresh-boot flow already
+    used, which incidentally fixes the broken framing as a side effect of
+    reusing code that was already working correctly elsewhere, rather than
+    debugging the raw chase-cam clipping case directly. Unlike the fresh-
+    boot flow, "Drive" (relabeled "Resume Driving" in this mode) or Escape
+    just unpauses in place - no re-teleport, no loading screen, since the
+    car never left real pavement to begin with.
+- **Deeper, NOT fully root-caused: cold-start tile-streaming latency after
+  a map-teleport can still take the full 20 s timeout, not just a few
+  frames.** A scripted `-odpick=Marysville` repro hit `onRoad=0` for the
+  ENTIRE 20 s wait, twice, in two fully separate process launches (same
+  exact hit coordinates, same `DefaultPhysicalMaterial`, both times) -
+  identical-enough results across independent runs that this reads more
+  like a genuine DATA gap at that specific spot than pure load-order race,
+  which lines up with the next bullet. The loading screen above makes this
+  no longer visible/confusing to the player, but the underlying "why does
+  this take up to 20 real seconds" question for a general (non-Marysville)
+  cold teleport target is still open and would need a dedicated
+  instrumented pass to answer properly - this project's own history (§ 7.2)
+  is that this exact class of bug (reconciling independently-streaming
+  systems against a just-moved player) needs that kind of dedicated session,
+  not more reactive guessing.
+- **New bug, reported live, NOT investigated yet: the coastal road around
+  Marysville appears to be entirely missing.** Concrete lead for whoever
+  picks this up: picking "Marysville" from the map consistently teleports
+  to world XY `(-1699061, 2597499)` cm (confirmed identical across two
+  separate runs) - the ROAD tile file for that point's grid cell
+  (`road_skagit_cascades_test_tile_-9_12.bin`) DOES exist on disk, but the
+  ground-snap trace there never once reads `PM_Asphalt`, even after the
+  full 20 s wait. Worth checking whether that tile's chunks actually cover
+  the coastline itself or just miss it narrowly (same centroid-bucketing
+  class of issue as the player-start bug above, or a genuine gap in the OSM
+  fetch for that specific stretch) before assuming it's a big pipeline
+  problem.
+- **New bug, reported live, NOT investigated yet: the open-world map reads
+  far too dark almost everywhere, hard to make anything out.** Not yet
+  diagnosed - note for whoever picks this up: `build_openworld_test_level.py`
+  DOES already spawn a "Grade" `PostProcessVolume` with the same exposure/
+  contrast values as Tail of the Dragon's own lighting fix, so the darkness
+  is NOT simply a missing-grade-volume repeat of that old bug; the actual
+  cause is still unknown (worth checking sun intensity/angle, fog density,
+  and whether the grade volume's `unbound` flag and priority are actually
+  taking effect over this level's specific geometry before assuming
+  anything about the fix that worked for the Dragon).
+
+### 7.6 Oahu test area — status update (2026-07-27)
+
+Test area switched from Skagit/Cascades to Oahu, HI this session
+(`pipeline/test_areas.py` — Taylor's call, "build the entire island," a whole
+bbox rather than a scoped loop, and the first real exercise of the
+tropical/coastal biome entries plus Honolulu's dense downtown grid; § 7.5
+above is the historical record of the Skagit-era `OpenWorldTest` bugs and
+predates this switch). Current state: roads and buildings are up and working
+on `OpenWorldTest` (barriers and forest intentionally still disabled via
+`BARRIER_ENABLED`/`FOREST_ENABLED` in `unreal/build_openworld_test_level.py` —
+staged troubleshooting flags for isolating terrain/road/building issues one
+system at a time, not a bug; see § 7.8 for what `AODBarrierManager` actually
+is). Also fixed this session: far-terrain tessellation improved
+(`FAR_GRID_N` 9→21 in `build_terrain_mesh_tiles.py`), map-texture/minimap
+wiring, and material compile bugs in `M_BuildingFacade` and
+`M_GroundStylized`.
+
+**Not yet verified live:** the visual-fidelity concerns raised during
+playtesting remain largely unconfirmed — a Windows-XP-like sharp/oversaturated
+look, whether road alignment reads as geographically plausible,
+building-to-road misalignment, and (§ 7.7) no water anywhere on the island.
+`unreal/apply_spawn_at_latlon.py` already exists for coordinate-matched spawn
+testing but hasn't yet been used to do an actual verified screenshot
+comparison against real-world reference imagery — that's the natural next
+step before chasing any of these visually rather than guessing from memory of
+the drive.
+
+### 7.7 Ocean/water rendering — completely missing (scoped 2026-07-27)
+
+Found/scoped during Oahu playtesting — "water doesn't exist" was a direct
+Taylor complaint, and on an island bbox that's immediately obvious. Root cause
+scoped, not yet fixed: `build_terrain_mesh_tiles.py` only bakes terrain within
+`RENDER_DISTANCE_M` (6000 m) of a road station, so offshore tiles are never
+built at all — a real geometry hole, not a missing-material issue.
+
+- **Tier 0 (cheap, ~1-2 hrs, no new pipeline work):** a single large flat
+  plane at `SEA_LEVEL_Z_CM` (already defined in
+  `unreal/apply_ground_material.py`, derived from `ORIGIN_HEIGHT_M` in
+  `pipeline/test_areas.py`), sized to the area bbox, simple
+  translucent/scrolling water material. Land pokes up naturally wherever DEM
+  elevation is positive. Would NOT flood inland water sitting above sea level
+  (e.g. Wahiawa Reservoir) — a flat plane at sea level can't distinguish
+  "below sea level" from "an inland lake."
+- **Tier 1 (real fix, matches the project's established tile-baked-manager
+  pattern):** Python bake script + C++ `AODWaterManager` mirroring
+  `AODBuildingManager`/`AODTerrainManager`. Fetch OSM `natural=water`
+  (lakes/reservoirs — closed polygons, straightforward) and
+  `natural=coastline` (the ocean edge). **Call out explicitly:** OSM
+  coastlines are disconnected linestring ways, NOT closed polygons, so
+  stitching them into closed land/sea rings is a known-hard problem (normally
+  needs a dedicated tool like `osmcoastline`) — this is the real time sink
+  here, not the manager/streaming boilerplate (which is now a well-worn
+  pattern in this codebase).
+
+**Recommendation:** do Tier 0 first as an immediate visual fix; scope Tier 1
+as a separate follow-up task.
+
+### 7.8 Roadside furniture (guardrails/signs/poles) — unscoped (2026-07-27)
+
+Found/scoped 2026-07-27.
+
+- `AODBarrierManager` (currently disabled via `BARRIER_ENABLED=False` in
+  `unreal/build_openworld_test_level.py` — an intentional Taylor
+  troubleshooting choice, not a bug) is **not** roadside furniture — it's a
+  pure invisible gameplay collision safety-rail (a flat 13 m offset ribbon
+  from every road station, `SetVisibility(false)`), dressed with generic
+  trees/bushes just so it "reads as scenery." Already independently flagged
+  in `AUDIT.md` § 5 as the single largest disk consumer (213 MB, `ODW2`) and
+  the most-criticized-in-genre element of the project if ever shipped as-is.
+- No OSM tag data is fetched anywhere today for `barrier=guard_rail`,
+  `traffic_sign=*`, `highway=street_lamp`, `traffic_signals`, etc. Road class
+  itself isn't even threaded through to `road_stations.json` currently
+  (dropped after `osm.json`), so no data exists yet to distinguish a highway
+  curve from a residential street for placement purposes.
+- **Cheap tier:** fetch real `barrier=guard_rail` ways +
+  `traffic_signals`/`stop` intersection nodes (half-day-to-a-day, mechanical,
+  follows the buildings-fetch precedent — but actual OSM coverage density for
+  Oahu is unknown until queried).
+- **Heuristic tier:** generic sign posts, street lights, curvature-triggered
+  guardrail placement — no reliable OSM signal exists for any of this, so it
+  would mean inventing placement rules from scratch (same risk category as
+  the building-height-guessing already flagged elsewhere in the project as a
+  weak spot). Should stay a separate, lower-priority, open-ended item, not
+  bundled with the cheap tier above.
+
+### 7.6 Implementation audit + decisions (2026-07-27)
+
+A full read-only audit of *how* the world is built and delivered — terrain and
+road geometry, textures/materials, procedural asset generation, runtime
+streaming. Full analysis, measured numbers, and a ranked 15-item queue live in
+[`AUDIT.md`](AUDIT.md); this section is the plan-of-record summary.
+
+**Decisions made (Taylor, 2026-07-27):**
+
+1. **Scope → mountain hot zones**, not the literal continent (see the Arc 7
+   header above). Turns ~950 GB into ~25 GB.
+2. **Per-location coordinate frames**, no shared continental space.
+3. **Buildings: collision only near the road**, mirroring the terrain near/far
+   split. All 74,090 Oahu buildings currently get full complex collision.
+4. **The road-corridor barrier is a stopgap** — replace the hard invisible wall
+   with an out-of-bounds reset (reuse `AODRaceManager`'s respawn), but keep a
+   light visual boundary so the player can see the edge. Deletes 213 MB.
+5. **Terrain detail: adaptive martini triangulation**, base grid 257
+   (7.81 m over a 2 km tile), done *first*, without a look-first verification
+   pass. RTIN requires a 2^k+1 grid, so the current `NEAR_GRID_N = 41` must
+   change regardless.
+6. **D1 generic tiling detail normal** — do it, cheap and orthogonal. **D2
+   DEM-derived per-tile normal maps** — dropped; they cost the same as the
+   geometry and deliver less (no silhouette).
+
+**The findings that drove them, briefly:**
+
+- **The pipeline bakes the *output* of a deterministic function instead of its
+  *input*** — 436 MB for Oahu, of which the barrier alone is 213 MB and
+  contains no information not already in `road_stations.json`. The
+  zero-per-instance rule (standing decision 2) is enforced for 90,000 trees and
+  for nothing else.
+- **Bridges and tunnels are broken, measured on H-3:** 38.9% of it sits within
+  ±1 m of the ground it should be flying over, and the Tetsuo Harano Tunnels
+  are built **429.7 m inside the Koʻolau range**. Root cause:
+  `fill_structure_gaps()` interpolates *ground elevation at the abutments*
+  rather than constructing a deck, and `grade_smooth_elevation`'s clamp is a
+  one-way ratchet that can only pull decks down. Matters more under the new
+  scope, not less — mountain roads are disproportionately viaducts and bores.
+- **74,090 buildings each get their own `UDynamicMeshComponent`** — ~25,000
+  resident over downtown Honolulu, each a draw call and a runtime collision
+  cook. The triangles are trivial (1.72M total); the per-object overhead is
+  the entire cost, and it is CPU-bound, so no GPU upgrade substitutes for
+  merging per tile.
+- **A confirmed determinism bug:** `build_road_barrier.py:168` seeds barrier
+  scatter with Python's salted `hash()` on a string, so every rebuild places
+  different trees. Verified by running it twice. Fix before any rebake.
+- **The road discards OSM tags it already fetched** — `lanes` (41% of Oahu
+  ways), `surface` (40%), `maxspeed`, `layer` (814 ways, the vertical-stacking
+  signal that would settle bridge/tunnel crossings directly). Every road in the
+  world is currently the same 9 m ribbon.
+- **~208 MB of retired Skagit/Palmdale tiles** are still in
+  `Content/OpenDrive/Masks` and would be cooked and shipped, since
+  `DirectoriesToAlwaysStageAsUFS` stages the whole directory.
+
+**Explicitly out of the audit's scope** (so silence is not a clean bill of
+health): vehicle physics, audio DSP, the race framework, HUD/menu code, and the
+Tail of the Dragon stage pipeline. No build was compiled and no live session
+run, so it is also unverified that the current untracked C++ compiles.
+
 ---
 
 ## Cross-cutting (release engineering)
 
-- **Packaging:** `BuildCookRun` scripted (headless-friendly) — unblocked now
-  that Arc 3 is done; first smoke test should include the 7.3 cooked-mask fix
-  so the packaged forest works. Fresh-machine smoke test each arc;
-  installer/zip for itch.
-- **Performance budget:** 60 fps on a mid GPU at 1080p; watch grass/HISM
-  instance counts, Lumen cost at night (headlights), streaming hitches (7.2).
+- **Packaging ✅ first proof (2026-07-18):** scripted `BuildCookRun`
+  (Win64 Development, cook+pak+archive to `Packaged/`) builds and **the
+  packaged game runs the full loop**: forest streams tiles from the cooked
+  mask sidecar (`pipeline/make_forest_mask_bin.py` →
+  `Content/OpenDrive/Masks/terrain_mask.bin`, staged via
+  DirectoriesToAlwaysStageAsUFS; `-odmaskbin` tests the path in editor
+  builds), custom vehicle drives on PM_Asphalt, audio synth plays. Gotcha
+  that cost one cook: runtime-`LoadObject` assets (car meshes, trees,
+  presets) are invisible to the cooker — `DirectoriesToAlwaysCook=/Game/
+  OpenDrive` in DefaultGame.ini. **Shipping config also proven** (builds
+  0 errors/0 warnings, packaged Shipping exe runs stable —
+  `Packaged/Shipping/`). Remaining for release: installer/zip,
+  fresh-machine test.
+- **Performance budget: DEFERRED, not an active constraint (2026-07-27).**
+  Taylor's call: *"I'm happy to burn the GPU I have to figure out what does and
+  doesn't work and work backwards from a perfect project rather than struggle
+  getting things right forever because we're trying to meet resource
+  constraints."* The old "60 fps on a mid GPU at 1080p" target is parked until
+  the world looks right. **Important caveat (`AUDIT.md` § 1.4): three costs are
+  NOT GPU-bound and a better card does nothing for them** — draw calls
+  (CPU/render thread; the 25,000-component building problem), bake time and
+  fetch volume (single-threaded Python + network), and coordinate precision
+  (arithmetic). Spend hardware on how the world *looks*, not on how it is
+  *delivered*.
+  !Issue - Lumen surface cache atlas overload warning has been present for a
+  while (Taylor, 2026-07-18).
+  *(fixed 2026-07-18, machine-verified: `AODForestManager`'s tile HISMs now
+  call `SetAffectDynamicIndirectLighting(false)` right after creation — trees
+  keep lighting/shadow, stop demanding surface-cache cards. Verified via
+  `-odshot=20` at the start gate with tiles loaded: no on-screen overload
+  warning, no overload text in `OpenDriveUE.log`, only the expected
+  `r.LumenScene.SurfaceCache.AtlasSize:4096` config line. Headroom trim
+  (`CardTexelDensityScale`) not needed — this alone cleared it.)*
 - **Crash discipline:** keep the headless-automation rule; new UE crashes get
   `Saved/Crashes` triage before workarounds.
 - **Repo hygiene:** ✅ git initialized 2026-07-15 (`main`; pipeline, unreal,
@@ -292,9 +1737,9 @@ Bite order: 7.1 → 7.2 (hardest) → 7.3 → 7.4.
 | 2 | day/night | 2.1 (cycle), 7.1 (real-time accurate) | ✅ cycle |
 | 3 | floaty car | 1.2 | ✅ |
 | 4 | per-tire grip | 1.4 | ✅ |
-| 5 | all of North America | Arc 7 | — |
-| 6 | map view | 4.2 (stage), 7.4 (world) | — |
-| 7 | garage/cosmetics | 4.3 | — |
+| 5 | all of North America → **mountain hot zones** (rescoped 2026-07-27) | Arc 7 | terrain ✅ baked+streamed, road network ✅, buildings/barrier ✅; scope + coordinate + terrain-detail decisions made (§ 7.6) |
+| 6 | map view | 4.2 (stage), 7.4 (world) | ✅ stage v1 |
+| 7 | garage/cosmetics | 4.3 | ✅ live car/engine/drivetrain/tuning picker; multi-car assets + cosmetics — |
 | 8 | performance mods | 1.5 (+4.3 UI) | ✅ presets |
 | 9 | control editing | 4.1 | — |
 | 10 | wheel/sim rig | Arc 6 (FFB deferred) | — |
@@ -303,5 +1748,40 @@ Bite order: 7.1 → 7.2 (hardest) → 7.3 → 7.4.
 | 13 | exhaust editing | 5.2 (params live, UI in 4.3) | params ✅ |
 | 14 | tree collision (added) | 1.6 | ✅ |
 
-**Recommended next:** packaging + cooked mask (release-path proof, fully
-autonomous), then Arc 4 UX (collaborative sessions).
+**Recommended next (2026-07-27, post-audit — § 7.6):**
+
+0. **Fix `build_road_barrier.py:168`'s `hash()` seed.** Minutes, and it must
+   land before any rebake or every barrier tree reshuffles.
+1. **Adaptive martini terrain, base grid 257.** Taylor's call to do this
+   first. Bake one known-steep Oahu tile before building the whole pipeline —
+   it validates both the approach and the premise in minutes. Seams are the
+   main risk (error-driven vertex selection can crack at tile edges; same
+   failure class as the `FAR_DEM_ZOOM` bug) and should be designed up front.
+   `NEAR_GRID_N = 129` stays available as a one-constant fallback.
+2. **Prune retired-area tiles** (−208 MB) before a rebake refills the directory.
+3. **The bridge/tunnel elevation fix** — strong candidate to bundle with (1),
+   since it changes the same mountain corridor and wants the same verification
+   drive.
+
+Then: per-tile building merge + corridor-gated collision, OSM road tags
+(`lanes`/`surface`/`layer`, already fetched), and restoring a road-vs-terrain
+gate. Full ranked queue in [`AUDIT.md`](AUDIT.md) § 7.
+
+Separately and independently: Taylor drive-tests the assist stack + gearbox/ABS
+changes (the gate for stage-3 preset retune). Packaging/Shipping are proven;
+4.1 input rebinding and Arc 4 UX proper remain queued. Dragon stitching,
+HTTP-based road-tile fetch, and intersection/junction mesh blending are still
+on the table for later Arc 7 slices. **NA-scale preprocessing/LWC is dropped** —
+the per-location coordinate decision removes the need.
+
+**2026-07-27 follow-up:** the audit (§ 7.6) supersedes the previous gate list.
+Of § 7.5's three open items: the **Marysville coastal road is closed** (Taylor:
+almost certainly a generation-time bounding-box error, not a pipeline defect);
+the **too-dark open-world level** is still open but was found on Skagit, since
+superseded by Oahu, so confirm it still reproduces before investigating; the
+**cold-start tile-streaming latency** is still unexplained but hidden by the
+loading screen, and § 7.6's finding that `FinalizeTile` runs unbudgeted on the
+game thread is the most likely mechanism — worth checking there first.
+
+The menu/garage/map-texture work (§ 4.0b, § 4.3, § 7.5) is done and verified
+live.
