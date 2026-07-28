@@ -63,6 +63,12 @@ public:
 	float SplitDelta = 0.0f;
 	float SplitShownAt = -100.0f;   // world seconds; HUD fades it after ~3 s
 
+	/** Full-density road centerline for the map (pipeline/
+	 *  export_centerline_bin.py; world XY, cm). Empty if the sidecar is
+	 *  missing - HUD falls back to a spline guess between the gates. */
+	UPROPERTY()
+	TArray<FVector2D> RoadCenterline;
+
 	float ElapsedTime() const;
 
 	void RespawnAtLastGate();
@@ -70,6 +76,7 @@ public:
 private:
 	FString SaveSlot() const;
 	void SaveBest();
+	void LoadCenterline();
 
 	/** Recording of the current run (becomes the ghost on a PB). */
 	static constexpr float SampleInterval = 0.1f;

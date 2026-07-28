@@ -6,8 +6,10 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Components/StaticMeshComponent.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "ODGhost.h"
-#include "WheeledVehiclePawn.h"
 
 AODRaceManager::AODRaceManager()
 {
@@ -19,9 +21,43 @@ FString AODRaceManager::SaveSlot() const
 	return FString::Printf(TEXT("OpenDrive_%s"), *GetWorld()->GetMapName());
 }
 
+void AODRaceManager::LoadCenterline()
+{
+	// same bin-sidecar pattern as ODForestManager's terrain mask: works in
+	// editor, standalone, AND packaged builds (no editor-only Texture Source)
+	TArray<uint8> Bin;
+	const FString Path =
+		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/centerline.bin");
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
+	{
+		return;   // HUD falls back to the gate-spline approximation
+	}
+	const int32 Count = (int32)Bin[4] | (int32)Bin[5] << 8
+		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
+	if (Count <= 0 || Bin.Num() < 8 + (int64)Count * 8)
+	{
+		return;
+	}
+	// float32 pairs on disk, but FVector2D's components are double (UE5 LWC)
+	// - convert per-element rather than memcpy, which would corrupt the data
+	RoadCenterline.SetNumUninitialized(Count);
+	const uint8* P = Bin.GetData() + 8;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		float X, Y;
+		FMemory::Memcpy(&X, P + i * 8, 4);
+		FMemory::Memcpy(&Y, P + i * 8 + 4, 4);
+		RoadCenterline[i] = FVector2D(X, Y);
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODRaceManager: road centerline (%d stations)"),
+		Count);
+}
+
 void AODRaceManager::BeginPlay()
 {
 	Super::BeginPlay();
+	LoadCenterline();
 
 	if (const UODRaceSave* Save = Cast<UODRaceSave>(
 			UGameplayStatics::LoadGameFromSlot(SaveSlot(), 0)))
@@ -34,10 +70,13 @@ void AODRaceManager::BeginPlay()
 			G->SampleInterval = Save->SampleInterval;
 			G->Positions = Save->GhostPositions;
 			G->Rotations = Save->GhostRotations;
-			if (const AWheeledVehiclePawn* Car = Cast<AWheeledVehiclePawn>(
-					UGameplayStatics::GetPlayerPawn(this, 0)))
+			if (const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0))
 			{
-				G->Init(Car->GetMesh()->GetSkeletalMeshAsset());
+				if (const auto* Mesh =
+						Cast<UStaticMeshComponent>(Car->GetRootComponent()))
+				{
+					G->Init(Mesh->GetStaticMesh());
+				}
 			}
 			Ghost = G;
 		}
@@ -89,9 +128,10 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	// pawn can spawn after our BeginPlay; give the ghost its mesh here
 	if (Ghost.IsValid() && Ghost->NeedsMesh())
 	{
-		if (const AWheeledVehiclePawn* Car = Cast<AWheeledVehiclePawn>(Pawn))
+		if (const auto* Mesh =
+				Cast<UStaticMeshComponent>(Pawn->GetRootComponent()))
 		{
-			Ghost->Init(Car->GetMesh()->GetSkeletalMeshAsset());
+			Ghost->Init(Mesh->GetStaticMesh());
 		}
 	}
 
@@ -181,10 +221,13 @@ void AODRaceManager::SaveBest()
 	if (!Ghost.IsValid() && RecPositions.Num() >= 2)
 	{
 		AODGhost* G = GetWorld()->SpawnActor<AODGhost>();
-		if (const AWheeledVehiclePawn* Car = Cast<AWheeledVehiclePawn>(
-				UGameplayStatics::GetPlayerPawn(this, 0)))
+		if (const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0))
 		{
-			G->Init(Car->GetMesh()->GetSkeletalMeshAsset());
+			if (const auto* Mesh =
+					Cast<UStaticMeshComponent>(Car->GetRootComponent()))
+			{
+				G->Init(Mesh->GetStaticMesh());
+			}
 		}
 		Ghost = G;
 	}

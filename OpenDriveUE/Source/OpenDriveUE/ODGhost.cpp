@@ -1,7 +1,7 @@
 #include "ODGhost.h"
 
-#include "Components/SkeletalMeshComponent.h"
-#include "Engine/SkeletalMesh.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 
 AODGhost::AODGhost()
@@ -9,7 +9,7 @@ AODGhost::AODGhost()
 	PrimaryActorTick.bCanEverTick = true;
 
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Root")));
-	Mesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Mesh"));
+	Mesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh"));
 	Mesh->SetupAttachment(RootComponent);
 	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Mesh->SetCastShadow(false);
@@ -17,16 +17,16 @@ AODGhost::AODGhost()
 
 bool AODGhost::NeedsMesh() const
 {
-	return Mesh->GetSkeletalMeshAsset() == nullptr;
+	return Mesh->GetStaticMesh() == nullptr;
 }
 
-void AODGhost::Init(USkeletalMesh* CarMesh)
+void AODGhost::Init(UStaticMesh* CarMesh)
 {
 	if (!CarMesh)
 	{
 		return;
 	}
-	Mesh->SetSkeletalMesh(CarMesh);
+	Mesh->SetStaticMesh(CarMesh);
 	if (UMaterialInterface* Ghost = LoadObject<UMaterialInterface>(
 			nullptr, TEXT("/Game/OpenDrive/Materials/M_Ghost.M_Ghost")))
 	{

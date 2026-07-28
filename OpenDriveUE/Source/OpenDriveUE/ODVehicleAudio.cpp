@@ -1,17 +1,13 @@
 #include "ODVehicleAudio.h"
 
 #include "AudioMixerBlueprintLibrary.h"
-#include "ChaosVehicleWheel.h"
-#include "ChaosWheeledVehicleMovementComponent.h"
-#include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
-#include "ODDrivetrainManager.h"
 #include "ODEngineSynth.h"
 #include "ODRoadNoiseSynth.h"
+#include "ODVehicleMovement.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
-#include "WheeledVehiclePawn.h"
 
 AODVehicleAudio::AODVehicleAudio()
 {
@@ -22,12 +18,10 @@ AODVehicleAudio::AODVehicleAudio()
 void AODVehicleAudio::BeginPlay()
 {
 	Super::BeginPlay();
-	FParse::Value(FCommandLine::Get(), TEXT("odrev="), RevAt);
-	FParse::Value(FCommandLine::Get(), TEXT("odlift="), LiftAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odrec="), RecSeconds);
 }
 
-void AODVehicleAudio::EnsureSynths(AWheeledVehiclePawn* Car)
+void AODVehicleAudio::EnsureSynths(APawn* Car)
 {
 	if (Engine && BoundCar == Car)
 	{
@@ -45,9 +39,9 @@ void AODVehicleAudio::EnsureSynths(AWheeledVehiclePawn* Car)
 	Road->RegisterComponent();
 	Road->Start();
 
-	if (auto* Mesh = Car->GetMesh())
+	if (auto* Root = Cast<UPrimitiveComponent>(Car->GetRootComponent()))
 	{
-		Mesh->OnComponentHit.AddUniqueDynamic(this, &AODVehicleAudio::OnVehicleHit);
+		Root->OnComponentHit.AddUniqueDynamic(this, &AODVehicleAudio::OnVehicleHit);
 	}
 	UE_LOG(LogTemp, Display, TEXT("ODVehicleAudio: synths attached to %s"),
 		*Car->GetName());
@@ -74,56 +68,31 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	auto* Car = Cast<AWheeledVehiclePawn>(UGameplayStatics::GetPlayerPawn(this, 0));
+	APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Car)
+	{
+		return;
+	}
+	auto* Move = Car->FindComponentByClass<UODVehicleMovement>();
+	if (!Move)
 	{
 		return;
 	}
 	EnsureSynths(Car);
 
-	auto* Move = Cast<UChaosWheeledVehicleMovementComponent>(
-		Car->GetVehicleMovementComponent());
-	if (!Move)
-	{
-		return;
-	}
-
-	// drivetrain sim owns engine telemetry when present (fuel cuts and shift
-	// cuts arrive via EffectiveThrottle); Chaos mechanical sim is the fallback
-	float Rpm, Throttle, Load;
-	if (!Drivetrain.IsValid())
-	{
-		for (TActorIterator<AODDrivetrainManager> It(GetWorld()); It; ++It)
-		{
-			Drivetrain = *It;
-			break;
-		}
-	}
-	if (Drivetrain.IsValid() && Drivetrain->IsBound())
-	{
-		Rpm = Drivetrain->GetRpm();
-		Throttle = Drivetrain->GetEffectiveThrottle();
-		Load = Drivetrain->GetLoad();
-	}
-	else
-	{
-		Rpm = Move->GetEngineRotationSpeed();
-		const float MaxRpm = FMath::Max(Move->GetEngineMaxRotationSpeed(), 1.0f);
-		Throttle = Move->GetThrottleInput();
-		// crude load: throttle biased up at low revs, down near redline
-		Load = FMath::Clamp(
-			Throttle * (1.25f - 0.5f * (Rpm / MaxRpm)), 0.0f, 1.0f);
-	}
-	Engine->SetEngineState(Rpm, Throttle, Load);
+	// the movement sim owns engine telemetry; fuel cuts and shift cuts
+	// arrive via EffectiveThrottle so they're audible for free
+	const float Rpm = Move->GetRpm();
+	Engine->SetEngineState(Rpm, Move->GetEffectiveThrottle(), Move->GetLoad());
+	Engine->SetIgnitionCut(Move->IsIgnitionCut());   // hard edge, unsmoothed
 
 	// surface color from the first grounded wheel's contact material
 	float Cutoff = 3200.0f;                 // asphalt hiss default
 	bool bGrounded = false;
-	for (UChaosVehicleWheel* Wheel : Move->Wheels)
+	for (int32 i = 0; i < Move->NumWheels(); ++i)
 	{
-		const UPhysicalMaterial* Mat =
-			Wheel ? Wheel->GetContactSurfaceMaterial() : nullptr;
-		if (!Mat)
+		const UPhysicalMaterial* Mat = Move->GetContactSurface(i);
+		if (!Move->IsWheelInContact(i) || !Mat)
 		{
 			continue;
 		}
@@ -149,30 +118,12 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 		LastLog = NowD;
 		UE_LOG(LogTemp, Display,
 			TEXT("ODVehicleAudio: rpm=%.0f thr=%.2f gen=%d rms=%.4f playing=%d"),
-			Rpm, Throttle, Engine->GenCalls.load(), Engine->LastRms.load(),
-			Engine->IsPlaying() ? 1 : 0);
+			Rpm, Move->GetEffectiveThrottle(), Engine->GenCalls.load(),
+			Engine->LastRms.load(), Engine->IsPlaying() ? 1 : 0);
 	}
 
-	// ---- headless test hooks ----
+	// ---- -odrec hook ----
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (RevAt > 0.0f && Now > RevAt)
-	{
-		Move->SetThrottleInput(1.0f);
-	}
-	if (LiftAt > 0.0f && Now > LiftAt)   // after odrev so lift wins
-	{
-		Move->SetThrottleInput(0.0f);
-	}
-	// 10 Hz rpm/gear trace while scripted-driving hooks are active: lets the
-	// FFT of the recording be correlated against what Chaos actually did
-	if ((RevAt > 0.0f || LiftAt > 0.0f) && Now - LastTraceTime > 0.1)
-	{
-		LastTraceTime = Now;
-		UE_LOG(LogTemp, Display,
-			TEXT("ODAudioTrace: t=%.2f rpm=%.0f gear=%d thr=%.2f spd=%.0f"),
-			Now, Rpm, Move->GetCurrentGear(), Move->GetThrottleInput(),
-			Move->GetForwardSpeed());
-	}
 	if (RecSeconds > 0.0f && !bRecDone)
 	{
 		if (!bRecording && Now > 3.0f)

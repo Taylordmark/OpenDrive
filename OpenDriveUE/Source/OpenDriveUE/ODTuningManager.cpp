@@ -1,17 +1,12 @@
 #include "ODTuningManager.h"
 
-#include "ChaosVehicleWheel.h"
-#include "ChaosWheeledVehicleMovementComponent.h"
 #include "Components/InputComponent.h"
-#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "TimerManager.h"
-#include "ODDrivetrainManager.h"
-#include "ODSurfaceTractionManager.h"
 #include "ODTuningPreset.h"
-#include "WheeledVehiclePawn.h"
+#include "ODVehicleMovement.h"
 
 AODTuningManager::AODTuningManager()
 {
@@ -61,64 +56,30 @@ void AODTuningManager::ApplyPresetByIndex(int32 Index)
 
 void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 {
-	auto* Car = Cast<AWheeledVehiclePawn>(UGameplayStatics::GetPlayerPawn(this, 0));
+	APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Preset || !Car)
 	{
 		return;
 	}
-	auto* Move = Cast<UChaosWheeledVehicleMovementComponent>(
-		Car->GetVehicleMovementComponent());
+	auto* Move = Car->FindComponentByClass<UODVehicleMovement>();
 	if (!Move)
 	{
 		return;
 	}
 
-	// capture this car's stock values once; presets are deltas over these
-	FBaseline& Base = Baselines.FindOrAdd(Car);
-	if (Base.Friction.Num() != Move->Wheels.Num())
-	{
-		Base = FBaseline{};
-		for (const UChaosVehicleWheel* W : Move->Wheels)
-		{
-			Base.SpringRate.Add(W->SpringRate);
-			Base.MaxRaise.Add(W->SuspensionMaxRaise);
-			Base.MaxDrop.Add(W->SuspensionMaxDrop);
-			Base.Friction.Add(W->FrictionForceMultiplier);
-		}
-		Base.MaxTorque = Move->EngineSetup.MaxTorque;
-	}
-
-	for (int32 i = 0; i < Move->Wheels.Num(); ++i)
-	{
-		UChaosVehicleWheel* W = Move->Wheels[i];
-		const bool bFront = W->GetAxleType() == EAxleType::Front || i < 2;
-		W->SuspensionDampingRatio = Preset->DampingRatio;
-		W->SpringRate = Base.SpringRate[i] * Preset->SpringRateScale;
-		W->SuspensionMaxRaise = Base.MaxRaise[i] + Preset->RideHeightDelta;
-		W->SuspensionMaxDrop = Base.MaxDrop[i] + Preset->RideHeightDelta;
-		W->FrictionForceMultiplier = Base.Friction[i]
-			* (bFront ? Preset->FrontFrictionScale : Preset->RearFrictionScale);
-	}
-	Move->EngineSetup.MaxTorque = Base.MaxTorque * Preset->TorqueScale;
-	Move->DownforceCoefficient = Preset->Downforce;
-	Move->bEnableCenterOfMassOverride = true;
-	Move->CenterOfMassOverride = FVector(0, 0, Preset->CenterOfMassZ);
-
-	// rebuild the vehicle sim so setup changes actually take
-	Move->RecreatePhysicsState();
-
-	// traction manager caches per-wheel base friction - make it re-read
-	for (TActorIterator<AODSurfaceTractionManager> It(GetWorld()); It; ++It)
-	{
-		It->InvalidateBaseFriction();
-	}
-
-	// the drivetrain sim owns engine torque when present (the MaxTorque edit
-	// above is then a dead knob - Chaos mechanical sim is disabled)
-	for (TActorIterator<AODDrivetrainManager> It(GetWorld()); It; ++It)
-	{
-		It->TorqueScale = Preset->TorqueScale;
-	}
+	// presets are scales/deltas over the component's own C++ defaults, so
+	// no baseline capture is needed - the fields below never accumulate
+	Move->DampingRatio = Preset->DampingRatio;
+	Move->SpringRateScale = Preset->SpringRateScale;
+	Move->RideHeightDelta = Preset->RideHeightDelta;
+	Move->TorqueScale = Preset->TorqueScale;
+	Move->FrontGripScale = Preset->FrontFrictionScale;
+	Move->RearGripScale = Preset->RearFrictionScale;
+	Move->DownforceCoeff = Preset->Downforce;
+	// preset COM heights were tuned around the template's 42 cm street value;
+	// map them as deltas onto the new body's 10 cm default (stage 3 retunes)
+	Move->ComLocalZ = 10.0f + (Preset->CenterOfMassZ - 42.0f);
+	Move->MarkBodyDirty();
 
 	CurrentPresetName = Preset->DisplayName;
 	SwapShownAt = GetWorld()->GetTimeSeconds();

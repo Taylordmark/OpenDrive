@@ -13,11 +13,13 @@ public class OpenDriveUE : ModuleRules
 			"Engine",
 			"InputCore",
 			"EnhancedInput",
-			"ChaosVehicles",
 			"PhysicsCore",
 			"Landscape",
 			"Foliage",
-			"AudioMixer"
+			"AudioMixer",
+			"GeometryFramework",
+			"GeometryCore",
+			"AssetRegistry"
 		});
 	}
 }

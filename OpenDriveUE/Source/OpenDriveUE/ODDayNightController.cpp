@@ -3,7 +3,7 @@
 #include "Components/SpotLightComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "EngineUtils.h"
-#include "WheeledVehiclePawn.h"
+#include "ODVehicleMovement.h"
 
 AODDayNightController::AODDayNightController()
 {
@@ -39,8 +39,13 @@ void AODDayNightController::Tick(float DeltaSeconds)
 
 void AODDayNightController::UpdateHeadlights(bool bOn)
 {
-	for (TActorIterator<AWheeledVehiclePawn> It(GetWorld()); It; ++It)
+	for (TActorIterator<APawn> It(GetWorld()); It; ++It)
 	{
+		// headlights only on vehicles (any pawn carrying our movement sim)
+		if (!It->FindComponentByClass<UODVehicleMovement>())
+		{
+			continue;
+		}
 		TArray<TWeakObjectPtr<USpotLightComponent>>& Pair = Lights.FindOrAdd(*It);
 		if (Pair.Num() == 0)
 		{

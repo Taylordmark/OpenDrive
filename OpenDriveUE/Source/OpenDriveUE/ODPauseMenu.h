@@ -4,13 +4,18 @@
 #include "GameFramework/Actor.h"
 #include "ODPauseMenu.generated.h"
 
+class UODVehicleMovement;
+
 /**
- * Stopgap pause menu (2026-07-16) until the real Arc 4 UMG shell: ESC (or P)
- * pauses and opens a canvas menu drawn by ODRaceHUD. Only surfaces systems
- * that already exist - tuning presets (1.5), gearbox character (1.7 stage 1
- * shift-controller params), engine character (drivetrain torque curve +
- * synth cylinder count), exhaust (5.2 synth params) - plus Resume and Quit.
- * Arrows navigate/change, Enter activates.
+ * In-game pause menu (ESC / P). Deliberately minimal (2026-07-25, Taylor's
+ * call): the two driver assists - Traction Control and ABS - are the only
+ * settings changed directly here. Everything that defines the car itself
+ * (car, engine, drivetrain, tuning) still lives in AODMainMenu's car-config
+ * screen; the "Garage" row (2026-07-26) opens that screen in place
+ * (AODMainMenu::OpenGarage()) instead of requiring a full trip through
+ * "Main Menu" -> map-select just to change the car mid-drive. Rows are
+ * Resume, Traction, ABS, Garage, Main Menu (back to the front-end), Quit.
+ * Drawn on canvas by ODRaceHUD; arrows navigate/change, Enter activates.
  */
 UCLASS()
 class OPENDRIVEUE_API AODPauseMenu : public AActor
@@ -36,13 +41,12 @@ private:
 	void Activate();
 	void Adjust(int32 Dir);
 
+	UODVehicleMovement* FindMovement() const;
+	/** One-time Sport-gearbox shift params at BeginPlay - preserves the
+	 *  current shift feel now that the gearbox row is gone (no UI). */
 	void ApplyGearbox();
-	void ApplyEngine();
-	void ApplyExhaust();
 
 	bool bOpen = false;
 	int32 Selected = 0;
-	int32 GearboxIdx = 1;    // Comfort / Sport (Sport ~= stage-1 defaults)
-	int32 EngineIdx = 0;     // V8 / V6
-	int32 ExhaustIdx = 0;    // Stock / Sport / Open
+	int32 GearboxIdx = 1;    // Sport (stage-1 shift defaults) - init only
 };

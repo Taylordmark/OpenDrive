@@ -10,7 +10,7 @@ class USpotLightComponent;
 /**
  * Day/night cycle (wishlist #2): drives the atmosphere sun through a full
  * cycle and gives every vehicle headlights that switch on around dusk.
- * "Real-time accurate" mode arrives with Cesium georeferencing (Arc 7).
+ * "Real-time accurate" mode arrives with real-world georeferencing (Arc 7).
  */
 UCLASS()
 class OPENDRIVEUE_API AODDayNightController : public AActor

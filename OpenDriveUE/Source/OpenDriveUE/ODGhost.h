@@ -4,7 +4,8 @@
 #include "GameFramework/Actor.h"
 #include "ODGhost.generated.h"
 
-class USkeletalMeshComponent;
+class UStaticMesh;
+class UStaticMeshComponent;
 
 /**
  * Spectral playback of the best run (Arc 3): replays transform samples
@@ -20,7 +21,7 @@ public:
 	AODGhost();
 
 	/** Copy the player's car mesh and start hidden. */
-	void Init(USkeletalMesh* CarMesh);
+	void Init(UStaticMesh* CarMesh);
 
 	bool NeedsMesh() const;
 
@@ -35,7 +36,7 @@ public:
 
 private:
 	UPROPERTY()
-	TObjectPtr<USkeletalMeshComponent> Mesh;
+	TObjectPtr<UStaticMeshComponent> Mesh;
 
 	bool bPlaying = false;
 	float StartTime = 0.0f;
