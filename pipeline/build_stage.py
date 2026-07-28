@@ -9,8 +9,9 @@ Writes  data/stages/<stage>/
     stage_meta.json  landscape transform, spawn point, stats
     preview.png      hillshade + road overlay for eyeballing
 
-Coordinate frame (matches Cesium for Unreal georeferencing, so Phase 2 is a
-drop-in): +X = east, +Y = south, +Z = up, units cm, origin at stage center.
+Coordinate frame (matches the real-world georeferencing convention used
+elsewhere in the project, so later phases are a drop-in): +X = east,
++Y = south, +Z = up, units cm, origin at stage center.
 """
 
 import json
@@ -20,23 +21,19 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from road_mesh_common import (
+    ROAD_LIFT, STATION_SPACING, MAX_GRADE, CHUNK_STATIONS,
+    gaussian1d, median1d, resample_stations, grade_smooth_elevation,
+    build_road_chunks,
+)
+
 # ---------------------------------------------------------------- config
 STAGE = "tail_of_the_dragon"
 START_LATLON = (35.46596, -83.91861)   # Deals Gap (US-129 / NC-28 junction)
 END_LATLON = (35.5297, -83.9935)       # Tabcat Creek bridge (north end)
 
-STATION_SPACING = 5.0        # m between road samples
-ROAD_HALF_WIDTH = 4.5        # m, asphalt edge
-SKIRT_EXTRA = 3.0            # m outward for embankment skirt
-SKIRT_DROP = 2.5             # m downward at skirt edge
-ROAD_LIFT = 0.10             # m above smoothed ground (wishlist #11: keep the
-                             # road close to terrain; carve sits at -0.15)
-MAX_BANK_RAD = 0.09          # ~5.2 deg superelevation cap
-BANK_GAIN = 9.55             # bank = min(cap, gain * |curvature 1/m|)
-MAX_GRADE = 0.10             # grade clamp after smoothing
 HEIGHTMAP_RES = 2017         # UE-friendly (63 quads, 2 sections, 16x16 comps)
 MARGIN_M = 1000.0            # terrain margin around road bbox
-CHUNK_STATIONS = 150         # stations per road mesh chunk (~750 m)
 INVALID_BELOW = 100.0        # DEM values below this are lake-bathymetry junk
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,14 +45,6 @@ M_PER_DEG_LAT = 111132.0
 
 
 # ---------------------------------------------------------------- helpers
-def gaussian1d(arr, sigma):
-    r = max(1, int(3 * sigma))
-    x = np.arange(-r, r + 1)
-    k = np.exp(-0.5 * (x / sigma) ** 2)
-    k /= k.sum()
-    return np.convolve(np.pad(arr, r, mode="edge"), k, mode="valid")
-
-
 def carve_road(hm, e, n, h, e0, n0, mpp, inner=10.0, outer=30.0):
     """Stamp road elevation into the heightmap within `inner` m of the
     centerline, blending to raw terrain at `outer` m. Guarantees terrain
@@ -80,12 +69,6 @@ def carve_road(hm, e, n, h, e0, n0, mpp, inner=10.0, outer=30.0):
     w = np.clip((outer - dist) / (outer - inner), 0.0, 1.0)
     w = w * w * (3 - 2 * w)
     return w * (roadh - 0.15) + (1 - w) * hm
-
-
-def median1d(arr, win):
-    r = win // 2
-    padded = np.pad(arr, r, mode="edge")
-    return np.median(np.lib.stride_tricks.sliding_window_view(padded, win), axis=1)
 
 
 # ---------------------------------------------------------------- DEM
@@ -223,82 +206,21 @@ def main():
     north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
 
     # resample centerline at even spacing
-    d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(east), np.diff(north)))])
-    total_len = d[-1]
-    s = np.arange(0, total_len, STATION_SPACING)
-    e = np.interp(s, d, east)
-    n = np.interp(s, d, north)
-    e = gaussian1d(e, 1.2)   # break polyline corners, preserve hairpins
-    n = gaussian1d(n, 1.2)
+    total_len = float(np.cumsum(np.hypot(np.diff(east), np.diff(north)))[-1])
+    s, e, n = resample_stations(east, north, STATION_SPACING)
+    n_st = len(s)
 
     # vertical profile: sample DEM, smooth, clamp grade
     lat_s = lat0 + n / M_PER_DEG_LAT
     lon_s = lon0 + e / m_per_deg_lon
     ground = dem.sample(lat_s, lon_s)
-    h = median1d(ground, 11)
-    h = gaussian1d(h, 4.0)
+    h = grade_smooth_elevation(ground, STATION_SPACING, MAX_GRADE)
     ds = STATION_SPACING
-    for _ in range(4):  # grade clamp: lower peaks in both directions
-        for i in range(1, len(h)):
-            h[i] = min(h[i], h[i - 1] + MAX_GRADE * ds)
-        for i in range(len(h) - 2, -1, -1):
-            h[i] = min(h[i], h[i + 1] + MAX_GRADE * ds)
-    h = gaussian1d(h, 2.0)
     grades = np.abs(np.diff(h)) / ds
     z = h + ROAD_LIFT
 
-    # UE frame: X=east, Y=south(-north), Z=up, cm
-    cx, cy, cz = e * 100.0, -n * 100.0, z * 100.0
-    tx = np.gradient(cx); ty = np.gradient(cy)
-    tl = np.hypot(tx, ty); tx /= tl; ty /= tl
-    rx, ry = -ty, tx          # right of travel, horizontal
-
-    # superelevation: raise the OUTER edge through curves (inner edge stays at
-    # road height, so the carved terrain can never poke through the low side)
-    theta = np.unwrap(np.arctan2(ty, tx))
-    curv = np.gradient(theta) / STATION_SPACING          # 1/m, signed
-    bank = np.minimum(MAX_BANK_RAD, BANK_GAIN * np.abs(gaussian1d(curv, 3.0)))
-    bank_tan = np.tan(gaussian1d(bank, 3.0))
-    raise_side = -np.sign(gaussian1d(curv, 3.0))         # +1: raise right side
-
-    # cross-section: (lateral offset m, z offset m), left -> right
-    profile = [(-(ROAD_HALF_WIDTH + SKIRT_EXTRA), -SKIRT_DROP),
-               (-ROAD_HALF_WIDTH, 0.0),
-               (ROAD_HALF_WIDTH, 0.0),
-               (ROAD_HALF_WIDTH + SKIRT_EXTRA, -SKIRT_DROP)]
-    n_prof = len(profile)
-
-    def station_verts(i):
-        out = []
-        for off, dz in profile:
-            lift = bank_tan[i] * max(0.0, off * raise_side[i])  # outer-edge raise
-            out.append((cx[i] + rx[i] * off * 100.0,
-                        cy[i] + ry[i] * off * 100.0,
-                        cz[i] + (dz + lift) * 100.0))
-        return out
-
-    # chunked mesh buffers; winding (A, A+right, A+forward) faces up in UE
-    chunks = []
-    n_st = len(s)
-    for c0 in range(0, n_st - 1, CHUNK_STATIONS):
-        c1 = min(c0 + CHUNK_STATIONS, n_st - 1)
-        verts, tris, uvs = [], [], []
-        for i in range(c0, c1 + 1):
-            verts.extend(station_verts(i))
-            v = s[i] / 20.0
-            uvs.extend([(j / (n_prof - 1), v) for j in range(n_prof)])
-        for irow in range(c1 - c0):
-            b = irow * n_prof
-            for j in range(n_prof - 1):
-                p, q = b + j, b + j + n_prof
-                tris.append((p, p + 1, q))
-                tris.append((p + 1, q + 1, q))
-        chunks.append({
-            "name": f"road_{c0:04d}",
-            "vertices": [round(v, 1) for xyz in verts for v in xyz],
-            "uvs": [round(v, 4) for uv in uvs for v in uv],
-            "triangles": [i for t in tris for i in t],
-        })
+    chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix="road",
+                                           spacing=STATION_SPACING)
     (OUT / "road_mesh.json").write_text(json.dumps({"chunks": chunks}))
 
     # ---------------- heightmap ----------------

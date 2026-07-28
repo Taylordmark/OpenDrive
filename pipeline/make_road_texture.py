@@ -1,4 +1,4 @@
-"""Generate the road surface texture matching the road mesh UV layout.
+"""Generate the road surface texture(s) matching the road mesh UV layout.
 
 UV layout (from build_stage.py cross-section, 4 profile points):
     u 0.000-0.333  left skirt/shoulder (7.5m..4.5m left of center)
@@ -6,9 +6,22 @@ UV layout (from build_stage.py cross-section, 4 profile points):
     u 0.667-1.000  right skirt/shoulder
     v tiles once per 20 m of road.
 
-Output: data/stages/<stage>/textures/T_Road.png (1024x1024, tileable in v).
+Writes two textures (same base asphalt/wear look, generated with the same
+RNG seed so they read as the same road surface): T_Road.png (two-way,
+double-yellow centerline) and T_Road_OneWay.png (2026-07-25, Taylor: a
+one-way divided-highway carriageway like I-5 southbound was showing a
+double-yellow line, which only belongs on a genuine two-way road - no
+centerline painted at all here, just the asphalt/wear/edge-lines every road
+gets). Both live in data/stages/<stage>/textures/ - M_Road is a single
+material shared by Tail of the Dragon AND the whole open-world Arc-7 road
+network (see ODRoadManager.cpp), so this is the one place either consumer's
+road texture gets built.
+
+Output: data/stages/<stage>/textures/T_Road.png, T_Road_OneWay.png
+        (1024x1024, tileable in v).
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +32,7 @@ OUT = Path(__file__).resolve().parent.parent / "data" / "stages" / STAGE / "text
 OUT.mkdir(parents=True, exist_ok=True)
 
 SIZE = 1024
-rng = np.random.default_rng(129)  # US-129 :)
+RNG_SEED = 129  # US-129 :)
 
 
 def tileable_noise(size, cell, seed_rng, lo=0.0, hi=1.0):
@@ -37,57 +50,63 @@ def tileable_noise(size, cell, seed_rng, lo=0.0, hi=1.0):
     return lo + big * (hi - lo)
 
 
-u = (np.arange(SIZE) + 0.5) / SIZE          # across road
-img = np.zeros((SIZE, SIZE, 3), dtype=np.float32)
+def generate(oneway, out_name, moisture):
+    rng = np.random.default_rng(RNG_SEED)  # same seed each call - textures read as the same surface
+    u = (np.arange(SIZE) + 0.5) / SIZE          # across road
+    img = np.zeros((SIZE, SIZE, 3), dtype=np.float32)
 
-# meters from centerline for each u (profile is linear per segment)
-m = np.where(u < 1 / 3, -7.5 + (u * 3) * 3.0,
-             np.where(u < 2 / 3, -4.5 + (u - 1 / 3) * 3 * 9.0,
-                      4.5 + (u - 2 / 3) * 3 * 3.0))
+    # meters from centerline for each u (profile is linear per segment)
+    m = np.where(u < 1 / 3, -7.5 + (u * 3) * 3.0,
+                 np.where(u < 2 / 3, -4.5 + (u - 1 / 3) * 3 * 9.0,
+                          4.5 + (u - 2 / 3) * 3 * 3.0))
 
-# --- base layers
-import json
-climate_path = OUT.parent / "climate.json"
-MOISTURE = 0.0
-if climate_path.exists():
-    MOISTURE = json.loads(climate_path.read_text()).get("road_moisture", 0.0)
-print(f"road moisture factor: {MOISTURE}")
+    dirt = np.array([0.24, 0.19, 0.14])
+    # wetter climate = darker, more weathered asphalt (wishlist #1)
+    asphalt = np.array([0.075, 0.075, 0.085]) * (1.0 - 0.38 * moisture)
+    on_road = np.abs(m) <= 4.5
 
-dirt = np.array([0.24, 0.19, 0.14])
-# wetter climate = darker, more weathered asphalt (wishlist #1)
-asphalt = np.array([0.075, 0.075, 0.085]) * (1.0 - 0.38 * MOISTURE)
-on_road = np.abs(m) <= 4.5
+    base = np.where(on_road[None, :, None], asphalt[None, None, :],
+                    dirt[None, None, :])
+    img[:] = base
 
-base = np.where(on_road[None, :, None], asphalt[None, None, :],
-                dirt[None, None, :])
-img[:] = base
+    # per-pixel speckle + broad blotches (both tileable)
+    speckle = tileable_noise(SIZE, 2, rng, 0.85, 1.15)[:, :SIZE]
+    blotch = tileable_noise(SIZE, 64, rng, 0.85, 1.10)
+    img *= (speckle * blotch)[:, :, None]
 
-# per-pixel speckle + broad blotches (both tileable)
-speckle = tileable_noise(SIZE, 2, rng, 0.85, 1.15)[:, :SIZE]
-blotch = tileable_noise(SIZE, 64, rng, 0.85, 1.10)
-img *= (speckle * blotch)[:, :, None]
+    # tire-polish: slightly darker wear bands at each lane center (+-1.8 m)
+    for lane in (-1.8, 1.8):
+        wear = np.exp(-((m - lane) / 0.9) ** 2)
+        img *= (1.0 - 0.12 * wear)[None, :, None]
 
-# tire-polish: slightly darker wear bands at each lane center (+-1.8 m)
-for lane in (-1.8, 1.8):
-    wear = np.exp(-((m - lane) / 0.9) ** 2)
-    img *= (1.0 - 0.12 * wear)[None, :, None]
+    # --- markings (painted over asphalt only)
+    def paint(mask_u, color, wear_amount=0.35):
+        wear = tileable_noise(SIZE, 8, rng, 1.0 - wear_amount, 1.0)
+        mask = mask_u[None, :] * wear
+        img[:] = img * (1 - mask[:, :, None]) + color[None, None, :] * mask[:, :, None]
 
-# --- markings (painted over asphalt only)
-def paint(mask_u, color, wear_amount=0.35):
-    wear = tileable_noise(SIZE, 8, rng, 1.0 - wear_amount, 1.0)
-    mask = mask_u[None, :] * wear
-    img[:] = img * (1 - mask[:, :, None]) + color[None, None, :] * mask[:, :, None]
+    yellow = np.array([0.90, 0.68, 0.08])
+    white = np.array([0.88, 0.88, 0.86])
+    if not oneway:
+        # double yellow: two 10 cm lines, 10 cm apart, centered - only on a
+        # genuine two-way road (opposing-traffic separation)
+        for off in (-0.10, 0.10):
+            paint(((np.abs(m - off) < 0.05) & on_road).astype(np.float32), yellow)
+    # white edge lines: 10 cm wide, 30 cm in from asphalt edge - every road gets these
+    for edge in (-4.2, 4.2):
+        paint(((np.abs(m - edge) < 0.05) & on_road).astype(np.float32), white)
+
+    out = (np.clip(img, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+    Image.fromarray(out).save(OUT / out_name)
+    print(f"Wrote {OUT / out_name}")
 
 
-yellow = np.array([0.90, 0.68, 0.08])
-white = np.array([0.88, 0.88, 0.86])
-# double yellow: two 10 cm lines, 10 cm apart, centered
-for off in (-0.10, 0.10):
-    paint(((np.abs(m - off) < 0.05) & on_road).astype(np.float32), yellow)
-# white edge lines: 10 cm wide, 30 cm in from asphalt edge
-for edge in (-4.2, 4.2):
-    paint(((np.abs(m - edge) < 0.05) & on_road).astype(np.float32), white)
+if __name__ == "__main__":
+    climate_path = OUT.parent / "climate.json"
+    MOISTURE = 0.0
+    if climate_path.exists():
+        MOISTURE = json.loads(climate_path.read_text()).get("road_moisture", 0.0)
+    print(f"road moisture factor: {MOISTURE}")
 
-out = (np.clip(img, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
-Image.fromarray(out).save(OUT / "T_Road.png")
-print(f"Wrote {OUT / 'T_Road.png'}")
+    generate(oneway=False, out_name="T_Road.png", moisture=MOISTURE)
+    generate(oneway=True, out_name="T_Road_OneWay.png", moisture=MOISTURE)

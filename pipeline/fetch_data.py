@@ -9,14 +9,11 @@ Outputs to  data/raw/<stage>/ :
 """
 
 import json
-import math
-import time
-from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 import requests
-from PIL import Image
+from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
 
 # ---------------------------------------------------------------- config
 STAGE = "tail_of_the_dragon"
@@ -31,7 +28,6 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
-TERRAIN_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / STAGE
 RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,15 +72,6 @@ def road_extent(data):
 
 
 # ---------------------------------------------------------------- terrain
-def lonlat_to_tilepx(lon, lat, z):
-    """Web-mercator global pixel coords (256px tiles) at zoom z."""
-    n = 256 * (2 ** z)
-    x = (lon + 180.0) / 360.0 * n
-    lat_r = math.radians(lat)
-    y = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
-    return x, y
-
-
 def fetch_dem(extent):
     s, w, n_, e = extent
     s -= DEM_MARGIN_DEG; w -= DEM_MARGIN_DEG; n_ += DEM_MARGIN_DEG; e += DEM_MARGIN_DEG
@@ -99,18 +86,8 @@ def fetch_dem(extent):
     session = requests.Session()
     for ty in range(ty0, ty1 + 1):
         for tx in range(tx0, tx1 + 1):
-            url = TERRAIN_URL.format(z=DEM_ZOOM, x=tx, y=ty)
-            for attempt in range(3):
-                try:
-                    resp = session.get(url, timeout=30)
-                    resp.raise_for_status()
-                    break
-                except requests.RequestException:
-                    if attempt == 2:
-                        raise
-                    time.sleep(1.5 * (attempt + 1))
-            img = np.asarray(Image.open(BytesIO(resp.content)).convert("RGB"), dtype=np.float32)
-            elev = img[:, :, 0] * 256.0 + img[:, :, 1] + img[:, :, 2] / 256.0 - 32768.0
+            img = fetch_terrarium_tile(DEM_ZOOM, tx, ty, session)
+            elev = terrarium_to_elevation(img)
             r0, c0 = (ty - ty0) * 256, (tx - tx0) * 256
             mosaic[r0:r0 + 256, c0:c0 + 256] = elev
         print(f"  row {ty - ty0 + 1}/{rows} done")
