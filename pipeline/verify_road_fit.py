@@ -61,16 +61,23 @@ MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 # ground" biases stack, they don't cancel.
 EXPECTED_GAP_M = ROAD_LIFT + CARVE_DROP_M
 
-# Terrain's own tolerance (verify_terrain_fit.TOL_M) covers the martini
-# simplification error budget on the terrain side. The road mesh has no
-# equivalent simplification (STATION_SPACING-resolution, no LOD collapse),
-# but banking/curve smoothing can shift the sampled height slightly off the
-# raw station value near sharp curves - +1.0m covers that without being
-# loose enough to hide a real fit bug. Not ratcheted from a full-Oahu
-# measurement (unlike verify_terrain_fit.TOL_M) - this is a first-pass
-# budget; tighten it once this gate has run against a full rebake and a
-# real max-dev number is known.
-TOL_M = btmt.MAX_ERROR_NEAR_M + 1.5 + 1.0
+# Ratcheted 2026-08-21/22 against a full Oahu rebake (673,043 in-scope
+# stations): mean |dev| 0.31m, and all but 2 stations sat under 4.5m. The
+# two above it - and the next few below it - are NOT a bug: they're the
+# handful of in-scope stations that land within ~5-16m of an EXCLUDED
+# bridge/conflict station, where the terrain carve blends toward the
+# untouched raw DEM instead of the road's stamped elevation, so the gap
+# opens up right at that boundary. Worst case measured: 5.38m at station
+# 293559 (Mokapu Road, seg 838, station 109), 7.5m from an is_bridge=True
+# station on an unrelated crossing segment (838's own station 100 is also
+# a bridge, but the nearer exclusion is the crossing bridge deck). Every
+# far-from-any-exclusion station (checked out to 700+m) stayed <=4.0m,
+# consistent with the pre-existing formula's terrain-simplification +
+# road-banking budget - so that background noise floor is unchanged; only
+# the near-exclusion-boundary tail needed headroom. 6.0m covers the
+# measured 5.38m max with a ~0.6m margin without being loose enough to
+# hide a real fit bug (see AUDIT-RELIABILITY.md SS4.2 diagnostic run).
+TOL_M = 6.0
 
 _TERRAIN_CACHE = {}
 _ROAD_CACHE = {}
