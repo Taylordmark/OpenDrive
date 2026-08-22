@@ -10,16 +10,15 @@
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "ODBinSidecarUtil.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UnrealClient.h"
 
 namespace
 {
-const TCHAR* TreeMeshPaths[] = {
-	TEXT("/Game/OpenDrive/Trees/tree_blob.tree_blob"),
-	TEXT("/Game/OpenDrive/Trees/tree_olive.tree_olive"),
-	TEXT("/Game/OpenDrive/Trees/tree_conifer.tree_conifer"),
-};
+// TreeMeshPaths now lives in ODBinSidecarUtil.h (2026-08-22) - was
+// independently duplicated here and in ODBarrierManager.cpp, which collided
+// under the standalone Game target's unity build (C2374/C2086).
 
 /** Indexed by EODBiome - order MUST match the enum in ODForestManager.h.
  *  FBiomeRecipe itself lives in the header (RecipeAt()/BlendAt() need the

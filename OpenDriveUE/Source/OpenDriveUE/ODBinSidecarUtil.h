@@ -49,3 +49,19 @@ inline FString ReadGenerationId(const uint8* P)
 {
 	return FString(GenerationIdBytes, reinterpret_cast<const ANSICHAR*>(P));
 }
+
+/** Shared tree mesh set (2026-08-22): ODForestManager.cpp and
+ *  ODBarrierManager.cpp both need this same three-mesh list and used to each
+ *  independently define an identical anonymous-namespace TreeMeshPaths array
+ *  - the exact ReadU32LE/ReadF32LE unity-build collision this header's
+ *  top-of-file comment already describes fixing once, just for a different
+ *  symbol: fine under the Editor target's per-file build, hard C2374/C2086
+ *  redefinition error under the standalone Game target's unity build once
+ *  both .cpp files land in the same translation unit. `inline` in a shared
+ *  header is exempt from ODR for the same reason the two functions above
+ *  are. */
+inline const TCHAR* TreeMeshPaths[] = {
+	TEXT("/Game/OpenDrive/Trees/tree_blob.tree_blob"),
+	TEXT("/Game/OpenDrive/Trees/tree_olive.tree_olive"),
+	TEXT("/Game/OpenDrive/Trees/tree_conifer.tree_conifer"),
+};
