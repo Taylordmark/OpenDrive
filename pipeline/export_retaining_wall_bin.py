@@ -12,6 +12,8 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/walls_<AREA_NAME>_test_tile_<tx>_<ty
 
 ODS1 format (per file) - byte-identical structure to ODU1 (buildings):
     'O','D','S','1'                                   magic (4 bytes)
+    16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
+               2026-08-21 - see that module's docstring)
     uint32 LE  wall_count
     per wall:
         uint32 LE  vertex_count
@@ -26,6 +28,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,9 +36,10 @@ SRC = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "retaining_walls.json
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 
-def write_tile(path, walls):
+def write_tile(path, walls, gen_id_bytes):
     with open(path, "wb") as f:
         f.write(b"ODS1")
+        f.write(gen_id_bytes)
         f.write(struct.pack("<I", len(walls)))
         for w in walls:
             verts, uvs, tris = w["vertices"], w["uvs"], w["triangles"]
@@ -57,16 +61,25 @@ def main():
         buckets[(int(tx), int(ty))].append(w)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    gen_id = compute_generation_id()
+    gen_id_bytes = pack_generation_id(gen_id)
+    print(f"generation id: {gen_id}")
+
     total_verts = total_tris = 0
+    written_paths = []
     for (tx, ty), tile_walls in buckets.items():
         out_path = OUT_DIR / f"walls_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile(out_path, tile_walls)
+        write_tile(out_path, tile_walls, gen_id_bytes)
+        written_paths.append(out_path)
         v = sum(len(w["vertices"]) // 3 for w in tile_walls)
         t = sum(len(w["triangles"]) // 3 for w in tile_walls)
         total_verts += v
         total_tris += t
         print(f"  tile ({tx},{ty}): {len(tile_walls)} wall chunk(s), {v} verts, {t} tris "
               f"-> {out_path.name}")
+
+    n_stale = delete_stale_tiles(OUT_DIR, f"walls_{AREA_NAME}_test_tile_*.bin", written_paths)
+    print(f"deleted {n_stale} stale wall tile(s) from a previous run")
 
     if not buckets:
         print("0 wall chunks - nothing to export")

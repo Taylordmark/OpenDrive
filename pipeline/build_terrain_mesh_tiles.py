@@ -40,6 +40,8 @@ bounds:
 
 ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
     'O','D','T','1'                                   magic (4 bytes)
+    16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
+               2026-08-21 - see that module's docstring)
     uint8      has_collision   (0 or 1)
     uint32 LE  vertex_count
     uint32 LE  tri_count
@@ -57,6 +59,7 @@ import numpy as np
 import requests
 from pymartini import Martini
 
+from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import road_ue_z_m, classify_wall_stations
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
@@ -489,10 +492,11 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
 
 
-def write_tile_bin(path, tile):
+def write_tile_bin(path, tile, gen_id_bytes):
     verts, uvs, tris = tile["verts"], tile["uvs"], tile["tris"]
     with open(path, "wb") as f:
         f.write(b"ODT1")
+        f.write(gen_id_bytes)
         f.write(struct.pack("<BII", 1 if tile["has_collision"] else 0,
                              len(verts), len(tris)))
         f.write(struct.pack(f"<{verts.size}f", *verts.reshape(-1)))
@@ -532,18 +536,26 @@ def main():
     print(f"{len(tiles)} tile(s) to build ({n_near} near/collision, {n_far} far/no-collision)")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    gen_id = compute_generation_id()
+    gen_id_bytes = pack_generation_id(gen_id)
+    print(f"generation id: {gen_id}")
+
     session = requests.Session()
     caches = ({}, {})   # (near_cache, far_cache), keyed (zoom, tx, ty)
     total_verts = total_tris = 0
+    written_paths = []
     for i, ((tx, ty), is_near) in enumerate(tiles.items()):
         tile = build_tile(tx, ty, is_near, station_data, session, caches)
         out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile_bin(out_path, tile)
+        write_tile_bin(out_path, tile, gen_id_bytes)
+        written_paths.append(out_path)
         total_verts += len(tile["verts"])
         total_tris += len(tile["tris"])
         if (i + 1) % 10 == 0 or i + 1 == len(tiles):
             print(f"  {i + 1}/{len(tiles)} tile(s) built")
 
+    n_stale = delete_stale_tiles(OUT_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin", written_paths)
+    print(f"deleted {n_stale} stale terrain tile(s) from a previous run")
     print(f"Built {len(tiles)} terrain tile(s), {total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
 

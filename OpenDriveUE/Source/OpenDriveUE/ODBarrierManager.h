@@ -37,6 +37,11 @@ struct FParsedBarrierTile
 {
 	TArray<FParsedBarrierPoint> Points;
 	TArray<FParsedWallRun> WallRuns;
+
+	// pipeline/generation_id.py's per-run id, read from the ODW3 header
+	// (2026-08-21) - see AODBarrierManager::OnTileParsed for the
+	// cross-tile mismatch check this feeds.
+	FString GenerationId;
 };
 
 /** Live components for one loaded tile: per-species HISM for the visual
@@ -117,6 +122,15 @@ private:
 	TMap<FIntPoint, FBarrierTile> Tiles;
 	TSet<FIntPoint> PendingTiles;
 	TSet<FIntPoint> MissingTiles;
+
+	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
+	// SS3.1/SS5.1): the id of the first tile this manager successfully
+	// parsed for BarrierTilePrefix - every later tile is compared against
+	// it, and a mismatch (tiles from two different pipeline runs streaming
+	// side by side) is logged once, not blocked.
+	FString FirstGenerationId;
+	bool bHasFirstGenerationId = false;
+	bool bGenerationMismatchWarned = false;
 
 	UPROPERTY()
 	TArray<TObjectPtr<UStaticMesh>> TreeMeshes;

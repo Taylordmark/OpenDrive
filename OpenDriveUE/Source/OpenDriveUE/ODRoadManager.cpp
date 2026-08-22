@@ -159,7 +159,7 @@ void AODRoadManager::LoadPlaceLabels()
 	TArray<uint8> Bin;
 	const FString BinPath = FPaths::ProjectContentDir()
 		/ TEXT("OpenDrive/Masks") / (PlaceLabelFilePrefix + TEXT(".bin"));
-	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
+	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 4 + GenerationIdBytes + 4
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'L' || Bin[3] != '1')
 	{
 		UE_LOG(LogTemp, Warning,
@@ -167,8 +167,13 @@ void AODRoadManager::LoadPlaceLabels()
 			     "labels will stay blank"), *BinPath);
 		return;
 	}
-	const int32 N = (int32)ReadU32LE(Bin.GetData() + 4);
-	const uint8* Cur = Bin.GetData() + 8;
+	// ODL1 header: magic(4) + generation id (pipeline/generation_id.py,
+	// 2026-08-21 - see ODBinSidecarUtil.h) + point_count(4). Single fixed-
+	// name file, not tile-bucketed, so there's no sibling tile to compare
+	// this id against - read past it and move on.
+	const FString LabelGenerationId = ReadGenerationId(Bin.GetData() + 4);
+	const int32 N = (int32)ReadU32LE(Bin.GetData() + 4 + GenerationIdBytes);
+	const uint8* Cur = Bin.GetData() + 4 + GenerationIdBytes + 4;
 	const uint8* End = Bin.GetData() + Bin.Num();
 	PlaceLabels.Reserve(N);
 	for (int32 i = 0; i < N; ++i)
@@ -193,8 +198,8 @@ void AODRoadManager::LoadPlaceLabels()
 		PlaceLabels.Add(MoveTemp(Label));
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("ODRoadManager: loaded %d place label(s) from %s"),
-		PlaceLabels.Num(), *BinPath);
+		TEXT("ODRoadManager: loaded %d place label(s) from %s (generation id %s)"),
+		PlaceLabels.Num(), *BinPath, *LabelGenerationId);
 }
 
 void AODRoadManager::UpdateCurrentLabels(const FVector& PlayerLoc)
@@ -320,7 +325,7 @@ bool AODRoadManager::ParseRoadTileFile(const FString& Path, FParsedRoadTile& Out
 	// Pure data parse, no UObject/actor state touched, safe off the game
 	// thread.
 	TArray<uint8> Bin;
-	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'R' || Bin[3] != '2')
 	{
 		return false;
@@ -329,6 +334,13 @@ bool AODRoadManager::ParseRoadTileFile(const FString& Path, FParsedRoadTile& Out
 	const uint8* Cur = Bin.GetData() + 4;
 	const uint8* End = Bin.GetData() + Bin.Num();
 	auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+
+	if (Remaining() < GenerationIdBytes)
+	{
+		return false;
+	}
+	Out.GenerationId = ReadGenerationId(Cur);
+	Cur += GenerationIdBytes;
 
 	if (Remaining() < 4)
 	{
@@ -423,6 +435,21 @@ void AODRoadManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTil
 	{
 		MissingTiles.Add(Key);
 		return;
+	}
+
+	if (!bHasFirstGenerationId)
+	{
+		FirstGenerationId = Parsed.GenerationId;
+		bHasFirstGenerationId = true;
+	}
+	else if (!bGenerationMismatchWarned && Parsed.GenerationId != FirstGenerationId)
+	{
+		bGenerationMismatchWarned = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODRoadManager: tile (%d,%d) generation id %s does not match "
+			     "%s's first-loaded generation id %s - tiles from different pipeline "
+			     "runs may be mixed (AUDIT-RELIABILITY.md SS3.1/SS5.1)"),
+			Key.X, Key.Y, *Parsed.GenerationId, *RoadTilePrefix, *FirstGenerationId);
 	}
 
 	// Builds straight away - no runtime ground-snap/wait-for-terrain step

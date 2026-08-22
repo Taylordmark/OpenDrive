@@ -42,7 +42,7 @@ void AODBuildingManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuildingTile& Out)
 {
 	TArray<uint8> Bin;
-	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || Bin[3] != '1')
 	{
 		return false;
@@ -51,6 +51,13 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 	const uint8* Cur = Bin.GetData() + 4;
 	const uint8* End = Bin.GetData() + Bin.Num();
 	auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+
+	if (Remaining() < GenerationIdBytes)
+	{
+		return false;
+	}
+	Out.GenerationId = ReadGenerationId(Cur);
+	Cur += GenerationIdBytes;
 
 	if (Remaining() < 4)
 	{
@@ -138,6 +145,22 @@ void AODBuildingManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedBui
 		MissingTiles.Add(Key);
 		return;
 	}
+
+	if (!bHasFirstGenerationId)
+	{
+		FirstGenerationId = Parsed.GenerationId;
+		bHasFirstGenerationId = true;
+	}
+	else if (!bGenerationMismatchWarned && Parsed.GenerationId != FirstGenerationId)
+	{
+		bGenerationMismatchWarned = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODBuildingManager: tile (%d,%d) generation id %s does not match "
+			     "%s's first-loaded generation id %s - tiles from different pipeline "
+			     "runs may be mixed (AUDIT-RELIABILITY.md SS3.1/SS5.1)"),
+			Key.X, Key.Y, *Parsed.GenerationId, *BuildingTilePrefix, *FirstGenerationId);
+	}
+
 	FinalizeTile(Key, MoveTemp(Parsed));
 }
 

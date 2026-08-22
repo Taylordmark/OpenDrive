@@ -17,6 +17,11 @@ struct FParsedTerrainTile
 	TArray<float> Verts;    // flat x,y,z (cm, UE world frame)
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
+
+	// pipeline/generation_id.py's per-run id, read from the ODT1 header
+	// (2026-08-21) - see AODTerrainManager::OnTileParsed for the
+	// cross-tile mismatch check this feeds.
+	FString GenerationId;
 };
 
 /** Live terrain component for one loaded tile - a single regular-grid mesh,
@@ -91,6 +96,15 @@ private:
 	// also the natural "no hole, just don't build it" outcome for any tile
 	// beyond the pipeline's render-distance cutoff
 	TSet<FIntPoint> MissingTiles;
+
+	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
+	// SS3.1/SS5.1): the id of the first tile this manager successfully
+	// parsed for TerrainTilePrefix - every later tile is compared against
+	// it, and a mismatch (tiles from two different pipeline runs streaming
+	// side by side) is logged once, not blocked.
+	FString FirstGenerationId;
+	bool bHasFirstGenerationId = false;
+	bool bGenerationMismatchWarned = false;
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> TerrainMat;

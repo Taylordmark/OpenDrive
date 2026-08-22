@@ -24,6 +24,11 @@ struct FParsedWall
 struct FParsedWallTile
 {
 	TArray<FParsedWall> Walls;
+
+	// pipeline/generation_id.py's per-run id, read from the ODS1 header
+	// (2026-08-21) - see AODWallManager::OnTileParsed for the cross-tile
+	// mismatch check this feeds.
+	FString GenerationId;
 };
 
 /** Live wall components for one loaded tile - ONE UDynamicMeshComponent PER
@@ -94,6 +99,15 @@ private:
 	TMap<FIntPoint, FWallTile> Tiles;
 	TSet<FIntPoint> PendingTiles;
 	TSet<FIntPoint> MissingTiles;
+
+	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
+	// SS3.1/SS5.1): the id of the first tile this manager successfully
+	// parsed for WallTilePrefix - every later tile is compared against it,
+	// and a mismatch (tiles from two different pipeline runs streaming
+	// side by side) is logged once, not blocked.
+	FString FirstGenerationId;
+	bool bHasFirstGenerationId = false;
+	bool bGenerationMismatchWarned = false;
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> WallMat;

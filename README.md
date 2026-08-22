@@ -149,19 +149,29 @@ once, offline, into world-space tile files and streamed at runtime by
 runtime, ever.
 
 ```
-python pipeline/fetch_osm_network.py       # OSM road network for AREA_NAME's bbox (skip if data/raw/<area>_test/osm.json already exists)
-python pipeline/build_road_stations.py     # samples + grade-conforms the road's elevation ONCE -> road_stations.json (single source of truth)
-python pipeline/build_terrain_mesh_tiles.py  # bakes ODT1 world-space terrain tiles into OpenDriveUE/Content/OpenDrive/Masks/, CARVED to road_stations.json
-python pipeline/build_road_network.py      # road_mesh.json + road_test_meta.json, reads the same road_stations.json
-python pipeline/export_road_mesh_bin.py    # buckets road_mesh.json into per-tile ODR2 sidecars (Arc 7.2 slice 2)
-python pipeline/verify_terrain_fit.py      # offline gate: samples the ACTUAL built terrain mesh at every road station, fails if it doesn't fit
+python pipeline/rebuild_area.py
 ```
 
+Runs every stage that feeds `OpenDriveUE/Content/OpenDrive/Masks/` for the
+active `test_areas.AREA_NAME` — fetch, stations, retaining walls, terrain,
+road network + bin export, barrier, buildings, place labels, biome/
+settlement classification, map texture, and the terrain-fit gate — in the
+one dependency order the pipeline actually requires, and stops immediately
+on the first stage that fails so a partial rebake never gets left on disk.
+See the script's own docstring for the full stage list and why each stage
+sits where it does; see `AUDIT-RELIABILITY.md` §3.3 for why hand-listing a
+subset of these steps (the old version of this section) was itself the
+mechanism producing mixed-generation bakes.
+
 `verify_terrain_fit.py` is the gate to run before ever loading the level —
-it checks the real encoded terrain mesh, not the pre-bake elevation grid, so
-a "PASS" there is authoritative for what actually renders at the vehicle;
-far/background tiles print for information only since the player is never
-meant to stray far enough from the road to see them close up. No local tile
+it checks a fresh in-memory rebuild of the terrain mesh against
+`road_stations.json`, not the pre-bake elevation grid. **It does not read the
+`.bin` files actually written to `Content/OpenDrive/Masks/`**
+(`AUDIT-RELIABILITY.md` §4.1), so a "PASS" is necessary but not sufficient —
+it can't catch a stale/partial bake on disk. Load the level and eyeball it
+before trusting a rebake. Far/background tiles print for information only
+since the player is never meant to stray far enough from the road to see
+them close up. No local tile
 server is needed — the baked tiles live directly under
 `OpenDriveUE/Content/OpenDrive/Masks/` and `AODTerrainManager` streams them
 from local (or packaged) Content, same as the road/forest tile managers.

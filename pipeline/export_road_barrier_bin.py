@@ -18,6 +18,8 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/barrier_<AREA_NAME>_test_tile_<tx>_<
 
 ODW3 format (per file):
     'O','D','W','3'                                   magic (4 bytes)
+    16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
+               2026-08-21 - see that module's docstring)
     uint32 LE  point_count
     point_count * (float32 x_cm, float32 y_cm, float32 z_cm, uint32 seed)
     uint32 LE  run_count
@@ -31,6 +33,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,13 +57,20 @@ def main():
         run_buckets[(int(tx), int(ty))].append(r)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    gen_id = compute_generation_id()
+    gen_id_bytes = pack_generation_id(gen_id)
+    print(f"generation id: {gen_id}")
+
     all_tiles = set(point_buckets) | set(run_buckets)
+    written_paths = []
     for tx, ty in all_tiles:
         tile_points = point_buckets.get((tx, ty), [])
         tile_runs = run_buckets.get((tx, ty), [])
         out_path = OUT_DIR / f"barrier_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        written_paths.append(out_path)
         with open(out_path, "wb") as f:
             f.write(b"ODW3")
+            f.write(gen_id_bytes)
             f.write(struct.pack("<I", len(tile_points)))
             for p in tile_points:
                 f.write(struct.pack("<fffI", p["x_cm"], p["y_cm"], p["z_cm"],
@@ -72,6 +82,8 @@ def main():
                 f.write(struct.pack("<I", scount))
                 f.write(struct.pack(f"<{len(xyz)}f", *xyz))
 
+    n_stale = delete_stale_tiles(OUT_DIR, f"barrier_{AREA_NAME}_test_tile_*.bin", written_paths)
+    print(f"deleted {n_stale} stale barrier tile(s) from a previous run")
     total_stations = sum(len(r["station_xyz_cm"]) // 3 for r in wall_runs)
     print(f"{len(points)} points, {len(wall_runs)} wall run(s) ({total_stations} stations) "
           f"-> {len(all_tiles)} tile(s) -> {OUT_DIR}")

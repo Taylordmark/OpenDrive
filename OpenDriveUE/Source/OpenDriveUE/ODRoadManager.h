@@ -32,6 +32,11 @@ struct FParsedChunk
 struct FParsedRoadTile
 {
 	TArray<FParsedChunk> Chunks;
+
+	// pipeline/generation_id.py's per-run id, read from the ODR2 header
+	// (2026-08-21) - see AODRoadManager::OnTileParsed for the cross-tile
+	// mismatch check this feeds.
+	FString GenerationId;
 };
 
 /** Live road-mesh components for one loaded tile. Plain struct (not a
@@ -237,6 +242,15 @@ private:
 	TSet<FIntPoint> PendingTiles;
 	// confirmed no file at this key (ENOENT or bad header) - don't retry
 	TSet<FIntPoint> MissingTiles;
+
+	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
+	// SS3.1/SS5.1): the id of the first tile this manager successfully
+	// parsed for RoadTilePrefix - every later tile is compared against it,
+	// and a mismatch (tiles from two different pipeline runs streaming
+	// side by side) is logged once, not blocked.
+	FString FirstGenerationId;
+	bool bHasFirstGenerationId = false;
+	bool bGenerationMismatchWarned = false;
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMat;

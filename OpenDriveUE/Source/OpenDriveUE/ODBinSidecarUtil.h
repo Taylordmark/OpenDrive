@@ -28,3 +28,24 @@ inline float ReadF32LE(const uint8* P)
 	FMemory::Memcpy(&V, P, 4);
 	return V;
 }
+
+/** Fixed-width ASCII-hex generation-id field every sidecar header now
+ *  carries immediately after its magic (pipeline/generation_id.py,
+ *  2026-08-21, AUDIT-RELIABILITY.md SS3.1/SS5.1) - a short hash of
+ *  road_stations.json's content plus the constants that affect derived
+ *  geometry shape. Lets a tile manager notice when tiles it's streaming
+ *  disagree about which pipeline run they came from (e.g. barrier tiles
+ *  baked against a stale road_stations.json next to fresh terrain tiles -
+ *  exactly SS2's mixed-bake bug) without making that mismatch fatal: see
+ *  each manager's GenerationMismatchWarned set for the "log once per
+ *  prefix, never block" policy this is meant to serve. */
+inline constexpr int32 GenerationIdBytes = 16;
+
+/** Reads the GenerationIdBytes ASCII bytes at P into a plain FString. Does
+ *  NOT bounds-check P/P+GenerationIdBytes against the buffer - callers must
+ *  confirm Remaining() >= GenerationIdBytes first, same convention as
+ *  ReadU32LE/ReadF32LE above. */
+inline FString ReadGenerationId(const uint8* P)
+{
+	return FString(GenerationIdBytes, reinterpret_cast<const ANSICHAR*>(P));
+}

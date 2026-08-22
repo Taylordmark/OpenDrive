@@ -30,6 +30,8 @@ below - reader/writer are always regenerated together in this pipeline, so
 no back-compat with old ODR1 files is needed; the magic bump just makes a
 stale/mismatched pair fail loudly instead of silently misreading a byte):
     'O','D','R','2'                                   magic (4 bytes)
+    16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
+               2026-08-21 - see that module's docstring)
     uint32 LE  chunk_count
     per chunk:
         uint32 LE  vertex_count
@@ -45,6 +47,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, ROAD_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,9 +63,10 @@ def chunk_centroid(chunk):
     return cx, cy
 
 
-def write_tile(path, chunks):
+def write_tile(path, chunks, gen_id_bytes):
     with open(path, "wb") as f:
         f.write(b"ODR2")
+        f.write(gen_id_bytes)
         f.write(struct.pack("<I", len(chunks)))
         for c in chunks:
             verts = c["vertices"]
@@ -90,12 +94,18 @@ def main():
         buckets[(tx, ty)].append(c)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    gen_id = compute_generation_id()
+    gen_id_bytes = pack_generation_id(gen_id)
+    print(f"generation id: {gen_id}")
+
     total_verts = total_tris = 0
     xs = [k[0] for k in buckets]
     ys = [k[1] for k in buckets]
+    written_paths = []
     for (tx, ty), tile_chunks in buckets.items():
         out_path = OUT_DIR / f"road_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile(out_path, tile_chunks)
+        write_tile(out_path, tile_chunks, gen_id_bytes)
+        written_paths.append(out_path)
         v = sum(len(c["vertices"]) // 3 for c in tile_chunks)
         t = sum(len(c["triangles"]) // 3 for c in tile_chunks)
         total_verts += v
@@ -103,6 +113,8 @@ def main():
         print(f"  tile ({tx},{ty}): {len(tile_chunks)} chunk(s), {v} verts, {t} tris "
               f"-> {out_path.name}")
 
+    n_stale = delete_stale_tiles(OUT_DIR, f"road_{AREA_NAME}_test_tile_*.bin", written_paths)
+    print(f"deleted {n_stale} stale road tile(s) from a previous run")
     print(f"{len(chunks)} chunks -> {len(buckets)} tile(s) "
           f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
