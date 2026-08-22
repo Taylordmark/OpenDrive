@@ -197,9 +197,18 @@ def load_stations():
 def sample_dem(lat_arr, lon_arr, zoom, session, cache):
     """Bilinear-sample Terrarium elevation at `zoom` for arrays of lat/lon,
     fetching+caching whichever 256x256 tiles are needed into `cache` (dict
-    keyed by (zoom, tx, ty) -> elevation array or None for an unfetchable
-    tile, treated as 0 m - same convention as build_road_stations.py's
-    sparse DEM cache, just self-fetching instead of pre-populated)."""
+    keyed by (zoom, tx, ty) -> elevation array).
+
+    AUDIT-RELIABILITY.md SS5.3 (2026-08-21): a DEM tile that fails to fetch
+    (after fetch_terrarium_tile's own retries are exhausted) used to be
+    cached as None and read by px() as a silent 0.0 m - a transient network
+    error baked a sea-level patch into whatever tile was building at the
+    time, uncounted and unreported, and the next (successful) rebake made it
+    disappear - "reruns produce different results and I can't reproduce it."
+    Fail fast instead, matching this project's existing rebuild_area.py
+    convention: an unrecoverable fetch failure aborts the whole bake
+    immediately with the offending tile named, rather than being silently
+    downgraded to bad data on disk."""
     n = 256 * (2 ** zoom)
     lat_r = np.radians(lat_arr)
     px_glob = (lon_arr + 180.0) / 360.0 * n
@@ -216,13 +225,17 @@ def sample_dem(lat_arr, lon_arr, zoom, session, cache):
             continue
         try:
             img = fetch_terrarium_tile(zoom, tx, ty, session)
-            cache[key] = terrarium_to_elevation(img)
-        except requests.RequestException:
-            cache[key] = None
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"DEM tile fetch failed after retries: zoom={zoom} tx={tx} "
+                f"ty={ty} ({exc}) - aborting bake rather than caching a "
+                f"silent sea-level patch (AUDIT-RELIABILITY.md SS5.3). Rerun "
+                f"once the network/S3 issue clears."
+            ) from exc
+        cache[key] = terrarium_to_elevation(img)
 
     def px(tx, ty, x, y):
-        t = cache.get((zoom, tx, ty))
-        return 0.0 if t is None else float(t[y, x])
+        return float(cache[(zoom, tx, ty)][y, x])
 
     out = np.empty(len(lat_arr), dtype=np.float32)
     for i in range(len(lat_arr)):

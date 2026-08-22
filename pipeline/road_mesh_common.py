@@ -596,11 +596,27 @@ def sample_mesh_height(positions, triangles, x_cm, y_cm, eps=1e-4):
     original did internally. Re-verify verify_terrain_fit.py's output against a
     known-good baseline before trusting a borderline PASS/FAIL from it.
 
+    AUDIT-RELIABILITY.md SS4.3 (2026-08-21): wherever more than one triangle's
+    XY footprint contains the query point (skirts, walls, bridges - anywhere
+    geometry legitimately overlaps in plan view), this now returns the
+    TOPMOST (highest interpolated Z) containing triangle, not simply the
+    first one np.where() happens to return - "first" was order-arbitrary
+    (depended on triangle emission order, not geometry) and wrong exactly at
+    the overlap sites a fit gate cares most about, e.g. a skirt's downward
+    slope sitting well below the drivable surface it skirts. Checked both
+    current call sites (build_forest_elevation.py - wants the ground/canopy
+    surface a tree actually sits on, not a skirt underside;
+    verify_terrain_fit.py - wants the drivable/carved surface, same reasoning)
+    before making this change: both want "the surface you'd actually stand
+    on," i.e. topmost, so this is a safe shared-behavior change, not a
+    per-caller special case.
+
     positions: (N,3) array of vertex (x_cm, y_cm, z_cm).
     triangles: (M,3) int array of vertex indices per triangle.
-    Returns the interpolated z_cm, or None if the point falls outside every
-    triangle (e.g. genuinely off the tile, or right on a shared-edge seam that
-    floating-point rounding pushed just outside both neighbors).
+    Returns the interpolated z_cm at the TOPMOST containing triangle, or None
+    if the point falls outside every triangle (e.g. genuinely off the tile,
+    or right on a shared-edge seam that floating-point rounding pushed just
+    outside both neighbors).
     """
     tri_pts = positions[triangles]   # (M, 3, 3): [tri, vert(0/1/2), xyz]
     ax, ay = tri_pts[:, 0, 0], tri_pts[:, 0, 1]
@@ -620,6 +636,8 @@ def sample_mesh_height(positions, triangles, x_cm, y_cm, eps=1e-4):
     if len(idxs) == 0:
         return None
 
-    i = idxs[0]
-    za, zb, zc = tri_pts[i, 0, 2], tri_pts[i, 1, 2], tri_pts[i, 2, 2]
-    return float(w_a[i] * za + w_b[i] * zb + w_c[i] * zc)
+    za_all = tri_pts[idxs, 0, 2]
+    zb_all = tri_pts[idxs, 1, 2]
+    zc_all = tri_pts[idxs, 2, 2]
+    z_all = w_a[idxs] * za_all + w_b[idxs] * zb_all + w_c[idxs] * zc_all
+    return float(np.max(z_all))

@@ -60,12 +60,19 @@ filenames:
  22. build_forest_elevation.py -> elev_*.bin (needs road_stations.json;
      ground-truths tree height against the just-built terrain tiles via
      build_terrain_mesh_tiles.build_tile())
- 23. verify_terrain_fit.py    -> offline gate, run last. NOTE
-     (AUDIT-RELIABILITY.md SS4.1): this re-derives terrain in memory from
-     road_stations.json: and build_terrain_mesh_tiles.build_tile(), it does
-     NOT read the .bin files this script just wrote to Content/. A PASS
-     here is necessary but not sufficient evidence the shipped bake is
-     good; it does not replace eyeballing the level.
+ 23. verify_terrain_fit.py    -> offline gate. Rewritten 2026-08-21
+     (AUDIT-RELIABILITY.md SS4): now reads the ACTUAL terrain .bin tiles
+     this script just wrote to Content/ (not an in-memory rebuild) as its
+     primary check, plus a generation-id cross-artifact check, with the old
+     in-memory pre-bake consistency check kept as a clearly separate,
+     secondary check.
+ 24. verify_road_fit.py       -> offline gate, run last. Restored 2026-08-21
+     (AUDIT-RELIABILITY.md SS4.2, previously deleted and never replaced) -
+     reads the ACTUAL road and terrain .bin tiles on disk and checks the
+     road surface sits the expected small gap above the terrain surface at
+     every in-scope station. A PASS on both gates is necessary but not
+     sufficient evidence the shipped bake is good; it does not replace
+     eyeballing the level.
 
 Not included (deliberately out of scope - these feed the separate
 Tail-of-the-Dragon stage or standalone stage assets, not the Arc 7 area
@@ -122,7 +129,8 @@ STAGES = [
     ("export_biome_bin.py", "export biome_*.bin"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
-    ("verify_terrain_fit.py", "offline gate: road-vs-terrain fit (in-memory rebuild, see docstring)"),
+    ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
+    ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
 ]
 
 
@@ -158,9 +166,9 @@ def main():
     print(
         f"\n=== rebuild_area.py: all {len(STAGES)} stages completed for "
         f"AREA_NAME={AREA_NAME!r} in {total / 60:.1f} min. "
-        "Remember: verify_terrain_fit.py above checks an in-memory rebuild, "
-        "not the .bin files on disk (AUDIT-RELIABILITY.md SS4.1) - a PASS is "
-        "not a substitute for loading the level. ==="
+        "verify_terrain_fit.py and verify_road_fit.py above both check the "
+        "actual .bin files on disk - a PASS is still not a substitute for "
+        "loading the level. ==="
     )
 
 

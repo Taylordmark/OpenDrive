@@ -77,6 +77,7 @@ whole bbox - see fetch_dem_tiles_sparse()'s docstring for why that stopped
 being viable once test areas grew past Palmdale's compact scale.
 """
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -158,6 +159,37 @@ OUT.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------- DEM
 DEM_NODE_MARGIN_DEG = 0.02   # ~2 km - buffer around actual road nodes, not the whole bbox
 
+# AUDIT-RELIABILITY.md SS3.1 (2026-08-21): dem_tiles.npz used to be keyed on
+# existence only - re-fetching OSM (different node set), tweaking BBOX_SNWE,
+# or changing DEM_ZOOM/DEM_NODE_MARGIN_DEG all still served the same stale
+# tile dict with no invalidation, and any lat/lon that fell outside what was
+# actually cached silently read back as 0 m via dem_sample_sparse's own
+# tile_px() fallback - new roads at sea level with no error. A fingerprint
+# of everything that determines which tiles get fetched (and from where) is
+# stored alongside the cache; a mismatch on load means "this cache was built
+# for a different request" and forces a re-fetch. Follows generation_id.py's
+# sha256-of-repr()-truncated-to-16-hex convention for consistency with the
+# project's other cache/staleness stamps.
+DEM_CACHE_FP_KEY = "__fingerprint__"
+
+
+def _dem_cache_fingerprint(lat_arr, lon_arr):
+    """Fingerprint over everything that determines which DEM tiles
+    fetch_dem_tiles_sparse fetches and how it fetches them: the zoom, the
+    node margin, the configured bbox, and the actual requested node lat/lon
+    (which already reflect the current OSM fetch - a re-fetch that changes
+    the node set changes this too, even if BBOX_SNWE itself didn't move).
+    Rounded to ~0.1 m (1e-6 deg) to strip float round-trip noise, not
+    because sub-metre precision matters here."""
+    h = hashlib.sha256()
+    h.update(repr((DEM_ZOOM, DEM_NODE_MARGIN_DEG, BBOX_SNWE)).encode("utf-8"))
+    lat_r = [round(float(v), 6) for v in lat_arr]
+    lon_r = [round(float(v), 6) for v in lon_arr]
+    h.update(repr(lat_r).encode("utf-8"))
+    h.update(repr(lon_r).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def fetch_dem_tiles_sparse(lat_arr, lon_arr):
     """Sparse per-tile DEM cache, gated to tiles near actual road geometry
     - NOT one mosaic covering the whole bbox (2026-07-20: the Skagit/
@@ -167,11 +199,22 @@ def fetch_dem_tiles_sparse(lat_arr, lon_arr):
     including everything between the loop's legs - same class of problem
     build_terrain_tiles.py's road_near_tile() already solved for z15
     terrain, applied here to the DEM fetch instead). Returns a dict keyed
-    by (tx, ty) -> 256x256 float32 elevation array."""
+    by (tx, ty) -> 256x256 float32 elevation array.
+
+    Cache-invalidated on bbox/zoom/margin/node-set change - see
+    _dem_cache_fingerprint()'s docstring (AUDIT-RELIABILITY.md SS3.1)."""
     cache_path = RAW / "dem_tiles.npz"
+    fp = _dem_cache_fingerprint(lat_arr, lon_arr)
     if cache_path.exists():
         with np.load(cache_path) as z:
-            return {tuple(int(v) for v in k.split(",")): z[k] for k in z.files}
+            stored_fp = str(z[DEM_CACHE_FP_KEY]) if DEM_CACHE_FP_KEY in z.files else None
+            if stored_fp == fp:
+                return {tuple(int(v) for v in k.split(",")): z[k]
+                        for k in z.files if k != DEM_CACHE_FP_KEY}
+            print(f"dem_tiles.npz fingerprint mismatch (stored={stored_fp!r}, "
+                  f"current={fp!r}) - bbox/zoom/margin/OSM node set changed "
+                  f"since this cache was built; re-fetching instead of "
+                  f"serving stale tiles (AUDIT-RELIABILITY.md SS3.1)")
 
     needed = set()
     for lat, lon in zip(lat_arr, lon_arr):
@@ -189,7 +232,8 @@ def fetch_dem_tiles_sparse(lat_arr, lon_arr):
         tiles[(tx, ty)] = terrarium_to_elevation(img)
         if (i + 1) % 200 == 0 or i + 1 == len(needed):
             print(f"  {i + 1}/{len(needed)} tile(s)")
-    np.savez(cache_path, **{f"{tx},{ty}": v for (tx, ty), v in tiles.items()})
+    np.savez(cache_path, **{DEM_CACHE_FP_KEY: np.array(fp)},
+             **{f"{tx},{ty}": v for (tx, ty), v in tiles.items()})
     return tiles
 
 
