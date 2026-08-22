@@ -27,8 +27,18 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import test_areas
 from classify_biomes import classify_rgb, fetch_imagery_mosaic
 from test_areas import AREA_NAME, BBOX_SNWE
+
+# Optional per-area wider bbox the map background should also cover, even
+# though the OSM road network (and this script's own default road-station
+# extent below) stays scoped to the tight corridor - see test_areas.py's
+# own comment and build_terrain_mesh_tiles.py's matching use of this same
+# constant for far/no-collision background terrain tiles. getattr, not a
+# plain import, so areas that don't define it don't need a stub None of
+# their own.
+BACKGROUND_BBOX_SNWE = getattr(test_areas, "BACKGROUND_BBOX_SNWE", None)
 
 M_PER_DEG_LAT = 111132.0
 MARGIN_M = 2000.0       # same buffer classify_biomes.py fetches beyond the road bbox
@@ -71,6 +81,17 @@ def main():
     buf_lon = MARGIN_M / (M_PER_DEG_LAT * math.cos(math.radians(float(lat.mean()))))
     west, east = float(lon.min() - buf_lon), float(lon.max() + buf_lon)
     south, north = float(lat.min() - buf_lat), float(lat.max() + buf_lat)
+
+    # Widen to also cover BACKGROUND_BBOX_SNWE (if this area defines one) -
+    # union, not replace, so a background bbox smaller than the road
+    # network's own extent (shouldn't happen, but not assumed) can't
+    # shrink the map. Same square-padding/imagery-fetch/crop logic below
+    # runs unchanged either way, it just operates on a wider west/south/
+    # east/north than the road-only default.
+    if BACKGROUND_BBOX_SNWE is not None:
+        bg_s, bg_w, bg_n, bg_e = BACKGROUND_BBOX_SNWE
+        west, east = min(west, bg_w), max(east, bg_e)
+        south, north = min(south, bg_s), max(north, bg_n)
 
     # Real bug found 2026-07-28 (Taylor, live: the road network looked
     # "shrunk toward the center" relative to the map's coastline art): on a

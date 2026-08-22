@@ -51,6 +51,20 @@ AREA_NAME = "green_valley"
 # Green Valley community and Lake Hughes, not the full Sierra Pelona area.
 BBOX_SNWE = (34.55, -118.50, 34.68, -118.35)
 
+# Background-visuals bbox (2026-08-22): wider than BBOX_SNWE, used ONLY by
+# build_terrain_mesh_tiles.py (raw-DEM far tiles, no road carving, no
+# collision - same code path that already renders the 6 km horizon ring
+# around the corridor, just extended to cover this whole area instead) and
+# build_map_texture.py (imagery fetch for the in-game map background) -
+# NOT by the OSM road/place/building fetch, which stays scoped to
+# BBOX_SNWE above so the corridor's road/building fidelity is unaffected
+# and Overpass never sees a query sized for this bbox. This is the
+# original whole-local-area bbox BBOX_SNWE was shrunk from (see history
+# above) - Sierra Pelona ridge, Bouquet Canyon Reservoir, Elizabeth
+# Lake/Lake Hughes. Leave unset (None) for an area that doesn't need a
+# wider visual backdrop than its own corridor.
+BACKGROUND_BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
+
 # Fetch_osm_network.py grabs every drivable road in the bbox. Kept at None
 # (no ref filter, every drivable road including ramps/cross streets) per
 # Taylor's 2026-07-25 realism preference for the Skagit loop - carried

@@ -59,10 +59,18 @@ import numpy as np
 import requests
 from pymartini import Martini
 
+import test_areas
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import road_ue_z_m, classify_wall_stations
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+
+# Optional per-area wider bbox for background-visuals-only far tiles (raw
+# DEM, no road carving, no collision) - see test_areas.py's own comment.
+# getattr, not a plain import, so areas that don't define it (every area
+# except green_valley so far) don't need a stub None assignment of their
+# own.
+BACKGROUND_BBOX_SNWE = getattr(test_areas, "BACKGROUND_BBOX_SNWE", None)
 
 M_PER_DEG_LAT = 111132.0
 
@@ -517,9 +525,35 @@ def write_tile_bin(path, tile, gen_id_bytes):
         f.write(struct.pack(f"<{tris.size}I", *tris.reshape(-1)))
 
 
+def background_bbox_tile_range(lat0, lon0):
+    """Tile-index bounds (tx0, tx1, ty0, ty1) covering BACKGROUND_BBOX_SNWE,
+    in the same local east/north-cm frame (relative to the road network's
+    own origin_latlon) build_tile()'s gx_cm/gy_cm grid uses - NOT a fresh
+    lat/lon->tile-index derivation of its own, so a background tile and a
+    corridor tile with the same (tx, ty) are guaranteed to be the exact
+    same physical square. Returns None if BACKGROUND_BBOX_SNWE isn't set
+    for this area."""
+    if BACKGROUND_BBOX_SNWE is None:
+        return None
+    s, w, n_, e = BACKGROUND_BBOX_SNWE
+    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    tile_cm = TERRAIN_TILE_SIZE_CM
+    # same north_m/east_m -> gy_cm/gx_cm sign convention as build_tile():
+    # gy_cm = -north_m * 100, gx_cm = east_m * 100
+    x_cm = [(lon - lon0) * m_per_deg_lon * 100.0 for lon in (w, e)]
+    y_cm = [-(lat - lat0) * M_PER_DEG_LAT * 100.0 for lat in (s, n_)]
+    tx0, tx1 = int(min(x_cm) // tile_cm), int(max(x_cm) // tile_cm)
+    ty0, ty1 = int(min(y_cm) // tile_cm), int(max(y_cm) // tile_cm)
+    return tx0, tx1, ty0, ty1
+
+
 def classify_tiles(station_data):
-    """Every tile key within RENDER_DISTANCE_M of the route, tagged near/far."""
-    _, _, st_x_cm, st_y_cm, _, _ = station_data
+    """Every tile key within RENDER_DISTANCE_M of the route, tagged
+    near/far, PLUS (if BACKGROUND_BBOX_SNWE is set for this area) every
+    tile key covering that wider bbox, added as far/no-collision unless
+    already claimed as near by the road-distance pass above - a
+    background tile never downgrades a driveable one."""
+    lat0, lon0, st_x_cm, st_y_cm, _, _ = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
     pad = RENDER_DISTANCE_M * 100.0
     tx0 = int((st_x_cm.min() - pad) // tile_cm)
@@ -535,6 +569,17 @@ def classify_tiles(station_data):
                 tiles[(tx, ty)] = True
             elif d <= RENDER_DISTANCE_M:
                 tiles[(tx, ty)] = False
+
+    bg_range = background_bbox_tile_range(lat0, lon0)
+    if bg_range is not None:
+        bx0, bx1, by0, by1 = bg_range
+        n_added = 0
+        for ty in range(by0, by1 + 1):
+            for tx in range(bx0, bx1 + 1):
+                if (tx, ty) not in tiles:
+                    tiles[(tx, ty)] = False
+                    n_added += 1
+        print(f"  +{n_added} background-visuals far tile(s) from BACKGROUND_BBOX_SNWE")
     return tiles
 
 
