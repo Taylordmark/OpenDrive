@@ -23,18 +23,27 @@ enum class EODMenuStage : uint8
  * canvas by AODRaceHUD (same no-UMG pattern as the pause menu):
  *
  *   1. Car config - arrows pick Car / Engine / Drivetrain / Tuning, applied
- *      LIVE to the player pawn so the choice is real (the car mesh swaps in a
- *      slow turntable). Enter on "Drive" advances.
+ *      LIVE to the player pawn so the choice is real (static showroom preview,
+ *      framed to the right of the menu text - see AODVehiclePawn::SetShowroom).
+ *      Enter on "Drive" advances.
  *   2. Map select - the route map with clickable town nodes; hovering
  *      highlights the nearest town, a click spawns the car on the road there
  *      (reusing the pawn's proven PM_Asphalt ground-snap).
  *
- * The game is paused for the whole menu so the frozen pawn never drives; this
- * actor ticks even when paused to spin the showroom car. Reopenable mid-game
- * from the pause menu's "Main Menu" row (full return to car-config -> map
- * pick) or its "Garage" row (OpenGarage() - same car-config screen, live
- * edits apply exactly the same way, but "Drive" resumes in place instead of
- * going to map-select, since the car is already sitting on real road).
+ * Fresh-boot (OpenMenu()) deliberately does NOT pause the game (2026-07-28,
+ * see OpenMenu()'s own comment for the full account) - APlayerCameraManager
+ * doesn't tick while paused, so the showroom camera used to freeze at
+ * whatever the very first, not-yet-positioned frame looked like ("I was still
+ * inside/under the car") no matter how the underlying Camera/SpringArm was
+ * configured. The frozen preview pawn can't drive off regardless
+ * (SetSimulatePhysics(false) already guarantees that), so pausing was never
+ * actually needed for that. OpenGarage() (mid-drive reopen) still pauses -
+ * it's a proven-working case this fix doesn't touch. This actor ticks even
+ * when paused for THAT path (garage mode). Reopenable mid-game from the pause
+ * menu's "Main Menu" row (full return to car-config -> map pick) or its
+ * "Garage" row (OpenGarage() - same car-config screen, live edits apply
+ * exactly the same way, but "Drive" resumes in place instead of going to
+ * map-select, since the car is already sitting on real road).
  *
  * Loading screen (2026-07-26): StartAt() used to teleport then immediately
  * unpause and hand control back, but a fresh teleport target can have zero
@@ -143,8 +152,15 @@ private:
 	bool bCapturedSpawn = false;
 
 	// headless QA (mirrors AODPauseMenu's -odmenu): -odmenumap=T jumps to the
-	// map stage + screenshots; -odpick=<Town> auto-picks a town and starts.
+	// map stage + screenshots; -odpick=<Town> auto-picks a town and starts;
+	// -odgo=T skips car-config/map entirely and starts at the level's own
+	// PlayerStart (StartAt(-1)'s "no town picked" fallback) - for screenshotting
+	// an arbitrary point moved onto Start_TestArea beforehand (2026-07-30,
+	// retaining-wall Phase 1 verification - build_openworld_test_level.py's
+	// PlayerStart doesn't correspond to a town node, so -odpick can't reach it).
 	float MenuMapAt = -1.0f;
 	FString PickTown;
 	bool bPickDone = false;
+	float GoAt = -1.0f;
+	bool bGoDone = false;
 };

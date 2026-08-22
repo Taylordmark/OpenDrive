@@ -74,6 +74,11 @@ ROADS_ENABLED = True
 BUILDINGS_ENABLED = True
 BARRIER_ENABLED = True
 FOREST_ENABLED = False
+# Phase 1 switchback retaining-wall geometry (2026-07-30) - see
+# ODWallManager.h and pipeline/build_retaining_walls.py. Independent of the
+# other flags: a tile with no walls_*.bin file is an ordinary tile with no
+# flagged switchback conflict nearby, same "no hole" semantics as buildings.
+WALL_ENABLED = True
 
 SPAWN_HEIGHT_ABOVE_ORIGIN_CM = 2000.0   # 20 m - clearance for tile streaming to catch up before landing
                                          # (was 300 m; cut down 2026-07-20 once -odtrace showed both
@@ -183,6 +188,9 @@ log("spawned ScreenshotHook (-odshot works on this Landscape-free level too)")
 
 if not BUILDINGS_ENABLED:
     log("BUILDINGS_ENABLED=False - skipping BuildingManager")
+if not WALL_ENABLED:
+    log("WALL_ENABLED=False - skipping WallManager (switchback locations "
+        "fall back to whatever the terrain carve alone produces)")
 if not BARRIER_ENABLED:
     log("BARRIER_ENABLED=False - skipping BarrierManager (nothing physically "
         "stops off-road driving onto no-collision 'far' terrain - see module "
@@ -206,6 +214,17 @@ if BUILDINGS_ENABLED:
         log("WARNING: M_BuildingFacade not found - run unreal/apply_building_material.py "
             "at least once to create it (Content/ is git-ignored, doesn't survive a fresh checkout)")
     log(f"spawned BuildingManager (tile prefix: buildings_{AREA_NAME}_test)")
+
+if WALL_ENABLED:
+    # ------------------------------------------------------------ retaining walls
+    # Phase 1 switchback geometry (2026-07-30, pipeline/build_retaining_walls.py
+    # + export_retaining_wall_bin.py) - reuses M_GroundStylized (no dedicated
+    # material authored yet), so no does_asset_exist warning needed the way
+    # BuildingManager's M_BuildingFacade check has (that material ships with
+    # every fresh checkout, it's the engine's own Landscape-style stylized ground).
+    wall_mgr = spawn(unreal.ODWallManager, (0, 0, 0), (0, 0, 0), "WallManager")
+    wall_mgr.set_editor_property("wall_tile_prefix", f"walls_{AREA_NAME}_test")
+    log(f"spawned WallManager (tile prefix: walls_{AREA_NAME}_test)")
 
 if BARRIER_ENABLED:
     # ------------------------------------------------------------ road-corridor barrier

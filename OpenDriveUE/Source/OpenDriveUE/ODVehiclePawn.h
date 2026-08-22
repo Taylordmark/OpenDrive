@@ -61,14 +61,26 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float PedalRate = 6.0f;
 
-	/** Showroom-only camera parallax shift (cm, local to the arm's aim) so
-	 *  the car frames toward the right of the screen with the menu text
-	 *  panel on the left (Taylor, 2026-07-28), instead of dead-centered
-	 *  behind the dim overlay. Negative shifts the CAMERA left, which
-	 *  (parallax) pushes the CAR right in frame. Normal driving's chase cam
-	 *  is unaffected - SetShowroom(false) restores the centered offset. */
+	/** Showroom camera placement (2026-07-28) - deliberately NOT routed
+	 *  through the SpringArm's TargetArmLength/SocketOffset/bInheritYaw
+	 *  system (see SetShowroom's comment for why: that system's inheritance
+	 *  flags did not behave as documented when actually measured, and
+	 *  chasing it through several rounds of live screenshots kept producing
+	 *  the exact same wrong framing regardless of what was changed). The
+	 *  showroom camera is detached and placed with plain, fully-deterministic
+	 *  vector math instead - these three tunables are the whole of it. */
 	UPROPERTY(EditAnywhere, Category = "Vehicle")
-	float ShowroomLateralOffsetCm = -150.0f;
+	float ShowroomDistanceCm = 550.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Vehicle")
+	float ShowroomHeightCm = 160.0f;
+
+	/** How far to one side the LOOK-AT point is biased (cm) - biasing the
+	 *  look-at target left pushes the car right in frame (and vice versa),
+	 *  independent of camera position, so the car reads as "off to the side"
+	 *  with the menu text panel on the other. */
+	UPROPERTY(EditAnywhere, Category = "Vehicle")
+	float ShowroomLookAtBiasCm = 120.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Vehicle")
 	float MassKg = 1500.0f;

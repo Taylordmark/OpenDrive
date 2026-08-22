@@ -54,13 +54,15 @@ runtime because the pipeline now guarantees the fit before the engine sees
 the data. Verified three independent ways (offline mesh-accurate check,
 live in-engine collision trace, screenshot). Full account in § 7.2.
 
-**Immediate to-do (revised 2026-07-27 after the implementation audit — see
-[`AUDIT.md`](AUDIT.md) and § 7.6 below):** the work queue is now
-(0) fix `build_road_barrier.py`'s non-deterministic `hash()` seed before any
-rebake, (1) adaptive martini terrain at base grid 257, (2) prune retired-area
-tiles from Content, (3) the bridge/tunnel elevation fix. Taylor's drive-test
-of the assist stack + gearbox/ABS changes remains the separate gate before
-stage-3 preset retune.
+**Immediate to-do (revised 2026-07-28 — see [`AUDIT.md`](AUDIT.md) and
+§ 7.9/§ 7.10 below):** the audit's ranked queue items 0–3 (barrier-seed
+determinism, adaptive martini terrain, retired-tile cleanup, bridge/tunnel
+elevation) are **done** — full account in § 7.10, including a real memory
+bug found and fixed along the way and a rebaked/reverified Oahu build. Next
+up per the ranked table: item 4 (barrier → out-of-bounds reset), item 5
+(merge buildings per tile — the top runtime item), item 6 (OSM road tags).
+Taylor's drive-test of the assist stack + gearbox/ABS changes remains the
+separate gate before stage-3 preset retune.
 
 **Known debts:** no menus/settings/garage beyond the stopgap (Arc 4.3/4.4),
 silent on wheel/FFB (Arc 6), still only one *drivable* stage in the classic
@@ -1504,6 +1506,27 @@ main-menu/pause-menu split (§ 4.0b) landed.
     boot flow, "Drive" (relabeled "Resume Driving" in this mode) or Escape
     just unpauses in place - no re-teleport, no loading screen, since the
     car never left real pavement to begin with.
+    - **Documentation catch-up (found reconciling the tree during the
+      2026-07-29 doc-consolidation pass, not new work done then): the
+      SpringArm-based fix above never actually worked as intended**, per
+      the code's own comment, and has since been replaced entirely.
+      **Actual root cause:** `APlayerCameraManager` doesn't tick while the
+      game is paused, so a spring-arm-relative camera frozen at pause time
+      could easily be mid-transition into "inside the car." Fix now in
+      `ODVehiclePawn.cpp`/`ODMainMenu.cpp`: `SetShowroom()` fully detaches
+      the camera and places it with plain vector math
+      (`ShowroomDistanceCm`/`ShowroomHeightCm`/`ShowroomLookAtBiasCm`,
+      replacing `ShowroomLateralOffsetCm`) instead of riding the driving
+      spring-arm; `AODMainMenu::OpenMenu()` (fresh-boot flow) now
+      deliberately does NOT pause the game at all, since the frozen preview
+      pawn can't drive off anyway (`SetSimulatePhysics(false)`); `OpenGarage()`
+      (this mid-drive reopen) still pauses but now force-ticks the camera
+      manager so the detached camera actually updates. `ODScreenshotHook`
+      also picked up two related fixes while this was being chased:
+      `bTickEvenWhenPaused = true` (its Tick silently never ran during any
+      paused menu, so `-odshot` was a no-op the whole time) and a switch
+      from `GetWorld()->GetTimeSeconds()` (freezes when paused) to
+      `FApp::GetCurrentTime()` (wall-clock) for its elapsed-time check.
 - **Deeper, NOT fully root-caused: cold-start tile-streaming latency after
   a map-teleport can still take the full 20 s timeout, not just a few
   frames.** A scripted `-odpick=Marysville` repro hit `onRoad=0` for the
@@ -1627,7 +1650,7 @@ Found/scoped 2026-07-27.
   weak spot). Should stay a separate, lower-priority, open-ended item, not
   bundled with the cheap tier above.
 
-### 7.6 Implementation audit + decisions (2026-07-27)
+### 7.9 Implementation audit + decisions (2026-07-27)
 
 A full read-only audit of *how* the world is built and delivered — terrain and
 road geometry, textures/materials, procedural asset generation, runtime
@@ -1687,6 +1710,184 @@ health): vehicle physics, audio DSP, the race framework, HUD/menu code, and the
 Tail of the Dragon stage pipeline. No build was compiled and no live session
 run, so it is also unverified that the current untracked C++ compiles.
 
+### 7.10 Audit work queue, items 0–3 (2026-07-27/28)
+
+`AUDIT.md`'s ranked queue (§ 7.9 above) is a dated snapshot; this section is
+the maintained status. Items 0 and 2 turned out to already be done by the
+time work resumed; items 1 and 3 were implemented and rebaked this session.
+
+- **Item 0 (`build_road_barrier.py`'s non-deterministic `hash()` seed):**
+  already fixed (crc32 over an explicit byte encoding) — landed in the same
+  commit as the audit itself, so the audit's own "fix before any rebake"
+  warning was already stale when written.
+- **Item 2 (retired-area tiles in `Content/OpenDrive/Masks`):** already
+  moot — checked directly, every file under `Masks/` is `oahu_test`-prefixed;
+  no Skagit/Palmdale leftovers exist to prune.
+- **Item 1 (adaptive martini terrain, base grid 257):** implemented in
+  `build_terrain_mesh_tiles.py`. `NEAR_GRID_N` is now 257 (was 41, RTIN
+  requires 2^k+1) and is a ceiling, not the literal output density —
+  `MAX_ERROR_NEAR_M = 2.0` drives pymartini's simplification. Far tiles are
+  unchanged (still a uniform 21×21 grid, no adaptive triangulation — they're
+  already cheap and have no collision).
+  - **Measured storage economics don't match the audit's estimate.**
+    AUDIT.md guessed steep terrain would retain "10–15% of the 257² grid."
+    Probed against 3 real Oahu tiles (flat/moderate/Koʻolau-cliff) before
+    committing to the full pipeline (the audit's own recommended cheap
+    hedge): retention ran 22–44% even at 2 m error, because Oahu's eroded
+    volcanic terrain carries real high-frequency relief almost everywhere,
+    not the smooth-valley/sharp-ridge split the estimate assumed. Taylor's
+    call, 2026-07-28: accept the higher cost and revisit later if it proves
+    too expensive in practice; `NEAR_GRID_N = 129` (uniform, Option A) is
+    the documented one-constant fallback if so.
+  - **Seams needed a mitigation the audit flagged but didn't design.**
+    Measured empirically that pymartini does NOT reliably pick the same
+    sparse boundary-vertex subset between two independently-triangulated
+    adjacent tiles, even when the underlying elevation is bit-identical
+    (5–11 point symmetric differences out of ~60–150 boundary points).
+    Fixed with `build_seam_skirt()`: a full-resolution (257-point) vertical
+    curtain dropped `SEAM_SKIRT_DROP_M` (10 m) below the true boundary
+    elevation on all 4 edges of every near tile — same "hide the gap under
+    geometry" pattern `road_mesh_common.py`'s own road skirt already uses.
+    Covers both near/near seams and the (pre-existing) near/far seam.
+  - Live-verified in `/Game/OpenWorldTest`: swapped tiles around the
+    default spawn (Mililani) render correctly with road/barrier/buildings/
+    terrain all together, no visible cracks — see the session's screenshot.
+- **Item 3 (bridge/tunnel elevation):** root cause was subtler than the
+  audit's framing. The straight-line abutment-to-abutment interpolation in
+  `fill_structure_gaps()` was fine; the bug was call order —
+  `build_road_stations.py` ran it *before* `grade_smooth_elevation()`, so
+  the deliberate climb onto a deck got fed through the same median-filter +
+  one-way grade-clamp built for smoothing noisy raw terrain, which chopped
+  it back down toward the surrounding low ground. Fixed by grade-smoothing
+  the real ground first, then re-interpolating the structure span from the
+  *final* smoothed abutment elevations (`fill_structure_gaps()` now runs
+  twice — see its docstring). Added a `MIN_BRIDGE_CLEARANCE_M` (4 m) floor
+  as a safety net, and a log-only grade-sanity warning
+  (`STRUCTURE_GRADE_WARN`, 15%) for any span too steep for a plausible real
+  structure — flagged for review, never used to delete a real OSM road.
+  - **Tunnels are now distinguishable from bridges.** `is_structure_way()`
+    used to collapse both into one flag; added `is_tunnel_way()` and a
+    parallel `is_tunnel` field threaded through `merge_way_chains()` into
+    `road_stations.json`. `build_road_network.py` splits each segment on
+    its tunnel stretches before meshing (`split_excluding_tunnels()`), so
+    pavement stops at each portal instead of running through solid rock —
+    H-3's Tetsuo Harano Tunnels plus 14 other, smaller Oahu tunnels all got
+    this treatment. Station elevation data through the tunnel is untouched,
+    so a future real-bore pass has everything it needs without redoing this
+    work — this was a deliberate stopgap, not a "tunnels don't matter"
+    call.
+  - **Measured on H-3** (same methodology as the audit): deepest burial
+    −429.7 m → **−33.4 m**; the "buried >50 m" bucket (tunnel-depth
+    failures on bridge-tagged spans) eliminated entirely (4.6% → 0%); "on
+    surface ±1m" dropped 38.9% → 26.9%; median deck offset flipped from
+    ~0 (a mix of floating and sunk) to a consistent **+1.09 m above grade**.
+    Not perfect — 26.6% of bridge stations still sit within 5 m of the
+    ground — but bounded and plausible instead of catastrophic.
+- **A real, separate memory bug found and fixed during the full rebake:**
+  `carve_grid_m` (in `build_terrain_mesh_tiles.py`) built one dense
+  `(grid_points × nearby_stations)` distance matrix per tile. A dense
+  mountain switchback area can hand a single tile several thousand nearby
+  stations — one such tile would have needed tens of GB for that one array,
+  and the first full-Oahu rebake attempt nearly exhausted system memory
+  (0.3 GB free) before being killed. Fixed by chunking over stations
+  (`CARVE_STATION_CHUNK = 2000`) so peak memory is bounded regardless of
+  station density — verified bit-identical output against the old
+  unbounded approach on synthetic data before trusting it on real terrain.
+- **`verify_terrain_fit.py`'s tolerance reconciled with adaptive terrain.**
+  Its 1.0 m `TOL_M` predates item 1 and was sized for the old uniform-41
+  grid, where the carve stamped elevation almost exactly at every station.
+  Adaptive martini can legitimately place a station up to about
+  `MAX_ERROR_NEAR_M` from the true carved surface between sparse sample
+  points — measured mean deviation 0.26 m (still tiny) but max 2.93 m
+  across all of Oahu, which the old tolerance was never going to pass.
+  `TOL_M` is now `MAX_ERROR_NEAR_M + 1.5` (3.5 m); re-ran and it PASSes.
+- **Full pipeline rebaked and verified end-to-end** against the fixed
+  `road_stations.json`: 781 terrain tiles, road mesh (343 tiles), barrier
+  (97 tiles), 74,090 buildings (270 tiles), place labels, centerline.
+
+**Still open from the ranked queue** (§ 7.9's table): item 4 (barrier →
+out-of-bounds reset + light visual boundary, delete `ODW2`), item 5 (merge
+buildings per tile + corridor-gate collision — the top *runtime* item), item
+6 (drive road width/lanes/surface from OSM tags already on disk), item 7
+(validate `sample_mesh_height` against a fixture, restore a road-vs-terrain
+gate), and the rest of the table beyond that.
+
+### 7.11 Road Z-axis rewrite: grade-conforming envelope, no terrain smoothing (2026-07-29)
+
+Not from the audit's ranked queue — raised directly by Taylor questioning
+whether the road's elevation logic was actually grade-driven or just
+guessing, then whether a real road would ever legitimately need to "cut"
+through a climb it could have started earlier. Both questions found a real
+gap: `grade_smooth_elevation` (`pipeline/road_mesh_common.py`) was, despite
+its name and § 3.6's account of it, **smoothing the terrain signal itself**
+(median filter → Gaussian → grade clamp → Gaussian) rather than treating
+the road as something that rides real ground and only deviates from it
+(cut/bridge/tunnel) where a grade limit forces it to. It also applied one
+flat `MAX_GRADE = 0.10` to every road regardless of class, and had no
+mechanism to ease an abrupt grade change at a transition (top of a cut, a
+bridge approach) into something rideable at speed.
+
+**Rewritten, not patched:**
+
+- **No terrain smoothing, anywhere.** `grade_smooth_elevation` now runs a
+  forward/backward min-envelope clamp directly on raw DEM ground: the
+  unique maximal profile that never exceeds the real ground and never
+  exceeds `max_grade` between adjacent stations. Where ground's own slope
+  is already gentle enough the result equals ground exactly (the road
+  simply rides the terrain, matching Taylor's point that a real road's
+  alignment already encodes wherever engineers "started climbing earlier" —
+  the XY path comes straight from OSM, unchanged by any of this); where a
+  climb/descent is too steep it cuts below the peak; where a dip is too
+  narrow/steep to reach the bottom within `max_grade` it stays above it —
+  the bridge shape falls out of the same clamp, no separate case needed.
+  XY is never touched by any of this (`resample_stations()` only smooths
+  east/north laterally, `grade_smooth_elevation()` only touches elevation).
+- **Per-highway-class grade limits**, not one flat constant. New
+  `ROAD_CLASS_GRADE` table in `road_mesh_common.py` keyed on OSM `highway=`
+  (motorway 6% down through track 18%), threaded through
+  `build_road_stations.py`'s `merge_way_chains()` alongside bridge/tunnel/
+  name/oneway (nearest-station lookup, same pattern as `road_name_s`) and
+  written to `road_stations.json` as a new `highway_class` field — kept,
+  not thrown away, per the same "don't discard OSM data you already
+  fetched" principle § 3.3 raised about `lanes`/`surface`/`layer`.
+- **Grade-rate limiting (vertical-curve easing), also per class.** A
+  second, optional pass limits how much grade is allowed to change from one
+  station edge to the next (`max_grade_delta`, e.g. motorway 0.5pp/edge vs.
+  track 4pp/edge) — Taylor's point that a bridge climbing steeply then
+  dropping steeply the very next edge reads as a jarring kink, not a real
+  vertical curve, at speed. This eases the ROAD's own profile; it is not
+  terrain smoothing (it never touches `ground`, only the already grade-
+  clamped result). **Caught by a synthetic-data test before shipping:** the
+  endpoint-anchoring correction this pass needs (both ends of a segment
+  must stay pinned to their real elevation) can, on its own, push an
+  already-near-ceiling edge slightly past `max_grade` — so a final re-run
+  of the envelope clamp on the eased result is a hard backstop. `max_grade`
+  is a genuine ceiling; `max_grade_delta` is a best-effort ease that yields
+  to it on the rare edge it can't satisfy both.
+- **Applied identically to both consumers** — the Arc 7 network pipeline
+  (`build_road_stations.py`) and Tail of the Dragon (`build_stage.py`,
+  which now also reads its route's `highway=` tags via its own
+  `build_centerline()`/`highway_class()`), since the underlying function is
+  shared. This changes already-tuned road feel on the shipping stage — **not
+  yet drive-tested**, only verified against synthetic DEM data (grade
+  ceiling holds exactly, endpoints pin correctly, a synthetic spike gets cut
+  and a synthetic narrow notch gets bridged, per-class boundaries honor the
+  stricter neighbor). Taylor should rebuild and drive Tail of the Dragon
+  before trusting the new profile by feel.
+- **Supersedes § 7.10 Item 3's description of the algorithm**, not its
+  result — item 3's call-order fix (grade-smooth real ground first, then
+  re-interpolate structure spans from the final smoothed abutments) is
+  still exactly what happens, just against an envelope clamp instead of a
+  median/Gaussian smoother. `AUDIT.md` § 3.6 point 2 ("a one-way ratchet
+  that can only pull decks down") and its "why the pipeline can't just use
+  the road data as-is" point 2 ("median → Gaussian → grade clamp") are both
+  now stale as algorithm descriptions — left as-is there, on purpose, as
+  the historical record; this section is authoritative for the current
+  algorithm.
+- **The per-class numbers are first guesses**, not pulled from any design-
+  speed table — ship now, tune by drive-test, same as every other feel
+  parameter in this project.
+
 ---
 
 ## Cross-cutting (release engineering)
@@ -1704,6 +1905,20 @@ run, so it is also unverified that the current untracked C++ compiles.
   0 errors/0 warnings, packaged Shipping exe runs stable —
   `Packaged/Shipping/`). Remaining for release: installer/zip,
   fresh-machine test.
+- **Real unity-build compile bug found and fixed (documentation catch-up,
+  2026-07-29 pass — the fix itself predates this session, exact date not
+  recorded in-code):** `ODBarrierManager.cpp`, `ODBuildingManager.cpp`,
+  `ODRoadManager.cpp`, and `ODTerrainManager.cpp` each carried their own
+  private `ReadU32LE`/`ReadF32LE` helpers in an anonymous namespace —
+  compiles fine per-file under the Editor target, but **collides under the
+  standalone Game target's unity build**, since anonymous namespaces are
+  per-translation-unit and unity build merges multiple `.cpp` files into
+  one. Fixed by extracting both into a new shared header,
+  `ODBinSidecarUtil.h`, included by all four instead of each redefining
+  them. Same four managers AUDIT.md § 6.3/item 9 already flags for
+  copy-pasted tile-streaming Tick/dispatch logic — this fix only extracts
+  two small leaf helpers, it does **not** implement item 9's actual ask (a
+  shared tile-streamer base class), so item 9 remains open.
 - **Performance budget: DEFERRED, not an active constraint (2026-07-27).**
   Taylor's call: *"I'm happy to burn the GPU I have to figure out what does and
   doesn't work and work backwards from a perfect project rather than struggle
@@ -1737,7 +1952,7 @@ run, so it is also unverified that the current untracked C++ compiles.
 | 2 | day/night | 2.1 (cycle), 7.1 (real-time accurate) | ✅ cycle |
 | 3 | floaty car | 1.2 | ✅ |
 | 4 | per-tire grip | 1.4 | ✅ |
-| 5 | all of North America → **mountain hot zones** (rescoped 2026-07-27) | Arc 7 | terrain ✅ baked+streamed, road network ✅, buildings/barrier ✅; scope + coordinate + terrain-detail decisions made (§ 7.6) |
+| 5 | all of North America → **mountain hot zones** (rescoped 2026-07-27) | Arc 7 | terrain ✅ baked+streamed, road network ✅, buildings/barrier ✅; scope + coordinate + terrain-detail decisions made (§ 7.9) |
 | 6 | map view | 4.2 (stage), 7.4 (world) | ✅ stage v1 |
 | 7 | garage/cosmetics | 4.3 | ✅ live car/engine/drivetrain/tuning picker; multi-car assets + cosmetics — |
 | 8 | performance mods | 1.5 (+4.3 UI) | ✅ presets |
@@ -1748,24 +1963,20 @@ run, so it is also unverified that the current untracked C++ compiles.
 | 13 | exhaust editing | 5.2 (params live, UI in 4.3) | params ✅ |
 | 14 | tree collision (added) | 1.6 | ✅ |
 
-**Recommended next (2026-07-27, post-audit — § 7.6):**
+**Recommended next (revised 2026-07-28 — § 7.10):** items 0–3 (barrier-seed
+determinism, adaptive martini terrain, retired-tile cleanup, bridge/tunnel
+elevation) are done — full account in § 7.10. Next up:
 
-0. **Fix `build_road_barrier.py:168`'s `hash()` seed.** Minutes, and it must
-   land before any rebake or every barrier tree reshuffles.
-1. **Adaptive martini terrain, base grid 257.** Taylor's call to do this
-   first. Bake one known-steep Oahu tile before building the whole pipeline —
-   it validates both the approach and the premise in minutes. Seams are the
-   main risk (error-driven vertex selection can crack at tile edges; same
-   failure class as the `FAR_DEM_ZOOM` bug) and should be designed up front.
-   `NEAR_GRID_N = 129` stays available as a one-constant fallback.
-2. **Prune retired-area tiles** (−208 MB) before a rebake refills the directory.
-3. **The bridge/tunnel elevation fix** — strong candidate to bundle with (1),
-   since it changes the same mountain corridor and wants the same verification
-   drive.
+4. **Per-tile building merge + corridor-gated collision** — the top *runtime*
+   item (~25,000 draw calls → ~25), CPU-bound so no GPU upgrade substitutes.
+5. **OSM road tags** (`lanes`/`surface`/`layer`, already fetched) — largest
+   available realism gain, no re-fetch needed.
+6. **Restore a road-vs-terrain gate** and validate `sample_mesh_height`
+   against a fixture — the one surviving gate rests on a reconstructed,
+   unvalidated reimplementation.
 
-Then: per-tile building merge + corridor-gated collision, OSM road tags
-(`lanes`/`surface`/`layer`, already fetched), and restoring a road-vs-terrain
-gate. Full ranked queue in [`AUDIT.md`](AUDIT.md) § 7.
+Full ranked queue in [`AUDIT.md`](AUDIT.md) § 7 (items 0–3 marked done there
+too; the table's original numbers are left as historical record).
 
 Separately and independently: Taylor drive-tests the assist stack + gearbox/ABS
 changes (the gate for stage-3 preset retune). Packaging/Shipping are proven;
@@ -1774,13 +1985,13 @@ HTTP-based road-tile fetch, and intersection/junction mesh blending are still
 on the table for later Arc 7 slices. **NA-scale preprocessing/LWC is dropped** —
 the per-location coordinate decision removes the need.
 
-**2026-07-27 follow-up:** the audit (§ 7.6) supersedes the previous gate list.
+**2026-07-27 follow-up:** the audit (§ 7.9) supersedes the previous gate list.
 Of § 7.5's three open items: the **Marysville coastal road is closed** (Taylor:
 almost certainly a generation-time bounding-box error, not a pipeline defect);
 the **too-dark open-world level** is still open but was found on Skagit, since
 superseded by Oahu, so confirm it still reproduces before investigating; the
 **cold-start tile-streaming latency** is still unexplained but hidden by the
-loading screen, and § 7.6's finding that `FinalizeTile` runs unbudgeted on the
+loading screen, and § 7.9's finding that `FinalizeTile` runs unbudgeted on the
 game thread is the most likely mechanism — worth checking there first.
 
 The menu/garage/map-texture work (§ 4.0b, § 4.3, § 7.5) is done and verified

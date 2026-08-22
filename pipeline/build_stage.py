@@ -22,8 +22,8 @@ import numpy as np
 from PIL import Image
 
 from road_mesh_common import (
-    ROAD_LIFT, STATION_SPACING, MAX_GRADE, CHUNK_STATIONS,
-    gaussian1d, median1d, resample_stations, grade_smooth_elevation,
+    ROAD_LIFT, STATION_SPACING, CHUNK_STATIONS,
+    resample_stations, grade_smooth_elevation, road_class_grade_arrays,
     build_road_chunks,
 )
 
@@ -123,7 +123,18 @@ class Dem:
 
 
 # ---------------------------------------------------------------- OSM -> centerline
+def highway_class(tags):
+    """This way's OSM highway= value - road_mesh_common.ROAD_CLASS_GRADE
+    keys off this to pick per-class grade/grade-change limits (2026-07-28).
+    Empty string (falls back to DEFAULT_ROAD_CLASS_GRADE) if untagged."""
+    return tags.get("highway") or ""
+
+
 def build_centerline():
+    """Returns (latlon, highway_chain) - the resolved node polyline and its
+    parallel per-node OSM highway= class (2026-07-28, so main() can build
+    per-class grade/grade-change limits the same way build_road_stations.py
+    does for the open-world network, instead of one flat constant)."""
     data = json.loads((RAW / "osm.json").read_text())
     nodes = {e["id"]: (e["lat"], e["lon"]) for e in data["elements"] if e["type"] == "node"}
     ways = [e for e in data["elements"] if e["type"] == "way"]
@@ -134,11 +145,13 @@ def build_centerline():
 
     # graph: way-endpoint node ids, edges = ways
     edges = []
+    edge_highway = []
     adj = {}
     for i, w in enumerate(ways):
         nds = w["nodes"]
         length = sum(dist(nodes[a], nodes[b]) for a, b in zip(nds, nds[1:]))
         edges.append((nds[0], nds[-1], length, nds))
+        edge_highway.append(highway_class(w.get("tags", {})))
         adj.setdefault(nds[0], []).append(i)
         adj.setdefault(nds[-1], []).append(i)
 
@@ -168,16 +181,20 @@ def build_centerline():
     if dst not in best:
         raise SystemExit("No path between stage endpoints in OSM data.")
 
-    # walk back and assemble polyline
+    # walk back and assemble polyline (+ parallel per-node highway class)
     chain = []
+    highway_chain = []
     node = dst
     while best[node][1] is not None:
         _, prev, ei = best[node]
         nds = edges[ei][3]
         seg = nds if nds[0] == prev else list(reversed(nds))
+        hwy_seg = [edge_highway[ei]] * len(seg)
         chain = seg[1:] + chain if chain else seg
+        highway_chain = hwy_seg[1:] + highway_chain if highway_chain else hwy_seg
         node = prev
     latlon = np.array([nodes[n] for n in chain])
+    highway_chain = np.array(highway_chain, dtype=object)
 
     # precise trim to nearest vertices of the actual endpoints
     def nearest_idx(target):
@@ -188,15 +205,17 @@ def build_centerline():
 
     i0, i1 = nearest_idx(START_LATLON), nearest_idx(END_LATLON)
     latlon = latlon[min(i0, i1): max(i0, i1) + 1]
+    highway_chain = highway_chain[min(i0, i1): max(i0, i1) + 1]
     if i0 > i1:
         latlon = latlon[::-1]
-    return latlon
+        highway_chain = highway_chain[::-1]
+    return latlon, highway_chain
 
 
 # ---------------------------------------------------------------- main build
 def main():
     dem = Dem()
-    latlon = build_centerline()
+    latlon, highway_chain = build_centerline()
 
     # local frame: origin at road bbox center; equirect projection
     lat0 = (latlon[:, 0].min() + latlon[:, 0].max()) / 2
@@ -210,11 +229,24 @@ def main():
     s, e, n = resample_stations(east, north, STATION_SPACING)
     n_st = len(s)
 
-    # vertical profile: sample DEM, smooth, clamp grade
+    # highway class is categorical (not a smooth 0..1 signal), so nearest-
+    # original-station lookup - same pattern build_road_stations.py uses for
+    # road_name_s/is_oneway_s - feeds road_class_grade_arrays() below so
+    # grade/grade-change limits track the real OSM road class per station
+    # instead of one flat constant for the whole route.
+    d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(east), np.diff(north)))])
+    right = np.clip(np.searchsorted(d, s), 0, len(d) - 1)
+    left = np.clip(right - 1, 0, len(d) - 1)
+    nearest_orig = np.where(np.abs(d[right] - s) <= np.abs(d[left] - s), right, left)
+    highway_s = [highway_chain[j] for j in nearest_orig]
+    max_grade_s, max_grade_delta_s = road_class_grade_arrays(highway_s)
+
+    # vertical profile: sample DEM, grade-conform (ride the ground, deviate
+    # only where max_grade forces it - never terrain-smoothed)
     lat_s = lat0 + n / M_PER_DEG_LAT
     lon_s = lon0 + e / m_per_deg_lon
     ground = dem.sample(lat_s, lon_s)
-    h = grade_smooth_elevation(ground, STATION_SPACING, MAX_GRADE)
+    h = grade_smooth_elevation(ground, STATION_SPACING, max_grade_s, max_grade_delta_s)
     ds = STATION_SPACING
     grades = np.abs(np.diff(h)) / ds
     z = h + ROAD_LIFT

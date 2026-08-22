@@ -1,5 +1,6 @@
 #include "ODRoadManager.h"
 
+#include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Containers/StringConv.h"
@@ -19,18 +20,9 @@ namespace
 // manual little-endian parsing (no struct cast) - same convention as
 // ODForestManager::LoadMask / ODRaceManager::LoadCenterline's binary
 // sidecars, and avoids any packing/alignment assumption on disk.
-uint32 ReadU32LE(const uint8* P)
-{
-	return (uint32)P[0] | (uint32)P[1] << 8 | (uint32)P[2] << 16 | (uint32)P[3] << 24;
-}
-
-float ReadF32LE(const uint8* P)
-{
-	float V;
-	FMemory::Memcpy(&V, P, 4);
-	return V;
-}
-
+// ReadU32LE/ReadF32LE moved to the shared ODBinSidecarUtil.h (2026-07-28) -
+// this file's own ReadU16LE/ReadPascalUtf8 below are unique to the ODL1
+// place-label format, so they stay local.
 uint16 ReadU16LE(const uint8* P)
 {
 	return (uint16)P[0] | (uint16)P[1] << 8;

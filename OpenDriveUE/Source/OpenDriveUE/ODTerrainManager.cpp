@@ -1,5 +1,6 @@
 #include "ODTerrainManager.h"
 
+#include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -12,23 +13,6 @@
 #include "Misc/Paths.h"
 
 using namespace UE::Geometry;
-
-namespace
-{
-// manual little-endian parsing (no struct cast) - same convention as
-// AODRoadManager's ODR2 parse and every other binary sidecar in this project.
-uint32 ReadU32LE(const uint8* P)
-{
-	return (uint32)P[0] | (uint32)P[1] << 8 | (uint32)P[2] << 16 | (uint32)P[3] << 24;
-}
-
-float ReadF32LE(const uint8* P)
-{
-	float V;
-	FMemory::Memcpy(&V, P, 4);
-	return V;
-}
-}
 
 AODTerrainManager::AODTerrainManager()
 {

@@ -13,10 +13,31 @@ number below is measured from files on disk or read out of the source.
 
 > **This is a dated snapshot, not a living document.** The decisions it
 > records are restated as plan-of-record in
-> [`next steps.md`](next%20steps.md) § 7.6 and the Arc 7 header — **those are
+> [`next steps.md`](next%20steps.md) § 7.9 and the Arc 7 header — **those are
 > authoritative and get maintained; this file does not.** What lives here is
 > the *analysis and measurement* behind them, which stays true for the state
 > of the repo on 2026-07-27 regardless of what changes afterwards.
+>
+> **Status (2026-07-28):** ranked-queue items 0–3 below (§ 7) are done —
+> barrier-seed determinism, adaptive martini terrain, retired-tile cleanup,
+> bridge/tunnel elevation. Several numbers in this snapshot are now stale as
+> a direct result (e.g. § 3.6's H-3 burial measurements, § 8's disk-usage
+> figures for the barrier). See `next steps.md` § 7.10 for the current
+> numbers and what changed; this file's own numbers are left as originally
+> measured, on purpose, as the historical record.
+>
+> **Status (2026-07-29):** the road's Z-axis algorithm itself was rewritten,
+> not just item 3's call-order bug — see `next steps.md` § 7.11. Two
+> passages in this file now describe an algorithm that no longer exists:
+> § "Why the pipeline can't just use the road data as-is" point 2 ("Hence
+> median → Gaussian → grade clamp") and § 3.6 point 2 ("`grade_smooth_
+> elevation` runs afterwards and only ever lowers... a one-way ratchet").
+> `grade_smooth_elevation` no longer smooths terrain at all — it's a
+> ground-conforming envelope clamp (rides real DEM ground, deviates only
+> where a per-highway-class `max_grade` forces a cut/bridge/tunnel) plus an
+> optional grade-rate limiter for vertical-curve easing. Left as originally
+> written, on purpose, as the historical record of the bug that motivated
+> item 3's fix; § 7.11 is authoritative for the current algorithm.
 
 ---
 
@@ -807,10 +828,10 @@ resolution moves to the front by Taylor's call.*
 
 | # | Action | Effort | Payoff |
 |---|---|---|---|
-| 0 | Fix `build_road_barrier.py:168`'s `hash()` seed **before any rebuild** | minutes | Restores determinism. Do this first regardless — a terrain rebake will otherwise reshuffle every barrier tree |
-| 1 | **Adaptive martini terrain, base grid 257 (7.81 m)** — § 9.1 | days | ~25 m-grid storage for 8 m-grid mountains. Seams are the risk; bake one steep tile first |
-| 2 | Delete retired-area tiles from `Content/OpenDrive/Masks` | minutes | −208 MB shipped; removes stale-prefix confusion. Worth doing before a rebake fills the directory again |
-| 3 | **Bridge minimum-clearance pass; exempt structure spans from the one-way grade clamp; drop tunnel spans from the road mesh** | hours | Viaducts sitting on the dirt, tunnels 430 m inside mountains (§ 3.6) — the representative case for mountain roads. **Strong candidate to bundle with item 1**: same corridor, same verification drive |
+| 0 | ~~Fix `build_road_barrier.py:168`'s `hash()` seed~~ — **done**, was already fixed by the time this audit was written | minutes | Restores determinism |
+| 1 | ~~Adaptive martini terrain, base grid 257 (7.81 m)~~ — **done, 2026-07-28** — see `next steps.md` § 7.10 for the measured economics (worse than estimated below) and the seam fix this table didn't anticipate | days | ~25 m-grid storage for 8 m-grid mountains *(not what was measured — actual retention 22–44%, not 10–15%)* |
+| 2 | ~~Delete retired-area tiles from `Content/OpenDrive/Masks`~~ — **moot**, no retired-area tiles existed to delete | minutes | −208 MB shipped |
+| 3 | ~~Bridge minimum-clearance pass; exempt structure spans from the one-way grade clamp; drop tunnel spans from the road mesh~~ — **done, 2026-07-28**, though the actual root cause was call-order (fill-before-smooth), not just the clamp — see `next steps.md` § 7.10 | hours | Viaducts sitting on the dirt, tunnels 430 m inside mountains (§ 3.6) — the representative case for mountain roads |
 | 4 | Replace the barrier with an out-of-bounds reset + light visual boundary; delete ODW2 | hours | **−213 MB**, removes the invisible wall, and the player can finally see the edge (§ 5.4) |
 | 5 | Merge buildings per tile + corridor-gate their collision | hours | ~25,000 draw calls → ~25; drops most collision cooks entirely (§ 5.2, § 5.2b). Top *runtime* item — and **CPU-bound, so no GPU upgrade substitutes for it** (§ 1.4) |
 | 6 | Drive road width/lanes/surface/`layer` from OSM tags **already on disk** | hours | Largest available realism gain; makes a network look like a network. No re-fetch — 41% of ways already carry `lanes` |

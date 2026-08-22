@@ -54,21 +54,13 @@ AODVehiclePawn::AODVehiclePawn()
 	SpringArm->CameraRotationLagSpeed = 9.0f;
 	SpringArm->bInheritPitch = false;
 	SpringArm->bInheritRoll = false;
-	// 2026-07-28: the main-menu showroom runs entirely with the game PAUSED
-	// (so the frozen preview pawn can't drive off), and this pawn's own Tick
-	// correctly does NOT run while paused (input/physics/ground-snap should
-	// all stay frozen) - but that also stops the SpringArm's OWN component
-	// tick, which is what actually computes/lags the camera into its "behind
-	// and above the car" pose. AODMainMenu::Tick DOES run while paused (it
-	// has to, to spin the preview) and rotates the Body directly, which took
-	// effect immediately (SetActorRotation doesn't need a tick) - but the
-	// camera itself just stayed wherever it was at the last pre-pause frame,
-	// which on a fresh boot is before the spring arm ever got to settle:
-	// reported live as "the car is rotating but I'm still inside/under it."
-	// A component's tick is independent of its owning actor's - enabling
-	// this JUST for the spring arm lets the camera keep tracking the
-	// spinning body while paused, without waking up any of the pawn's own
-	// (correctly-frozen) driving logic.
+	// Lets the normal chase-cam keep settling/lagging into place even while
+	// paused - matters for AODMainMenu's OpenGarage() (mid-drive reopen),
+	// which still pauses. The fresh-boot showroom no longer goes through
+	// this arm at all (see AODVehiclePawn::SetShowroom) and no longer pauses
+	// either (see AODMainMenu::OpenMenu()'s comment for why), so this is
+	// specifically for the garage case now, not the boot flow that
+	// originally motivated it.
 	SpringArm->PrimaryComponentTick.bTickEvenWhenPaused = true;
 
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
@@ -226,7 +218,7 @@ void AODVehiclePawn::CycleVehicle()
 
 void AODVehiclePawn::SetShowroom(bool bOn)
 {
-	if (!Body || !SpringArm)
+	if (!Body || !SpringArm || !Camera)
 	{
 		return;
 	}
@@ -235,17 +227,34 @@ void AODVehiclePawn::SetShowroom(bool bOn)
 		Body->SetSimulatePhysics(false);
 		// level the car; AODMainMenu sets a fixed display yaw once (no spin)
 		SetActorRotation(FRotator(0.0f, GetActorRotation().Yaw, 0.0f));
-		// stop the spring arm inheriting the body's yaw, so the fixed display
-		// angle actually shows a fixed angle instead of the camera orbiting
-		// to match whatever heading the pawn happened to spawn facing
-		SpringArm->bInheritYaw = false;
-		// shift the car toward screen-right, text panel toward screen-left
-		SpringArm->SocketOffset = FVector(0.0f, ShowroomLateralOffsetCm, 150.0f);
+
+		// 2026-07-28: the showroom camera used to ride the same SpringArm as
+		// the driving chase-cam (bInheritYaw=false meant to decouple it from
+		// the spinning car). That never actually worked as intended - live
+		// screenshots (Taylor: "I was still inside/under the car", repeated
+		// through several rounds of fixes to arm length/collision/lag) showed
+		// the SAME wrong framing regardless of what was changed, and a
+		// logged dump proved the spring arm's own inheritance flags weren't
+		// producing the documented behavior in practice. Rather than keep
+		// chasing USpringArmComponent's inheritance system, the showroom
+		// camera is detached from it entirely and placed with plain,
+		// fully-deterministic vector math - full control, nothing implicit.
+		Camera->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+
+		const FVector Pivot = GetActorLocation();
+		const FVector Forward = GetActorForwardVector();
+		const FVector Right = GetActorRightVector();
+		const FVector CamPos = Pivot - Forward * ShowroomDistanceCm + FVector(0, 0, ShowroomHeightCm);
+		// look at a point offset to one side of the car (not the camera) -
+		// biasing the LOOK-AT target left pushes the car right in frame
+		const FVector LookAt = Pivot - Right * ShowroomLookAtBiasCm + FVector(0, 0, 40.0f);
+		Camera->SetWorldLocationAndRotation(CamPos, (LookAt - CamPos).Rotation());
 	}
 	else
 	{
-		SpringArm->bInheritYaw = true;   // back to the chase cam
-		SpringArm->SocketOffset = FVector(0.0f, 0.0f, 150.0f);   // restore centered chase-cam framing
+		// back to the normal chase cam - re-attach with the arm's usual
+		// (relative) transform, not the showroom's absolute one
+		Camera->AttachToComponent(SpringArm, FAttachmentTransformRules::SnapToTargetIncludingScale);
 	}
 }
 

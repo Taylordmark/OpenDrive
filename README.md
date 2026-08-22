@@ -9,9 +9,12 @@ Creek, 18.2 km, 318 curves) on real USGS terrain.
 
 ## What works today
 
-- Real terrain + grade-smoothed, banked road meshes generated from USGS 3DEP
-  elevation and OpenStreetMap geometry; roads carved into the mountainside
-  with a tight cut-wall blend (canyon-wall proximity preserved).
+- Real terrain + grade-conforming, banked road meshes generated from USGS
+  3DEP elevation and OpenStreetMap geometry — the road rides the real ground
+  and only deviates (cut/bridge/tunnel) where a per-highway-class grade
+  limit forces it to, never terrain-smoothed; roads carved into the
+  mountainside with a tight cut-wall blend (canyon-wall proximity
+  preserved).
 - **Fully custom vehicle physics** (`UODVehicleMovement`, no Chaos vehicles):
   raycast spring/damper suspension with real per-corner loads, slip-curve
   tire model (slip ratio + slip angle on one friction circle — burnouts,
@@ -49,7 +52,7 @@ runtime by our own `AODTerrainManager` (no engine plugin, no network
 dependency), with a real OSM road network, procedural buildings, runtime
 forest, and a continuous collision barrier all machine-verified on a
 separate open-world test area (Oahu, HI as of 2026-07-27). See
-`next steps.md` § 7.0–7.6 for status.
+`next steps.md` § 7.0–7.10 for status.
 
 **Arc 7 scope, narrowed 2026-07-27:** the target is the **mountain areas** of
 North America — Cascades, Sierra Nevada, Rockies, Blue Ridge/Appalachians,
@@ -57,7 +60,10 @@ coast ranges, plus all of Hawaii and Alaska — as discrete zones each with its
 own local coordinate frame, rather than one continuous continent. The plains,
 Midwest, Gulf and most of the desert Southwest are cut. See
 [`AUDIT.md`](AUDIT.md) for the implementation audit that drove this and the
-ranked work queue that came out of it.
+ranked work queue that came out of it — items 0–3 (barrier-seed
+determinism, adaptive martini terrain, retired-tile cleanup, bridge/tunnel
+elevation) are done as of 2026-07-28; `next steps.md` § 7.10 has the
+maintained status, `AUDIT.md` itself is a dated snapshot.
 
 Full roadmap and per-arc status: [`next steps.md`](next%20steps.md).
 
@@ -144,7 +150,7 @@ runtime, ever.
 
 ```
 python pipeline/fetch_osm_network.py       # OSM road network for AREA_NAME's bbox (skip if data/raw/<area>_test/osm.json already exists)
-python pipeline/build_road_stations.py     # samples + grade-smooths the road's elevation ONCE -> road_stations.json (single source of truth)
+python pipeline/build_road_stations.py     # samples + grade-conforms the road's elevation ONCE -> road_stations.json (single source of truth)
 python pipeline/build_terrain_mesh_tiles.py  # bakes ODT1 world-space terrain tiles into OpenDriveUE/Content/OpenDrive/Masks/, CARVED to road_stations.json
 python pipeline/build_road_network.py      # road_mesh.json + road_test_meta.json, reads the same road_stations.json
 python pipeline/export_road_mesh_bin.py    # buckets road_mesh.json into per-tile ODR2 sidecars (Arc 7.2 slice 2)

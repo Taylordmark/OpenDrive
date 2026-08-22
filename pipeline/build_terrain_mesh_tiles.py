@@ -51,13 +51,13 @@ ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
 import json
 import math
 import struct
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import requests
+from pymartini import Martini
 
-from road_mesh_common import road_ue_z_m
+from road_mesh_common import road_ue_z_m, classify_wall_stations
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -66,18 +66,34 @@ M_PER_DEG_LAT = 111132.0
 NEAR_MARGIN_M = 60.0        # tile-granularity buffer beyond the literal
                              # 5-10 m stray corridor
 RENDER_DISTANCE_M = 6000.0  # still-visible-but-not-driveable horizon
-NEAR_GRID_N = 41            # ~50 m spacing across a 2 km tile
-# 100 m spacing (2026-07-28, was 9/~250m) - Taylor: hillsides visible off to
-# the side of the road read as hard-faceted, obviously low-poly ("looks like
-# Windows XP") at the old spacing. MUST keep (NEAR_GRID_N-1) an integer
-# multiple of (FAR_GRID_N-1) - see FAR_DEM_ZOOM's comment below for the real
-# seam bug (2026-07-25) this divisibility avoids; 40/20=2 keeps every other
-# near-tile boundary vertex landing exactly on a far-tile one, same
-# guarantee as the original 40/8=5. Not pushed all the way to NEAR_GRID_N's
-# own density (41) - far tiles cover far more ground per tile and have no
-# collision, so tripling+ their triangle count for a horizon backdrop isn't
-# worth the render/build-time cost the near tiles' precision actually needs.
-FAR_GRID_N = 21
+NEAR_GRID_N = 257           # AUDIT.md item 1 (2026-07-28): base sampling grid for
+# adaptive martini triangulation (RTIN requires exactly 2^k+1; 257 -> 7.81 m
+# spacing over a 2 km tile, matches z15 Terrarium's ~4.8 m/px so nothing is
+# oversampled). This is a CEILING now, not the literal output density - see
+# MAX_ERROR_NEAR_M. Replaces the old uniform-41 grid (50 m spacing, no real
+# shape off the road corridor - AUDIT.md 3.1).
+MAX_ERROR_NEAR_M = 2.0      # martini simplification tolerance, near tiles only.
+# Taylor, 2026-07-28: accept this despite AUDIT.md's storage estimate not
+# holding up under measurement - probed 3 real Oahu tiles (flat/moderate/
+# Koolau-cliff) at base 257 before committing to the full pipeline (the
+# audit's own recommended cheap hedge): retention ran 22-44% even at this
+# tolerance, well above the "10-15% on steep terrain" guess, because Oahu's
+# eroded volcanic ground carries real high-frequency relief almost
+# everywhere rather than the smooth-valley/sharp-ridge split the estimate
+# assumed. Revisit if this proves too expensive in practice; NEAR_GRID_N=129
+# (one-constant Option A fallback) is the documented escape hatch.
+SEAM_SKIRT_DROP_M = 10.0    # see build_seam_skirt()'s docstring - hides the
+                             # crack an adaptive mesh can produce at a tile
+                             # boundary, the same "gap hidden under geometry"
+                             # pattern road_mesh_common.py's road skirt uses.
+FAR_GRID_N = 21              # 100 m spacing (2026-07-28, was 9/~250m) - Taylor:
+# hillsides visible off to the side of the road read as hard-faceted,
+# obviously low-poly ("looks like Windows XP") at the old spacing. Far tiles
+# stay on the old uniform-grid path (no adaptive triangulation - they're
+# already coarse, no collision, and cost isn't the concern there); the
+# NEAR/FAR boundary is now protected by NEAR tiles' own seam skirt (below)
+# rather than requiring (NEAR_GRID_N-1) to divide evenly into (FAR_GRID_N-1)
+# the way the old uniform-uniform pairing did.
 NEAR_DEM_ZOOM = 15          # matches build_road_stations.py's DEM_ZOOM
 # FAR_DEM_ZOOM used to be 10 (coarse/pre-generalized Terrarium data, on the
 # idea that it'd read as "averaged distant terrain" for free). Real bug,
@@ -123,99 +139,31 @@ TERRAIN_CARVE_DROP_M = 0.15   # bias the carved surface just below the road so
                               # the OUTER edge through curves, never dropping any
                               # edge below the centerline the carve references.)
 
-# Auto-detected elevation conflicts (2026-07-23): found via verify_terrain_fit.py
-# even after the carve-radius fix above, one tile still failed - two DIFFERENT
-# road segments passing within ~90 m of each other with a 16 m elevation gap,
-# same failure class as the original Skagit bridge crossing (Arc 7.2), except
-# this pair carries no OSM bridge/tunnel tag at all. Rather than rely on OSM
-# tagging (which can miss real crossings, as this proved), detect these
-# geometrically: any two stations within CONFLICT_RADIUS_M of each other
-# whose elevation gap exceeds what a plausible shared grade could explain
-# over that distance are flagged and excluded from the carve, the same way
-# is_bridge stations already are - a strict superset of tag-based detection,
-# not a replacement for it (is_bridge stations are still excluded too; this
-# catches what tags miss).
-#
-# 2026-07-26 (full-network rebuild, Taylor's ref-filter/segment-cap removal):
-# this originally only compared stations from DIFFERENT segments, on the
-# assumption a single chain (merge_way_chains only breaks at real OSM
-# junctions) can't double back close to itself. Wrong for real mountain
-# switchback/hairpin roads (SR-530 in the Cascades foothills) - the SAME
-# chain climbing a hillside can pass within meters of its own earlier/later
-# self at a very different elevation. verify_terrain_fit.py FAILed at 15.2 m
-# on exactly this (station 149.7 m from another station 149 STATIONS later
-# on the identical segment, same_seg=True, 56 m elevation gap - confirmed via
-# a nearby-station dump before assuming this fix, not guessed). Now compares
-# ALL station pairs regardless of segment, just excluding trivially-adjacent
-# same-chain stations (SAME_SEG_GAP_STATIONS) so ordinary along-route
-# progression is never even evaluated - the max_grade/min_gap_m physics
-# check below is what actually decides "conflict" either way, so this isn't
-# a looser detector, just a correctly-scoped one.
-CONFLICT_RADIUS_M = TERRAIN_CARVE_OUTER_M   # matches the carve's own reach -
-                                             # anything farther can't influence
-                                             # the same grid vertices anyway
-CONFLICT_MAX_GRADE = 0.15    # generous vs. road_mesh_common.MAX_GRADE (0.10)
-                              # - only flag gaps too steep for ANY plausible
-                              # single road profile, not just an unusual one
-CONFLICT_MIN_GAP_M = 3.0     # floor so two stations meters apart with a
-                              # sub-meter difference (ordinary local noise)
-                              # never gets flagged
-SAME_SEG_GAP_STATIONS = 8    # ~40m at 5m station spacing - skip evaluating
-                              # trivially-adjacent same-chain stations at all
-                              # (ordinary progression); anything past this gap
-                              # is a real candidate, same-segment or not - see
-                              # 2026-07-26 comment above.
-
+# Elevation-conflict detection (station pairs close in XY, too far apart in
+# Z to be the same piece of ground - e.g. a switchback doubling back on
+# itself, or two different chains crossing) used to be reimplemented here
+# independently of build_road_stations.py's own copy - the two disagreed by
+# construction (different radius, different threshold shape). Both are now
+# road_mesh_common.classify_wall_stations() (2026-07-30 consolidation),
+# called below against the SAME final station data build_road_stations.py
+# already folded its own copy of this decision into `is_bridge` from -
+# calling it again here isn't redundant with that, it's what GUARANTEES the
+# two agree (same function, same inputs, deterministic), instead of hoping
+# two independent implementations happen to.
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 
-def detect_elevation_conflicts(seg_ids, x_cm, y_cm, elev_m, station_idx,
-                                radius_m=CONFLICT_RADIUS_M,
-                                max_grade=CONFLICT_MAX_GRADE,
-                                min_gap_m=CONFLICT_MIN_GAP_M,
-                                same_seg_gap_stations=SAME_SEG_GAP_STATIONS):
-    """Geometric (not tag-based) detection of station pairs that are close in
-    XY but too far apart in elevation to be the same piece of ground - see
-    the CONFLICT_* constants' comment for why this exists, and the
-    2026-07-26 comment for why this checks ALL pairs (not just different-
-    segment ones) minus trivially-adjacent same-chain neighbors. Grid-
-    bucketed (radius_m cells, 3x3 neighborhood per query) since a brute-
-    force all-pairs check doesn't scale to tens of thousands of stations;
-    returns a bool array, True = exclude from the carve."""
-    n = len(x_cm)
-    radius_cm = radius_m * 100.0
-    cx = np.floor(x_cm / radius_cm).astype(int)
-    cy = np.floor(y_cm / radius_cm).astype(int)
-    buckets = defaultdict(list)
-    for i in range(n):
-        buckets[(cx[i], cy[i])].append(i)
-
-    conflict = np.zeros(n, dtype=bool)
-    for (bx, by), idxs in buckets.items():
-        neighbor_idxs = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                neighbor_idxs.extend(buckets.get((bx + dx, by + dy), []))
-        if not neighbor_idxs:
-            continue
-        ni = np.array(neighbor_idxs)
-        for i in idxs:
-            d_m = np.hypot(x_cm[ni] - x_cm[i], y_cm[ni] - y_cm[i]) / 100.0
-            candidate = (seg_ids[ni] != seg_ids[i]) | (
-                np.abs(station_idx[ni] - station_idx[i]) > same_seg_gap_stations)
-            close = (d_m > 0.01) & (d_m <= radius_m) & candidate
-            if not close.any():
-                continue
-            dz = np.abs(elev_m[ni[close]] - elev_m[i])
-            allowed = max_grade * d_m[close] + min_gap_m
-            if (dz > allowed).any():
-                conflict[i] = True
-    return conflict
-
-
 def load_stations():
+    """Returns (lat0, lon0, east, north, elev, exclude, wall_pairs). `exclude`
+    is True for any station the terrain carve must skip (real bridge/tunnel,
+    OR an elevation conflict - either wall-eligible or out-of-scope, see
+    classify_wall_stations()). `wall_pairs` is the (i, j) station-index list
+    of in-scope, above-WALL_MIN_GRADE conflicts that need generated wall
+    geometry - build_retaining_walls.py consumes this same loader so its
+    run-clustering always starts from the identical pair list terrain
+    carving used to decide what to exclude."""
     data = json.loads(STATIONS_PATH.read_text())
     lat0, lon0 = data["origin_latlon"]
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
@@ -229,17 +177,18 @@ def load_stations():
         for si, seg in enumerate(data["segments"])])
     station_idx = np.concatenate([
         np.arange(len(seg["east_m"])) for seg in data["segments"]])
+    road_name = [name for seg in data["segments"] for name in seg["road_name"]]
 
-    x_cm, y_cm = east * 100.0, -north * 100.0
-    conflict = detect_elevation_conflicts(seg_ids, x_cm, y_cm, elev, station_idx)
+    conflict, wall_pairs = classify_wall_stations(
+        east, north, elev, seg_ids, station_idx, road_name)
     n_new = int(np.sum(conflict & ~is_bridge))
     if n_new:
-        print(f"detect_elevation_conflicts: {n_new} station(s) auto-flagged "
-              f"(crossing or same-chain switchback within {CONFLICT_RADIUS_M:.0f}m, "
-              f"no bridge/tunnel tag) - excluded from the terrain carve the same "
-              f"way is_bridge stations are")
+        print(f"classify_wall_stations: {n_new} station(s) auto-flagged "
+              f"(crossing or same-chain switchback, no bridge/tunnel tag) - "
+              f"excluded from the terrain carve the same way is_bridge "
+              f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
-    return lat0, lon0, east, north, elev, exclude
+    return lat0, lon0, east, north, elev, exclude, wall_pairs
 
 
 def sample_dem(lat_arr, lon_arr, zoom, session, cache):
@@ -300,6 +249,9 @@ def tile_min_dist_m(station_x_cm, station_y_cm, tx, ty, tile_cm):
     return float(d_cm.min()) / 100.0
 
 
+CARVE_STATION_CHUNK = 2000   # see carve_grid_m's docstring - bounds the
+                             # (grid_points x stations) distance matrix
+
 def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
                   drop=TERRAIN_CARVE_DROP_M):
@@ -308,19 +260,136 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     east/north METER frame instead of a lon/lat-bounded pixel grid - no
     row/col transpose ambiguity to get backwards (the old live-streaming
     version's 2026-07-20 bug) since there's no pymartini array-order convention to
-    match here at all, just plain 2-D arrays this script fully controls."""
+    match here at all, just plain 2-D arrays this script fully controls.
+
+    Chunked over stations (2026-07-28) - the naive one-shot version built a
+    dense (grid_points x stations) distance matrix (up to 257x257=66,049
+    grid points), which is fine for a handful of nearby stations but not
+    bounded: a dense mountain switchback area can hand build_tile() several
+    thousand "keep" stations for one tile (prefiltered by distance, not
+    count), and 66,049 x thousands x 8 bytes is multiple GB for a SINGLE
+    tile - found live during the full-Oahu rebake (2026-07-28): process RSS
+    swung 5.6->20 GB tile to tile, not a steady climb, which is the
+    signature of one-off huge transient allocations on specific dense
+    tiles rather than an actual leak. Processing stations in fixed-size
+    chunks and keeping a running nearest-distance/elevation bounds peak
+    memory to grid_points x CARVE_STATION_CHUNK regardless of how many
+    stations a tile has nearby."""
     if len(st_east) == 0:
         return elev_grid
-    gx, gy = east_grid.reshape(-1, 1), north_grid.reshape(-1, 1)
-    sx, sy = st_east.reshape(1, -1), st_north.reshape(1, -1)
-    d = np.hypot(gx - sx, gy - sy)             # (P, S)
-    nearest = np.argmin(d, axis=1)
-    nearest_d = d[np.arange(d.shape[0]), nearest]
-    nearest_elev = st_elev[nearest]
-    w = np.clip((outer - nearest_d) / (outer - inner), 0.0, 1.0)
+    shape = elev_grid.shape
+    gx = east_grid.reshape(-1)
+    gy = north_grid.reshape(-1)
+    P = gx.shape[0]
+    best_d = np.full(P, np.inf, dtype=np.float64)
+    best_elev = np.zeros(P, dtype=np.float64)
+    for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
+        sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
+        sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
+        se = st_elev[c0:c0 + CARVE_STATION_CHUNK]
+        d = np.hypot(gx.reshape(-1, 1) - sx, gy.reshape(-1, 1) - sy)   # (P, chunk)
+        nearest = np.argmin(d, axis=1)
+        nearest_d = d[np.arange(P), nearest]
+        better = nearest_d < best_d
+        best_d = np.where(better, nearest_d, best_d)
+        best_elev = np.where(better, se[nearest], best_elev)
+    w = np.clip((outer - best_d) / (outer - inner), 0.0, 1.0)
     w = w * w * (3 - 2 * w)
-    out = w * (nearest_elev - drop) + (1 - w) * elev_grid.reshape(-1)
-    return out.reshape(elev_grid.shape)
+    out = w * (best_elev - drop) + (1 - w) * elev_grid.reshape(-1)
+    return out.reshape(shape)
+
+
+_MARTINI_CACHE = {}
+
+
+def _martini_for(n):
+    if n not in _MARTINI_CACHE:
+        _MARTINI_CACHE[n] = Martini(n)
+    return _MARTINI_CACHE[n]
+
+
+def fix_up_winding(verts_cm, tris):
+    """Flip any triangle whose UE-convention normal
+    (normalize(cross(V2-V0, V1-V0))) points down. martini's own winding is
+    unpredictable per-triangle (it's not building a regular quad grid), so
+    unlike the uniform-grid path below (which gets this right by
+    construction via a fixed (p, q, p+1) emission order) each adaptive
+    triangle has to be checked individually. See that path's own comment
+    for why this matters (2026-07-24 flat-terrain/no-grass bug)."""
+    v0 = verts_cm[tris[:, 0]]
+    v1 = verts_cm[tris[:, 1]]
+    v2 = verts_cm[tris[:, 2]]
+    normal_z = np.cross(v2 - v0, v1 - v0)[:, 2]
+    flip = normal_z < 0
+    out = tris.copy()
+    out[flip, 1], out[flip, 2] = tris[flip, 2], tris[flip, 1]
+    return out
+
+
+def build_seam_skirt(gx_cm, gy_cm, z_cm, n, drop_cm=None):
+    """Full-resolution (n-point) vertical curtain around all 4 edges of a
+    near tile, dropped `drop_cm` below the TRUE boundary elevation (not
+    whatever subset of it the adaptive mesh happened to keep).
+
+    Why this exists: adaptive martini triangulation does not reliably pick
+    the same sparse boundary vertex subset between two independently-built
+    neighboring tiles, even when the underlying elevation data is
+    bit-identical - measured 2026-07-28 (see MAX_ERROR_NEAR_M's comment):
+    5-11 point symmetric differences out of ~60-150 boundary points, on
+    tiles whose shared-edge elevation samples matched to the bit. So the
+    straight-line interpolation between one tile's chosen boundary points
+    can diverge from its neighbor's by up to MAX_ERROR_NEAR_M on each side -
+    a real, if thin, crack. This skirt reproduces the true full-density
+    elevation along the boundary and drops it well below that worst case,
+    hiding the crack under solid geometry - the same "gap hidden under
+    geometry" pattern road_mesh_common.py's own road skirt already uses for
+    the road-vs-terrain seam. Also covers the NEAR/FAR tile boundary, which
+    has an equivalent (pre-existing, not new) gap between the near tile's
+    dense edge and the far tile's coarse one.
+    """
+    if drop_cm is None:
+        drop_cm = SEAM_SKIRT_DROP_M * 100.0
+
+    # One continuous perimeter walk, each corner visited once.
+    idx = ([(i, 0) for i in range(n)]
+           + [(n - 1, j) for j in range(1, n)]
+           + [(i, n - 1) for i in range(n - 2, -1, -1)]
+           + [(0, j) for j in range(n - 2, 0, -1)])
+    ring_x = np.array([p[0] for p in idx])
+    ring_y = np.array([p[1] for p in idx])
+
+    top_x_cm = gx_cm[ring_y, ring_x]
+    top_y_cm = gy_cm[ring_y, ring_x]
+    top_z_cm = z_cm[ring_y, ring_x]
+    bot_z_cm = top_z_cm - drop_cm
+
+    m = len(idx)
+    top_verts = np.stack([top_x_cm, top_y_cm, top_z_cm], axis=-1)
+    bot_verts = np.stack([top_x_cm, top_y_cm, bot_z_cm], axis=-1)
+    verts = np.concatenate([top_verts, bot_verts], axis=0).astype(np.float32)
+    ring_uv = np.stack([ring_x / (n - 1), ring_y / (n - 1)], axis=-1)
+    uvs = np.concatenate([ring_uv, ring_uv], axis=0).astype(np.float32)
+
+    center_x_cm = float(gx_cm.min() + gx_cm.max()) / 2.0
+    center_y_cm = float(gy_cm.min() + gy_cm.max()) / 2.0
+    k = np.arange(m)
+    k2 = (k + 1) % m
+    t0, t1, b0, b1 = k, k2, m + k, m + k2
+    quad_tris = np.concatenate([
+        np.stack([t0, t1, b1], axis=-1),
+        np.stack([t0, b1, b0], axis=-1),
+    ], axis=0)
+
+    v0p, v1p, v2p = verts[quad_tris[:, 0]], verts[quad_tris[:, 1]], verts[quad_tris[:, 2]]
+    normal = np.cross(v2p - v0p, v1p - v0p)
+    mid = (v0p + v1p + v2p) / 3.0
+    outward_x = mid[:, 0] - center_x_cm
+    outward_y = mid[:, 1] - center_y_cm
+    flip = (normal[:, 0] * outward_x + normal[:, 1] * outward_y) < 0
+    tris = quad_tris.copy()
+    tris[flip, 1], tris[flip, 2] = quad_tris[flip, 2], quad_tris[flip, 1]
+
+    return verts, uvs, tris.astype(np.uint32)
 
 
 def build_tile(tx, ty, is_near, station_data, session, caches):
@@ -355,9 +424,11 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # is purely a speed optimization for far tiles with thousands of
     # stations elsewhere on the route)
     prefilter_m = TERRAIN_CARVE_OUTER_M + 500.0
-    # st_exclude = is_bridge OR an auto-detected different-segment elevation
-    # conflict (see detect_elevation_conflicts) - both mean "don't carve
+    # st_exclude = is_bridge OR an auto-detected elevation conflict (see
+    # road_mesh_common.classify_wall_stations) - both mean "don't carve
     # toward this station, the ground here belongs to something else"
+    # (either a real structure, or - for wall-eligible conflicts - a
+    # generated retaining wall covers the gap instead)
     keep = (~st_exclude) & (
         np.hypot(np.clip(st_x_cm, x0_cm, x1_cm) - st_x_cm,
                  np.clip(st_y_cm, y0_cm, y1_cm) - st_y_cm) / 100.0 <= prefilter_m)
@@ -367,29 +438,53 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
 
     z_cm = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) * 100.0
 
-    verts = np.stack([gx_cm, gy_cm, z_cm], axis=-1).reshape(-1, 3).astype(np.float32)
-    ii, jj = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
-    uvs = np.stack([ii, jj], axis=-1).reshape(-1, 2).astype(np.float32)
+    if is_near:
+        # AUDIT.md item 1: adaptive martini triangulation instead of a
+        # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. `elev`
+        # (meters, pre-UE-Z-shift) is what martini simplifies against;
+        # road_ue_z_m is a pure additive shift (road_mesh_common.py) so an
+        # error tolerance in DEM meters is identical to one in UE-Z meters.
+        tile = _martini_for(n).create_tile(elev.astype(np.float32))
+        grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M)
+        grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
+        gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]
 
-    # Winding must put the front face / computed vertex normal UP (+Z). UE's
-    # triangle-normal convention (VectorUtil::Normal) is
-    # normalize(cross(V2-V0, V1-V0)) - reversed vs. the usual right-handed
-    # cross for its left-handed coordinate system - so a grid quad emitted as
-    # (p, p+1, q) actually faces DOWN (fixed 2026-07-24: that inverted winding
-    # made FMeshNormals::ComputeVertexNormals fill AODTerrainManager's normal
-    # overlay pointing down, so the ground material's sun lighting hit the terrain
-    # as a back-face and every tile read as flat blue sky-ambient - the "no
-    # terrain / no grass" bug). Emitting (p, q, p+1) / (p+1, q, q+1) faces the
-    # top up, matching the road pipeline's own convention (road tiles verify
-    # 100% up-normals, terrain now does too).
-    tris = []
-    for j in range(n - 1):
-        b = j * n
-        for i in range(n - 1):
-            p, q = b + i, b + i + n
-            tris.append((p, q, p + 1))
-            tris.append((p + 1, q, q + 1))
-    tris = np.array(tris, dtype=np.uint32)
+        verts = np.stack([gx_cm[gyi, gxi], gy_cm[gyi, gxi], z_cm[gyi, gxi]],
+                          axis=-1).astype(np.float32)
+        uvs = np.stack([gxi / (n - 1), gyi / (n - 1)], axis=-1).astype(np.float32)
+        tris = fix_up_winding(verts, martini_tris.reshape(-1, 3).astype(np.uint32))
+
+        skirt_verts, skirt_uvs, skirt_tris = build_seam_skirt(gx_cm, gy_cm, z_cm, n)
+        base = len(verts)
+        verts = np.concatenate([verts, skirt_verts], axis=0)
+        uvs = np.concatenate([uvs, skirt_uvs], axis=0)
+        tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
+    else:
+        # Uniform grid, unchanged - far tiles are already coarse/cheap and
+        # have no collision, so adaptive triangulation isn't worth it here.
+        verts = np.stack([gx_cm, gy_cm, z_cm], axis=-1).reshape(-1, 3).astype(np.float32)
+        ii, jj = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
+        uvs = np.stack([ii, jj], axis=-1).reshape(-1, 2).astype(np.float32)
+
+        # Winding must put the front face / computed vertex normal UP (+Z). UE's
+        # triangle-normal convention (VectorUtil::Normal) is
+        # normalize(cross(V2-V0, V1-V0)) - reversed vs. the usual right-handed
+        # cross for its left-handed coordinate system - so a grid quad emitted as
+        # (p, p+1, q) actually faces DOWN (fixed 2026-07-24: that inverted winding
+        # made FMeshNormals::ComputeVertexNormals fill AODTerrainManager's normal
+        # overlay pointing down, so the ground material's sun lighting hit the terrain
+        # as a back-face and every tile read as flat blue sky-ambient - the "no
+        # terrain / no grass" bug). Emitting (p, q, p+1) / (p+1, q, q+1) faces the
+        # top up, matching the road pipeline's own convention (road tiles verify
+        # 100% up-normals, terrain now does too).
+        tris = []
+        for j in range(n - 1):
+            b = j * n
+            for i in range(n - 1):
+                p, q = b + i, b + i + n
+                tris.append((p, q, p + 1))
+                tris.append((p + 1, q, q + 1))
+        tris = np.array(tris, dtype=np.uint32)
 
     return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
 
@@ -427,7 +522,7 @@ def classify_tiles(station_data):
 
 
 def main():
-    lat0, lon0, east, north, elev, exclude = load_stations()
+    lat0, lon0, east, north, elev, exclude, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
     station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude)
 

@@ -20,7 +20,10 @@ def log(msg):
 
 
 n = 0
-for path in ("/Game/OpenDrive/Materials/M_Road",):
+for path in (
+    "/Game/OpenDrive/Materials/M_Road",
+    "/Game/OpenDrive/Materials/M_Road_OneWay",
+):
     m = unreal.load_asset(path)
     if not m:
         log(f"missing {path}")

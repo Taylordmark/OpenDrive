@@ -35,17 +35,37 @@ Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
                                # tagged span, regardless of this flag - DEM
                                # under a bridge is whatever's really there
                                # (river, valley), not deck height.
+         "is_tunnel": [...],  # bool per station (2026-07-28, AUDIT.md item 3)
+                               # - the tunnel subset of is_bridge's "structure"
+                               # bit, kept separate so a consumer can tell a
+                               # tunnel (no pavement should be drawn through
+                               # solid rock) apart from a bridge (should draw
+                               # an elevated deck). build_road_network.py uses
+                               # this to truncate the visible road ribbon at
+                               # each portal while elev_m stays populated for
+                               # a future real-bore pass.
          "road_name": [...],  # display name per station (2026-07-23, Arc
                                # "place labels" feature) - the source way's
                                # OSM name tag, falling back to ref (e.g.
                                # "WA-20") - nearest-original-station lookup,
                                # not interpolated (see main()).
+         "highway_class": [...],  # OSM highway= value per station
+                               # (2026-07-28) - "" if the way had no highway
+                               # tag. Nearest-original-station lookup, same
+                               # as road_name. Drives per-class grade/grade-
+                               # change limits in road_mesh_common's
+                               # ROAD_CLASS_GRADE; kept in the output too so
+                               # downstream consumers (speed limits, HUD)
+                               # aren't stuck re-deriving it from raw OSM.
          "east_m": [...], "north_m": [...], "s_m": [...],
-         "elev_m": [...]}   # grade-smoothed absolute DEM elevation (or
-                             # interpolated, for is_bridge stations) - NOT
-                             # yet shifted by ROAD_LIFT or ORIGIN_HEIGHT_M
-                             # (that's a UE-frame concern, applied by
-                             # consumers via road_mesh_common.road_ue_z_m())
+         "elev_m": [...]}   # grade-CONFORMING absolute DEM elevation (rides
+                             # the real ground; only deviates via cut/bridge/
+                             # tunnel where max_grade forces it to - never
+                             # terrain-smoothed) or interpolated, for
+                             # is_bridge stations - NOT yet shifted by
+                             # ROAD_LIFT or ORIGIN_HEIGHT_M (that's a UE-
+                             # frame concern, applied by consumers via
+                             # road_mesh_common.road_ue_z_m())
       ]
     }
 
@@ -59,7 +79,6 @@ being viable once test areas grew past Palmdale's compact scale.
 
 import json
 import math
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -67,7 +86,10 @@ import requests
 
 from test_areas import AREA_NAME, BBOX_SNWE
 from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
-from road_mesh_common import STATION_SPACING, MAX_GRADE, resample_stations, grade_smooth_elevation
+from road_mesh_common import (STATION_SPACING, resample_stations,
+                               grade_smooth_elevation, road_class_grade_arrays,
+                               despike_ground, clamp_plausible_elevation,
+                               classify_wall_stations)
 
 # ---------------------------------------------------------------- config
 DEM_ZOOM = 15                   # matches build_terrain_tiles.py's MAX_ZOOM
@@ -102,15 +124,28 @@ CARVE_BUFFER_FRAC = 0.30
 # the same fix (exclude from carving), NOT elevation interpolation (unlike
 # a bridge deck, each side's elev_m IS correct DEM elevation already, so
 # fill_structure_gaps() must NOT run on these - only carve-exclusion).
-CONFLICT_RADIUS_M = 40.0   # matches build_terrain_tiles.py's CARVE_OUTER_M (not imported - that module imports FROM this one's output, not the reverse)
-CONFLICT_MIN_ELEV_DELTA_M = 5.0   # was 15.0 - verify_road_fit.py's ok range is only [-2.0,+0.2]m, so ANY
-                                  # cross-chain elevation gap much past that within CONFLICT_RADIUS_M can blow
-                                  # the gate; 15.0 missed a second, smaller-magnitude wave of the same failure
-                                  # class (7.7-11.2m deltas at 2-9m range, found 2026-07-25 re-running the gate
-                                  # after the first fix). 5.0 stays safely below MAX_GRADE's (0.10) own natural
-                                  # same-chain climb over CONFLICT_RADIUS_M (~4m) to avoid flagging normal grade.
-CONFLICT_SAME_CHAIN_GAP_STATIONS = 8   # ~40m at 5m spacing - skip flagging merely-adjacent stations on the same chain (already MAX_GRADE-clamped)
-CONFLICT_EXCLUDE_STATIONS = 8      # dilate each flagged station's carve-exclusion this many stations each way (~CONFLICT_RADIUS_M at 5m spacing)
+# CONFLICT_RADIUS_M/CONFLICT_MAX_GRADE/CONFLICT_MIN_GAP_M/
+# CONFLICT_SAME_CHAIN_GAP_STATIONS now live in road_mesh_common.py as the
+# single canonical set (2026-07-30 consolidation - see
+# classify_wall_stations()'s docstring), not duplicated here.
+CONFLICT_EXCLUDE_STATIONS = 8      # dilate each flagged station's carve-exclusion
+                                  # this many stations each way along its OWN
+                                  # chain (~40m at 5m spacing) so the excluded
+                                  # zone doesn't end on a single hard station -
+                                  # a distinct, along-chain-index concept from
+                                  # the spatial CONFLICT_RADIUS_M above, not
+                                  # meant to track its value
+
+# AUDIT.md item 3 (2026-07-28, bridges/tunnels): a plausibility floor, not
+# derived from any specific vertical-clearance code - just enough that a
+# bridge visibly clears the ground it crosses instead of grazing it.
+MIN_BRIDGE_CLEARANCE_M = 4.0
+# Generous vs MAX_GRADE (0.10) on purpose - same reasoning as
+# CONFLICT_MAX_GRADE below: only flag a structure span too steep for ANY
+# plausible real bridge/tunnel, not just an unusually steep one. This is a
+# WARNING, not a rejection - a real OSM road never gets deleted for being
+# steep, see the 2026-07-28 conversation for why.
+STRUCTURE_GRADE_WARN = 0.15
 
 M_PER_DEG_LAT = 111132.0
 
@@ -192,50 +227,13 @@ def expand_carve_exclusion(is_structure, buffer_frac=0.10):
     return out
 
 
-def detect_elevation_conflicts(seg_lon, seg_lat, seg_elev, seg_idx, station_idx,
-                                radius_m=CONFLICT_RADIUS_M,
-                                min_delta_m=CONFLICT_MIN_ELEV_DELTA_M,
-                                same_chain_gap=CONFLICT_SAME_CHAIN_GAP_STATIONS):
-    """Flag stations (across the WHOLE network, not per-segment) that sit
-    within radius_m of another station - on a different chain, or far along
-    the SAME chain (a real switchback looping back on itself) - whose real
-    elevation differs by more than min_delta_m. See CONFLICT_RADIUS_M's
-    comment for why this exists. Grid-bucketed (cell size = radius_m) so
-    this stays roughly linear instead of O(n^2) across ~900k stations.
-    Returns a flat bool array parallel to the (seg_lon, seg_lat, ...) input,
-    True = this station's real elevation can't be reconciled with a nearby
-    station's within one carved terrain surface."""
-    n = len(seg_lon)
-    conflict = np.zeros(n, dtype=bool)
-    if n == 0:
-        return conflict
-    lat0 = float(np.mean(seg_lat))
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
-    cell_deg_lat = radius_m / M_PER_DEG_LAT
-    cell_deg_lon = radius_m / m_per_deg_lon
-    cell_lat = np.floor(seg_lat / cell_deg_lat).astype(np.int64)
-    cell_lon = np.floor(seg_lon / cell_deg_lon).astype(np.int64)
-    buckets = defaultdict(list)
-    for i in range(n):
-        buckets[(int(cell_lon[i]), int(cell_lat[i]))].append(i)
-    for i in range(n):
-        cx, cy = int(cell_lon[i]), int(cell_lat[i])
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for j in buckets.get((cx + dx, cy + dy), ()):
-                    if j <= i:
-                        continue
-                    if (seg_idx[i] == seg_idx[j]
-                            and abs(int(station_idx[i]) - int(station_idx[j])) <= same_chain_gap):
-                        continue   # merely-adjacent stations on the same chain, already grade-clamped
-                    if abs(seg_elev[i] - seg_elev[j]) < min_delta_m:
-                        continue
-                    dlat_m = (seg_lat[j] - seg_lat[i]) * M_PER_DEG_LAT
-                    dlon_m = (seg_lon[j] - seg_lon[i]) * m_per_deg_lon
-                    if math.hypot(dlat_m, dlon_m) <= radius_m:
-                        conflict[i] = True
-                        conflict[j] = True
-    return conflict
+# detect_elevation_conflicts used to live here (lon/lat frame, 40m/flat-5m-
+# delta threshold) as an independent, differently-parameterized twin of
+# build_terrain_mesh_tiles.py's own local-meter/grade-based version - the two
+# disagreed with each other by construction. Both are now
+# road_mesh_common.classify_wall_stations() (single canonical
+# implementation, called here AND by build_terrain_mesh_tiles.py against the
+# same final station data) - see that function's docstring.
 
 
 def dilate_1d(mask, radius_stations):
@@ -259,10 +257,20 @@ def fill_structure_gaps(ground, is_structure):
     """Replace DEM samples at bridge/tunnel stations with a straight-line
     interpolation between the nearest solid-ground station on each side,
     instead of trusting DEM elevation there (see is_structure_way()'s
-    docstring for why that's wrong, not just noisy). Runs BEFORE
-    grade_smooth_elevation() so the existing median-filter/grade-clamp
-    passes smooth the corrected ramp the same way they smooth everything
-    else - no separate bridge-specific smoothing needed."""
+    docstring for why that's wrong, not just noisy).
+
+    Called TWICE by main() (2026-07-28, AUDIT.md item 3): once on raw DEM
+    ground as a placeholder BEFORE grade_smooth_elevation(), purely so that
+    function's median-filter/gaussian windows don't ingest raw under-
+    structure DEM noise (river/valley/another-road elevation) near a span's
+    edges; then AGAIN on the smoothed result, to recompute the structure
+    span from the FINAL smoothed abutment elevations. The second call is
+    the one that matters - it overwrites whatever the median filter and
+    grade clamp did to the first call's placeholder ramp, since those passes
+    have no idea a bridge deck's climb onto its abutment is deliberate and
+    will otherwise chop it back down toward the surrounding low ground
+    (measured: this, not the interpolation itself, is why 39% of H-3 used to
+    sit within a metre of the dirt)."""
     ground = ground.copy()
     idx = np.arange(len(ground))
     good = ~is_structure
@@ -270,6 +278,20 @@ def fill_structure_gaps(ground, is_structure):
         return ground   # nothing to anchor interpolation to - leave as-is
     ground[~good] = np.interp(idx[~good], idx[good], ground[good])
     return ground
+
+
+def _contiguous_true_runs(mask):
+    """Yields (first_idx, last_idx) - inclusive - for each contiguous True
+    run in a bool array. Used to find each bridge/tunnel span's abutment/
+    portal station pair for the grade sanity check."""
+    idx = np.where(mask)[0]
+    if len(idx) == 0:
+        return
+    breaks = np.where(np.diff(idx) > 1)[0]
+    starts = np.concatenate([[0], breaks + 1])
+    ends = np.concatenate([breaks, [len(idx) - 1]])
+    for a, b in zip(starts, ends):
+        yield int(idx[a]), int(idx[b])
 
 
 def dem_sample_sparse(tiles, lat_arr, lon_arr):
@@ -318,12 +340,31 @@ def is_structure_way(tags):
     return tags.get("bridge") not in (None, "no") or tags.get("tunnel") not in (None, "no")
 
 
+def is_tunnel_way(tags):
+    """True for the tunnel subset of is_structure_way() - kept as its own
+    flag (2026-07-28, AUDIT.md item 3) so downstream consumers can tell a
+    tunnel (no pavement should be drawn through solid rock - the terrain
+    isn't carved for it either) apart from a bridge (should draw an
+    elevated deck). Both used to collapse into one "structure" bit, which
+    meant nothing downstream could treat them differently."""
+    return tags.get("tunnel") not in (None, "no")
+
+
 def way_name(tags):
     """Display name for a way - real street/route name if OSM has one,
     falling back to the route number (e.g. "WA-20") so an unnamed state
     route still shows something meaningful on the HUD label. Empty string
     if neither tag exists (rare for anything merge_way_chains kept)."""
     return tags.get("name") or tags.get("ref") or ""
+
+
+def highway_class(tags):
+    """This way's OSM highway= value ("motorway", "residential", ...) -
+    road_mesh_common.ROAD_CLASS_GRADE keys off this to pick per-class grade/
+    grade-change limits (2026-07-28: fast roads need a gentler grade AND a
+    much gentler grade-change than slow ones). Empty string (falls back to
+    DEFAULT_ROAD_CLASS_GRADE) if the way has no highway tag at all."""
+    return tags.get("highway") or ""
 
 
 def is_oneway_way(tags):
@@ -344,15 +385,21 @@ def merge_way_chains(ways):
     between two fixed endpoints, one route) into an actual road NETWORK -
     the graph itself is the same "way = edge, endpoint = node" model, just
     walked as connected chains instead of shortest-pathed. Returns a list
-    of (node_id_chain, is_structure_chain, name_chain, is_oneway_chain)
-    4-tuples - the 2nd array flags which nodes came from a bridge/tunnel
-    way, the 3rd carries each node's source way's display name
-    (way_name()), the 4th flags one-way carriageways (is_oneway_way()), all
-    parallel to the first."""
+    of (node_id_chain, is_structure_chain, is_tunnel_chain, name_chain,
+    is_oneway_chain, highway_chain) 6-tuples - the 2nd array flags which
+    nodes came from a bridge/tunnel way, the 3rd flags the tunnel subset
+    specifically (see is_tunnel_way()), the 4th carries each node's source
+    way's display name (way_name()), the 5th flags one-way carriageways
+    (is_oneway_way()), the 6th carries each node's source way's OSM
+    highway= class (highway_class()) - used to pick per-class grade/grade-
+    change limits, not thrown away even though it isn't rendered directly -
+    all parallel to the first."""
     edges = []
     edge_structure = []
+    edge_tunnel = []
     edge_name = []
     edge_oneway = []
+    edge_highway = []
     adj = {}
     for w in ways:
         nds = w["nodes"]
@@ -361,8 +408,10 @@ def merge_way_chains(ways):
         i = len(edges)
         edges.append(nds)
         edge_structure.append(is_structure_way(w.get("tags", {})))
+        edge_tunnel.append(is_tunnel_way(w.get("tags", {})))
         edge_name.append(way_name(w.get("tags", {})))
         edge_oneway.append(is_oneway_way(w.get("tags", {})))
+        edge_highway.append(highway_class(w.get("tags", {})))
         adj.setdefault(nds[0], []).append(i)
         if nds[-1] != nds[0]:
             adj.setdefault(nds[-1], []).append(i)
@@ -373,8 +422,10 @@ def merge_way_chains(ways):
         nds = edges[i]
         chain = list(nds) if forward else list(reversed(nds))
         struct = [edge_structure[i]] * len(nds)
+        tunnel = [edge_tunnel[i]] * len(nds)
         names = [edge_name[i]] * len(nds)
         oneway = [edge_oneway[i]] * len(nds)
+        highway = [edge_highway[i]] * len(nds)
         used[i] = True
         while True:
             tail = chain[-1]
@@ -391,9 +442,11 @@ def merge_way_chains(ways):
             used[wi] = True
             chain.extend(nxt[1:])
             struct.extend([edge_structure[wi]] * (len(nxt) - 1))
+            tunnel.extend([edge_tunnel[wi]] * (len(nxt) - 1))
             names.extend([edge_name[wi]] * (len(nxt) - 1))
             oneway.extend([edge_oneway[wi]] * (len(nxt) - 1))
-        return chain, struct, names, oneway
+            highway.extend([edge_highway[wi]] * (len(nxt) - 1))
+        return chain, struct, tunnel, names, oneway, highway
 
     chains = []
     for i, nds in enumerate(edges):
@@ -428,12 +481,13 @@ def main():
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     scored = []
-    for chain, struct, names, oneway in chains:
+    for chain, struct, tunnel, names, oneway, highway in chains:
         latlon = np.array([nodes[n] for n in chain])
         is_struct = np.array(struct, dtype=bool)
+        is_tunnel = np.array(tunnel, dtype=bool)
         length = float(np.sum(np.hypot(np.diff(latlon[:, 0]) * M_PER_DEG_LAT,
                                         np.diff(latlon[:, 1]) * m_per_deg_lon)))
-        scored.append((length, latlon, is_struct, names, oneway))
+        scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway))
     scored.sort(key=lambda t: -t[0])
 
     # only fetch DEM tiles for chains that will actually become segments
@@ -441,17 +495,18 @@ def main():
     # fragment/link-ramp the ref-filtered OSM fetch happened to include.
     kept = [t for t in scored
             if t[0] >= MIN_SEGMENT_STATIONS * STATION_SPACING][:MAX_SEGMENTS]
-    all_lat = np.concatenate([latlon[:, 0] for _, latlon, _, _, _ in kept])
-    all_lon = np.concatenate([latlon[:, 1] for _, latlon, _, _, _ in kept])
+    all_lat = np.concatenate([latlon[:, 0] for _, latlon, _, _, _, _, _ in kept])
+    all_lon = np.concatenate([latlon[:, 1] for _, latlon, _, _, _, _, _ in kept])
     dem_tiles = fetch_dem_tiles_sparse(all_lat, all_lon)
-    n_struct_nodes = sum(int(is_struct.sum()) for _, _, is_struct, _, _ in kept)
+    n_struct_nodes = sum(int(is_struct.sum()) for _, _, is_struct, _, _, _, _ in kept)
     if n_struct_nodes:
         print(f"{n_struct_nodes} bridge/tunnel node(s) across kept chains - "
               f"DEM will be skipped and interpolated across those spans")
 
     segments = []
     total_km = 0.0
-    for idx, (length, latlon, is_struct, names, oneway) in enumerate(kept):
+    n_grade_warnings = 0
+    for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway) in enumerate(kept):
         east = (latlon[:, 1] - lon0) * m_per_deg_lon
         north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
         s, e, n = resample_stations(east, north, STATION_SPACING)
@@ -466,6 +521,7 @@ def main():
         # end by a station or two doesn't matter).
         d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(east), np.diff(north)))])
         is_struct_s = np.interp(s, d, is_struct.astype(float)) > 0.5
+        is_tunnel_s = np.interp(s, d, is_tunnel.astype(float)) > 0.5
         # road_name is categorical (not a 0..1 signal like is_struct), so
         # nearest-original-station lookup, not interpolation - a road label
         # doesn't need sub-station precision at a name-change boundary the
@@ -481,32 +537,100 @@ def main():
         # not interp+threshold - a carriageway doesn't partially become
         # one-way mid-station.
         is_oneway_s = [bool(oneway[j]) for j in nearest_orig]
-        ground = dem_sample_sparse(dem_tiles, lat_s, lon_s)
-        ground = fill_structure_gaps(ground, is_struct_s)
-        h = grade_smooth_elevation(ground, STATION_SPACING, MAX_GRADE)
+        # highway class is categorical too (nearest-station lookup, same as
+        # road_name_s/is_oneway_s) - feeds road_class_grade_arrays() below
+        # so grade/grade-change limits track the real OSM road class instead
+        # of one flat constant for every road.
+        highway_s = [highway[j] for j in nearest_orig]
+        max_grade_s, max_grade_delta_s = road_class_grade_arrays(highway_s)
+
+        raw_ground = dem_sample_sparse(dem_tiles, lat_s, lon_s)
+        # 2026-07-29: two independent guards against corrupt Terrarium DEM
+        # data before anything downstream - including fill_structure_gaps()'s
+        # solid-ground anchors and the bridge clearance floor below - trusts
+        # raw_ground. Order matters: clamp the impossible-range case first
+        # (a sustained bad tile stretch, which despike can't see because
+        # nothing "bounces back") so despike's own neighbor comparisons
+        # aren't themselves poisoned by an unclamped extreme value. See
+        # ELEV_PLAUSIBLE_MIN_M/MAX_M and DEM_SPIKE_THRESHOLD_M in
+        # road_mesh_common.py.
+        raw_ground = clamp_plausible_elevation(raw_ground)
+        raw_ground = despike_ground(raw_ground)
+        # AUDIT.md item 3 (2026-07-28): placeholder-fill first so
+        # grade_smooth_elevation's envelope clamp near a span's edges
+        # doesn't ingest raw under-structure DEM noise, THEN re-fill from
+        # the final elevation-conforming abutment elevations, overwriting
+        # whatever the clamp did inside the span - see fill_structure_gaps()'s
+        # docstring for why calling it only once (before the clamp, as this
+        # used to) let the deck sag toward the ground it should clear.
+        placeholder = fill_structure_gaps(raw_ground, is_struct_s)
+        h = grade_smooth_elevation(placeholder, STATION_SPACING, max_grade_s, max_grade_delta_s)
+        h = fill_structure_gaps(h, is_struct_s)
+
+        # Minimum-clearance floor, bridges only - tunnels belong at/below
+        # grade, lifting one would be exactly backwards. Safety net on top
+        # of the reorder above: a straight abutment-to-abutment line should
+        # already clear a normal valley by construction, but a valley that
+        # bulges up mid-span, or a badly-anchored abutment, could still
+        # leave the deck closer to the ground than a real bridge would be.
+        is_bridge_only_s = is_struct_s & ~is_tunnel_s
+        if is_bridge_only_s.any():
+            clearance_floor = raw_ground + MIN_BRIDGE_CLEARANCE_M
+            h = np.where(is_bridge_only_s, np.maximum(h, clearance_floor), h)
+
+        # Log-only grade sanity check (2026-07-28): an abutment-to-abutment
+        # (or portal-to-portal) grade steeper than any plausible real
+        # structure usually means a mis-tagged way or a bad abutment pick,
+        # not a real bridge/tunnel that just happens to be steep - worth a
+        # human look, but never a reason to delete a real OSM road.
+        for run_lo, run_hi in _contiguous_true_runs(is_struct_s):
+            span_m = s[run_hi] - s[run_lo]
+            if span_m <= 0:
+                continue
+            grade = abs(h[run_hi] - h[run_lo]) / span_m
+            if grade > STRUCTURE_GRADE_WARN:
+                n_grade_warnings += 1
+                kind = "tunnel" if is_tunnel_s[run_lo] else "bridge"
+                print(f"  WARNING: seg{idx:03d} {kind} span [{run_lo}:{run_hi}] "
+                      f"({span_m:.0f} m) grade {grade * 100:.1f}% exceeds "
+                      f"{STRUCTURE_GRADE_WARN * 100:.0f}% sanity ceiling - "
+                      f"check the OSM tag/abutment detection")
+
         name = f"seg{idx:03d}"
         segments.append({
             "name": name, "length": length, "lat_s": lat_s, "lon_s": lon_s,
-            "is_struct_s": is_struct_s, "road_name_s": road_name_s,
+            "is_struct_s": is_struct_s, "is_tunnel_s": is_tunnel_s,
+            "road_name_s": road_name_s,
             "is_oneway_s": is_oneway_s,
+            "highway_s": highway_s,
             "e": e, "n": n, "s": s, "h": h,
         })
         total_km += length / 1000.0
 
     if not segments:
         raise SystemExit("No segments met the minimum length - check the OSM fetch/bbox.")
+    if n_grade_warnings:
+        print(f"{n_grade_warnings} structure span(s) exceeded the "
+              f"{STRUCTURE_GRADE_WARN * 100:.0f}% grade sanity ceiling (see WARNING lines above)")
 
     # cross-segment elevation-conflict pass (2026-07-25) - needs every
     # segment's final resampled stations first, hence deferred until after
     # the loop above instead of computed inline per-segment like is_struct_s
     # (which only ever needs its OWN chain's data). See
-    # detect_elevation_conflicts()'s docstring for what this catches.
-    all_lon = np.concatenate([seg["lon_s"] for seg in segments])
-    all_lat = np.concatenate([seg["lat_s"] for seg in segments])
+    # road_mesh_common.classify_wall_stations()'s docstring for what this catches.
+    all_east = np.concatenate([seg["e"] for seg in segments])
+    all_north = np.concatenate([seg["n"] for seg in segments])
     all_elev = np.concatenate([seg["h"] for seg in segments])
-    all_seg_idx = np.concatenate([np.full(len(seg["lon_s"]), i) for i, seg in enumerate(segments)])
-    all_station_idx = np.concatenate([np.arange(len(seg["lon_s"])) for seg in segments])
-    conflict_flat = detect_elevation_conflicts(all_lon, all_lat, all_elev, all_seg_idx, all_station_idx)
+    all_seg_idx = np.concatenate([np.full(len(seg["e"]), i) for i, seg in enumerate(segments)])
+    all_station_idx = np.concatenate([np.arange(len(seg["e"])) for seg in segments])
+    all_road_name = [name for seg in segments for name in seg["road_name_s"]]
+    # exclude here folds BOTH wall-eligible (in-scope, steep) and out-of-scope
+    # (e.g. freeway/ramp) conflicts into is_bridge-style carve exclusion -
+    # this file doesn't build wall geometry itself (that's
+    # build_retaining_walls.py, run later against this script's own output),
+    # it only needs to know which stations the terrain carve must skip.
+    conflict_flat, _wall_pairs_unused = classify_wall_stations(
+        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
     n_conflict_stations = int(conflict_flat.sum())
     offsets = np.concatenate([[0], np.cumsum([len(seg["lon_s"]) for seg in segments])])
     if n_conflict_stations:
@@ -532,8 +656,10 @@ def main():
             "lat": [round(float(v), 7) for v in seg["lat_s"]],
             "lon": [round(float(v), 7) for v in seg["lon_s"]],
             "is_bridge": [bool(v) for v in is_bridge_out],
+            "is_tunnel": [bool(v) for v in seg["is_tunnel_s"]],
             "road_name": seg["road_name_s"],
             "oneway": seg["is_oneway_s"],
+            "highway_class": seg["highway_s"],
             "east_m": [round(float(v), 2) for v in seg["e"]],
             "north_m": [round(float(v), 2) for v in seg["n"]],
             "s_m": [round(float(v), 2) for v in seg["s"]],

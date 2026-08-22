@@ -18,6 +18,12 @@ the shared elev_m by ROAD_LIFT, shift into the old georeference actor's
 CARTOGRAPHIC_ORIGIN frame (road_mesh_common.road_ue_z_m - see that function's
 docstring for why the shift exists), then build banked/skirted geometry via
 road_mesh_common.build_road_chunks (unchanged math, shared with the Dragon).
+
+Tunnels (2026-07-28, AUDIT.md item 3): a segment is split on its is_tunnel
+stretches (split_excluding_tunnels()) before meshing, so no ribbon gets
+built through a tunnel span at all - the road visibly ends at each portal.
+Only the visible geometry is stubbed out; road_stations.json still carries
+real elev_m through the tunnel for a future real-bore pass.
 """
 
 import json
@@ -34,29 +40,79 @@ OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
 STATIONS_PATH = OUT / "road_stations.json"
 
 
+def split_excluding_tunnels(is_tunnel):
+    """Yields (lo, hi) index ranges (Python slice convention) covering each
+    contiguous non-tunnel stretch of a segment's stations, skipping tunnel-
+    flagged stretches entirely. AUDIT.md item 3 (2026-07-28): tunnels get no
+    visible road ribbon at all - pavement stops at each portal instead of
+    running through solid rock the terrain was never carved for - while
+    road_stations.json still carries real elev_m through the tunnel for a
+    future real-bore pass to consume without redoing any of this."""
+    n = len(is_tunnel)
+    i = 0
+    while i < n:
+        if is_tunnel[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not is_tunnel[j]:
+            j += 1
+        yield i, j
+        i = j
+
+
 def main():
     if not STATIONS_PATH.exists():
         raise SystemExit(f"{STATIONS_PATH} not found - run build_road_stations.py first.")
     data = json.loads(STATIONS_PATH.read_text())
     lat0, lon0 = data["origin_latlon"]
 
+    MIN_RUN_STATIONS = 2   # a lone leftover station either side of a tunnel
+                            # portal can't form a chunk (build_road_chunks
+                            # needs at least 2 points for its tangent calc)
+
     segments = []
     segment_geoms = []   # (cx, cy, cz) per built segment, for center-based player-start pick
     total_km = 0.0
+    n_tunnel_truncated = 0
     for seg in data["segments"]:
-        s = np.array(seg["s_m"])
-        e = np.array(seg["east_m"])
-        n = np.array(seg["north_m"])
-        h = np.array(seg["elev_m"])
-        z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
-        is_oneway = seg.get("oneway")   # absent in older road_stations.json - defaults to two-way
-        chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=seg["name"],
-                                               spacing=STATION_SPACING, is_oneway=is_oneway)
-        segments.append({"name": seg["name"], "chunks": chunks})
-        segment_geoms.append((cx, cy, cz))
-        length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0
-        total_km += length_km
-        print(f"  {seg['name']}: {length_km:.2f} km, {len(chunks)} chunk(s)")
+        s_full = np.array(seg["s_m"])
+        e_full = np.array(seg["east_m"])
+        n_full = np.array(seg["north_m"])
+        h_full = np.array(seg["elev_m"])
+        # AUDIT.md item 3 (2026-07-28): no visible ribbon through tunnels -
+        # split each segment on its is_tunnel stretches and mesh only the
+        # non-tunnel runs, so pavement stops at each portal instead of
+        # continuing through solid rock the terrain isn't carved for. elev_m
+        # for the tunnel stations themselves is untouched in road_stations.json,
+        # so a future real-bore pass has everything it needs without redoing
+        # this script's work. Absent in older road_stations.json -> no tunnels.
+        is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
+        is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
+        runs = list(split_excluding_tunnels(is_tunnel))
+        if len(runs) > 1:
+            n_tunnel_truncated += 1
+        for run_idx, (lo, hi) in enumerate(runs):
+            if hi - lo < MIN_RUN_STATIONS:
+                continue
+            s = s_full[lo:hi]
+            e = e_full[lo:hi]
+            n = n_full[lo:hi]
+            h = h_full[lo:hi]
+            z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
+            is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
+            name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
+            chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
+                                                   spacing=STATION_SPACING, is_oneway=is_oneway)
+            segments.append({"name": name, "chunks": chunks})
+            segment_geoms.append((cx, cy, cz))
+            length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0
+            total_km += length_km
+            tag = " [tunnel-truncated]" if len(runs) > 1 else ""
+            print(f"  {name}: {length_km:.2f} km, {len(chunks)} chunk(s){tag}")
+    if n_tunnel_truncated:
+        print(f"{n_tunnel_truncated} segment(s) had a tunnel span - "
+              f"pavement truncated at each portal")
 
     if not segment_geoms:
         raise SystemExit("No segments in road_stations.json - check build_road_stations.py's output.")

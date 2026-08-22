@@ -74,6 +74,24 @@ void AODMainMenu::BeginPlay()
 	{
 		return;
 	}
+	// THE actual "still under/inside the car" bug (2026-07-28) - found only
+	// after several rounds of camera fixes (arm length, collision, lag, a
+	// full rewrite to bypass the spring arm entirely) all produced the
+	// IDENTICAL rendered frame, which a logged comparison finally explained:
+	// APlayerCameraManager doesn't tick while the game is paused (default UE
+	// behavior), and this menu pauses the game within the first frame or two
+	// of boot - so the camera manager's cached view froze at whatever the
+	// very FIRST frame's raw, not-yet-positioned camera happened to be
+	// (before the spring arm had ticked even once to place it), and never
+	// updated again for the rest of the paused session. Every subsequent
+	// Camera/SpringArm change was real and correct - none of it was ever
+	// being picked up for rendering. This is the same "doesn't tick while
+	// paused" class of bug as AODVehiclePawn/AODScreenshotHook elsewhere in
+	// this session, just in an engine class this project doesn't subclass.
+	if (PC->PlayerCameraManager)
+	{
+		PC->PlayerCameraManager->PrimaryActorTick.bTickEvenWhenPaused = true;
+	}
 	EnableInput(PC);
 	if (InputComponent)
 	{
@@ -96,6 +114,7 @@ void AODMainMenu::BeginPlay()
 	// timers freeze once paused)
 	FParse::Value(FCommandLine::Get(), TEXT("odmenumap="), MenuMapAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odpick="), PickTown);
+	FParse::Value(FCommandLine::Get(), TEXT("odgo="), GoAt);
 	if (MenuMapAt > 0.0f)
 	{
 		FTSTicker::GetCoreTicker().AddTicker(
@@ -144,6 +163,21 @@ void AODMainMenu::BeginPlay()
 			}), 6.0f);
 	}
 
+	if (GoAt > 0.0f)
+	{
+		FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateWeakLambda(this, [this](float)
+			{
+				if (!bGoDone)
+				{
+					bGoDone = true;
+					StartAt(-1);
+					UE_LOG(LogTemp, Display, TEXT("ODMainMenu: -odgo started at PlayerStart"));
+				}
+				return false;
+			}), GoAt);
+	}
+
 	OpenMenu();
 }
 
@@ -154,7 +188,23 @@ void AODMainMenu::OpenMenu()
 	Selected = 0;
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
-	UGameplayStatics::SetGamePaused(this, true);
+	// Deliberately NOT pausing here (2026-07-28, unlike OpenGarage() below) -
+	// see this class's declaration comment for the full account, but the
+	// short version: pausing broke the showroom camera in a way that took
+	// several rounds of fixes (spring arm lag/collision/arm-length, a full
+	// rewrite bypassing the arm, then the camera manager's own tick) to even
+	// properly diagnose, because APlayerCameraManager's cached view simply
+	// stops updating the instant the world pauses - it froze at whatever the
+	// very first, not-yet-positioned frame looked like and never moved again
+	// for the rest of the menu, regardless of what the underlying Camera/
+	// SpringArm state actually was. The ONLY reason this menu paused at all
+	// was so the frozen preview pawn couldn't drive off - already guaranteed
+	// on its own by PlaceInShowroom's SetSimulatePhysics(false) (a
+	// non-simulating body ignores input-driven forces entirely), so pausing
+	// was never actually load-bearing for that goal. OpenGarage() still
+	// pauses because it opens MID-DRIVE, where the camera is already
+	// correctly positioned from live gameplay before the freeze - a working
+	// case this fix doesn't need to touch.
 	SetCursorVisible(true);
 }
 
@@ -445,7 +495,7 @@ void AODMainMenu::StartAt(int32 TownIdx)
 		return;
 	}
 
-	FVector2D Target;
+	FVector2D Target = FVector2D::ZeroVector;   // only read when bHaveTarget is true
 	float Yaw = Pawn->GetActorRotation().Yaw;
 	bool bHaveTarget = false;
 	if (AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld());
