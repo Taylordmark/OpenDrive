@@ -17,6 +17,8 @@ from collections import defaultdict
 
 import numpy as np
 
+from test_areas import ELEV_PLAUSIBLE_MAX_M, ELEV_PLAUSIBLE_MIN_M
+
 STATION_SPACING = 5.0        # m between road samples
 ROAD_HALF_WIDTH = 4.5        # m, asphalt edge
 SKIRT_EXTRA = 3.0            # m outward for embankment skirt
@@ -93,11 +95,14 @@ DEM_SPIKE_THRESHOLD_M = 60.0
 # catastrophic (falling through the world) reaches the game, but the
 # clipped stations are still WRONG, just boundedly wrong - the
 # STRUCTURE_GRADE_WARN sanity check downstream is what actually flags a
-# clipped run for a human to go look at the source tile. Range is
-# generous for Oahu specifically (real span is sea level to Ka'ala's
-# 1220 m) - not a general-purpose Hawaii/US constant.
-ELEV_PLAUSIBLE_MIN_M = -50.0
-ELEV_PLAUSIBLE_MAX_M = 1300.0
+# clipped run for a human to go look at the source tile.
+#
+# Moved to a per-area dict in test_areas.py (2026-08-22, PLAN-RELIABILITY.md
+# Phase 3 item 9) - this used to be one constant shared by every area,
+# which would have silently clipped real elevation in any future
+# mountainous area outside Oahu's range. Imported here (not redefined) so
+# every existing caller of clamp_plausible_elevation()'s default args below
+# keeps working unchanged.
 
 
 def road_class_grade_arrays(highway_classes):

@@ -715,9 +715,11 @@ void AODRoadManager::Tick(float DeltaSeconds)
 	}
 
 	// headless verification: `-odseam=N` runs the terrain-seam check N
-	// seconds after boot, once (same delayed-trigger pattern as -odshot)
-	static float SeamAt = -1.0f;
-	static bool bSeamParsed = false, bSeamDone = false;
+	// seconds after boot, once (same delayed-trigger pattern as -odshot).
+	// SeamAt/bSeamParsed/bSeamDone are instance members (see ODRoadManager.h)
+	// rather than function-local `static` - a new AODRoadManager instance is
+	// spawned fresh every PIE session, so this resets naturally per run
+	// instead of persisting for the life of the editor process.
 	if (!bSeamParsed)
 	{
 		bSeamParsed = true;

@@ -20,4 +20,18 @@ class OPENDRIVEUE_API AODScreenshotHook : public AActor
 public:
 	AODScreenshotHook();
 	virtual void Tick(float DeltaSeconds) override;
+
+private:
+	// -odshot=N QA hook state (2026-08-22: moved off function-local `static`
+	// into instance members - a `static` inside Tick() only initializes once
+	// per PROCESS, not once per PIE session, so triggering -odshot, stopping
+	// PIE, then starting a new PIE run in the same editor process left
+	// bShotDone still true from the previous run and the screenshot never
+	// fired again. An instance member is naturally fresh every PIE session
+	// since PIE spawns a brand-new AODScreenshotHook each time - same fix
+	// applied to AODForestManager/AODRoadManager's identical pattern).
+	double StartTime = -1.0;
+	float ShotAt = -1.0f;
+	bool bShotParsed = false;
+	bool bShotDone = false;
 };

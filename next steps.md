@@ -1888,6 +1888,108 @@ bridge approach) into something rideable at speed.
   speed table — ship now, tune by drive-test, same as every other feel
   parameter in this project.
 
+### 7.12 Retaining walls (Phase 1 switchbacks) — documented 2026-08-22, built 2026-07-30
+
+Undocumented until now (`AUDIT-RELIABILITY.md` § 6 flagged it: "the
+retaining-wall system (7/30) is entirely undocumented"). Filling that gap
+per `PLAN-RELIABILITY.md` item 11.
+
+**Why this exists:** § 7.11's grade-conforming envelope clamp can still hit
+a real switchback/hairpin where two nearby stretches of the SAME road (or
+the same OSM chain split across a break) pass close together in XY with a
+big enough elevation gap and steep enough grade that one terrain
+heightfield cannot represent both — think a mountain road climbing past
+almost directly above itself. Carving the terrain smoothly toward both
+stations there would either wash out one side of the switchback or produce
+an impossible slope; the fix is to exclude that pair from the smooth carve
+and generate an actual near-vertical cut-face/retaining-wall mesh to fill
+the gap instead, same "guarantee it with real geometry, not a probabilistic
+approximation" lesson the road-corridor barrier work (§ 7, "Guaranteed
+road-corridor barrier") already learned the hard way. **Scope is
+deliberately Phase 1 only:** same-chain and cross-chain-same-road-name
+conflicts (a hairpin on one named road). Cross-chain-different-name
+conflicts — freeway ramps/interchanges — are explicitly out of scope,
+deferred to a later phase.
+
+**Data flow:**
+
+1. `road_stations.json` (built by `build_road_stations.py`, the single
+   source of truth every pipeline stage reads) already carries every
+   station's east/north/elevation plus its `seg_idx`/`road_name`.
+2. `road_mesh_common.classify_wall_stations()` runs
+   `detect_elevation_conflict_pairs()` over those stations and buckets each
+   conflicting pair into one of three outcomes: out-of-scope (excluded from
+   the carve, no wall — freeway-ramp case), in-scope above
+   `WALL_MIN_GRADE` (excluded from the carve AND returned as a `wall_pair`
+   needing generated geometry), or in-scope below `WALL_MIN_GRADE`
+   (left un-excluded — the terrain's ordinary nearest-station carve can
+   represent a steep-but-continuous slope there directly, no wall needed).
+3. `pipeline/build_retaining_walls.py` calls that same function against
+   `road_stations.json`, clusters the returned `wall_pairs` into connected
+   "runs" (Union-Find — a real hairpin's many overlapping conflict pairs
+   collapse into one run, not dozens of fragments), splits each run into
+   upper/lower station sets via 1-D 2-means on elevation, and stitches the
+   two sides into a ruled-surface mesh (same row-stitching triangulation
+   idiom `road_mesh_common.build_road_chunks` uses for the road itself, just
+   two independent 3-D paths instead of one centerline + cross-section).
+   Writes `retaining_walls.json`.
+4. `pipeline/export_retaining_wall_bin.py` buckets those wall chunks by
+   their already-tagged tile key into per-tile `ODS1` binary sidecars
+   (`walls_<AREA>_test_tile_<tx>_<ty>.bin` under
+   `OpenDriveUE/Content/OpenDrive/Masks/`) — byte-identical header structure
+   to the building system's `ODU1` format, generation-id-stamped like every
+   other sidecar since the Phase 1/2 reliability fixes.
+5. `AODWallManager` (`ODWallManager.h/.cpp`, new) streams these tiles at
+   runtime — one more tile-streaming actor alongside
+   `AODRoadManager`/`AODTerrainManager`/`AODBuildingManager`/
+   `AODBarrierManager`, same one-actor-per-data-domain convention, reusing
+   the terrain tile grid (`TileSizeCm` must match
+   `test_areas.TERRAIN_TILE_SIZE_CM`). One `UDynamicMeshComponent` per wall
+   chunk (mirrors `AODBuildingManager`, not `AODTerrainManager`'s single
+   grid mesh per tile) since each chunk needs independent collision. Walls
+   always get full collision, no far/no-collision LOD tier — a wall only
+   ever exists directly on the drivable corridor by construction, filling a
+   gap the road's own carve genuinely couldn't resolve. Material is
+   `M_GroundStylized` reused as-is (its slope-based grass/rock blend reads
+   a near-vertical face as rock for free — no new asset work for v1).
+
+**Critical ordering constraint — flagging prominently, this is a landmine
+for anyone touching pipeline stage order:** `build_retaining_walls.py`
+**must run before** `build_terrain_mesh_tiles.py`. Not because the terrain
+script reads the wall script's JSON output — it doesn't. It's because both
+scripts independently call the exact same `classify_wall_stations()`
+against the exact same `road_stations.json` and, by construction, get
+identical exclusion answers either way. The ordering constraint isn't
+about data dependency, it's about the terrain carve needing the wall
+build's implied exclusion set to already be true when it carves — i.e. the
+constraint is conceptual/documentation-only (correctness doesn't actually
+depend on execution order thanks to the shared pure function), but running
+walls first keeps the mental model — "wall build decides what's excluded,
+terrain build honors it" — intact and matches the artifact generation-order
+`AUDIT-RELIABILITY.md` § 3.1 relies on for the generation-id staleness
+check. `pipeline/rebuild_area.py` (the single rebuild driver added in the
+Phase 1 reliability fixes) already encodes this correctly — stage 6
+(`build_retaining_walls.py`) runs before stage 7
+(`build_terrain_mesh_tiles.py`), with stage 8
+(`export_retaining_wall_bin.py`) right after. **Anyone editing
+`rebuild_area.py`'s `STAGES` list, or resurrecting a hand-run partial
+rebuild instead of using the driver, needs to preserve this order** or risk
+silently rebuilding one of the two against a road_stations.json the other
+hasn't seen yet (exactly the mixed-generation-bake failure mode
+`AUDIT-RELIABILITY.md` catalogued project-wide).
+
+**Open/pending — not yet done, do not read as verified:** the § 7.11 Z-axis
+rewrite (which the wall system's `WALL_MIN_GRADE` threshold and the whole
+switchback-conflict detection sit downstream of) changed already-tuned road
+feel on Tail of the Dragon, and per § 7.11's own note, "Taylor should
+rebuild and drive Tail of the Dragon before trusting the new profile by
+feel" — **that drive-test has not happened yet.** The retaining-wall system
+inherits the same gap: it has only been verified offline (station
+classification, mesh generation, tile export) and via the mixed-bake audit
+above, never by Taylor actually driving up to and past a generated wall in
+the packaged/PIE build. Both are open verification items, not completed
+work — do not mark this system "done" until that drive-test lands.
+
 ---
 
 ## Cross-cutting (release engineering)

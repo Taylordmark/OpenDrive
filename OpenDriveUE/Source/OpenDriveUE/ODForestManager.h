@@ -305,6 +305,18 @@ private:
 	double LastDiagTime = 0.0;
 	bool bReady = false;
 
+	// -odshot=N QA hook state (2026-08-22: moved off function-local `static`
+	// into instance members - a `static` inside Tick() only initializes once
+	// per PROCESS, not once per PIE session, so triggering -odshot, stopping
+	// PIE, then starting a new PIE run in the same editor process left
+	// bShotDone still true from the previous run and the screenshot never
+	// fired again. An instance member is naturally fresh every PIE session
+	// since PIE spawns a brand-new AODForestManager each time - same fix
+	// applied to AODScreenshotHook/AODRoadManager's identical pattern).
+	float ShotAt = -1.0f;
+	bool bShotParsed = false;
+	bool bShotDone = false;
+
 	static constexpr float TileSizeCm = 9600.0f;    // 96 m
 	static constexpr int32 TilesPerTick = 1;
 };

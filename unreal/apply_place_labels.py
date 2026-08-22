@@ -11,15 +11,17 @@ UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
 """
 
+import sys
+from pathlib import Path
+
 import unreal
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
+from test_areas import AREA_NAME
 
 LEVEL = "/Game/OpenWorldTest"
 LABEL = "RoadManager"
 
-# must match build_openworld_test_level.py's AREA_NAME (pipeline/test_areas.py)
-# for whichever area was built last - same convention that script already
-# uses for the road/terrain/centerline prefixes.
-AREA_NAME = "skagit_cascades"
 PLACE_LABEL_PREFIX = f"labels_{AREA_NAME}_test"
 
 

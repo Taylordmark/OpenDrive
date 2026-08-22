@@ -280,6 +280,18 @@ private:
 
 	double LastDiagTime = 0.0;
 
+	// -odseam=N QA hook state (2026-08-22: moved off function-local `static`
+	// into instance members - a `static` inside Tick() only gets initialized
+	// once per PROCESS, not once per PIE session, so triggering -odseam,
+	// stopping PIE, then starting a new PIE run in the same editor process
+	// left bSeamDone still true from the previous run and the check never
+	// fired again. An instance member is naturally fresh every PIE session
+	// because PIE spawns a brand-new AODRoadManager each time - same fix
+	// already used for AODMainMenu's -odpick/-odgo, see ODMainMenu.h).
+	float SeamAt = -1.0f;
+	bool bSeamParsed = false;
+	bool bSeamDone = false;
+
 	TArray<FPlaceLabel> PlaceLabels;
 	double LastLabelUpdateTime = 0.0;
 };

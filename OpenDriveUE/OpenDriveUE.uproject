@@ -31,6 +31,14 @@
 		{
 			"Name": "ChaosVehiclesPlugin",
 			"Enabled": false
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		},
+		{
+			"Name": "GeometryScripting",
+			"Enabled": true
 		}
 	]
 }

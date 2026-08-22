@@ -64,3 +64,30 @@ ROAD_TILE_SIZE_CM = 200000.0   # 2 km
 # grid for now (no requirement that they match, just simplest to reason
 # about while both systems are new).
 TERRAIN_TILE_SIZE_CM = 200000.0   # 2 km
+
+# Absolute plausibility floor/ceiling (m) for raw DEM elevation samples, per
+# area. Moved here from pipeline/road_mesh_common.py 2026-08-22
+# (PLAN-RELIABILITY.md Phase 3 item 9, HARD DEADLINE before the first
+# non-Oahu/non-mountain-zone bake): it used to be one constant shared by
+# every area, which silently clipped any real road elevation above 1300 m -
+# harmless for Oahu (real span is sea level to Ka'ala's 1220 m) but would
+# have corrupted data for any future area with real mountains outside
+# Oahu's range.
+#
+# Original rationale (unchanged): not every Terrarium decode failure is an
+# isolated single-pixel spike that despike_ground() can catch by "bouncing
+# back" - a corrupt/mismatched source tile can read consistently wrong over
+# many consecutive stations, with nothing to bounce back to. clamp_
+# plausible_elevation() uses this as a backstop, not a real fix: it clips
+# the impossible value to the nearest plausible bound so nothing
+# catastrophic (falling through the world) reaches the game, but a clipped
+# station is still WRONG, just boundedly wrong - the STRUCTURE_GRADE_WARN
+# sanity check downstream is what flags a clipped run for a human to go
+# look at the source tile.
+#
+# area_name -> (min_m, max_m). Add a new area's own range here before
+# baking it - do NOT reuse Oahu's range for a mountainous area.
+ELEV_PLAUSIBLE_M = {
+    "oahu": (-50.0, 1300.0),
+}
+ELEV_PLAUSIBLE_MIN_M, ELEV_PLAUSIBLE_MAX_M = ELEV_PLAUSIBLE_M[AREA_NAME]

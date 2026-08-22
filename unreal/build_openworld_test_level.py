@@ -59,9 +59,10 @@ import test_areas   # noqa: E402 - BBOX_SNWE/ORIGIN_HEIGHT_M for the sea-level w
 LEVEL = "/Game/OpenWorldTest"
 FOLDER = "OpenWorldTest"
 
-# must match pipeline/test_areas.py's AREA_NAME for whichever area was built
-# last (both build_terrain_mesh_tiles.py and build_road_network.py)
-AREA_NAME = "oahu"
+# sourced directly from pipeline/test_areas.py (single source of truth -
+# used to independently hardcode "oahu"/"skagit_cascades" here, which drifted
+# from the pipeline's own AREA_NAME more than once).
+AREA_NAME = test_areas.AREA_NAME
 
 # see module docstring - each flag independently gates its own manager.
 # PlayerStart still uses road_test_meta.json's point (a real, already-

@@ -900,9 +900,11 @@ void AODForestManager::Tick(float DeltaSeconds)
 
 	UpdateCollision(Loc);
 
-	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot
-	static float ShotAt = -1.0f;
-	static bool bShotParsed = false, bShotDone = false;
+	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot.
+	// ShotAt/bShotParsed/bShotDone are instance members (see ODForestManager.h)
+	// rather than function-local `static` - a new AODForestManager instance
+	// is spawned fresh every PIE session, so this resets naturally per run
+	// instead of persisting for the life of the editor process.
 	if (!bShotParsed)
 	{
 		bShotParsed = true;

@@ -21,9 +21,11 @@ The id is a truncated sha256 over:
   - the handful of constants that actually change the SHAPE of derived
     geometry, not just performance/LOD knobs: road cross-section/skirt
     dimensions and banking (road_mesh_common.py), the DEM plausibility
-    clamp (also road_mesh_common.py - AUDIT-RELIABILITY.md SS3.1 flags this
-    as Oahu-specific but shared), and the world-space tile grid + origin
-    height (test_areas.py) that every tile-bucketing exporter depends on.
+    clamp (now per-area in test_areas.py - AUDIT-RELIABILITY.md SS3.1
+    flagged the old shared constant as Oahu-specific, fixed 2026-08-22 per
+    PLAN-RELIABILITY.md Phase 3 item 9), and the world-space tile grid +
+    origin height (test_areas.py) that every tile-bucketing exporter
+    depends on.
     Deliberately excluded: pure LOD/perf constants (NEAR_GRID_N, FAR_GRID_N,
     MAX_ERROR_NEAR_M, DEM zoom levels, martini simplification tolerance,
     carve inner/outer radii) - these change tessellation density/cost, not
@@ -44,8 +46,6 @@ from pathlib import Path
 from road_mesh_common import (
     BANK_GAIN,
     DEM_SPIKE_THRESHOLD_M,
-    ELEV_PLAUSIBLE_MAX_M,
-    ELEV_PLAUSIBLE_MIN_M,
     MAX_BANK_RAD,
     ROAD_HALF_WIDTH,
     ROAD_LIFT,
@@ -53,7 +53,14 @@ from road_mesh_common import (
     SKIRT_EXTRA,
     STATION_SPACING,
 )
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, TERRAIN_TILE_SIZE_CM
+from test_areas import (
+    AREA_NAME,
+    ELEV_PLAUSIBLE_MAX_M,
+    ELEV_PLAUSIBLE_MIN_M,
+    ORIGIN_HEIGHT_M,
+    ROAD_TILE_SIZE_CM,
+    TERRAIN_TILE_SIZE_CM,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"

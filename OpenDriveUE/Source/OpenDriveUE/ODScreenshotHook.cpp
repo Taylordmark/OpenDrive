@@ -28,9 +28,15 @@ void AODScreenshotHook::Tick(float DeltaSeconds)
 	// caveat AODMainMenu's own -odmenumap/-odpick hooks already route around
 	// via FTSTicker, see its BeginPlay comment) - otherwise this can never
 	// fire at all on a level whose menu pauses at boot.
-	static double StartTime = -1.0;
-	static float ShotAt = -1.0f;
-	static bool bShotParsed = false, bShotDone = false;
+	//
+	// StartTime/ShotAt/bShotParsed/bShotDone are instance members (see
+	// ODScreenshotHook.h) rather than function-local `static` - a new
+	// AODScreenshotHook instance is spawned fresh every PIE session, so this
+	// resets naturally per run instead of persisting for the life of the
+	// editor process (function-local `static` only initializes once per
+	// PROCESS: triggering -odshot, stopping PIE, then starting a new PIE run
+	// in the same editor process left bShotDone still true from the previous
+	// run and the screenshot never fired again).
 	if (StartTime < 0.0)
 	{
 		StartTime = FApp::GetCurrentTime();
