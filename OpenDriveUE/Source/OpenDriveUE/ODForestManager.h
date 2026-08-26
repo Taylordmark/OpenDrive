@@ -76,9 +76,17 @@ public:
 	 *  480 m -> 300 m (2026-07-25): with ForestBandCm now bounding trees to a
 	 *  corridor around the road, the outer disk was empty scatter attempts
 	 *  anyway, and the smaller radius keeps any far background terrain (whose
-	 *  smoothed height disagrees with the tree elevation grid) out of frame. */
+	 *  smoothed height disagrees with the tree elevation grid) out of frame.
+	 *  Raised 300 m -> 500 m (2026-08-24, Taylor: "no flora at all outside of
+	 *  the immediate vicinity. looks barren.") - since ForestBandCm keeps
+	 *  trees corridor-bound regardless of SpawnRadius, the extra radius is
+	 *  cheap (still mostly empty scatter attempts off the corridor) and only
+	 *  buys visibility further down the road. Kept comfortably under
+	 *  build_forest_elevation.py's FOREST_RADIUS_M=550 m ground-truth
+	 *  coverage so height lookups near the new edge still land inside real
+	 *  baked data instead of falling back to guesses. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
-	float SpawnRadius = 30000.0f;
+	float SpawnRadius = 50000.0f;
 
 	/** Trees per m^2 at forest weight 1. Thinned 0.075 -> 0.05 (2026-07-25) so
 	 *  the roadside canopy reads as forest, not a wall right over the camera. */
@@ -318,5 +326,21 @@ private:
 	bool bShotDone = false;
 
 	static constexpr float TileSizeCm = 9600.0f;    // 96 m
-	static constexpr int32 TilesPerTick = 1;
+	// SpawnRadius / TileSizeCm -> Reach in tile-rings, i.e. up to
+	// (2*Reach+1)^2 tiles to fully cover the disc around the player (at the
+	// current 500 m SpawnRadius, Reach ~= 6 -> up to 169 tiles; it was ~4
+	// rings / 81 tiles back when this was found at SpawnRadius=300m). At the
+	// old TilesPerTick=1 that's tens of seconds to finish just ONE
+	// stationary fill, and Tick() re-centers on the player every frame while
+	// driving - the fill front never catches up to a moving car at all.
+	// Found 2026-08-24 (Taylor: "a single line of trees at the edge of the
+	// road... a tiny see-through line, not a whole collection") - what
+	// looked like a placement/density bug was the ring-by-ring BFS fill
+	// (Tick(), nearest-ring-first) permanently stuck only a few rings out
+	// from wherever the player has been, which reads as a thin, spotty band
+	// rather than the full biome-density forest. 40/tick clears the whole
+	// disc in a handful of ticks (well under a second at 60 fps) -
+	// BuildTile() itself is cheap (bucketed grid lookups, no physics), so
+	// this has plenty of headroom before it could hitch.
+	static constexpr int32 TilesPerTick = 40;
 };
