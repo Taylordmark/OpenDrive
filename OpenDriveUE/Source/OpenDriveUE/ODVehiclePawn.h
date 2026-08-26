@@ -50,6 +50,23 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Vehicle")
 	TArray<TObjectPtr<UStaticMeshComponent>> WheelVisuals;
 
+	/** Mouse-look camera orbit, degrees of raw mouse delta per unit sensitivity
+	 *  (2026-08-25) - lets the player look around the car independent of its
+	 *  heading (e.g. to inspect a junction while stopped/driving) by offsetting
+	 *  the SpringArm's relative rotation on top of whatever it inherits from
+	 *  the car. No Enhanced Input map for this either (see class comment) -
+	 *  polled the same DIRECT way as the keyboard axes, via the PlayerController's
+	 *  raw GetInputMouseDelta rather than an axis mapping that would need
+	 *  project-settings config to exist. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float MouseLookSensitivity = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float LookPitchMinDeg = -70.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float LookPitchMaxDeg = 70.0f;
+
 	/** Steering input speed toward full lock (1/s) and back to center. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float SteerRate = 2.5f;
@@ -168,6 +185,14 @@ private:
 	bool bLeftKey = false, bRightKey = false;
 	float SmSteer = 0.0f, SmThrottle = 0.0f, SmBrake = 0.0f;
 	TArray<float> WheelSpinDeg;
+
+	// free-look orbit offset on top of the SpringArm's base -12 deg tilt
+	// (BaseCameraPitchDeg, set once from the constructor's initial relative
+	// rotation so this doesn't have to duplicate that literal)
+	float BaseCameraPitchDeg = 0.0f;
+	float LookYawDeg = 0.0f;
+	float LookPitchDeg = 0.0f;
+	void UpdateFreeLook();
 
 	bool bGroundSnapped = false;
 	double SpawnTime = 0.0;

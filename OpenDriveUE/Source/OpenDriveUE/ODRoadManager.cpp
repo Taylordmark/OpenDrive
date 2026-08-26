@@ -70,6 +70,17 @@ void AODRoadManager::BeginPlay()
 	LoadPlaceLabels();
 	BuildTownNodes();
 
+	// Diagnostic-only override (2026-08-25): lets a headless test bisect
+	// how many resident chunks trigger the open Chaos/UE5.8
+	// collision-registration bug without a recompile per step - see
+	// AODTerrainManager's matching -odcollisionradius= override.
+	float OverrideRadius = 0.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odspawnradius="), OverrideRadius))
+	{
+		SpawnRadius = OverrideRadius;
+		UE_LOG(LogTemp, Display, TEXT("ODRoadManager: odspawnradius override -> %.0f"), SpawnRadius);
+	}
+
 	// Tiles/PendingTiles/MissingTiles start empty - the first Tick()
 	// discovers what's needed around the player/spawn point (slice 1 used
 	// to eagerly load the whole network here instead).
@@ -428,11 +439,9 @@ void AODRoadManager::RequestTileLoad(const FIntPoint& Key)
 
 void AODRoadManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTile&& Parsed)
 {
-	// cleared on every path: success below, or the failure return right here.
-	PendingTiles.Remove(Key);
-
 	if (!bOk)
 	{
+		PendingTiles.Remove(Key);
 		MissingTiles.Add(Key);
 		return;
 	}
@@ -452,102 +461,288 @@ void AODRoadManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTil
 			Key.X, Key.Y, *Parsed.GenerationId, *RoadTilePrefix, *FirstGenerationId);
 	}
 
-	// Builds straight away - no runtime ground-snap/wait-for-terrain step
-	// needed (Arc 7.2 restructure, 2026-07-20, superseded by the Arc 7.0
-	// baked-terrain pivot on 2026-07-23): the pipeline now carves the
-	// offline-baked terrain tiles to the road's elevation profile offline
-	// (pipeline/build_terrain_mesh_tiles.py + road_mesh_common.carve_heightmap),
-	// verified by pipeline/verify_terrain_fit.py against the ACTUAL
-	// simplified mesh before it ever reaches the engine, so station Z values
-	// arriving here are already correct - there is no live terrain stream to
-	// reconcile against at runtime at all anymore. See next steps.md Arc 7.2
-	// for why the old runtime-snap approach was removed (it raced the old
-	// live-streaming plugin's async terrain streaming and could still
-	// disagree with it after simplification).
-	FinalizeTile(Key, MoveTemp(Parsed));
+	// No runtime ground-snap/wait-for-terrain step needed (Arc 7.2 restructure,
+	// 2026-07-20, superseded by the Arc 7.0 baked-terrain pivot on 2026-07-23):
+	// the pipeline now carves the offline-baked terrain tiles to the road's
+	// elevation profile offline (pipeline/build_terrain_mesh_tiles.py +
+	// road_mesh_common.carve_heightmap), verified by pipeline/verify_terrain_fit.py
+	// against the ACTUAL simplified mesh before it ever reaches the engine, so
+	// station Z values arriving here are already correct.
+	//
+	// Chunk *components* are NOT all built this frame though (2026-08-25,
+	// Taylor: full-map junction-pad collision investigation) - a tile with
+	// dozens of chunks used to build every UDynamicMeshComponent and enable
+	// its complex-as-simple collision in one synchronous burst here. Isolated
+	// via headless multi-trace diagnostics: with ~260 chunks registering their
+	// physics state in the same frame (the full map's near-tile count), some
+	// components' own state (BodyInstance.IsValidBodyInstance(),
+	// GetCollisionEnabled()) reported perfectly valid, correct position/bounds,
+	// yet the world's physics scene query never found them - even 1000+ frames
+	// later. The identical geometry in --solo (5 chunks, no burst) worked
+	// instantly. Root cause looks like a Chaos/UE5.8 physics-scene broadphase
+	// registration bug under bulk same-frame creation, not anything wrong with
+	// this class's own bookkeeping. Spreading chunk creation across frames
+	// (ChunksPerFrameBudget, see ProcessPendingChunkBuilds) avoids ever hitting
+	// that many same-frame registrations at once.
+	//
+	// Key stays in PendingTiles (not removed here) until the queued build
+	// actually finishes in ProcessPendingChunkBuilds - Tick()'s dispatch guard
+	// (Tiles/PendingTiles/MissingTiles) must keep treating this tile as
+	// "already being handled" for however many frames that now takes.
+	FPendingTileBuild& Build = PendingChunkBuilds.AddDefaulted_GetRef();
+	Build.Key = Key;
+	Build.Parsed = MoveTemp(Parsed);
+	Build.InProgress.Chunks.Reserve(Build.Parsed.Chunks.Num());
 }
 
-void AODRoadManager::FinalizeTile(const FIntPoint& Key, FParsedRoadTile&& Parsed)
+void AODRoadManager::ProcessPendingChunkBuilds()
 {
-	FRoadTile& Tile = Tiles.Add(Key);
-	Tile.Chunks.Reserve(Parsed.Chunks.Num());
+	int32 Budget = ChunksPerFrameBudget;
 	const FTransform CompXf = GetActorTransform();   // identity today (actor
 	                                                  // always spawned at world
 	                                                  // origin) - kept explicit
 	                                                  // rather than assumed.
-
-	for (const FParsedChunk& Chunk : Parsed.Chunks)
+	while (Budget > 0 && PendingChunkBuilds.Num() > 0)
 	{
-		const uint32 VCount = Chunk.Verts.Num() / 3;
-		const uint32 TCount = Chunk.Tris.Num() / 3;
-
-		auto* Comp = NewObject<UDynamicMeshComponent>(this);
-		Comp->SetupAttachment(RootComponent);
-		Comp->RegisterComponent();
-
-		Comp->EditMesh([&](FDynamicMesh3& Mesh)
+		FPendingTileBuild& Build = PendingChunkBuilds[0];
+		while (Budget > 0 && Build.NextChunkIndex < Build.Parsed.Chunks.Num())
 		{
-			Mesh.EnableAttributes();
-			FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
-
-			TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
-			TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
-
-			for (uint32 v = 0; v < VCount; ++v)
-			{
-				const float X = Chunk.Verts[v * 3 + 0];
-				const float Y = Chunk.Verts[v * 3 + 1];
-				const float Z = Chunk.Verts[v * 3 + 2];
-				VertIds[v] = Mesh.AppendVertex(FVector3d(X, Y, Z));
-
-				// skirt-bottom sample for the -odseam terrain check: every
-				// 10th station's outer two verts (index 0/3 of the
-				// skirt-L,pave-L,pave-R,skirt-R layout build_road_chunks
-				// always emits, 4 verts per station) - same convention as
-				// slice 1, just filled in incrementally as tiles load now.
-				const uint32 StationIdx = v / 4;
-				const uint32 InStation = v % 4;
-				if ((StationIdx % 10) == 0 && (InStation == 0 || InStation == 3))
-				{
-					SkirtSamplePoints.Add(CompXf.TransformPosition(FVector(X, Y, Z)));
-				}
-			}
-			for (uint32 v = 0; v < VCount; ++v)
-			{
-				UvIds[v] = UV->AppendElement(
-					FVector2f(Chunk.Uvs[v * 2 + 0], Chunk.Uvs[v * 2 + 1]));
-			}
-			for (uint32 t = 0; t < TCount; ++t)
-			{
-				const uint32 I0 = Chunk.Tris[t * 3 + 0];
-				const uint32 I1 = Chunk.Tris[t * 3 + 1];
-				const uint32 I2 = Chunk.Tris[t * 3 + 2];
-				const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
-				if (Tid >= 0)
-				{
-					UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
-				}
-			}
-		});
-
-		Comp->EnableComplexAsSimpleCollision();
-		Comp->SetCollisionProfileName(TEXT("BlockAll"));
-		// one-way carriageways (e.g. a divided highway's own direction) get
-		// the no-center-yellow variant - RoadMat's baked centerline only
-		// belongs on a genuine two-way road. Falls back to RoadMat if the
-		// one-way variant failed to load, rather than rendering nothing.
-		UMaterialInterface* ChunkMat = (Chunk.bOneway && RoadMatOneWay) ? RoadMatOneWay : RoadMat;
-		if (ChunkMat)
-		{
-			Comp->SetMaterial(0, ChunkMat);
+			BuildOneChunk(Build.Key, Build.InProgress, Build.Parsed.Chunks[Build.NextChunkIndex], CompXf);
+			++Build.NextChunkIndex;
+			--Budget;
 		}
 
-		Tile.Chunks.Add(Comp);
+		if (Build.NextChunkIndex < Build.Parsed.Chunks.Num())
+		{
+			break;   // budget spent mid-tile - finish it next tick
+		}
+
+		const FIntPoint Key = Build.Key;
+		const int32 NumChunks = Build.InProgress.Chunks.Num();
+		Tiles.Add(Key, MoveTemp(Build.InProgress));
+		PendingTiles.Remove(Key);
+		PendingChunkBuilds.RemoveAt(0);
+
+		UE_LOG(LogTemp, Display,
+			TEXT("ODRoadManager: tile (%d,%d) built %d chunk(s)"),
+			Key.X, Key.Y, NumChunks);
+	}
+}
+
+UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
+	const FParsedChunk& Chunk, const FTransform& CompXf, bool bRecordSkirtSamples)
+{
+	const uint32 VCount = Chunk.Verts.Num() / 3;
+	const uint32 TCount = Chunk.Tris.Num() / 3;
+
+	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetupAttachment(RootComponent);
+
+	// 2026-08-26: RegisterComponent() used to run before EditMesh() ever
+	// populated geometry, and EnableComplexAsSimpleCollision()/
+	// SetCollisionProfileName() used to run AFTER EditMesh(). Neither
+	// reorder alone fixed the open bug (a merged host+pad chunk's disc
+	// portion silently missing from collision scene queries despite every
+	// component-level health check - registered/visible/valid body/correct
+	// triangle count/now-correct single-connected topology via
+	// bridge_pad_to_host - reporting fine) but both are still correct
+	// lifecycle fixes to keep: set the FINAL collision type/profile before
+	// the mesh's first EditMesh populates it, so whatever rebuild EditMesh
+	// triggers already sees the right collision settings, and only
+	// register once mesh + collision are both fully final.
+	Comp->EnableComplexAsSimpleCollision();
+	Comp->SetCollisionProfileName(TEXT("BlockAll"));
+
+	Comp->EditMesh([&](FDynamicMesh3& Mesh)
+	{
+		Mesh.EnableAttributes();
+		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
+
+		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
+		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			const float X = Chunk.Verts[v * 3 + 0];
+			const float Y = Chunk.Verts[v * 3 + 1];
+			const float Z = Chunk.Verts[v * 3 + 2];
+			VertIds[v] = Mesh.AppendVertex(FVector3d(X, Y, Z));
+
+			// skirt-bottom sample for the -odseam terrain check: every
+			// 10th station's outer two verts (index 0/3 of the
+			// skirt-L,pave-L,pave-R,skirt-R layout build_road_chunks
+			// always emits, 4 verts per station) - same convention as
+			// slice 1, just filled in incrementally as tiles load now.
+			// Skipped on a physics-rebuild pass (bRecordSkirtSamples=false)
+			// since those points were already recorded on this chunk's
+			// original build - recording again would duplicate them.
+			const uint32 StationIdx = v / 4;
+			const uint32 InStation = v % 4;
+			if (bRecordSkirtSamples && (StationIdx % 10) == 0 && (InStation == 0 || InStation == 3))
+			{
+				SkirtSamplePoints.Add(CompXf.TransformPosition(FVector(X, Y, Z)));
+			}
+		}
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			UvIds[v] = UV->AppendElement(
+				FVector2f(Chunk.Uvs[v * 2 + 0], Chunk.Uvs[v * 2 + 1]));
+		}
+		for (uint32 t = 0; t < TCount; ++t)
+		{
+			const uint32 I0 = Chunk.Tris[t * 3 + 0];
+			const uint32 I1 = Chunk.Tris[t * 3 + 1];
+			const uint32 I2 = Chunk.Tris[t * 3 + 2];
+			const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
+			if (Tid >= 0)
+			{
+				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+			}
+		}
+	});
+
+	// one-way carriageways (e.g. a divided highway's own direction) get
+	// the no-center-yellow variant - RoadMat's baked centerline only
+	// belongs on a genuine two-way road. Falls back to RoadMat if the
+	// one-way variant failed to load, rather than rendering nothing.
+	UMaterialInterface* ChunkMat = (Chunk.bOneway && RoadMatOneWay) ? RoadMatOneWay : RoadMat;
+	if (ChunkMat)
+	{
+		Comp->SetMaterial(0, ChunkMat);
 	}
 
-	UE_LOG(LogTemp, Display,
-		TEXT("ODRoadManager: tile (%d,%d) built %d chunk(s)"),
-		Key.X, Key.Y, Parsed.Chunks.Num());
+	Comp->RegisterComponent();
+
+	return Comp;
+}
+
+void AODRoadManager::BuildOneChunk(const FIntPoint& Key, FRoadTile& Tile, const FParsedChunk& Chunk, const FTransform& CompXf)
+{
+	const uint32 VCount = Chunk.Verts.Num() / 3;
+	const uint32 TCount = Chunk.Tris.Num() / 3;
+
+	UDynamicMeshComponent* Comp = CreateChunkMeshComponent(Chunk, CompXf, /*bRecordSkirtSamples=*/true);
+	Tile.Chunks.Add(Comp);
+
+	// 2026-08-26 diagnostic: the earlier bulk-same-frame-registration theory
+	// (see OnTileParsed's comment above) assumed the affected component's own
+	// state is fully valid - registered, correct bounds, valid BodyInstance -
+	// just invisible to Chaos scene queries. Taylor spotted live that the
+	// failing junction pad doesn't RENDER either, which that theory can't
+	// explain (render and physics registration are independent paths) - so
+	// log the actual component state for chunks built near the known-failing
+	// test junction to check whether this is really the same bug or a
+	// different, more basic failure (e.g. the chunk never finishing
+	// EditMesh/registration at all).
+	// 2026-08-26: was checking only Chunk.Verts[0]/[1] (the chunk's FIRST
+	// vertex) against the test point - missed the merged host+pad chunk
+	// whenever the host ribbon's first vertex happened to be tens of meters
+	// away from the junction it was fused near (the ribbon can span up to
+	// MaxChunkSpanCm=75000cm). Check every vertex instead so a fused chunk is
+	// never invisible to this diagnostic just because of vertex ordering.
+	bool bNearTestPoint = false;
+	for (int32 vi = 0; vi + 1 < Chunk.Verts.Num() && !bNearTestPoint; vi += 3)
+	{
+		if (FMath::Abs(Chunk.Verts[vi] - 356900.0f) < 2000.0f
+			&& FMath::Abs(Chunk.Verts[vi + 1] - (-540300.0f)) < 2000.0f)
+		{
+			bNearTestPoint = true;
+		}
+	}
+	if (bNearTestPoint)
+	{
+		const FBoxSphereBounds B = Comp->Bounds;
+		UE_LOG(LogTemp, Display,
+			TEXT("ODRoadManager: DIAG chunk near test point - comp=%s registered=%d visible=%d ")
+			TEXT("collisionEnabled=%d bodyValid=%d numTris=%d bounds=(%.0f,%.0f,%.0f)+%.0f vcount=%d tcount=%d"),
+			*Comp->GetName(), Comp->IsRegistered(), Comp->IsVisible(),
+			(int32)Comp->GetCollisionEnabled(), Comp->BodyInstance.IsValidBodyInstance(),
+			Comp->GetMesh() ? Comp->GetMesh()->TriangleCount() : -1,
+			B.Origin.X, B.Origin.Y, B.Origin.Z, B.SphereRadius, VCount, TCount);
+
+		// 2026-08-26: was restricted to TCount<=25 (the pad's own standalone
+		// chunk, pre-merge) - now that the pad is fused into a much bigger
+		// host ribbon chunk, that size no longer identifies it. Track
+		// whichever near-test-point chunk was built most recently instead.
+		DiagTargetComp = Comp;
+		bDiagTargetEverSet = true;
+	}
+
+	// 2026-08-26: this used to unconditionally enqueue EVERY chunk (not just
+	// the one known-broken junction pad) for a forced destroy-and-rebuild one
+	// tick later, as a mitigation attempt for the open Chaos/UE5.8 phantom-
+	// registration bug. That mitigation was already proven not to fix the
+	// bug it targeted (live-tracked retest still failed identically), so
+	// applying it to literally every chunk in the game bought nothing while
+	// adding real risk: forcing a fresh async physics cook and component
+	// swap for every chunk the instant after it's built, which is exactly
+	// the ~20s post-spawn window every headless ground-snap self-test
+	// measures in. Disabled rather than deleted so the machinery (struct,
+	// ProcessPendingPhysicsRefresh, DiagTargetComp tracking) stays available
+	// if a future bug needs the same forced-rebuild technique deliberately,
+	// scoped to just the affected chunk.
+}
+
+void AODRoadManager::ProcessPendingPhysicsRefresh()
+{
+	for (FPendingPhysicsRebuild& Pending : PendingPhysicsRefresh)
+	{
+		UDynamicMeshComponent* OldComp = Pending.OldComp.Get();
+		UDynamicMeshComponent* NewComp =
+			CreateChunkMeshComponent(Pending.Chunk, Pending.CompXf, /*bRecordSkirtSamples=*/false);
+
+		// swap the slot that references OldComp - the owning tile may
+		// already have migrated from PendingChunkBuilds into Tiles by now
+		// (or vice versa be mid-build still), so check both rather than
+		// assuming which one currently holds it.
+		bool bReplaced = false;
+		if (FRoadTile* Tile = Tiles.Find(Pending.TileKey))
+		{
+			for (TObjectPtr<UDynamicMeshComponent>& Slot : Tile->Chunks)
+			{
+				if (Slot.Get() == OldComp)
+				{
+					Slot = NewComp;
+					bReplaced = true;
+					break;
+				}
+			}
+		}
+		if (!bReplaced)
+		{
+			for (FPendingTileBuild& Build : PendingChunkBuilds)
+			{
+				if (Build.Key != Pending.TileKey)
+				{
+					continue;
+				}
+				for (TObjectPtr<UDynamicMeshComponent>& Slot : Build.InProgress.Chunks)
+				{
+					if (Slot.Get() == OldComp)
+					{
+						Slot = NewComp;
+						bReplaced = true;
+						break;
+					}
+				}
+				break;
+			}
+		}
+
+		if (Pending.OldComp == DiagTargetComp)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("ODRoadManager: DIAG full-rebuild tracked target old=%s new=%s replacedInTile=%d"),
+				OldComp ? *OldComp->GetName() : TEXT("null"), *NewComp->GetName(), bReplaced);
+			DiagTargetComp = NewComp;
+		}
+
+		if (OldComp)
+		{
+			OldComp->DestroyComponent();
+		}
+	}
+	PendingPhysicsRefresh.Reset();
 }
 
 void AODRoadManager::ReleaseTile(const FIntPoint& Key)
@@ -626,6 +821,12 @@ void AODRoadManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	// Runs before this tick's new builds so every component gets at least
+	// one full tick registered before its forced destroy-and-rebuild pass -
+	// see FPendingPhysicsRebuild's declaration comment.
+	ProcessPendingPhysicsRefresh();
+	ProcessPendingChunkBuilds();
+
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Player)
 	{
@@ -645,6 +846,41 @@ void AODRoadManager::Tick(float DeltaSeconds)
 	{
 		LastLabelUpdateTime = Now;
 		UpdateCurrentLabels(Loc);
+	}
+
+	// 2026-08-26 diagnostic: log the tracked junction-pad component's live
+	// state every ~2s, plus a trace fired right here (independent of
+	// ODVehiclePawn's own ground-snap trace) straight down through its
+	// bounds origin - to see whether it's torn down/replaced later, or
+	// whether even a trace run from this actor still misses it despite
+	// otherwise-valid state persisting the whole time.
+	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastDiagTargetLogTime > 2.0)
+	{
+		LastDiagTargetLogTime = Now;
+		if (UDynamicMeshComponent* Comp = DiagTargetComp.Get())
+		{
+			const FBoxSphereBounds B = Comp->Bounds;
+			FHitResult Hit;
+			const FVector Start = B.Origin + FVector(0, 0, 5000.0);
+			const FVector End = B.Origin - FVector(0, 0, 5000.0);
+			FCollisionQueryParams Params;
+			Params.AddIgnoredActor(this);
+			const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+			UE_LOG(LogTemp, Display,
+				TEXT("ODRoadManager: DIAG live target t=%.1f valid=1 registered=%d visible=%d ")
+				TEXT("collisionEnabled=%d bodyValid=%d renderStateCreated=%d bounds=(%.0f,%.0f,%.0f)+%.0f ")
+				TEXT("selfTraceHit=%d selfTraceComp=%s"),
+				Now, Comp->IsRegistered(), Comp->IsVisible(),
+				(int32)Comp->GetCollisionEnabled(), Comp->BodyInstance.IsValidBodyInstance(),
+				Comp->IsRenderStateCreated(),
+				B.Origin.X, B.Origin.Y, B.Origin.Z, B.SphereRadius,
+				bHit, bHit && Hit.Component.IsValid() ? *Hit.Component->GetName() : TEXT("none"));
+		}
+		else if (bDiagTargetEverSet)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("ODRoadManager: DIAG live target t=%.1f valid=0 (destroyed since last check)"), Now);
+		}
 	}
 
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),

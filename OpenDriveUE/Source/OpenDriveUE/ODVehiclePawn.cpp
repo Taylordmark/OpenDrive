@@ -3,15 +3,18 @@
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Camera/CameraComponent.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Components/InputComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
+#include "UObject/UObjectIterator.h"
 
 namespace
 {
@@ -47,7 +50,8 @@ AODVehiclePawn::AODVehiclePawn()
 	SpringArm->SetupAttachment(Body);
 	SpringArm->TargetArmLength = 640.0f;
 	SpringArm->SocketOffset = FVector(0.0f, 0.0f, 150.0f);
-	SpringArm->SetRelativeRotation(FRotator(-12.0f, 0.0f, 0.0f));
+	BaseCameraPitchDeg = -12.0f;
+	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg, 0.0f, 0.0f));
 	SpringArm->bEnableCameraLag = true;
 	SpringArm->CameraLagSpeed = 9.0f;
 	SpringArm->bEnableCameraRotationLag = true;
@@ -368,12 +372,51 @@ void AODVehiclePawn::TrySnapToGround()
 	if (Now - LastSnapLogTime > 1.0)
 	{
 		LastSnapLogTime = Now;
+
+		// 2026-08-26 diagnostic: direct measurement (not an inference from
+		// separate subsystem logs) of how many road/terrain/pad collision
+		// components are actually resident right now, to test whether the
+		// open Chaos/UE5.8 collision-registration bug is keyed on a total
+		// scene-wide count. TObjectIterator crosses all worlds, so filter to
+		// this one.
+		int32 TotalDynMeshCollision = 0;
+		for (TObjectIterator<UDynamicMeshComponent> It; It; ++It)
+		{
+			if (It->GetWorld() == GetWorld() && It->IsRegistered()
+				&& It->GetCollisionEnabled() != ECollisionEnabled::NoCollision)
+			{
+				++TotalDynMeshCollision;
+			}
+		}
+
+		// Second diagnostic: LineTraceSingleByChannel only reports the FIRST
+		// hit, which can't distinguish "the pad's collision genuinely isn't
+		// queryable" from "the pad IS there and registered, but terrain
+		// (regraded to sit within ~0.25m of the pad at a junction, closer
+		// than mid-road's normal clearance) is winning the single-trace
+		// ordering instead." A multi-trace along the same ray settles it
+		// directly - if a hit whose PhysMaterial is Asphalt shows up in this
+		// list at all, the pad's collision is registered and queryable, and
+		// the single-trace behavior above is a hit-ordering issue, not the
+		// registration bug.
+		TArray<FHitResult> AllHits;
+		GetWorld()->LineTraceMultiByChannel(AllHits, Start, End, ECC_Visibility, Params);
+		FString HitsDesc;
+		for (const FHitResult& H : AllHits)
+		{
+			HitsDesc += FString::Printf(TEXT("[%s z=%.0f mat=%s] "),
+				H.Component.IsValid() ? *H.Component->GetName() : TEXT("?"),
+				H.ImpactPoint.Z,
+				H.PhysMaterial.IsValid() ? *H.PhysMaterial->GetName() : TEXT("none"));
+		}
+
 		UE_LOG(LogTemp, Display,
 			TEXT("ODVehiclePawn: ground-snap waiting at (%.0f,%.0f,%.0f) t=%.1fs - "
-			     "hit=%d onRoad=%d physmat=%s implZ=%.0f"),
+			     "hit=%d onRoad=%d physmat=%s implZ=%.0f totalCollisionComponents=%d "
+			     "allHits(%d)=%s"),
 			Loc.X, Loc.Y, Loc.Z, Now - SpawnTime, bHit, bOnRoad,
 			(bHit && Hit.PhysMaterial.IsValid()) ? *Hit.PhysMaterial->GetName() : TEXT("none"),
-			bHit ? Hit.ImpactPoint.Z : 0.0f);
+			bHit ? Hit.ImpactPoint.Z : 0.0f, TotalDynMeshCollision, AllHits.Num(), *HitsDesc);
 	}
 
 	if (!bOnRoad && !bTimedOut)
@@ -452,9 +495,35 @@ void AODVehiclePawn::HandbrakeReleased()
 	Movement->SetHandbrakeInput(false);
 }
 
+void AODVehiclePawn::UpdateFreeLook()
+{
+	// raw poll, same DIRECT-input philosophy as the keyboard axes below - no
+	// axis mapping needed, so nothing to configure in project settings. Signs
+	// match the classic UE Turn/LookUp convention (Turn uses raw MouseX
+	// as-is; LookUp negates raw MouseY) even though there's no axis mapping
+	// actually applying that scale for us here.
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC)
+	{
+		return;
+	}
+	float MouseX = 0.0f, MouseY = 0.0f;
+	PC->GetInputMouseDelta(MouseX, MouseY);
+	if (MouseX == 0.0f && MouseY == 0.0f)
+	{
+		return;
+	}
+	LookYawDeg = FMath::UnwindDegrees(LookYawDeg + MouseX * MouseLookSensitivity);
+	LookPitchDeg = FMath::Clamp(
+		LookPitchDeg - MouseY * MouseLookSensitivity, LookPitchMinDeg, LookPitchMaxDeg);
+	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg + LookPitchDeg, LookYawDeg, 0.0f));
+}
+
 void AODVehiclePawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	UpdateFreeLook();
 
 	if (!bGroundSnapped)
 	{
