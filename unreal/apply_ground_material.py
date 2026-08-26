@@ -24,6 +24,25 @@ matching the game's low-poly storybook art direction:
 Same MaterialEditingLibrary node-graph approach build_visuals_headless.py/
 apply_light_wet_fix.py already use for M_Road.
 
+Textured pass (2026-08-24, Taylor live drive-test: "Flat green terrain, no
+texture/variation" - the material above only ever fed MP_BASE_COLOR flat
+CONSTANT colors, so even with the slope blend working correctly there was
+zero per-pixel detail anywhere on the ground, just a solid painted color).
+Content/OpenDrive/Textures/T_DetailGrass(_N)/T_DetailRock(_N) already exist
+in the project (pipeline/make_detail_textures.py) but were generated for
+the older Tail-of-the-Dragon stage and never wired into this, the Arc-7
+open-world ground material - same stylized low-poly art direction, so they
+are reused as-is rather than generating a second, redundant texture set.
+Sampled with a world-space tiling UV (terrain tiles hand every tile the
+SAME 0..1 UV range regardless of the tile's real 2000 m size, so sampling
+mesh UV directly would show one texture repeat per tile, not real tiling)
+and tinted by the existing GRASS_COLOR/ROCK_COLOR constants so the color
+tuning history above (esp. the 2026-07-28 Hawaii-greenery darkening) still
+holds - the texture supplies per-pixel variation, the constants still set
+the overall hue. Sand stays a flat color: no beach detail texture exists
+yet and the beach band is narrow enough (~1 m) that tiling artifacts would
+rarely be visible anyway.
+
 AODTerrainManager loads this by path directly (LoadObject, BeginPlay) - no
 level-actor material assignment needed, unlike the old streamed-terrain
 tileset actor this script used to also wire up (removed 2026-07-27; that
@@ -80,6 +99,10 @@ BEACH_BAND_CM = 3.0 * 0.3048 * 100.0
 SEA_LEVEL_Z_CM = -ORIGIN_HEIGHT_M * 100.0
 ROUGHNESS = 0.9
 SAND_ROUGHNESS = 0.55              # damp-looking sand reads better than matte
+# world-space texel size (cm) for the detail textures - small enough to
+# read as real ground detail up close, large enough that the tiling isn't
+# blatant from the road. Tune here, not per-tile UVs (see module docstring).
+DETAIL_TILE_CM = 800.0
 
 
 def log(msg):
@@ -121,15 +144,81 @@ rock = MEL.create_material_expression(
     mat, unreal.MaterialExpressionConstant3Vector, -450, 200)
 rock.set_editor_property("constant", unreal.LinearColor(*ROCK_COLOR, 1.0))
 
-lerp = MEL.create_material_expression(
-    mat, unreal.MaterialExpressionLinearInterpolate, -200, 0)
-MEL.connect_material_expressions(rock, "", lerp, "A")
-MEL.connect_material_expressions(grass, "", lerp, "B")
-MEL.connect_material_expressions(sharpen, "", lerp, "Alpha")
-
-# ---- sand/beach blend (2026-07-27): flat AND near sea level ----------------
+# ---- detail textures (2026-08-24) - world-space tiling UV, shared by the
+# grass and rock samples so both stay in registration with each other.
+# world_pos is also reused below by the sand/beach blend (its Z channel).
 world_pos = MEL.create_material_expression(
     mat, unreal.MaterialExpressionWorldPosition, -900, 500)
+detail_uv_xy = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -900, -400)
+detail_uv_xy.set_editor_property("r", True)
+detail_uv_xy.set_editor_property("g", True)
+detail_uv_xy.set_editor_property("b", False)
+detail_uv_xy.set_editor_property("a", False)
+MEL.connect_material_expressions(world_pos, "", detail_uv_xy, "")
+detail_tile = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -900, -550)
+detail_tile.set_editor_property("r", 1.0 / DETAIL_TILE_CM)
+detail_uv = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -750, -400)
+MEL.connect_material_expressions(detail_uv_xy, "", detail_uv, "A")
+MEL.connect_material_expressions(detail_tile, "", detail_uv, "B")
+
+tex_grass = unreal.load_asset("/Game/OpenDrive/Textures/T_DetailGrass")
+tex_grass_n = unreal.load_asset("/Game/OpenDrive/Textures/T_DetailGrass_N")
+tex_rock = unreal.load_asset("/Game/OpenDrive/Textures/T_DetailRock")
+tex_rock_n = unreal.load_asset("/Game/OpenDrive/Textures/T_DetailRock_N")
+
+
+def connect_uv(uv_node, tex_sample_node):
+    # UE 5.8's python binding reports MaterialExpressionTextureSample's UV
+    # input pin under different names depending on context ("UVs" is the
+    # documented/common one, "Coordinates" seen elsewhere in this repo -
+    # build_visuals_headless.py's Graph.sample() has the same fallback,
+    # same class of gotcha as this file's Clamp/If pin-name notes above).
+    for pin in ("UVs", "Coordinates"):
+        if MEL.connect_material_expressions(uv_node, "", tex_sample_node, pin):
+            return
+    raise RuntimeError("could not connect detail-texture UV input - pin name mismatch?")
+
+
+grass_tex = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, -450)
+grass_tex.set_editor_property("texture", tex_grass)
+connect_uv(detail_uv, grass_tex)
+grass_n_tex = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, -600)
+grass_n_tex.set_editor_property("texture", tex_grass_n)
+grass_n_tex.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+connect_uv(detail_uv, grass_n_tex)
+
+rock_tex = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, 100)
+rock_tex.set_editor_property("texture", tex_rock)
+connect_uv(detail_uv, rock_tex)
+rock_n_tex = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -600, 250)
+rock_n_tex.set_editor_property("texture", tex_rock_n)
+rock_n_tex.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+connect_uv(detail_uv, rock_n_tex)
+
+# tint the sampled texture by the same constants used to tune the flat
+# color before - the texture supplies per-pixel variation, the constant
+# still sets the overall hue (keeps the 2026-07-28 color-tuning history valid)
+grass_tinted = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -400, -350)
+MEL.connect_material_expressions(grass_tex, "RGB", grass_tinted, "A")
+MEL.connect_material_expressions(grass, "", grass_tinted, "B")
+rock_tinted = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -400, 150)
+MEL.connect_material_expressions(rock_tex, "RGB", rock_tinted, "A")
+MEL.connect_material_expressions(rock, "", rock_tinted, "B")
+
+lerp = MEL.create_material_expression(
+    mat, unreal.MaterialExpressionLinearInterpolate, -200, 0)
+MEL.connect_material_expressions(rock_tinted, "", lerp, "A")
+MEL.connect_material_expressions(grass_tinted, "", lerp, "B")
+MEL.connect_material_expressions(sharpen, "", lerp, "Alpha")
+
+normal_lerp = MEL.create_material_expression(
+    mat, unreal.MaterialExpressionLinearInterpolate, -200, -700)
+MEL.connect_material_expressions(rock_n_tex, "", normal_lerp, "A")
+MEL.connect_material_expressions(grass_n_tex, "", normal_lerp, "B")
+MEL.connect_material_expressions(sharpen, "", normal_lerp, "Alpha")
+MEL.connect_material_property(normal_lerp, "", unreal.MaterialProperty.MP_NORMAL)
+
+# ---- sand/beach blend (2026-07-27): flat AND near sea level ----------------
 world_z = MEL.create_material_expression(
     mat, unreal.MaterialExpressionComponentMask, -700, 500)
 world_z.set_editor_property("r", False)
