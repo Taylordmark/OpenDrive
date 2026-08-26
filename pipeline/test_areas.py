@@ -104,14 +104,29 @@ ORIGIN_HEIGHT_M = 829.9
 # AODRoadManager::TileSizeCm's default in ODRoadManager.h - a mismatch here
 # doesn't crash anything (the runtime just probes filenames that don't
 # exist), it just silently loads no road tiles.
-ROAD_TILE_SIZE_CM = 200000.0   # 2 km
+#
+# Shrunk from 200000 (2km) 2026-08-25 - the open Chaos/UE5.8 collision-
+# registration bug (junction pads unreachable by a ground-snap trace) was
+# bisected to a cumulative resident-chunk-count threshold (~111 chunks pass,
+# ~144 fail at a real dense junction cluster), and AODRoadManager::Tick's
+# ring-load math (Ring = ceil((SpawnRadius + MaxChunkSpanCm*0.5) /
+# TileSizeCm)) guarantees AT LEAST a 3x3-tile neighborhood resident around
+# the player no matter how small SpawnRadius is set - at the old 2km tile
+# size that guaranteed-minimum block already exceeded the failure threshold
+# at some real junction clusters, so shrinking SpawnRadius alone couldn't
+# fix it (see AODRoadManager.h's SpawnRadius comment). A finer grid shrinks
+# that guaranteed-minimum physical footprint (and its worst-case chunk
+# count) instead - decoupled from TERRAIN_TILE_SIZE_CM below on purpose,
+# since this bug is road-chunk-specific and terrain doesn't need rebaking.
+ROAD_TILE_SIZE_CM = 50000.0   # 500 m
 
 # Arc 7.0 pivot (2026-07-23): world-space grid size (cm) baked terrain mesh
 # tiles are bucketed into (pipeline/build_terrain_mesh_tiles.py). MUST match
 # AODTerrainManager::TileSizeCm's default in ODTerrainManager.h, same
-# mismatch caveat as ROAD_TILE_SIZE_CM above. Same size as the road tile
-# grid for now (no requirement that they match, just simplest to reason
-# about while both systems are new).
+# mismatch caveat as ROAD_TILE_SIZE_CM above. No longer required to match
+# ROAD_TILE_SIZE_CM (2026-08-25 - see that constant's comment); every other
+# tiled pipeline stage (barrier/building/biome/forest) keys off this one, so
+# it stays at the original size deliberately.
 TERRAIN_TILE_SIZE_CM = 200000.0   # 2 km
 
 # Absolute plausibility floor/ceiling (m) for raw DEM elevation samples, per

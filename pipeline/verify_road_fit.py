@@ -50,7 +50,7 @@ import build_terrain_mesh_tiles as btmt
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, sample_mesh_height
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -124,13 +124,17 @@ def _load_road_tile(tx, ty):
     return _ROAD_CACHE[key]
 
 
-def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm):
-    """Tries (tx0,ty0) first, then its 8 neighbors, returning the first
-    non-None sample - see this module's docstring for why a station's own
-    tile isn't guaranteed to hold the chunk/triangle covering it."""
+def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1):
+    """Tries (tx0,ty0) first, then its neighbors out to `ring` tiles,
+    returning the first non-None sample - see this module's docstring for why
+    a station's own tile isn't guaranteed to hold the chunk/triangle covering
+    it. `ring` defaults to 1 (8 neighbors); road lookups pass 2 (2026-08-25)
+    since ROAD_TILE_SIZE_CM (500 m) is now smaller than a chunk's own span
+    (750 m, CHUNK_STATIONS * station spacing), so a chunk centroid up to
+    ~375 m from a covered station can land more than one 500 m tile away."""
     order = [(tx0, ty0)] + [
         (tx0 + dx, ty0 + dy)
-        for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+        for dy in range(-ring, ring + 1) for dx in range(-ring, ring + 1)
         if not (dx == 0 and dy == 0)
     ]
     tiles_tried = 0
@@ -157,17 +161,24 @@ def check_road_vs_terrain_fit():
           + (f" ({n_excluded} excluded - bridge/tunnel or an auto-detected "
              "elevation conflict, same as verify_terrain_fit.py)" if n_excluded else ""))
 
-    tile_cm = btmt.TERRAIN_TILE_SIZE_CM   # == ROAD_TILE_SIZE_CM today
+    # 2026-08-25: road and terrain tiles no longer share one grid size (see
+    # ROAD_TILE_SIZE_CM's comment in test_areas.py), so each needs its own
+    # tile-coordinate lookup - using the terrain grid for both would probe
+    # the wrong road tile filename and read as false road misses.
+    tile_cm = btmt.TERRAIN_TILE_SIZE_CM
     tx_all = np.floor(st_x_cm / tile_cm).astype(int)
     ty_all = np.floor(st_y_cm / tile_cm).astype(int)
+    rtx_all = np.floor(st_x_cm / ROAD_TILE_SIZE_CM).astype(int)
+    rty_all = np.floor(st_y_cm / ROAD_TILE_SIZE_CM).astype(int)
 
     gaps = []
     road_misses = terrain_misses = 0
     for i in fit_idx:
         tx, ty = int(tx_all[i]), int(ty_all[i])
+        rtx, rty = int(rtx_all[i]), int(rty_all[i])
         x_cm, y_cm = float(st_x_cm[i]), float(st_y_cm[i])
 
-        road_h, _rt = _sample_with_neighbors(_load_road_tile, tx, ty, x_cm, y_cm)
+        road_h, _rt = _sample_with_neighbors(_load_road_tile, rtx, rty, x_cm, y_cm, ring=2)
         terrain_h, _tt = _sample_with_neighbors(_load_terrain_tile, tx, ty, x_cm, y_cm)
 
         if road_h is None:

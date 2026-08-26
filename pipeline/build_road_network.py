@@ -145,8 +145,22 @@ def main():
     # station - a station at one end of its own chunk's window can be up to
     # ~375 m from that chunk's centroid (the value export_road_mesh_bin.py
     # actually buckets by tile). 200 m margin (tried first) still wasn't past
-    # that worst case; 500 m comfortably is.
-    TILE_MARGIN_CM = 50000.0   # 500 m
+    # that worst case; 500 m comfortably was, back when ROAD_TILE_SIZE_CM was
+    # 200000 (2 km).
+    #
+    # 2026-08-25: ROAD_TILE_SIZE_CM shrank to 50000 (500 m, see its comment
+    # in test_areas.py) to fix the Chaos/UE5.8 collision-registration bug.
+    # A true ~375 m safety margin no longer fits - it would need to be under
+    # half the tile width (250 m) to leave any valid interior band at all, so
+    # this check can no longer GUARANTEE the picked station's chunk buckets
+    # to the tile it looks like it's in. That guarantee isn't needed anymore
+    # either: AODRoadManager::Tick's ring-load math always resides at least a
+    # 3x3-tile neighborhood around the player (see the SpawnRadius/TileSizeCm
+    # comments in ODRoadManager.h), so even a seam-adjacent spawn's true
+    # chunk tile is still loaded on spawn. This margin is now just a soft
+    # preference for picking a station well inside a tile rather than a hard
+    # safety requirement - 100 m keeps a real (100 m, 400 m) valid band.
+    TILE_MARGIN_CM = 10000.0   # 100 m
     best = None       # (dist2, cx, cy, cz, station_idx) - respects TILE_MARGIN_CM
     best_any = None   # closest overall, ignoring margin - fallback only
     for cx, cy, cz in segment_geoms:
