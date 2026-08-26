@@ -528,6 +528,21 @@ void AODMainMenu::StartAt(int32 TownIdx)
 		Pawn->TeleportToSpawn(FVector(Loc.X, Loc.Y, 0.0f), SpawnYaw);
 	}
 
+	// debug override for isolated-junction test builds (experimental_
+	// junction_pads.py --solo): TeleportToSpawn just placed the pawn on
+	// whatever real road point the picked town snapped to, which is nowhere
+	// near the one junction that script isolates - override the XY here
+	// (AFTER the real teleport, not in AODVehiclePawn::BeginPlay, where it
+	// silently no-ops - this pawn persists from the menu map and BeginPlay
+	// only ever fires once, before StartAt() moves it here).
+	float OdSpawnX = 0.0f, OdSpawnY = 0.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odspawnx="), OdSpawnX)
+		&& FParse::Value(FCommandLine::Get(), TEXT("odspawny="), OdSpawnY))
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: odspawn override -> (%.0f,%.0f)"), OdSpawnX, OdSpawnY);
+		Pawn->TeleportToSpawn(FVector(OdSpawnX, OdSpawnY, 0.0f), Yaw);
+	}
+
 	// Unpause NOW, before handing control back - tile streaming
 	// (AODRoadManager/AODTerrainManager) only runs while unpaused, and a
 	// fresh teleport target can have nothing loaded there yet. Loading stage
