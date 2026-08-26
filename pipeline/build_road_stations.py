@@ -80,6 +80,7 @@ being viable once test areas grew past Palmdale's compact scale.
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -90,7 +91,7 @@ from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_
 from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
                                despike_ground, clamp_plausible_elevation,
-                               classify_wall_stations)
+                               classify_wall_stations, reconcile_junction_elevations)
 
 # ---------------------------------------------------------------- config
 DEM_ZOOM = 15                   # matches build_terrain_tiles.py's MAX_ZOOM
@@ -608,7 +609,15 @@ def main():
         # docstring for why calling it only once (before the clamp, as this
         # used to) let the deck sag toward the ground it should clear.
         placeholder = fill_structure_gaps(raw_ground, is_struct_s)
-        h = grade_smooth_elevation(placeholder, STATION_SPACING, max_grade_s, max_grade_delta_s)
+        # OD_RAW_ROAD_STATIONS=1 (Taylor, 2026-08-24 diagnostic pass): skip
+        # grade_smooth_elevation entirely and keep the DEM-sampled elevation
+        # (bridge/tunnel gap-filled only) so the road mesh shows exactly
+        # what the raw per-station elevation profile looks like, unsmoothed -
+        # temporary debug toggle, not meant to stay on for normal rebuilds.
+        if os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
+            h = placeholder
+        else:
+            h = grade_smooth_elevation(placeholder, STATION_SPACING, max_grade_s, max_grade_delta_s)
         h = fill_structure_gaps(h, is_struct_s)
 
         # Minimum-clearance floor, bridges only - tunnels belong at/below
@@ -648,6 +657,7 @@ def main():
             "is_oneway_s": is_oneway_s,
             "highway_s": highway_s,
             "e": e, "n": n, "s": s, "h": h,
+            "max_grade_s": max_grade_s, "max_grade_delta_s": max_grade_delta_s,
         })
         total_km += length / 1000.0
 
@@ -681,6 +691,49 @@ def main():
         print(f"{n_conflict_stations} station(s) in {len(np.unique(all_seg_idx[conflict_flat]))} "
               f"segment(s) flagged as untagged elevation conflicts (switchback/hairpin terrain) - "
               f"excluded from carving like bridges, elevation left as-is")
+
+    # Junction smoothing pass (2026-08-24, Taylor: "start at the highest
+    # point and work our way down making sure they connect" - see
+    # road_mesh_common.reconcile_junction_elevations()'s docstring). Runs on
+    # every rebake automatically, no separate stage needed - snaps the lower
+    # station of each disagreeing at-grade road-road pair up to match the
+    # higher one, then re-smooths just the touched segment(s) so the snap
+    # becomes a rate-limited approach ramp instead of a new vertical kink.
+    #
+    # Position alone isn't enough (same date, Taylor: "cant be two sections
+    # of road on the same xyz axis with different slopes... after departing
+    # the road width they can SLOWLY start changing gradient") - pinned_grade
+    # carries the higher-priority side's own local slope at each seam, which
+    # gets threaded into grade_smooth_elevation as pinned_edge_grades so the
+    # rate limiter eases away from a MATCHED slope instead of a free one.
+    reconciled_elev, touched, pinned_grade = reconcile_junction_elevations(
+        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
+    n_touched = int(touched.sum())
+    if n_touched and os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
+        print(f"OD_RAW_ROAD_STATIONS=1: skipping the junction re-smoothing pass "
+              f"({n_touched} station(s) would otherwise have been touched)")
+        n_touched = 0
+    if n_touched:
+        touched_segs = sorted(set(all_seg_idx[touched].tolist()))
+        print(f"{n_touched} station(s) across {len(touched_segs)} segment(s) snapped to a "
+              f"higher-priority junction elevation - re-smoothing those segment(s)")
+        for idx in touched_segs:
+            seg = segments[idx]
+            lo, hi = offsets[idx], offsets[idx + 1]
+            local_touched = np.nonzero(touched[lo:hi])[0]
+            # both edges adjacent to the touched station get pinned to the
+            # same grade - a straight-through slope at the seam, not a peak
+            # or valley there - letting pass 2's own rate limiter ease each
+            # side back to the road's natural profile a few stations out.
+            pinned_edges = {}
+            for local_i in local_touched.tolist():
+                g = float(pinned_grade[lo + local_i])
+                pinned_edges[local_i - 1] = g
+                pinned_edges[local_i] = g
+            seg["h"] = grade_smooth_elevation(
+                reconciled_elev[lo:hi], STATION_SPACING,
+                seg["max_grade_s"], seg["max_grade_delta_s"],
+                pinned_edge_grades=pinned_edges)
 
     out_segments = []
     for idx, seg in enumerate(segments):

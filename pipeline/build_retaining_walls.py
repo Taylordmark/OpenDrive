@@ -1,9 +1,15 @@
-"""Bakes real 3D retaining-wall/cut-face geometry at road switchback
-locations flagged by road_mesh_common.classify_wall_stations() - Phase 1
-(same-chain + cross-chain-same-road-name conflicts only; cross-chain-
-different-name conflicts, e.g. freeway ramps/interchanges, are explicitly
-out of scope here, deferred to a later phase - see that function's
-docstring for why the scope split exists).
+"""Bakes real 3D retaining-wall/cut-face geometry at road switchback and
+crossing locations flagged by road_mesh_common.classify_wall_stations() -
+both same-road (same-chain / cross-chain-same-road-name) conflicts steep
+enough to need a wall, AND out-of-scope conflicts (different/missing
+road_name - e.g. an unnamed rural road climbing near a named one, or a
+freeway ramp crossing an unrelated street) which ALWAYS get a wall
+regardless of grade, since two unrelated roads never have a shared-slope
+relationship that would justify blending their terrain toward each other -
+see that function's docstring for the full scope breakdown (changed
+2026-08-24; out-of-scope conflicts used to be a dead end - excluded from
+the carve with no wall, leaving whichever side lost the exclusion as bare
+raw DEM).
 
 Usage:  python build_retaining_walls.py   (needs road_stations.json first)
 

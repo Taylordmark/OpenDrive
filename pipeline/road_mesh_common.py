@@ -26,7 +26,9 @@ SKIRT_DROP = 2.5             # m downward at skirt edge
 ROAD_LIFT = 0.10             # m above smoothed ground (wishlist #11: keep the
                              # road close to terrain; build_terrain_tiles.py's
                              # CARVE_DROP_M carves the terrain further below)
-MAX_BANK_RAD = 0.09          # ~5.2 deg superelevation cap
+MAX_BANK_RAD = 0.14          # ~8.0 deg superelevation cap (was 0.09/~5.2 deg -
+                              # Taylor, 2026-08-23: wanted more banking through
+                              # curves after the Green Valley drive-test)
 BANK_GAIN = 9.55             # bank = min(cap, gain * |curvature 1/m|)
 CHUNK_STATIONS = 150         # stations per road mesh chunk (~750 m)
 
@@ -190,11 +192,24 @@ def despike_ground(ground, threshold_m=DEM_SPIKE_THRESHOLD_M):
 
 
 def grade_smooth_elevation(ground, spacing=STATION_SPACING, max_grade=MAX_GRADE,
-                            max_grade_delta=None):
+                            max_grade_delta=None, pinned_edge_grades=None):
     """Grade-CONFORMING envelope over raw ground - never smooths the terrain
     signal itself (no median/Gaussian filtering of `ground`; a road rides
     the real ground or deviates from it via cut/bridge/tunnel, it never
     fakes the ground into something gentler than it is).
+
+    `pinned_edge_grades` (2026-08-24, Taylor: "there cant be two sections of
+    road on the same xyz axis with different slopes... after departing the
+    road width they can SLOWLY start changing gradient, not a super quick
+    transition"): optional {edge_index: grade} - after every relaxation
+    iteration of pass 2 below, these edges are hard-set to the given grade
+    instead of being left free. Since pass 2 already propagates a rate-
+    limited (max_grade_delta per station) change outward from any edge that
+    moves, re-asserting a pin after each relaxation makes the SAME mechanism
+    that eases a bridge approach into a curve also ease a pinned junction
+    slope back to the road's natural profile over a few stations, instead of
+    a kink - no separate taper logic needed. See
+    reconcile_junction_elevations() for where the pinned grade comes from.
 
     Two passes:
 
@@ -249,11 +264,19 @@ def grade_smooth_elevation(ground, spacing=STATION_SPACING, max_grade=MAX_GRADE,
         edge_md = np.minimum(md[:-1], md[1:])            # n-1, matches g below
         rate_md = np.minimum(edge_md[:-1], edge_md[1:])  # n-2 edge-to-edge caps
         g = np.diff(h) / spacing
+        pin_idx, pin_val = None, None
+        if pinned_edge_grades:
+            pin_idx = np.array([k for k in pinned_edge_grades if 0 <= k < len(g)], dtype=np.int64)
+            pin_val = np.array([pinned_edge_grades[k] for k in pin_idx], dtype=np.float64)
+            if len(pin_idx):
+                g[pin_idx] = pin_val
         for _ in range(4):
             for i in range(1, len(g)):
                 g[i] = np.clip(g[i], g[i - 1] - rate_md[i - 1], g[i - 1] + rate_md[i - 1])
             for i in range(len(g) - 2, -1, -1):
                 g[i] = np.clip(g[i], g[i + 1] - rate_md[i], g[i + 1] + rate_md[i])
+            if pin_idx is not None and len(pin_idx):
+                g[pin_idx] = pin_val
         h2 = np.empty(n)
         h2[0] = h[0]
         h2[1:] = h[0] + np.cumsum(g * spacing)
@@ -293,9 +316,15 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     # road height, so the carved terrain can never poke through the low side)
     theta = np.unwrap(np.arctan2(ty, tx))
     curv = np.gradient(theta) / spacing          # 1/m, signed
-    bank = np.minimum(max_bank_rad, bank_gain * np.abs(gaussian1d(curv, 3.0)))
-    bank_tan = np.tan(gaussian1d(bank, 3.0))
-    raise_side = -np.sign(gaussian1d(curv, 3.0))         # +1: raise right side
+    # smoothing sigma widened 3.0 -> 5.0 m (2026-08-23, Taylor: wanted a
+    # smoother road feel) - a wider window damps station-to-station
+    # curvature noise into a gentler bank ramp in/out of curves instead of
+    # tracking every small wiggle.
+    BANK_SMOOTH_SIGMA_M = 5.0
+    bank = np.minimum(max_bank_rad,
+                       bank_gain * np.abs(gaussian1d(curv, BANK_SMOOTH_SIGMA_M)))
+    bank_tan = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
+    raise_side = -np.sign(gaussian1d(curv, BANK_SMOOTH_SIGMA_M))  # +1: raise right side
 
     # cross-section: (lateral offset m, z offset m), left -> right
     profile = [(-(road_half_width + skirt_extra), -skirt_drop),
@@ -372,9 +401,26 @@ CONFLICT_RADIUS_M = 150.0
 CONFLICT_MAX_GRADE = 0.15        # generous vs MAX_GRADE (0.10) - only flag
                                   # gaps too steep for ANY plausible shared
                                   # road profile, not just an unusual one
-CONFLICT_MIN_GAP_M = 3.0         # floor so two stations meters apart with a
+CONFLICT_MIN_GAP_M = 1.0         # floor so two stations meters apart with a
                                   # sub-meter difference (ordinary local
                                   # noise) never gets flagged
+#
+# Lowered 3.0 -> 1.0 (2026-08-22, Taylor: Green Valley drive-test found
+# spots where terrain visibly poked up through the road - never supposed
+# to happen outside a tunnel). Traced to real, DIFFERENT road segments
+# passing within 1-5 m of each other in XY while sitting 2-4 m apart in
+# elevation (e.g. station 22826 vs station 8959: d=2.4 m, dz=+2.4 m;
+# station 16322 vs station 26781: d=1.1 m, dz=-2.9 m) - carve_grid_m has
+# no concept of "which road" a station belongs to, so it blended toward
+# the wrong nearby road's elevation at these spots instead of excluding
+# them as a conflict. At the old 3.0 m floor, dz=2.4-2.9 m at d=1-2.4 m
+# sat just UNDER the dz > 0.15*d + 3.0 threshold - real, close-range,
+# cross-road elevation jumps were slipping through by a hair. 1.0 m still
+# tolerates ordinary sub-meter noise/same-road grade progression (already
+# separately exempted for nearby same-chain stations via
+# CONFLICT_SAME_CHAIN_GAP_STATIONS) while catching this class of bug;
+# tune further if verify_road_fit.py/verify_terrain_fit.py still show
+# outliers after this.
 CONFLICT_SAME_CHAIN_GAP_STATIONS = 8   # ~40m at 5m spacing - skip evaluating
                                   # trivially-adjacent same-chain stations
                                   # (ordinary progression, already grade-
@@ -395,12 +441,53 @@ CONFLICT_SAME_CHAIN_GAP_STATIONS = 8   # ~40m at 5m spacing - skip evaluating
 # ~180-200%). Ship-a-guess, tune by drive-test, same as ROAD_CLASS_GRADE.
 WALL_MIN_GRADE = 0.50
 
+# Separate, much tighter threshold used ONLY to catch cross-road (different
+# seg_idx AND different/missing road_name) pairs (2026-08-24, Taylor's Lake
+# Hughes screenshot: a torn-open canyon where "Lake Hughes Road" and an
+# unrelated unnamed nearby road sat d=149m apart, dz=17.6m - UNDER
+# CONFLICT_MAX_GRADE's allowance at that distance (0.15*149+1=23.4m) so
+# detect_elevation_conflict_pairs never flagged it, and carve_heightmap
+# happily blended toward BOTH within its 150m outer radius, flipping which
+# one "wins" partway between them). CONFLICT_MAX_GRADE's generous allowance
+# only makes sense for a genuine same-road switchback where SOME continuous
+# grade between the two points is physically plausible - two different,
+# unrelated roads have no such relationship, so any real disagreement
+# between them within carve range should exclude both from blending into
+# each other, not just disagreements steep enough to look wall-eligible.
+CROSS_ROAD_CONFLICT_MAX_GRADE = 0.05
+
 # Bias a generated wall's bottom/top edges past the real station elevation
 # by this much so the wall visually embeds into terrain instead of leaving a
 # hairline gap - the same "gap hidden under geometry" pattern already used
 # by the road skirt (SKIRT_DROP above) and build_terrain_mesh_tiles.py's
 # build_seam_skirt(), applied to a fourth case.
 WALL_EMBED_MARGIN_M = 1.5
+
+# Wall-run coherence bounds (2026-08-24, Taylor's screenshot: a stray flat
+# diagonal plane slicing across open terrain after out-of-scope pairs became
+# wall-eligible). build_retaining_walls.py's cluster_runs() does a plain
+# Union-Find over every wall-eligible pair with no notion of "does this
+# still look like one real wall" - two pairs sharing a station get merged
+# TRANSITIVELY even if the two pairs point in unrelated directions, so a
+# dense area (out-of-scope pairs are common - most rural roads lack an OSM
+# name tag) can chain dozens of unrelated crossings into one giant run.
+# build_wall_run_mesh() then forces that whole run through a SINGLE PCA axis
+# + upper/lower 2-means split + ruled-surface stitch, which only makes sense
+# for a genuinely path-like cluster (a real hairpin or a single crossing) -
+# fed a scattered, non-path-like cluster instead, it happily interpolates
+# between unrelated stations at the same projected coordinate and produces
+# exactly this kind of nonsense geometry. Filtering here (the shared
+# single-source-of-truth function both build_retaining_walls.py and
+# build_terrain_mesh_tiles.py call) rather than in build_retaining_walls.py
+# itself keeps exclude/wall_pairs consistent: a pair whose run turns out
+# incoherent falls back to un-excluded (ordinary carve_grid_m blending
+# papers over it, same as any other below-wall_min_grade case) instead of a
+# wall that's wrong AND still excluded from carve, which would be worse
+# than doing nothing.
+WALL_RUN_MAX_ASPECT = 0.6   # secondary/primary PCA std-dev ratio ceiling - a
+                             # real hairpin or crossing is elongated (low
+                             # ratio); a blob of unrelated merged stations
+                             # reads as roughly circular (ratio near 1)
 
 
 def detect_elevation_conflict_pairs(east_m, north_m, elev_m, seg_idx, station_idx,
@@ -468,15 +555,25 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
                             max_grade=CONFLICT_MAX_GRADE,
                             min_gap_m=CONFLICT_MIN_GAP_M,
                             same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
-                            wall_min_grade=WALL_MIN_GRADE):
+                            wall_min_grade=WALL_MIN_GRADE,
+                            cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE):
     """Classifies every conflicting pair (detect_elevation_conflict_pairs)
     into one of three outcomes:
 
-    - out of scope (cross-chain, different road_name - e.g. a freeway ramp
-      crossing an unrelated street): excluded from the terrain carve exactly
-      as before, no wall generated - this is real interchange/ramp geometry,
-      deliberately deferred to a later pass, not something this function
-      attempts.
+    - out of scope (cross-chain, different/missing road_name - e.g. a
+      freeway ramp crossing an unrelated street, or - the common real case,
+      2026-08-24 - an unnamed rural/unclassified road climbing near a named
+      one) ALWAYS returned as a wall_pair, regardless of grade: unlike an
+      in-scope pair, there's no shared-road relationship that could justify
+      blending toward each other at any grade, so a wall is the only way to
+      give BOTH sides real terrain instead of leaving whichever side loses
+      the exclusion as bare, un-carved raw DEM. (Before 2026-08-24 this
+      case was a dead end - excluded from the carve with no wall built,
+      because build_retaining_walls.py only consumed in-scope wall_pairs -
+      found via a switchback screenshot where the climbing road had no OSM
+      name tag: EVERY station along the stretch near the valley road below
+      conflicted with it, so the entire climb sat under untouched hillside
+      DEM, not just the couple of stations actually near the crossing.)
     - in scope (same seg_idx, OR same non-empty road_name - the latter
       because a single real switchback road is often split across multiple
       OSM way segments, e.g. "Satellite Tracking Station Road" measured
@@ -490,11 +587,11 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
 
     Returns (exclude, wall_pairs): exclude is a bool array parallel to the
     input stations (True = don't carve terrain smoothly toward this
-    station), wall_pairs is a list of (i, j) index tuples needing generated
-    wall geometry. A station's exclude flag is only ever set True, never
-    reset back to False by a later pair - so a station touched by BOTH an
-    out-of-scope pair and an in-scope below-threshold pair still ends up
-    correctly excluded (the out-of-scope pair's own reasoning still holds)."""
+    station - it's covered by a wall instead), wall_pairs is a list of
+    (i, j) index tuples needing generated wall geometry (deduplicated - a
+    pair caught by both the main and cross-road passes below only appears
+    once). A station's exclude flag is only ever set True, never reset back
+    to False by a later pair."""
     n = len(east_m)
     east_m = np.asarray(east_m, dtype=np.float64)
     north_m = np.asarray(north_m, dtype=np.float64)
@@ -505,32 +602,266 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
 
     exclude = np.zeros(n, dtype=bool)
     wall_pairs = []
+    wall_pair_set = set()
+
+    def add_wall_pair(i, j):
+        key = (i, j) if i < j else (j, i)
+        if key not in wall_pair_set:
+            wall_pair_set.add(key)
+            wall_pairs.append(key)
+        exclude[i] = True
+        exclude[j] = True
+
     for i, j in zip(pairs_i.tolist(), pairs_j.tolist()):
         in_scope = (seg_idx[i] == seg_idx[j]) or (
             bool(road_name[i]) and road_name[i] == road_name[j])
         if not in_scope:
-            exclude[i] = True
-            exclude[j] = True
+            add_wall_pair(i, j)
             continue
         dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
         grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
         if grade >= wall_min_grade:
-            exclude[i] = True
-            exclude[j] = True
-            wall_pairs.append((i, j))
+            add_wall_pair(i, j)
         # else: in-scope, below threshold - leave exclude as-is (un-excluded
         # unless some OTHER pair already required this station excluded)
+
+    # Second, tighter pass: catches cross-road disagreements too small for
+    # the main (same-road-switchback-calibrated) threshold above to see, but
+    # still real enough that two DIFFERENT roads shouldn't blend into each
+    # other's carve - see CROSS_ROAD_CONFLICT_MAX_GRADE's docstring. Same
+    # "out of scope always walls" rule as the main pass above.
+    cross_i, cross_j = detect_elevation_conflict_pairs(
+        east_m, north_m, elev_m, seg_idx, station_idx,
+        radius_m, cross_road_max_grade, min_gap_m, same_chain_gap_stations)
+    for i, j in zip(cross_i.tolist(), cross_j.tolist()):
+        in_scope = (seg_idx[i] == seg_idx[j]) or (
+            bool(road_name[i]) and road_name[i] == road_name[j])
+        if not in_scope:
+            add_wall_pair(i, j)
+
+    # Coherence filter (see WALL_RUN_MAX_ASPECT's comment): drop any wall
+    # pair whose transitively-connected run isn't path-like, un-excluding
+    # its stations so they fall back to ordinary carve blending instead of
+    # feeding build_retaining_walls.py geometry it can't build sanely.
+    if wall_pairs:
+        parent = {}
+
+        def find(x):
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i, j in wall_pairs:
+            union(i, j)
+
+        components = defaultdict(list)
+        for i, j in wall_pairs:
+            components[find(i)].append(i)
+            components[find(i)].append(j)
+        bad_roots = set()
+        for root, members in components.items():
+            stations = sorted(set(members))
+            if len(stations) < 3:
+                continue   # a lone pair is always path-like (2 points)
+            pts = np.stack([east_m[stations], north_m[stations]], axis=1)
+            centered = pts - pts.mean(axis=0)
+            cov = centered.T @ centered
+            evals = np.linalg.eigvalsh(cov)
+            primary_std = math.sqrt(max(evals[-1], 0.0))
+            secondary_std = math.sqrt(max(evals[0], 0.0))
+            if primary_std > 1e-6 and secondary_std / primary_std > WALL_RUN_MAX_ASPECT:
+                bad_roots.add(root)
+
+        if bad_roots:
+            # An incoherent (blob-shaped) component can't get a clean ruled-surface
+            # wall mesh from build_wall_run_mesh()'s single-PCA-axis approach - but
+            # its stations are still real, close-in-XY/far-in-Z conflicts (that's
+            # what put them in wall_pairs to begin with). Un-excluding them would
+            # hand them back to the ordinary nearest-station terrain carve, which
+            # can't represent two stations meters apart in XY with a huge Z gap
+            # either - it stamps the wrong neighbor's elevation across the gap,
+            # producing spikes far worse than the original silent-dead-end bug this
+            # whole feature replaced (18m+ deviation, confirmed via verify_terrain_fit.py).
+            # So: drop bad-component pairs from wall_pairs (no mesh built for them)
+            # but leave `exclude` untouched - they keep falling back to raw,
+            # un-carved DEM terrain at that spot, same as before this session's
+            # wall-extension work, rather than being carved wrong.
+            wall_pairs = [(i, j) for i, j in wall_pairs if find(i) not in bad_roots]
+
     return exclude, wall_pairs
+
+
+def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
+                                   radius_m=CONFLICT_RADIUS_M, max_grade=CONFLICT_MAX_GRADE,
+                                   min_gap_m=CONFLICT_MIN_GAP_M,
+                                   same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
+                                   wall_min_grade=WALL_MIN_GRADE):
+    """The reusable road-road junction smoothing pass (Taylor, 2026-08-24: two
+    roads meeting/crossing at grade were disagreeing on elevation by meters
+    at the same physical spot - Lake Hughes near spawn, one road's pavement
+    visibly bursting through the other). Each chain in build_road_stations.py
+    is DEM-sampled and grade-smoothed independently (merge_way_chains() /
+    grade_smooth_elevation()) - nothing upstream ever makes two DIFFERENT
+    chains agree on elevation where they meet, even at a shared OSM node,
+    because each chain's own grade-rate-limiting pass can pull that shared
+    point away from raw DEM by a different amount depending on the rest of
+    ITS OWN profile.
+
+    Reuses classify_wall_stations' own conflict detection (same radius/grade/
+    gap thresholds - single source of truth for "these two stations are the
+    same physical spot") but only acts on the in-scope, BELOW wall_min_grade
+    subset - exactly the set classify_wall_stations leaves alone today (a
+    continuous, not near-vertical, disagreement it expects carve_grid_m's
+    ordinary blend to paper over in the TERRAIN, which does nothing for the
+    ROAD ribbon meshes themselves crossing at different heights). Steep/
+    wall-eligible pairs are untouched here - those are real grade-separated
+    crossings that need build_retaining_walls.py's wall geometry, not a
+    flatten-together fix.
+
+    Snaps the LOWER station of each disagreeing pair up to match the higher
+    one, processing pairs HIGHEST-ELEVATION-FIRST (Taylor's own framing:
+    "start at the highest point and work our way down making sure they
+    connect") so an already-reconciled high point never gets dragged back
+    down by a later, lower-priority pair - every write only ever raises a
+    station's elevation, never lowers it, so pair order beyond the high-to-
+    low sort can't create oscillation or new disagreements.
+
+    Matching position isn't enough on its own (2026-08-24, Taylor: "cant be
+    two sections of road on the same xyz axis with different slopes...
+    after departing the road width they can SLOWLY start changing
+    gradient") - two independently grade-smoothed roads can pass through the
+    same point with different tangents, reading as a crease even though
+    neither road kinks against ITSELF. `hi`'s profile is left untouched here
+    (it's the higher-priority side), so it's the authoritative slope at the
+    seam; for each snap this also computes `hi`'s local grade (central
+    difference over its own neighbors, i.e. its own rate of climb/descent at
+    that point) and reports it as `lo`'s target grade at the seam, SIGN-
+    ALIGNED via the two roads' local tangent directions (both `hi`/`lo`
+    stations only ever reach this function in-scope - same seg_idx or same
+    road_name, i.e. literally the same physical road chain-broken or
+    switchbacking on itself - so their headings are coherent enough for
+    "same slope" to mean the same thing on both sides). If tangents point
+    roughly opposite ways (dot < 0, e.g. a switchback doubling straight
+    back), the sign is flipped so both sides still climb/descend together
+    rather than mirror-imaging each other.
+
+    Returns (elev_m, touched, pinned_grade): a NEW array (input is not
+    mutated) with these snaps applied, a parallel bool mask of which
+    stations changed, and a parallel float array (nan where unset) of the
+    target grade at each touched station. The caller is expected to re-run
+    grade_smooth_elevation() on each touched segment using that segment's
+    own per-class max_grade/max_grade_delta arrays AND pass pinned_grade's
+    values (converted to that segment's local edge indices) as
+    pinned_edge_grades (not done here - this function only sees the
+    flattened cross-segment arrays) so each snap turns into a slope-matched,
+    rate-limited approach ramp instead of a new vertical kink at the
+    junction - the same vertical-curve easing grade_smooth_elevation already
+    does for any other local disagreement between input ground and
+    profile."""
+    elev_m = np.array(elev_m, dtype=np.float64)
+    n = len(elev_m)
+    pairs_i, pairs_j = detect_elevation_conflict_pairs(
+        east_m, north_m, elev_m, seg_idx, station_idx,
+        radius_m, max_grade, min_gap_m, same_chain_gap_stations)
+    touched = np.zeros(n, dtype=bool)
+    pinned_grade = np.full(n, np.nan, dtype=np.float64)
+    if len(pairs_i) == 0:
+        return elev_m, touched, pinned_grade
+
+    keep = []
+    for k in range(len(pairs_i)):
+        i, j = int(pairs_i[k]), int(pairs_j[k])
+        in_scope = (seg_idx[i] == seg_idx[j]) or (
+            bool(road_name[i]) and road_name[i] == road_name[j])
+        if not in_scope:
+            continue
+        dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
+        grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
+        if grade < wall_min_grade:
+            keep.append(k)
+    if not keep:
+        return elev_m, touched, pinned_grade
+
+    def local_tangent(idx):
+        # unit (east, north) direction at idx, in increasing-station_idx
+        # sense, from whichever same-segment neighbor(s) exist.
+        seg = seg_idx[idx]
+        a = idx - 1 if idx - 1 >= 0 and seg_idx[idx - 1] == seg else idx
+        b = idx + 1 if idx + 1 < n and seg_idx[idx + 1] == seg else idx
+        if a == b:
+            return 0.0, 0.0
+        dx, dy = east_m[b] - east_m[a], north_m[b] - north_m[a]
+        d = math.hypot(dx, dy)
+        return (dx / d, dy / d) if d > 1e-9 else (0.0, 0.0)
+
+    elev_orig = elev_m.copy()
+
+    def local_grade(idx):
+        # signed dz/ds at idx (increasing-station_idx sense), central
+        # difference over whichever same-segment neighbor(s) exist. Reads
+        # elev_ORIG, not the elev_m this loop is mutating in place (2026-08-24
+        # fix, Taylor's Lake Hughes screenshots after the first version of
+        # this: `hi` can itself have been snapped upward earlier in this same
+        # descending-elevation pass while its own immediate neighbors are
+        # still at their raw, un-resmoothed elevation - a central difference
+        # against the live array then reads a fictitious spike (measured up
+        # to ~500% grade) at hi instead of the real local terrain grade,
+        # which got pinned into lo's profile and tore a canyon into the
+        # carve. The pre-loop snapshot is always real input-derived slope.
+        seg = seg_idx[idx]
+        a = idx - 1 if idx - 1 >= 0 and seg_idx[idx - 1] == seg else idx
+        b = idx + 1 if idx + 1 < n and seg_idx[idx + 1] == seg else idx
+        if a == b:
+            return 0.0
+        d = math.hypot(east_m[b] - east_m[a], north_m[b] - north_m[a])
+        return (elev_orig[b] - elev_orig[a]) / d if d > 1e-9 else 0.0
+
+    keep_i = pairs_i[np.array(keep)]
+    keep_j = pairs_j[np.array(keep)]
+    order = np.argsort(-np.maximum(elev_m[keep_i], elev_m[keep_j]))
+    for k in order:
+        i, j = int(keep_i[k]), int(keep_j[k])
+        hi, lo = (i, j) if elev_m[i] >= elev_m[j] else (j, i)
+        if elev_m[lo] < elev_m[hi]:
+            elev_m[lo] = elev_m[hi]
+            touched[lo] = True
+            hx, hy = local_tangent(hi)
+            lx, ly = local_tangent(lo)
+            aligned = (hx * lx + hy * ly) >= 0.0
+            target = local_grade(hi)
+            # hard backstop: a pinned slope should never exceed wall_min_grade
+            # (the same "single heightfield can still represent this"
+            # ceiling classify_wall_stations uses) - anything past that is
+            # not a real road grade and would tear the terrain carve instead
+            # of easing into it.
+            target = float(np.clip(target, -wall_min_grade, wall_min_grade))
+            pinned_grade[lo] = target if aligned else -target
+    return elev_m, touched, pinned_grade
 
 
 def carve_heightmap(hm, station_lon, station_lat, station_elev_m,
                      west, south, east, north, inner=10.0, outer=40.0,
-                     drop=0.15):
+                     drop=0.15, cut_inner=None, cut_outer=None):
     """Stamp road elevation into an elevation grid within `inner` m of the
     nearest road station, blending to raw terrain at `outer` m - the same
     inverse-distance-stamp + smoothstep blend as build_stage.py's
     carve_road(), generalized from a fixed local-mpp grid to an arbitrary
     lon/lat-bounded grid (a Terrarium/quantized-mesh tile at any zoom).
+
+    `cut_inner`/`cut_outer` (both default to `inner`/`outer` if unset) give a
+    separate, normally tighter, taper for pixels whose raw terrain sits ABOVE
+    the nearest station (a hillside/cut pixel) - see
+    build_terrain_mesh_tiles.py's TERRAIN_CARVE_CUT_INNER_M for the reasoning
+    (a wide taper on a cut face reads as terrain sitting on the road instead
+    of a clean cut). Fill pixels (raw terrain below the station) always use
+    `inner`/`outer`.
 
     `hm` is (rows, cols), row 0 = the `north` edge, col 0 = the `west` edge.
     Callers building a pymartini/quantized-mesh tile MUST pass the array
@@ -577,7 +908,12 @@ def carve_heightmap(hm, station_lon, station_lat, station_elev_m,
         m = d < sub
         sub[m] = d[m]
         roadh[y0:y1, x0:x1][m] = station_elev_m[i]
-    w = np.clip((outer - dist) / (outer - inner), 0.0, 1.0)
+    ci = inner if cut_inner is None else cut_inner
+    co = outer if cut_outer is None else cut_outer
+    is_cut = hm > roadh
+    px_inner = np.where(is_cut, ci, inner)
+    px_outer = np.where(is_cut, co, outer)
+    w = np.clip((px_outer - dist) / (px_outer - px_inner), 0.0, 1.0)
     w = w * w * (3 - 2 * w)
     return w * (roadh - drop) + (1 - w) * hm
 
