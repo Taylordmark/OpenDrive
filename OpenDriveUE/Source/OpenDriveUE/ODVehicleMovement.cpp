@@ -545,10 +545,15 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 	// worst driven wheel slips past the grip peak, give it back slowly.
 	if (TractionMode == EODTractionMode::High && WheelTq > 0.0f)
 	{
+		// Floor raised 0.15->0.35 and cut/recovery rates softened
+		// (2026-08-26, alongside TcSlipTarget's increase) - a 0.15 floor let
+		// TC hold an 85% torque cut for seconds on a normal WOT launch;
+		// this keeps it a backstop against runaway wheelspin rather than a
+		// hard choke on every launch.
 		TcScale += TraceSlip > TcSlipTarget
-			? -(TraceSlip - TcSlipTarget) * 20.0f * Dt
-			: 1.5f * Dt;
-		TcScale = FMath::Clamp(TcScale, 0.15f, 1.0f);
+			? -(TraceSlip - TcSlipTarget) * 10.0f * Dt
+			: 3.0f * Dt;
+		TcScale = FMath::Clamp(TcScale, 0.35f, 1.0f);
 		WheelTq *= TcScale;
 	}
 	else
@@ -661,9 +666,22 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			const float Mu = MuPeak * SurfaceGrip(W.Surface.Get())
 				* (bFront ? FrontGripScale : RearGripScale);
 
-			// combined slip, normalized so 1.0 = the peak of the curve
-			const float SlipRatio = (W.Omega * ReM - Vx)
-				/ FMath::Max(FMath::Abs(Vx), 1.0f);
+			// combined slip, normalized so 1.0 = the peak of the curve.
+			// Denominator is max(|Vx|, |wheel speed|, 1) rather than a bare
+			// 1 m/s floor - at near-zero road speed (launch) a bare 1 m/s
+			// floor let any wheel spin-up read as a huge multiple (e.g.
+			// slip=10 at a dead stop), which fed TC High's controller a
+			// nonsense value and slammed WheelTq to its 0.15 floor for
+			// several seconds of every forward launch (2026-08-26, Taylor:
+			// "forward start feels terrible, reverse feels fine" - reverse
+			// dodged this only because TC High's WheelTq>0 gate never
+			// engages for reverse's negated Ratio, not because reverse
+			// didn't hit the same bad reading). This keeps SlipRatio
+			// physically bounded to roughly [-1,1] and leaves normal-speed
+			// driving unchanged, since Vx already dominates there.
+			const float WheelSpeedMs = W.Omega * ReM;
+			const float SlipRatio = (WheelSpeedMs - Vx)
+				/ FMath::Max(FMath::Max(FMath::Abs(Vx), FMath::Abs(WheelSpeedMs)), 1.0f);
 			const float SlipAngle = FMath::Atan2(-Vy, FMath::Abs(Vx) + 0.7f);
 			const float Sx = SlipRatio / PeakSlipRatio;
 			const float Sy = SlipAngle / PeakSlipAngleRad;

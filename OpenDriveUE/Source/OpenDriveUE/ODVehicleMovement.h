@@ -186,9 +186,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	EODTractionMode TractionMode = EODTractionMode::High;
 
-	/** TC High: hold driven-wheel slip ratio at/below this (peak is 0.14). */
+	/** TC High: hold driven-wheel slip ratio at/below this (peak is 0.14).
+	 *  Raised from 0.12 (2026-08-26, Taylor: "forward start feels terrible,
+	 *  reverse feels fine") - at 0.12 the target sat just under the tire's
+	 *  own peak-grip slip ratio, so TC was clamping torque through the
+	 *  tire's normal working range on every WOT launch, not just genuine
+	 *  runaway wheelspin. Reverse launches never hit TC at all (see
+	 *  TickDrivetrain's WheelTq>0 gate), which is why only forward felt
+	 *  choked. */
 	UPROPERTY(EditAnywhere, Category = "Assists")
-	float TcSlipTarget = 0.12f;
+	float TcSlipTarget = 0.22f;
 
 	/** ESC Low: yaw-rate excess deadband before the brakes step in (rad/s). */
 	UPROPERTY(EditAnywhere, Category = "Assists")
