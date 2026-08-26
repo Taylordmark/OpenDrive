@@ -83,9 +83,13 @@ void UODVehicleMovement::ApplyVehicleDef(const UODVehicleDef& Def)
 	FinalRatio = Def.FinalRatio;
 
 	MuPeak = Def.MuPeak;
-	SlideFrac = Def.SlideFrac;
+	// Floor these two rather than taking Def's value outright (2026-08-24,
+	// Taylor: too much oversteer/slide after braking) - a per-car asset that
+	// already serialized its own SlideFrac/PeakSlipAngleDeg would otherwise
+	// silently undo this the same way tuning presets undo GripScale above.
+	SlideFrac = FMath::Max(Def.SlideFrac, 0.88f);
 	PeakSlipRatio = Def.PeakSlipRatio;
-	PeakSlipAngleDeg = Def.PeakSlipAngleDeg;
+	PeakSlipAngleDeg = FMath::Max(Def.PeakSlipAngleDeg, 13.0f);
 	WheelInertia = Def.WheelInertia;
 
 	SpringRate = Def.SpringRate;
@@ -302,9 +306,13 @@ int32 UODVehicleMovement::GearForSpeed(float AbsSpeedCmS) const
 
 float UODVehicleMovement::TorqueCurve(float Rpm) const
 {
-	// normalized flat-ish curve: soft off idle, peak, gentle fall to redline
+	// normalized flat-ish curve: soft off idle, peak, gentle fall to redline.
+	// Floor raised 0.55->0.85 (2026-08-25, Taylor: launches felt dead until
+	// ~20 mph then hit like a boost right as coupled rpm climbed toward
+	// PeakTorqueRpm in 1st gear) - a peaky low end reads as "no torque, then
+	// sudden torque" once a car is moving instead of revving freely.
 	const float T = FMath::GetMappedRangeValueClamped(
-		FVector2D(IdleRpm, PeakTorqueRpm), FVector2D(0.55f, 1.0f), Rpm);
+		FVector2D(IdleRpm, PeakTorqueRpm), FVector2D(0.85f, 1.0f), Rpm);
 	const float Fall = FMath::GetMappedRangeValueClamped(
 		FVector2D(PeakTorqueRpm, MaxRpm), FVector2D(1.0f, 0.82f), Rpm);
 	return PeakTorqueNm * TorqueScale * FMath::Min(T, Fall);
@@ -354,10 +362,23 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		// floored car just bounces off the limiter forever and never climbs
 		// through the box.
 		const bool bMaxedInGear = EngineRpm > LimiterRpm - 150.0f;
+		// grade guard: don't take a WOT upshift into a gear that can't hold
+		// the current wheel speed at all - that gear's coupled rpm would sag
+		// straight past CoastDownshiftRpm and kick back down once rpm
+		// rebuilds, forever. Found 2026-08-23 (Taylor: hill starts got stuck
+		// revving 1st<->2nd around a fixed low speed, never gaining ground) -
+		// gear 1 hits the limiter fast under WOT and upshifts on bMaxedInGear
+		// alone with no regard for whether gear 2 can actually keep climbing
+		// the grade. Only gates the WOT path; bRelaxedShift's UpshiftRpm
+		// already targets a sane rpm on flat/cruise throttle.
+		const float RpmInHigher = Gear < GearRatios.Num()
+			? CoupledRpm * GearRatios[Gear] / GearRatios[Gear - 1] : 0.0f;
+		const bool bHigherGearViable = RpmInHigher > CoastDownshiftRpm * 1.3f;
 		// slip guard: spinning wheels drive the rpm, not road speed - hold
 		// the gear through a burnout instead of short-shifting to 5th
 		if (ThrottleIn > 0.05f && Gear < GearRatios.Num() && TraceSlip < 0.5f
-			&& (bRelaxedShift ? EngineRpm > UpshiftRpm : bMaxedInGear))
+			&& (bRelaxedShift ? EngineRpm > UpshiftRpm
+			                  : (bMaxedInGear && bHigherGearViable)))
 		{
 			++Gear;
 			ShiftTimer = ShiftTime;
@@ -406,8 +427,10 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		}
 	}
 
-	// reverse <-> forward: intent = holding the opposite pedal at standstill
-	const bool bStopped = FMath::Abs(FwdSpeedCmS) < 60.0f;
+	// reverse <-> forward: intent = holding the opposite pedal below walking
+	// speed, not literally standstill (2026-08-25, Taylor: under 4mph,
+	// holding forward or back should shift) - 4mph = 178.8 cm/s
+	const bool bStopped = FMath::Abs(FwdSpeedCmS) < 178.8f;
 	if (Gear > 0 && bStopped && BrakeIn > 0.3f && ThrottleIn < 0.05f)
 	{
 		ReverseIntent += Dt;

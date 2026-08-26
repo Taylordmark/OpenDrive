@@ -87,13 +87,13 @@ public:
 	float MuPeak = 1.05f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float SlideFrac = 0.72f;
+	float SlideFrac = 0.88f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float PeakSlipRatio = 0.14f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float PeakSlipAngleDeg = 9.0f;
+	float PeakSlipAngleDeg = 13.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float WheelInertia = 1.5f;

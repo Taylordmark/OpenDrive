@@ -96,6 +96,12 @@ public:
 	float GetSteeringInput() const { return SteerIn; }
 
 	// --- engine (pause menu swaps these live) ---
+	// tried 1400 (2026-08-25) to further flatten launch feel, but it also
+	// raises the "CoupledRpm > IdleRpm" engine-braking gate in
+	// TickDrivetrain, which made the car stop applying engine drag at low
+	// speed and got stuck creeping ~1.8mph with no way to brake below the
+	// bStopped threshold to even request reverse. Reverted to 900 - the
+	// TorqueCurve floor bump (0.55->0.85) below is the one that stays.
 	UPROPERTY(EditAnywhere, Category = "Engine")
 	float IdleRpm = 900.0f;
 
@@ -128,7 +134,7 @@ public:
 	 *  road speed. Without this the engine starts already in the powerband,
 	 *  which can't stall on an uphill launch. */
 	UPROPERTY(EditAnywhere, Category = "Engine")
-	float LaunchClutchTime = 0.45f;
+	float LaunchClutchTime = 0.15f;
 
 	/** Limiter bounce rate - the brap-brap repetition (audio-facing cut). */
 	UPROPERTY(EditAnywhere, Category = "Engine")
@@ -254,10 +260,10 @@ public:
 
 	/** Per-axle grip scales (tuning presets route here). */
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float FrontGripScale = 1.0f;
+	float FrontGripScale = 4.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float RearGripScale = 1.0f;
+	float RearGripScale = 4.0f;
 
 	// --- aero ---
 	/** Drag, N per (m/s)^2 (CdA * rho/2; 0.45 ~= 186 mph drag limit). */
