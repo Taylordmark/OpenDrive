@@ -38,6 +38,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float HeadlightElevation = 8.0f;
 
+	/** Moon light intensity (lux) once the sun drops below the horizon - a
+	 * dim night key light so Lumen has something to expose against instead
+	 * of clipping to black (2026-08-25, Taylor: exposure-clipping warning /
+	 * black screen on the far side of the terrain at night). Deliberately
+	 * not a sun-intensity floor - a separate, dimmer, opposite-angle light
+	 * reads as "moonlit" instead of "sun that never fully sets". */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float MoonIntensity = 0.3f;
+
 	UPROPERTY(VisibleAnywhere, Transient, Category = "DayNight")
 	float TimeOfDay = 10.0f;
 
@@ -45,5 +54,6 @@ private:
 	void UpdateHeadlights(bool bOn);
 
 	TWeakObjectPtr<ADirectionalLight> Sun;
+	TWeakObjectPtr<ADirectionalLight> Moon;
 	TMap<TWeakObjectPtr<APawn>, TArray<TWeakObjectPtr<USpotLightComponent>>> Lights;
 };

@@ -1,5 +1,6 @@
 #include "ODDayNightController.h"
 
+#include "Components/DirectionalLightComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "EngineUtils.h"
@@ -19,6 +20,21 @@ void AODDayNightController::BeginPlay()
 		Sun = *It;
 		break;
 	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	Moon = GetWorld()->SpawnActor<ADirectionalLight>(ADirectionalLight::StaticClass(), FTransform::Identity, SpawnParams);
+	if (Moon.IsValid())
+	{
+		Moon->SetMobility(EComponentMobility::Movable);
+		if (UDirectionalLightComponent* MoonComp = Cast<UDirectionalLightComponent>(Moon->GetLightComponent()))
+		{
+			MoonComp->SetIntensity(0.0f);
+			MoonComp->SetLightColor(FLinearColor(0.6f, 0.7f, 1.0f));  // cool moonlight
+			MoonComp->SetCastShadows(false);
+			MoonComp->bAtmosphereSunLight = false;  // don't fight the real sun for aerial perspective
+		}
+	}
 }
 
 void AODDayNightController::Tick(float DeltaSeconds)
@@ -33,6 +49,16 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	if (Sun.IsValid())
 	{
 		Sun->SetActorRotation(FRotator(-Elevation, Azimuth, 0.0f));
+	}
+	if (Moon.IsValid())
+	{
+		// Opposite the sun in azimuth, mirrored elevation - rises as the sun
+		// sets, peaks at solar midnight, sets as the sun rises.
+		Moon->SetActorRotation(FRotator(Elevation, Azimuth + 180.0f, 0.0f));
+		if (UDirectionalLightComponent* MoonComp = Cast<UDirectionalLightComponent>(Moon->GetLightComponent()))
+		{
+			MoonComp->SetIntensity(Elevation < 0.0f ? MoonIntensity : 0.0f);
+		}
 	}
 	UpdateHeadlights(Elevation < HeadlightElevation);
 }
