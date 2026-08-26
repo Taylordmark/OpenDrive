@@ -1990,6 +1990,47 @@ above, never by Taylor actually driving up to and past a generated wall in
 the packaged/PIE build. Both are open verification items, not completed
 work — do not mark this system "done" until that drive-test lands.
 
+### 7.13 Junction-pad collision bug — ROOT-CAUSED AND FIXED (2026-08-26)
+
+The long-standing, multi-session junction-pad collision bug (vehicles
+failing to collide with certain road-junction pad chunks — `AODVehiclePawn`'s
+ground-snap would sit at `onRoad=0` and eventually settle onto terrain
+instead, even though the pad's `UDynamicMeshComponent` was fully registered,
+visible, had a valid body, and correct triangle/vertex counts) is finally
+root-caused, not just patched around again.
+
+**Root cause:** an earlier session flipped the pad fan triangles' winding
+order, believing it was needed to fix backface-culling/render invisibility.
+It wasn't — `RoadMat` is double-sided, so winding was never doing anything
+for rendering. What it WAS doing, silently, is breaking Chaos's
+complex-as-simple collision cook for `UDynamicMeshComponent`, which (unlike
+the double-sided material) is genuinely one-sided by winding. The fix that
+"worked" back then was fixing render invisibility and quietly introducing a
+collision hole in the same motion — two different bugs sharing one symptom
+description ("flip the winding"), only one of which the fix actually
+addressed.
+
+**Fix:** `pipeline/experimental_junction_pads.py`'s `build_pad_chunk()` fan
+winding reverted to its original orientation (`tris = [0, a, b]`, not
+`[0, b, a]`). Verified headlessly at two independent junctions, both now
+resolving `onRoad=1`/`PM_Asphalt` instantly instead of riding out the
+ground-snap timeout onto terrain.
+
+**Lesson worth keeping:** when a mesh component reports fully healthy at
+every level UE5 can tell you about (registered, visible, valid body, correct
+triangle/vertex counts) but a physics query still misses it, check triangle
+winding as its own independent variable before reaching for a
+lifecycle/registration/topology explanation — and don't assume a past
+render-visibility fix and a present collision fix for the same "flip the
+winding" symptom are the same fix. A double-sided material can fully mask a
+winding problem in rendering while collision still breaks underneath it.
+
+Committed in `12e70fc` on `audit-and-arc7-rescope`, alongside a mesh-bridging
+topology improvement in the same file (`bridge_pad_to_host()` welds the pad
+ring to the host ribbon's vertices so a merged chunk stays one connected
+mesh instead of two coincident shells) and an unrelated free-look camera
+feature on `AODVehiclePawn`.
+
 ---
 
 ## Cross-cutting (release engineering)
