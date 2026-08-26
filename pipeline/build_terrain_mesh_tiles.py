@@ -61,7 +61,8 @@ from pymartini import Martini
 
 import test_areas
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
-from road_mesh_common import road_ue_z_m, classify_wall_stations
+from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m,
+                               classify_wall_stations)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -83,8 +84,8 @@ NEAR_GRID_N = 257           # AUDIT.md item 1 (2026-07-28): base sampling grid f
 # oversampled). This is a CEILING now, not the literal output density - see
 # MAX_ERROR_NEAR_M. Replaces the old uniform-41 grid (50 m spacing, no real
 # shape off the road corridor - AUDIT.md 3.1).
-MAX_ERROR_NEAR_M = 2.0      # martini simplification tolerance, near tiles only.
-# Taylor, 2026-07-28: accept this despite AUDIT.md's storage estimate not
+MAX_ERROR_NEAR_M = 0.3      # martini simplification tolerance, near tiles only.
+# Taylor, 2026-07-28: accept 2.0 despite AUDIT.md's storage estimate not
 # holding up under measurement - probed 3 real Oahu tiles (flat/moderate/
 # Koolau-cliff) at base 257 before committing to the full pipeline (the
 # audit's own recommended cheap hedge): retention ran 22-44% even at this
@@ -93,6 +94,18 @@ MAX_ERROR_NEAR_M = 2.0      # martini simplification tolerance, near tiles only.
 # everywhere rather than the smooth-valley/sharp-ridge split the estimate
 # assumed. Revisit if this proves too expensive in practice; NEAR_GRID_N=129
 # (one-constant Option A fallback) is the documented escape hatch.
+#
+# Tightened 2.0 -> 0.3 (2026-08-22, Taylor: drive-tested Green Valley,
+# found many spots where the road sat close to but off the terrain surface
+# by under a foot - visually terrain poking through the road, or a sharp
+# lip climbing back onto it). 2.0 m of allowed simplification error right
+# next to a carved road edge is easily enough to produce a sub-foot gap;
+# 0.3 m (~1 ft) forces martini to keep enough vertices near the carve zone
+# to track the carved (road-following) surface much more closely. Cost is
+# more retained triangles/bigger tiles - not yet measured for Green
+# Valley's terrain the way Oahu was above; watch bake time and tile size
+# on this rebake and revisit (e.g. NEAR_GRID_N=129 fallback) if it's too
+# expensive.
 SEAM_SKIRT_DROP_M = 10.0    # see build_seam_skirt()'s docstring - hides the
                              # crack an adaptive mesh can produce at a tile
                              # boundary, the same "gap hidden under geometry"
@@ -149,6 +162,65 @@ TERRAIN_CARVE_DROP_M = 0.15   # bias the carved surface just below the road so
                               # needed for banking: road_mesh_common raises only
                               # the OUTER edge through curves, never dropping any
                               # edge below the centerline the carve references.)
+                              #
+                              # Briefly raised 0.15 -> 0.5 (2026-08-23) to paper
+                              # over martini's simplification error (up to
+                              # MAX_ERROR_NEAR_M=0.3 m) eating this margin -
+                              # worked, but left the road ~0.4-0.6 m above the
+                              # shoulder everywhere (Taylor: wanted ~0.15 m,
+                              # "only criteria being road always above
+                              # environment"). A blanket drop can't satisfy
+                              # both - the fix is HARD_CLAMP_MARGIN_M below,
+                              # which enforces the invariant only where it's
+                              # actually needed (under the physical road
+                              # footprint) instead of inflating the drop
+                              # everywhere the 50-150 m blend reaches. Reverted
+                              # to 0.15 now that the clamp covers the guarantee.
+
+# "Environment reducer after the cut" (Taylor, 2026-08-23): even with a
+# correct carve stamp, martini is free to drop any grid vertex whose error is
+# within MAX_ERROR_NEAR_M - so a point exactly under the road could still sit
+# up to that much above where carve_grid_m placed it, poking through the road
+# surface regardless of TERRAIN_CARVE_DROP_M. Clamping every grid point
+# within the road's actual paved+skirt footprint (not the full 150 m carve
+# blend) to (road_elev - HARD_CLAMP_MARGIN_M) BEFORE martini sees the grid
+# guarantees this by construction: martini only ever selects a subset of
+# already-clamped points as vertices, and linear interpolation between two
+# capped values can't exceed the cap either - so the guarantee survives
+# simplification without needing it applied a second time post-triangulation.
+# Kept separate from TERRAIN_CARVE_DROP_M/_INNER_M/_OUTER_M, which still
+# control the wider cosmetic blend taper back to raw terrain.
+HARD_CLAMP_RADIUS_M = ROAD_HALF_WIDTH + SKIRT_EXTRA   # 7.5 m - the literal
+                                                       # paved+skirt width
+HARD_CLAMP_MARGIN_M = 0.15    # matches TERRAIN_CARVE_DROP_M's own small gap
+
+# Cut/fill asymmetry (2026-08-24, Taylor: switchback screenshots showing the
+# road buried under terrain that should have been cut away for it). The
+# single 50/150 m taper above was calibrated purely to hide martini/skirt
+# seams (see its own comment) - it says nothing about which side of the road
+# the ground is on, so a hillside pixel (raw terrain sits ABOVE road
+# elevation - a cut) gets the exact same 150 m gentle taper back to raw as a
+# drop-off pixel (raw terrain sits BELOW road elevation - a fill). On a
+# switchback the inboard/hillside terrain is often close in elevation to the
+# OTHER leg of the switchback, not this one, so a wide taper lets raw
+# hillside height bleed most of the way back in before it's fully faded -
+# reading as "terrain sitting on top of the road" instead of a clean cut
+# face. Fill pixels don't have this problem (there's no ground to bleed back
+# in from below) and keep the original 50/150 taper so we don't invent fake
+# embankments. `best_d <= best_elev-vs-raw sign` decides which taper a given
+# pixel uses - see carve_grid_m.
+# 2026-08-24 correction: the first cut (12/25 m) was tighter than the grid
+# itself can represent - NEAR tiles sample at ~7.8 m spacing (2000 m /
+# (257-1)) and martini only keeps points within MAX_ERROR_NEAR_M=0.3 m, so a
+# trench that steep and only 1-3 grid cells wide got treated as noise:
+# simplification skipped straight over the narrow feature and bridged across
+# it, leaving the road plank floating over a V-notch the surviving triangles
+# barely touched (Taylor's screenshot). 25/75 m is still meaningfully
+# tighter than the 50/150 m fill taper (a real visible cut, not a graded
+# slope) while spanning ~3-10 grid cells - enough samples for martini to
+# keep the feature under its own error tolerance instead of discarding it.
+TERRAIN_CARVE_CUT_INNER_M = 25.0
+TERRAIN_CARVE_CUT_OUTER_M = 75.0
 
 # Elevation-conflict detection (station pairs close in XY, too far apart in
 # Z to be the same piece of ground - e.g. a switchback doubling back on
@@ -278,13 +350,23 @@ CARVE_STATION_CHUNK = 2000   # see carve_grid_m's docstring - bounds the
 
 def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
-                  drop=TERRAIN_CARVE_DROP_M):
+                  drop=TERRAIN_CARVE_DROP_M,
+                  cut_inner=TERRAIN_CARVE_CUT_INNER_M,
+                  cut_outer=TERRAIN_CARVE_CUT_OUTER_M):
     """Same inverse-distance-stamp + smoothstep blend as
     road_mesh_common.carve_heightmap, but operating directly in the local
     east/north METER frame instead of a lon/lat-bounded pixel grid - no
     row/col transpose ambiguity to get backwards (the old live-streaming
     version's 2026-07-20 bug) since there's no pymartini array-order convention to
     match here at all, just plain 2-D arrays this script fully controls.
+
+    Cut/fill asymmetric taper (see TERRAIN_CARVE_CUT_INNER_M's comment): a
+    pixel whose RAW terrain sits above the nearest station's elevation (a
+    hillside/cut pixel) blends back to raw over `cut_inner..cut_outer`
+    instead of `inner..outer`, so the hillside reads as a cut face carved
+    for the road rather than gently regaining its natural slope over 150 m.
+    Fill pixels (raw terrain below road) are unaffected - they keep the
+    original wide taper.
 
     Chunked over stations (2026-07-28) - the naive one-shot version built a
     dense (grid_points x stations) distance matrix (up to 257x257=66,049
@@ -317,9 +399,18 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
         better = nearest_d < best_d
         best_d = np.where(better, nearest_d, best_d)
         best_elev = np.where(better, se[nearest], best_elev)
-    w = np.clip((outer - best_d) / (outer - inner), 0.0, 1.0)
+    raw = elev_grid.reshape(-1)
+    is_cut = raw > best_elev
+    px_inner = np.where(is_cut, cut_inner, inner)
+    px_outer = np.where(is_cut, cut_outer, outer)
+    w = np.clip((px_outer - best_d) / (px_outer - px_inner), 0.0, 1.0)
     w = w * w * (3 - 2 * w)
-    out = w * (best_elev - drop) + (1 - w) * elev_grid.reshape(-1)
+    out = w * (best_elev - drop) + (1 - w) * raw
+    # hard clamp under the literal road footprint - see HARD_CLAMP_MARGIN_M's
+    # comment. Reuses best_d/best_elev from the blend above rather than a
+    # second nearest-station search.
+    under_road = best_d <= HARD_CLAMP_RADIUS_M
+    out = np.where(under_road, np.minimum(out, best_elev - HARD_CLAMP_MARGIN_M), out)
     return out.reshape(shape)
 
 
@@ -602,6 +693,8 @@ def main():
     caches = ({}, {})   # (near_cache, far_cache), keyed (zoom, tx, ty)
     total_verts = total_tris = 0
     written_paths = []
+    written_coarse_paths = []
+    n_coarse_fallback = 0
     for i, ((tx, ty), is_near) in enumerate(tiles.items()):
         tile = build_tile(tx, ty, is_near, station_data, session, caches)
         out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
@@ -609,12 +702,31 @@ def main():
         written_paths.append(out_path)
         total_verts += len(tile["verts"])
         total_tris += len(tile["tris"])
+
+        # Runtime dynamic-LOD streaming (2026-08-25, Arc 7 rescope): near
+        # tiles are the only ones with full-res+collision geometry, but
+        # AODTerrainManager needs something cheap to show *before* the
+        # player is actually close enough to warrant that cost. Bake the
+        # same coarse/no-collision variant a plain far tile would get,
+        # under a distinct prefix so both can live on disk at once - see
+        # AODTerrainManager::RequestTileLoad.
+        if is_near:
+            coarse_tile = build_tile(tx, ty, False, station_data, session, caches)
+            coarse_path = OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+            write_tile_bin(coarse_path, coarse_tile, gen_id_bytes)
+            written_coarse_paths.append(coarse_path)
+            n_coarse_fallback += 1
+
         if (i + 1) % 10 == 0 or i + 1 == len(tiles):
             print(f"  {i + 1}/{len(tiles)} tile(s) built")
 
     n_stale = delete_stale_tiles(OUT_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin", written_paths)
     print(f"deleted {n_stale} stale terrain tile(s) from a previous run")
-    print(f"Built {len(tiles)} terrain tile(s), {total_verts} verts, {total_tris} tris -> {OUT_DIR}")
+    n_stale_coarse = delete_stale_tiles(
+        OUT_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin", written_coarse_paths)
+    print(f"deleted {n_stale_coarse} stale coarse-fallback tile(s) from a previous run")
+    print(f"Built {len(tiles)} terrain tile(s) ({n_coarse_fallback} with a coarse fallback), "
+          f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
 
 if __name__ == "__main__":

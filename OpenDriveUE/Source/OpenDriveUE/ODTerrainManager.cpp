@@ -9,6 +9,7 @@
 #include "DynamicMesh/MeshNormals.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
+#include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -34,16 +35,28 @@ void AODTerrainManager::BeginPlay()
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: TerrainMat load %s"),
 		TerrainMat ? TEXT("OK") : TEXT("FAILED (terrain will use engine default material)"));
+
+	// Diagnostic-only override (2026-08-25): lets a headless test bisect
+	// how many resident near-fidelity (collision-enabled) tiles trigger the
+	// open Chaos/UE5.8 collision-registration bug without a recompile per
+	// step - see AODRoadManager's matching -odspawnradius= override.
+	float OverrideRadius = 0.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odcollisionradius="), OverrideRadius))
+	{
+		CollisionRadius = OverrideRadius;
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: odcollisionradius override -> %.0f"), CollisionRadius);
+	}
 }
 
 void AODTerrainManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (PendingTiles.Num() > 0)
+	const int32 NumInFlight = PendingCoarseTiles.Num() + PendingNearTiles.Num();
+	if (NumInFlight > 0)
 	{
 		UE_LOG(LogTemp, Display,
 			TEXT("ODTerrainManager: EndPlay with %d tile load(s) still in flight - "
 			     "their completions will no-op harmlessly when they land"),
-			PendingTiles.Num());
+			NumInFlight);
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -114,39 +127,76 @@ bool AODTerrainManager::ParseTerrainTileFile(const FString& Path, FParsedTerrain
 	return true;
 }
 
-void AODTerrainManager::RequestTileLoad(const FIntPoint& Key)
+static FString TerrainTileFilePath(const FString& Prefix, const FIntPoint& Key)
 {
-	PendingTiles.Add(Key);
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("%s_tile_%d_%d.bin"), *TerrainTilePrefix, Key.X, Key.Y);
+	return FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("%s_tile_%d_%d.bin"), *Prefix, Key.X, Key.Y);
+}
+
+void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity)
+{
+	TSet<FIntPoint>& Pending = (Fidelity == ETileFidelity::Near) ? PendingNearTiles : PendingCoarseTiles;
+	Pending.Add(Key);
+
+	// Near always reads TerrainTilePrefix's own file. Coarse prefers the
+	// "terrain_coarse_<area>_..." variant baked alongside every NEAR tile
+	// (pipeline/build_terrain_mesh_tiles.py's main()) so a route tile has
+	// something cheap to show before it's close enough to warrant the
+	// full build; a plain far tile never got that separate file - it only
+	// ever had the one file, under the ordinary prefix, which already IS
+	// the coarse content - so Coarse falls back to that same path when the
+	// "_coarse_" one doesn't exist (2026-08-25: this fallback was missing
+	// in the initial cut and silently starved every far/background tile).
+	FString PrimaryPath = TerrainTileFilePath(TerrainTilePrefix, Key);
+	FString FallbackPath;
+	if (Fidelity == ETileFidelity::Coarse)
+	{
+		checkf(TerrainTilePrefix.StartsWith(TEXT("terrain_")),
+			TEXT("TerrainTilePrefix %s must start with \"terrain_\""), *TerrainTilePrefix);
+		const FString CoarsePrefix = TEXT("terrain_coarse_") + TerrainTilePrefix.Mid(8);
+		FallbackPath = MoveTemp(PrimaryPath);
+		PrimaryPath = TerrainTileFilePath(CoarsePrefix, Key);
+	}
 
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath]()
 	{
 		FParsedTerrainTile Parsed;
-		const bool bOk = ParseTerrainTileFile(Path, Parsed);
+		// Check existence first rather than just trying-then-falling-back -
+		// every plain far tile is a guaranteed miss on the "_coarse_"
+		// prefix, and that's most of the tiles in VisualRadius, so
+		// avoiding LoadFileToArray's own "failed to read file" warning
+		// spam here (LogStreaming) actually matters.
+		const bool bUseFallback = !FallbackPath.IsEmpty()
+			&& !FPlatformFileManager::Get().GetPlatformFile().FileExists(*PrimaryPath);
+		const bool bOk = ParseTerrainTileFile(bUseFallback ? FallbackPath : PrimaryPath, Parsed);
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, Fidelity, bOk, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
 					return;
 				}
-				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
+				WeakThis->OnTileParsed(Key, Fidelity, bOk, MoveTemp(Parsed));
 			});
 	});
 }
 
-void AODTerrainManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedTerrainTile&& Parsed)
+void AODTerrainManager::OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed)
 {
-	PendingTiles.Remove(Key);
+	TSet<FIntPoint>& Pending = (Fidelity == ETileFidelity::Near) ? PendingNearTiles : PendingCoarseTiles;
+	Pending.Remove(Key);
 	if (!bOk)
 	{
-		// Also the expected outcome for any tile beyond the pipeline's
-		// render-distance cutoff (build_terrain_mesh_tiles.py never writes
-		// a file for those) - not a bug, same "no hole" semantics
-		// AODRoadManager relies on for MissingTiles.
-		MissingTiles.Add(Key);
+		// For Coarse, also the expected outcome for any tile beyond the
+		// pipeline's render-distance cutoff (build_terrain_mesh_tiles.py
+		// never writes a file for those) - not a bug, same "no hole"
+		// semantics AODRoadManager relies on for its own MissingTiles. For
+		// Near, the normal, expected state for every plain far tile (they
+		// never had a near variant) - upgrade attempts for those keys
+		// simply stop here forever, which is correct.
+		TSet<FIntPoint>& Missing = (Fidelity == ETileFidelity::Near) ? MissingNearTiles : MissingCoarseTiles;
+		Missing.Add(Key);
 		return;
 	}
 
@@ -165,10 +215,47 @@ void AODTerrainManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedTerr
 			Key.X, Key.Y, *Parsed.GenerationId, *TerrainTilePrefix, *FirstGenerationId);
 	}
 
-	FinalizeTile(Key, MoveTemp(Parsed));
+	// Actual mesh/collision build is deferred and budgeted (see
+	// ProcessPendingTileBuilds) rather than done here synchronously -
+	// 2026-08-25 Arc 7 rescope, same reasoning as
+	// AODRoadManager::OnTileParsed's PendingChunkBuilds queue.
+	FPendingTerrainBuild& Build = PendingTileBuilds.AddDefaulted_GetRef();
+	Build.Key = Key;
+	Build.Parsed = MoveTemp(Parsed);
+	Build.TargetFidelity = Fidelity;
 }
 
-void AODTerrainManager::FinalizeTile(const FIntPoint& Key, FParsedTerrainTile&& Parsed)
+void AODTerrainManager::ProcessPendingTileBuilds()
+{
+	int32 Budget = TileBuildsPerFrameBudget;
+	while (Budget > 0 && PendingTileBuilds.Num() > 0)
+	{
+		FPendingTerrainBuild Build = MoveTemp(PendingTileBuilds[0]);
+		PendingTileBuilds.RemoveAt(0);
+		--Budget;
+
+		// A downgrade/upgrade target may have gone stale (tile fully
+		// released, or the opposite fidelity already won a race) - only
+		// act on it if still relevant.
+		FTerrainTile* Existing = Tiles.Find(Build.Key);
+		if (Existing && Existing->Fidelity == Build.TargetFidelity)
+		{
+			continue;
+		}
+
+		if (Existing && Existing->Comp)
+		{
+			Existing->Comp->DestroyComponent();
+			Tiles.Remove(Build.Key);
+		}
+
+		FTerrainTile NewTile;
+		BuildTile(NewTile, Build.Parsed, Build.TargetFidelity);
+		Tiles.Add(Build.Key, MoveTemp(NewTile));
+	}
+}
+
+void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& Parsed, ETileFidelity Fidelity)
 {
 	const uint32 VCount = Parsed.Verts.Num() / 3;
 	const uint32 TCount = Parsed.Tris.Num() / 3;
@@ -218,15 +305,20 @@ void AODTerrainManager::FinalizeTile(const FIntPoint& Key, FParsedTerrainTile&& 
 		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 
-	if (Parsed.bHasCollision)
+	// Fidelity, not the file's own baked bHasCollision byte, decides
+	// collision here: a near tile's coarse fallback carries bHasCollision
+	// false same as a plain far tile, but we still want the Near-fidelity
+	// *build* of that same tile key to get collision even though the file
+	// read for the Coarse request never will.
+	if (Fidelity == ETileFidelity::Near && Parsed.bHasCollision)
 	{
 		Comp->EnableComplexAsSimpleCollision();
 		Comp->SetCollisionProfileName(TEXT("BlockAll"));
 	}
 	else
 	{
-		// far/background tile - the player can never reach it, so paying
-		// for collision setup here is pure waste
+		// far/background/not-yet-approached tile - paying for collision
+		// setup here is pure waste until (if ever) the player gets close.
 		Comp->SetCollisionProfileName(TEXT("NoCollision"));
 	}
 	if (TerrainMat)
@@ -234,12 +326,8 @@ void AODTerrainManager::FinalizeTile(const FIntPoint& Key, FParsedTerrainTile&& 
 		Comp->SetMaterial(0, TerrainMat);
 	}
 
-	FTerrainTile& Tile = Tiles.Add(Key);
 	Tile.Comp = Comp;
-
-	UE_LOG(LogTemp, Display,
-		TEXT("ODTerrainManager: tile (%d,%d) built %d verts/%d tris (collision=%d)"),
-		Key.X, Key.Y, VCount, TCount, Parsed.bHasCollision ? 1 : 0);
+	Tile.Fidelity = Fidelity;
 }
 
 void AODTerrainManager::ReleaseTile(const FIntPoint& Key)
@@ -258,6 +346,8 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	ProcessPendingTileBuilds();
+
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Player)
 	{
@@ -271,11 +361,16 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	// its own tile bounds (build_terrain_mesh_tiles.py builds a plain grid
 	// clipped exactly to [tx*TileSizeCm, (tx+1)*TileSizeCm)) - no
 	// chunk-span padding needed on the load reach.
-	const int32 LoadReach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
-	const int32 DespawnReach = FMath::CeilToInt((SpawnRadius + DespawnMarginCm) / TileSizeCm);
+	const int32 VisualLoadReach = FMath::CeilToInt(VisualRadius / TileSizeCm);
+	const int32 VisualDespawnReach = FMath::CeilToInt((VisualRadius + DespawnMarginCm) / TileSizeCm);
+	const int32 CollisionUpgradeReach = FMath::CeilToInt(CollisionRadius / TileSizeCm);
+	const int32 CollisionDowngradeReach = FMath::CeilToInt((CollisionRadius + DespawnMarginCm) / TileSizeCm);
 
 	int32 Dispatched = 0;
-	for (int32 Ring = 0; Ring <= LoadReach && Dispatched < MaxNewLoadsPerTick; ++Ring)
+
+	// Pass 1: coarse "always something there" load, out to VisualRadius -
+	// this is the one that used to be the whole story (as SpawnRadius).
+	for (int32 Ring = 0; Ring <= VisualLoadReach && Dispatched < MaxNewLoadsPerTick; ++Ring)
 	{
 		for (int32 dy = -Ring; dy <= Ring && Dispatched < MaxNewLoadsPerTick; ++dy)
 		{
@@ -286,13 +381,56 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key))
+				if (Tiles.Contains(Key) || PendingCoarseTiles.Contains(Key) || MissingCoarseTiles.Contains(Key))
 				{
 					continue;
 				}
-				RequestTileLoad(Key);
+				RequestTileLoad(Key, ETileFidelity::Coarse);
 				++Dispatched;
 			}
+		}
+	}
+
+	// Pass 2: upgrade coarse -> near for whatever's within the much
+	// smaller CollisionRadius (Arc 7 rescope, 2026-08-25) - only tiles
+	// that are actually near-corridor route tiles have a near variant to
+	// upgrade to; everything else just no-ops into MissingNearTiles once.
+	for (int32 Ring = 0; Ring <= CollisionUpgradeReach && Dispatched < MaxNewLoadsPerTick; ++Ring)
+	{
+		for (int32 dy = -Ring; dy <= Ring && Dispatched < MaxNewLoadsPerTick; ++dy)
+		{
+			for (int32 dx = -Ring; dx <= Ring && Dispatched < MaxNewLoadsPerTick; ++dx)
+			{
+				if (FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring)
+				{
+					continue;
+				}
+				const FIntPoint Key = Center + FIntPoint(dx, dy);
+				const FTerrainTile* Existing = Tiles.Find(Key);
+				if (!Existing || Existing->Fidelity == ETileFidelity::Near
+					|| PendingNearTiles.Contains(Key) || MissingNearTiles.Contains(Key))
+				{
+					continue;
+				}
+				RequestTileLoad(Key, ETileFidelity::Near);
+				++Dispatched;
+			}
+		}
+	}
+
+	// Downgrade near -> coarse for anything that's fallen back outside
+	// CollisionRadius (+hysteresis) - re-requests the coarse variant
+	// through the normal budgeted path rather than swapping instantly.
+	for (const auto& Pair : Tiles)
+	{
+		if (Pair.Value.Fidelity != ETileFidelity::Near)
+		{
+			continue;
+		}
+		const int32 Dist = FMath::Max(FMath::Abs(Pair.Key.X - Center.X), FMath::Abs(Pair.Key.Y - Center.Y));
+		if (Dist > CollisionDowngradeReach && !PendingCoarseTiles.Contains(Pair.Key))
+		{
+			RequestTileLoad(Pair.Key, ETileFidelity::Coarse);
 		}
 	}
 
@@ -300,7 +438,7 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	for (const auto& Pair : Tiles)
 	{
 		if (FMath::Max(FMath::Abs(Pair.Key.X - Center.X),
-		               FMath::Abs(Pair.Key.Y - Center.Y)) > DespawnReach)
+		               FMath::Abs(Pair.Key.Y - Center.Y)) > VisualDespawnReach)
 		{
 			Gone.Add(Pair.Key);
 		}
@@ -313,8 +451,15 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastDiagTime > 5.0)
 	{
 		LastDiagTime = Now;
+		int32 NumNear = 0, NumCoarse = 0;
+		for (const auto& Pair : Tiles)
+		{
+			(Pair.Value.Fidelity == ETileFidelity::Near ? NumNear : NumCoarse)++;
+		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODTerrainManager: tiles=%d pending=%d missing=%d"),
-			Tiles.Num(), PendingTiles.Num(), MissingTiles.Num());
+			TEXT("ODTerrainManager: tiles=%d (near=%d coarse=%d) pending=%d buildQueue=%d missing=%d"),
+			Tiles.Num(), NumNear, NumCoarse,
+			PendingCoarseTiles.Num() + PendingNearTiles.Num(), PendingTileBuilds.Num(),
+			MissingCoarseTiles.Num() + MissingNearTiles.Num());
 	}
 }

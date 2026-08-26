@@ -48,6 +48,17 @@ struct FRoadTile
 	TArray<TObjectPtr<UDynamicMeshComponent>> Chunks;
 };
 
+/** One tile's worth of chunk components still being built, a few per tick
+ *  (see AODRoadManager::ProcessPendingChunkBuilds) instead of all at once -
+ *  see that function's header comment on OnTileParsed for why. */
+struct FPendingTileBuild
+{
+	FIntPoint Key = FIntPoint::ZeroValue;
+	FParsedRoadTile Parsed;
+	int32 NextChunkIndex = 0;
+	FRoadTile InProgress;
+};
+
 /** One sparse road-name/city-name point (pipeline/export_place_labels_bin.py's
  *  ODL1 sidecar) - loaded whole at BeginPlay (a few thousand points at most,
  *  unlike the road/terrain tiles) and nearest-nooked at runtime, same
@@ -103,26 +114,71 @@ public:
 
 	/** World-space grid size, cm. MUST match pipeline/test_areas.py's
 	 *  ROAD_TILE_SIZE_CM - a mismatch doesn't crash, it just probes
-	 *  filenames that don't exist and silently loads no road. */
+	 *  filenames that don't exist and silently loads no road.
+	 *  Shrunk from 200000 (2km) 2026-08-25 to fix the open Chaos/UE5.8
+	 *  collision-registration bug (junction pads unreachable by a
+	 *  ground-snap trace): Tick()'s ring-load math guarantees at least a
+	 *  3x3-tile neighborhood resident around the player no matter how
+	 *  small SpawnRadius is, and at the old tile size that guaranteed
+	 *  minimum footprint already exceeded the bug's bisected resident-
+	 *  chunk-count failure threshold at some real dense junction clusters.
+	 *  A finer grid shrinks that guaranteed-minimum footprint instead -
+	 *  see pipeline/test_areas.py's ROAD_TILE_SIZE_CM comment for the full
+	 *  bisection numbers. */
 	UPROPERTY(EditAnywhere, Category = "Road")
-	float TileSizeCm = 200000.0f;
+	float TileSizeCm = 50000.0f;
 
-	/** Tiles fully populated inside this radius of the player (cm). */
+	/** Tiles fully populated inside this radius of the player (cm).
+	 *  Shrunk from 400000 (4km) to 200000 (2km) as part of the Arc 7
+	 *  dynamic-streaming rescope (2026-08-25, see
+	 *  AODTerrainManager::VisualRadius/CollisionRadius for the terrain
+	 *  side of the same change): roads don't need a coarse/full fidelity
+	 *  split the way terrain does - they're already just chunk geometry
+	 *  along the actual route, throttled to build a few chunks/tick via
+	 *  ChunksPerFrameBudget - so the only remaining boot-burst contributor
+	 *  here was simply loading too large a radius at once. 200000cm was
+	 *  MaxChunkSpanCm (75000cm) plus a full tile of margin, comfortably
+	 *  more than a player can cross before the next ring dispatches even
+	 *  at unrealistic speeds.
+	 *  Brought down to 50000cm alongside TileSizeCm's matching shrink
+	 *  (2026-08-25, see that field's comment) to match the new tile size
+	 *  1:1 - radius tuning alone couldn't clear the bug's bisected
+	 *  threshold at some dense junctions (the ring-load minimum footprint
+	 *  is independent of SpawnRadius, see TileSizeCm), but keeping it in
+	 *  step with the smaller tile still avoids dispatching load requests
+	 *  needlessly far ahead of the player. */
 	UPROPERTY(EditAnywhere, Category = "Road")
-	float SpawnRadius = 400000.0f;
+	float SpawnRadius = 50000.0f;
 
 	/** Fixed world-space margin (cm) beyond the load radius before a tile is
 	 *  released - a world-space hysteresis band, not a bare tile-count
 	 *  constant (which wouldn't scale correctly across different
-	 *  TileSizeCm values). */
+	 *  TileSizeCm values). Brought down alongside SpawnRadius (2026-08-25)
+	 *  to keep the despawn ring proportionally close, not 2.5x SpawnRadius.
+	 *  Shrunk again in step with TileSizeCm/SpawnRadius's 2026-08-25 drop
+	 *  to 50000cm, preserving the same ~1.25x ratio to SpawnRadius. */
 	UPROPERTY(EditAnywhere, Category = "Road")
-	float DespawnMarginCm = 500000.0f;
+	float DespawnMarginCm = 62500.0f;
 
 	/** Cap on new tile-load DISPATCHES per tick (not completions - the I/O
 	 *  itself is async) so a big SpawnRadius or a fast ring-crossing can't
 	 *  thundering-herd the thread pool with simultaneous file opens. */
 	UPROPERTY(EditAnywhere, Category = "Road")
 	int32 MaxNewLoadsPerTick = 2;
+
+	/** Cap on chunk *components* (NewObject/RegisterComponent/collision-enable)
+	 *  built per tick, across however many tiles are mid-build at once (2026-
+	 *  08-25, Taylor: full-map junction-pad collision investigation) - see
+	 *  ProcessPendingChunkBuilds's header comment on OnTileParsed for why this
+	 *  exists: building every chunk in a big same-frame burst (a full map's
+	 *  ~260 near-tile chunks) left some components' physics state reporting
+	 *  itself valid yet never actually queryable in the world's physics scene,
+	 *  while the identical geometry built in a small burst (--solo, 5 chunks)
+	 *  worked immediately - a Chaos/UE5.8 bulk-registration issue, not a bug
+	 *  in this class's own bookkeeping. Spreading the same total work across
+	 *  more frames avoids ever hitting that many same-frame registrations. */
+	UPROPERTY(EditAnywhere, Category = "Road")
+	int32 ChunksPerFrameBudget = 8;
 
 	/** Content/OpenDrive/Masks/<prefix>.bin - full-density road centerline
 	 *  (pipeline/export_road_centerline_bin.py, same ODC1 sidecar format
@@ -232,16 +288,60 @@ private:
 
 	void RequestTileLoad(const FIntPoint& Key);
 	void OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTile&& Parsed);
-	void FinalizeTile(const FIntPoint& Key, FParsedRoadTile&& Parsed);
+	void ProcessPendingChunkBuilds();
+	void BuildOneChunk(const FIntPoint& Key, FRoadTile& Tile, const FParsedChunk& Chunk, const FTransform& CompXf);
+	UDynamicMeshComponent* CreateChunkMeshComponent(const FParsedChunk& Chunk, const FTransform& CompXf, bool bRecordSkirtSamples);
 	void ReleaseTile(const FIntPoint& Key);
 	void RunSeamCheck();
 
 	TMap<FIntPoint, FRoadTile> Tiles;
 
-	// dispatched, awaiting the game-thread OnTileParsed callback
+	// parsed tiles awaiting their chunk components, a few per tick - see
+	// ProcessPendingChunkBuilds
+	TArray<FPendingTileBuild> PendingChunkBuilds;
+
+	// dispatched (parse in flight, OR parsed and queued in PendingChunkBuilds
+	// awaiting its incremental build) - stays populated until the tile's last
+	// chunk actually finishes in ProcessPendingChunkBuilds
 	TSet<FIntPoint> PendingTiles;
 	// confirmed no file at this key (ENOENT or bad header) - don't retry
 	TSet<FIntPoint> MissingTiles;
+
+	// 2026-08-26: RecreatePhysicsState() alone (tried first) did NOT fix the
+	// bug - retested with live per-second tracking (DiagTargetComp below)
+	// and the affected component stayed registered=1/visible=1/collision
+	// valid/bodyValid=1/renderStateCreated=1 for 30+ seconds straight, never
+	// destroyed or replaced, while an independent trace fired from this
+	// actor (not just the vehicle's own trace) still missed it every time.
+	// That rules out both a stale/never-refreshed state AND a timing/tile-
+	// churn explanation - the component's own bookkeeping is correct but
+	// something in the engine's internal registration of it isn't. The
+	// stronger mitigation: don't just refresh the existing component's
+	// physics state, fully DESTROY it and construct a brand-new
+	// UDynamicMeshComponent with identical geometry one tick later, so
+	// whatever internal registration table entry is actually broken gets
+	// replaced by a fresh one rather than patched in place.
+	struct FPendingPhysicsRebuild
+	{
+		FIntPoint TileKey = FIntPoint::ZeroValue;
+		TWeakObjectPtr<UDynamicMeshComponent> OldComp;
+		FParsedChunk Chunk;   // copy - needed to rebuild the mesh from scratch
+		FTransform CompXf;
+	};
+	TArray<FPendingPhysicsRebuild> PendingPhysicsRefresh;
+	void ProcessPendingPhysicsRefresh();
+
+	// 2026-08-26 diagnostic: RecreatePhysicsState() (above) did NOT fix the
+	// test junction - onRoad=0 still, identical to before. BuildOneChunk's
+	// per-chunk log only proves the component's state was valid AT BUILD
+	// TIME; the ground-snap failure happens 2-20s later. Track the specific
+	// small pad chunk found near the test point across time to see whether
+	// it's actually torn down/rebuilt in between (tile despawn churn, a
+	// duplicate-key collision) rather than staying registered-but-ignored
+	// the whole time.
+	TWeakObjectPtr<UDynamicMeshComponent> DiagTargetComp;
+	bool bDiagTargetEverSet = false;
+	double LastDiagTargetLogTime = 0.0;
 
 	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
 	// SS3.1/SS5.1): the id of the first tile this manager successfully
