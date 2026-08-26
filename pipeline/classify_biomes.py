@@ -140,6 +140,19 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, elev_m, lat_deg):
             return BIOME_RAINFOREST
         if abs_lat > 45.0:
             return BIOME_EVERGREEN   # Pacific NW default for forest cover
+        # BIOME_CHAPARRAL/BIOME_DESERT were unreachable here (2026-08-23 fix:
+        # every mid-latitude "forest-leaning" pixel fell straight to
+        # Deciduous, even w_forest's leftover-bucket definition - 1 minus
+        # grass/rock/water - catching dark, patchy dry scrub, not just real
+        # closed canopy). Found live: Green Valley CA/Angeles NF (high-desert
+        # chaparral) baked as 2399 Deciduous / 545 Canyon out of 2944 points,
+        # nothing else - painted "100% green" dense forest
+        # (TreeDensityScale=1.0) over what should read as sparse dry brush.
+        # A moderate (not overwhelming) forest signal at real elevation now
+        # reads as Chaparral (TreeDensityScale=0.5, bush-dominant) instead;
+        # only a strongly saturated signal still commits to true Deciduous.
+        if w_forest < 0.85 and elev_m > 200.0:
+            return BIOME_CHAPARRAL
         return BIOME_DECIDUOUS
     if abs_lat < 23.5:
         return BIOME_SAVANNA
