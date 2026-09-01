@@ -10,7 +10,9 @@
 #include "UnrealClient.h"
 
 #include "ODEngineSynth.h"
+#include "ODGarageEnvironment.h"
 #include "ODRoadManager.h"
+#include "ODTerrainManager.h"
 #include "ODTuningManager.h"
 #include "ODVehicleAudio.h"
 #include "ODVehicleDef.h"
@@ -108,6 +110,16 @@ void AODMainMenu::BeginPlay()
 		Bind(EKeys::Enter, &AODMainMenu::Activate);
 		Bind(EKeys::Escape, &AODMainMenu::Back);
 		Bind(EKeys::LeftMouseButton, &AODMainMenu::OnClick);
+		// gamepad menu navigation (2026-08-27) - cheap to add alongside the
+		// keyboard binds above (same Bind() helper, same "must work while
+		// paused" flags), so a gamepad-only player isn't stuck needing a
+		// keyboard to get through the front-end.
+		Bind(EKeys::Gamepad_DPad_Up, &AODMainMenu::Up);
+		Bind(EKeys::Gamepad_DPad_Down, &AODMainMenu::Down);
+		Bind(EKeys::Gamepad_DPad_Left, &AODMainMenu::Left);
+		Bind(EKeys::Gamepad_DPad_Right, &AODMainMenu::Right);
+		Bind(EKeys::Gamepad_FaceButton_Bottom, &AODMainMenu::Activate);
+		Bind(EKeys::Gamepad_FaceButton_Right, &AODMainMenu::Back);
 	}
 
 	// headless QA hooks (core ticker, like AODPauseMenu's -odmenu - world
@@ -215,6 +227,12 @@ void AODMainMenu::OpenGarage()
 	Selected = 0;
 	bEntered = false;   // re-sync the displayed engine/drivetrain with reality
 	UGameplayStatics::SetGamePaused(this, true);
+	// 2026-08-27 fix: this call was missing entirely, so the pause menu's
+	// "Garage" row left the cursor exactly as the driving path had set it
+	// (hidden, FInputModeGameOnly) - unlike OpenMenu(), which has always
+	// called this. Without it the mouse is invisible and every click/move
+	// goes to the game instead of the garage UI.
+	SetCursorVisible(true);
 }
 
 void AODMainMenu::SetCursorVisible(bool bVisible)
@@ -222,6 +240,22 @@ void AODMainMenu::SetCursorVisible(bool bVisible)
 	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
 	{
 		PC->bShowMouseCursor = bVisible;
+		// visibility alone is not enough: without GameOnly capture the
+		// hidden OS cursor keeps moving under the game and pins against the
+		// viewport edge, at which point GetInputMouseDelta() reads zero in
+		// that direction - freelook orbits partway then "locks". Capture the
+		// mouse while driving; release it (GameAndUI, unlocked) for menus.
+		if (bVisible)
+		{
+			FInputModeGameAndUI Mode;
+			Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+			Mode.SetHideCursorDuringCapture(false);
+			PC->SetInputMode(Mode);
+		}
+		else
+		{
+			PC->SetInputMode(FInputModeGameOnly());
+		}
 	}
 }
 
@@ -230,11 +264,63 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 	if (Stage == EODMenuStage::Loading)
 	{
-		// polls the same settle signal TrySnapToGround uses for itself - see
-		// this stage's declaration comment for why StartAt() can't just
-		// unpause and hand control back immediately.
-		if (const AODVehiclePawn* Pawn = FindPawn(); Pawn && Pawn->IsGroundSnapped())
+		// polls the same settle signal TrySnapToGround uses for itself, PLUS
+		// both tile managers' own readiness (2026-08-27) - see this stage's
+		// declaration comment and StartAt()'s comment for why
+		// IsGroundSnapped() alone isn't enough: the car can be resolved onto
+		// real pavement while the terrain/road tiles around it are still
+		// mid-build, which is exactly the "world fills in around the player"
+		// Taylor saw live. A manager that doesn't exist on this level (e.g. a
+		// bare menu-only map) is treated as already settled, same optional-
+		// actor convention as everything else that reads these managers.
+		const double Now = GetWorld()->GetTimeSeconds();
+		const AODVehiclePawn* Pawn = FindPawn();
+		const bool bPawnReady = Pawn && Pawn->IsGroundSnapped();
+		const AODTerrainManager* Terrain = FindActor<AODTerrainManager>(GetWorld());
+		const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld());
+		const bool bTerrainSettled = !Terrain
+			|| Terrain->IsInitialStreamingSettled(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector);
+		const bool bRoadSettled = !Road || Road->IsInitialStreamingSettled();
+		const bool bAllSettled = bPawnReady && bTerrainSettled && bRoadSettled;
+
+		if (bAllSettled)
 		{
+			if (LoadingSettledSinceTime == 0.0)
+			{
+				LoadingSettledSinceTime = Now;
+			}
+		}
+		else
+		{
+			LoadingSettledSinceTime = 0.0;   // dropped out - restart the debounce window
+		}
+
+		const double Elapsed = Now - LoadingStartTime;
+
+		// hard failsafe: release regardless of settle state so a genuinely
+		// stuck streaming condition (missing sidecar, pathological tile)
+		// can't strand the player on a black screen forever.
+		if (Elapsed > LoadingFailsafeSec)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ODMainMenu: LOADSCREEN failsafe released after %.1fs (groundSnapped=%d, ")
+				TEXT("terrainSettled=%d, roadSettled=%d)"),
+				Elapsed, bPawnReady, bTerrainSettled, bRoadSettled);
+			Stage = EODMenuStage::Playing;
+			SetCursorVisible(false);
+			return;
+		}
+
+		// debounced (continuously settled for LoadingSettleDebounceSec) AND
+		// past the minimum display floor (so a same-town reload where
+		// everything is already resident doesn't just flash the screen).
+		const bool bDebounced = LoadingSettledSinceTime != 0.0
+			&& (Now - LoadingSettledSinceTime) >= LoadingSettleDebounceSec;
+		if (bDebounced && Elapsed >= LoadingMinDisplaySec)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("ODMainMenu: LOADSCREEN released after %.1fs (terrain settled, roads settled)"),
+				Elapsed);
 			Stage = EODMenuStage::Playing;
 			SetCursorVisible(false);
 		}
@@ -285,6 +371,27 @@ void AODMainMenu::EnterCarConfig()
 	// static display angle, not a spin (Taylor, 2026-07-28: "stop the car
 	// rotating stuff too") - a single fixed 3/4 view, set once.
 	Pawn->SetActorRotation(FRotator(0.0f, ShowroomYawDeg, 0.0f));
+
+	// Garage room (2026-08): built around wherever the car is RIGHT NOW, which
+	// covers both entry paths this function serves - fresh boot just placed
+	// the pawn at ShowroomLocationCm a few lines up, and a mid-drive
+	// OpenGarage() reopen leaves the pawn at its real on-map location. Either
+	// way, "current location" is the correct pivot, so one call site here
+	// covers both.
+	if (AODGarageEnvironment* Garage = EnsureGarageEnvironment())
+	{
+		// pawn's actor origin is the body pivot at axle height, not ground
+		// level (2026-08-27 "cars sink into the garage floor" fix) - drop the
+		// floor by the wheels' actual clearance below that pivot so it lands
+		// under the tires instead of at axle height.
+		float GroundOffset = 0.0f;
+		if (const UODVehicleMovement* Move = FindMovement())
+		{
+			GroundOffset = Move->GetRestGroundClearanceCm();
+		}
+		Garage->PlaceAt(Pawn->GetActorLocation(), ShowroomYawDeg, GroundOffset);
+		Garage->SetActive(true);
+	}
 	// sync the displayed engine/drivetrain with reality (leave tuning at stock
 	// until the player picks one, same as the pause menu)
 	ApplyEngine();
@@ -330,7 +437,7 @@ void AODMainMenu::Activate()
 {
 	if (Stage == EODMenuStage::CarConfig)
 	{
-		if (Selected == 4)          // "Drive" / "Resume Driving" row
+		if (Selected == 5)          // "Drive" / "Resume Driving" row
 		{
 			if (bGarageMode)
 			{
@@ -357,7 +464,7 @@ void AODMainMenu::Back()
 	if (Stage == EODMenuStage::MapSelect)
 	{
 		Stage = EODMenuStage::CarConfig;   // back to the car screen
-		Selected = 4;
+		Selected = 5;
 	}
 	else if (Stage == EODMenuStage::CarConfig && bGarageMode)
 	{
@@ -394,6 +501,18 @@ void AODMainMenu::Adjust(int32 Dir)
 		{
 			TuneIdx = (TuneIdx + Dir + N) % N;
 			ApplyTuning();
+		}
+		break;
+	case 4:
+		// Input Device row (2026-08-27): Auto/Keyboard/Gamepad/Wheel, cycling
+		// the same way the other value rows do. Persisted on the pawn itself
+		// (SetInputDeviceMode writes it to GameUserSettings.ini) rather than
+		// mirrored here, since the pawn is what actually needs it every Tick.
+		if (AODVehiclePawn* Pawn = FindPawn())
+		{
+			constexpr int32 NumModes = static_cast<int32>(EODInputDevice::Wheel) + 1;
+			const int32 Next = (static_cast<int32>(Pawn->GetInputDeviceMode()) + Dir + NumModes) % NumModes;
+			Pawn->SetInputDeviceMode(static_cast<EODInputDevice>(Next));
 		}
 		break;
 	default:
@@ -512,6 +631,10 @@ void AODMainMenu::StartAt(int32 TownIdx)
 	}
 
 	Pawn->SetShowroom(false);
+	if (GarageEnv.IsValid())
+	{
+		GarageEnv->SetActive(false);
+	}
 	if (bHaveTarget)
 	{
 		Pawn->TeleportToSpawn(FVector(Target.X, Target.Y, 0.0f), Yaw);
@@ -547,8 +670,15 @@ void AODMainMenu::StartAt(int32 TownIdx)
 	// (AODRoadManager/AODTerrainManager) only runs while unpaused, and a
 	// fresh teleport target can have nothing loaded there yet. Loading stage
 	// keeps the player from seeing/driving a possibly-airborne car until
-	// Tick() confirms IsGroundSnapped().
+	// Tick() confirms IsGroundSnapped() AND both managers' initial streaming
+	// has settled (2026-08-27, spawn-loading-screen task: IsGroundSnapped()
+	// alone only proves the car itself is standing on real pavement, not that
+	// the surrounding terrain/road ring has finished building - Taylor's live
+	// drive-test still saw the world visibly fill in right after the old
+	// loading screen dropped).
 	Stage = EODMenuStage::Loading;
+	LoadingStartTime = GetWorld()->GetTimeSeconds();
+	LoadingSettledSinceTime = 0.0;
 	SetCursorVisible(false);
 	UGameplayStatics::SetGamePaused(this, false);
 }
@@ -561,13 +691,53 @@ void AODMainMenu::ResumeFromGarage()
 	{
 		Pawn->SetShowroom(false);
 	}
+	if (GarageEnv.IsValid())
+	{
+		GarageEnv->SetActive(false);
+	}
 	Stage = EODMenuStage::Playing;
 	SetCursorVisible(false);
 	UGameplayStatics::SetGamePaused(this, false);
 	bGarageMode = false;
 }
 
+AODGarageEnvironment* AODMainMenu::EnsureGarageEnvironment()
+{
+	if (GarageEnv.IsValid())
+	{
+		return GarageEnv.Get();
+	}
+	// lazy, not BeginPlay - avoids racing pawn/level discovery at boot (same
+	// reasoning as this class's own pawn lookups, which all retry-by-Tick
+	// rather than assume anything exists yet).
+	if (UWorld* World = GetWorld())
+	{
+		AODGarageEnvironment* Spawned = World->SpawnActor<AODGarageEnvironment>();
+		GarageEnv = Spawned;
+		return Spawned;
+	}
+	return nullptr;
+}
+
 // ---- HUD-facing ----------------------------------------------------------
+
+void AODMainMenu::GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTotal,
+	int32& OutRoadReady, int32& OutRoadTotal) const
+{
+	OutTerrainReady = OutTerrainTotal = 0;
+	OutRoadReady = OutRoadTotal = 0;
+
+	const AODVehiclePawn* Pawn = FindPawn();
+	if (const AODTerrainManager* Terrain = FindActor<AODTerrainManager>(GetWorld()))
+	{
+		Terrain->GetStreamingProgress(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector,
+			OutTerrainReady, OutTerrainTotal);
+	}
+	if (const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld()))
+	{
+		Road->GetStreamingProgress(OutRoadReady, OutRoadTotal);
+	}
+}
 
 void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
@@ -605,6 +775,24 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		}
 		break;
 	case 4:
+	{
+		OutLabel = TEXT("Input Device");
+		OutValue = TEXT("Auto");
+		if (const AODVehiclePawn* Pawn = FindPawn())
+		{
+			const EODInputDevice Mode = Pawn->GetInputDeviceMode();
+			OutValue = AODVehiclePawn::InputDeviceModeToString(Mode);
+			if (Mode == EODInputDevice::Auto)
+			{
+				// show what Auto has actually resolved to, so the row reads
+				// as live feedback ("Auto (Gamepad)") instead of a static name
+				OutValue += FString::Printf(TEXT(" (%s)"),
+					*AODVehiclePawn::InputDeviceModeToString(Pawn->GetActiveInputDevice()));
+			}
+		}
+		break;
+	}
+	case 5:
 		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
 		OutValue.Empty();
 		break;

@@ -6,6 +6,7 @@
 
 class AODVehiclePawn;
 class UODVehicleMovement;
+class AODGarageEnvironment;
 
 /** Which screen of the front-end the player is on. */
 UENUM()
@@ -84,9 +85,18 @@ public:
 	bool IsActive() const { return Stage != EODMenuStage::Playing; }
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
-	int32 NumRows() const { return 5; }        // Car, Engine, Drivetrain, Tuning, Drive
+	// Car, Engine, Drivetrain, Tuning, Input Device, Drive
+	int32 NumRows() const { return 6; }
 	int32 GetSelected() const { return Selected; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
+
+	/** Loading-screen progress numbers (2026-08-27, spawn-loading-screen task) -
+	 *  ODRaceHUD reads these while Stage == Loading to draw a "terrain N/M ·
+	 *  roads N/M" line. Zero/zero for a manager that isn't present on this
+	 *  level (matches AODTerrainManager/AODRoadManager's own optional-actor
+	 *  convention elsewhere in this project). */
+	void GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTotal,
+		int32& OutRoadReady, int32& OutRoadTotal) const;
 
 	/** The HUD computes the town nearest the mouse each frame (it owns the
 	 *  world->screen transform) and reports it here for the click handler. */
@@ -133,6 +143,11 @@ private:
 	int32 NumPresets() const;
 	void SetCursorVisible(bool bVisible);
 
+	// spawned lazily on first use (see EnsureGarageEnvironment()) - not from
+	// BeginPlay, to avoid racing pawn/level discovery at boot.
+	AODGarageEnvironment* EnsureGarageEnvironment();
+	TWeakObjectPtr<AODGarageEnvironment> GarageEnv;
+
 	EODMenuStage Stage = EODMenuStage::CarConfig;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
@@ -150,6 +165,26 @@ private:
 	FVector CapturedSpawnLoc = FVector::ZeroVector;
 	float CapturedSpawnYaw = 0.0f;
 	bool bCapturedSpawn = false;
+
+	// Loading-gate timing (2026-08-27, spawn-loading-screen task): StartAt()
+	// stamps LoadingStartTime when it enters EODMenuStage::Loading. Tick()
+	// requires IsGroundSnapped() AND both tile managers' IsInitialStreamingSettled()
+	// to hold TRUE CONTINUOUSLY for LoadingSettleDebounceSec before releasing
+	// (LoadingSettledSinceTime is the world-time the combined condition first
+	// went true; reset to 0 the instant it drops again) - a debounce, not a
+	// one-shot check, because a tile finishing its build can immediately kick
+	// off the next ring's dispatch and re-arm PendingTiles for a frame or two.
+	// LoadingMinDisplaySec is a floor under Elapsed regardless of how fast
+	// settling actually finishes, so the screen never just flashes on a
+	// same-town reload. LoadingFailsafeSec is the hard ceiling - released
+	// regardless of settle state, with a Warning log, so a genuinely stuck
+	// streaming state (missing sidecar, pathological tile) can't strand the
+	// player on a black screen forever.
+	double LoadingStartTime = 0.0;
+	double LoadingSettledSinceTime = 0.0;
+	static constexpr double LoadingSettleDebounceSec = 0.5;
+	static constexpr double LoadingMinDisplaySec = 1.0;
+	static constexpr double LoadingFailsafeSec = 25.0;
 
 	// headless QA (mirrors AODPauseMenu's -odmenu): -odmenumap=T jumps to the
 	// map stage + screenshots; -odpick=<Town> auto-picks a town and starts;

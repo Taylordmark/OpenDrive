@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/FileHelper.h"
 
 /** Manual little-endian parsing helpers shared by every binary sidecar
  *  reader in this project (ODT1/ODR2/ODW3/ODU1/etc.) - no struct cast, no
@@ -65,3 +66,185 @@ inline const TCHAR* TreeMeshPaths[] = {
 	TEXT("/Game/OpenDrive/Trees/tree_olive.tree_olive"),
 	TEXT("/Game/OpenDrive/Trees/tree_conifer.tree_conifer"),
 };
+
+/** Extended 7-species tree mesh set (2026-08-27, ODForestManager's
+ *  "chaparral isn't working and all the trees are the same" fix) - the
+ *  first 3 entries are IDENTICAL to TreeMeshPaths above (index parity with
+ *  FBiomeRecipe::SpeciesWeight[0..2] matters), plus 4 new biome-distinct
+ *  species from make_tree_meshes.py. Originally local to ODForestManager.cpp
+ *  ("nothing else needs it yet"); moved here 2026-08-27 once
+ *  ODBarrierManager.cpp became a second consumer (biome-aware windbreak
+ *  species pick, Taylor's live-drive report: desert windbreak rows render as
+ *  bright green trees) - same ODR-collision reasoning as TreeMeshPaths/
+ *  ReadU32LE/ReadF32LE above: an identically-named anonymous-namespace copy
+ *  in two .cpp files collides under the standalone Game target's unity
+ *  build the moment both land in the same translation unit. */
+inline const TCHAR* ExtendedTreeMeshPaths[] = {
+	TEXT("/Game/OpenDrive/Trees/tree_blob.tree_blob"),
+	TEXT("/Game/OpenDrive/Trees/tree_olive.tree_olive"),
+	TEXT("/Game/OpenDrive/Trees/tree_conifer.tree_conifer"),
+	TEXT("/Game/OpenDrive/Trees/tree_scrub_oak.tree_scrub_oak"),
+	TEXT("/Game/OpenDrive/Trees/tree_manzanita.tree_manzanita"),
+	TEXT("/Game/OpenDrive/Trees/tree_yucca.tree_yucca"),
+	TEXT("/Game/OpenDrive/Trees/tree_canyon_oak.tree_canyon_oak"),
+};
+inline constexpr int32 NumExtendedTreeSpecies = UE_ARRAY_COUNT(ExtendedTreeMeshPaths);
+
+/** Maps an already-drawn [0,1) random value to a weighted index (species or
+ *  shrub choice) - takes R rather than an FRandomStream so it never
+ *  consumes RNG itself (ODForestManager::BuildTile()'s "RNG fully consumed
+ *  above" ordering guarantee depends on that). Moved here 2026-08-27
+ *  alongside ExtendedTreeMeshPaths for the same second-consumer reason
+ *  (ODBarrierManager.cpp's biome-aware species pick reuses this exact
+ *  weighted-pick logic against AODForestManager::RecipeForBiome()'s
+ *  SpeciesWeight table). */
+inline int32 PickWeightedIndex(float R, const float* Weight, int32 Count)
+{
+	float Sum = 0.0f;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		Sum += Weight[i];
+	}
+	if (Sum <= 0.0f)
+	{
+		return 0;
+	}
+	float Acc = 0.0f;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		Acc += Weight[i];
+		if (R < Acc / Sum)
+		{
+			return i;
+		}
+	}
+	return Count - 1;
+}
+
+/** One road-station sample from the ODS1 station sidecar
+ *  (roadstations_{area}.bin, pipeline export) - a single point along the
+ *  baked road centerline, used purely as a nearest-station lookup target
+ *  (carve elevation in AODTerrainManager, road-exclusion distance in
+ *  AODForestManager). No segment/s-position identity is kept here, unlike
+ *  the pipeline's own station arrays - both consumers only ever need
+ *  "nearest point on the road (and its elevation)", same as the pipeline's
+ *  carve_grid_m()'s own nearest-station search.
+ *
+ *  Lifted out of ODTerrainManager.h (2026-08-26, carve-clamp/road-exclusion
+ *  rescope) so AODForestManager can build its own copy of the same spatial
+ *  hash for road-exclusion without duplicating the struct or the parser -
+ *  see AODForestManager::LoadRoadStations. */
+struct FRoadStation
+{
+	float X = 0.0f, Y = 0.0f, Z = 0.0f; // cm, UE world frame
+};
+
+/** Read-only spatial hash over every road station - built once at BeginPlay
+ *  (AODTerrainManager::LoadRoadStationSidecar, AODForestManager::
+ *  LoadRoadStations) and never mutated again. AODTerrainManager shares its
+ *  copy read-only into its tile-parse thread pool via a thread-safe
+ *  TSharedPtr (see FStationSpatialHash's original comment in
+ *  ODTerrainManager.h's history); AODForestManager only ever queries its own
+ *  copy from the game thread, so it just holds a plain value. Cell size is
+ *  independent of (much smaller than) either manager's own tile grid, purely
+ *  so one query only has to touch a handful of cells instead of every
+ *  station bucketed anywhere near a whole tile/SpawnRadius disc. */
+struct FStationSpatialHash
+{
+	static constexpr float CellSizeCm = 10000.0f; // 100 m
+
+	TArray<FRoadStation> Stations;
+	TMap<FIntPoint, TArray<int32>> Cells;
+
+	void Build(TArray<FRoadStation>&& InStations)
+	{
+		Stations = MoveTemp(InStations);
+		Cells.Reset();
+		for (int32 i = 0; i < Stations.Num(); ++i)
+		{
+			const FIntPoint Cell(FMath::FloorToInt(Stations[i].X / CellSizeCm),
+			                      FMath::FloorToInt(Stations[i].Y / CellSizeCm));
+			Cells.FindOrAdd(Cell).Add(i);
+		}
+	}
+
+	/** Appends the index of every station whose cell overlaps
+	 *  [MinX,MinY]-[MaxX,MaxY] into OutIndices - a coarse cell-overlap test,
+	 *  not an exact circle/box test. Caller is expected to have already
+	 *  padded the box by whatever exact-distance radius it cares about. */
+	void QueryBox(float MinX, float MinY, float MaxX, float MaxY, TArray<int32>& OutIndices) const
+	{
+		const int32 CxMin = FMath::FloorToInt(MinX / CellSizeCm);
+		const int32 CxMax = FMath::FloorToInt(MaxX / CellSizeCm);
+		const int32 CyMin = FMath::FloorToInt(MinY / CellSizeCm);
+		const int32 CyMax = FMath::FloorToInt(MaxY / CellSizeCm);
+		for (int32 cy = CyMin; cy <= CyMax; ++cy)
+		{
+			for (int32 cx = CxMin; cx <= CxMax; ++cx)
+			{
+				if (const TArray<int32>* Bucket = Cells.Find(FIntPoint(cx, cy)))
+				{
+					OutIndices.Append(*Bucket);
+				}
+			}
+		}
+	}
+};
+
+/** PINNED format (roadstations_{area}.bin): "ODS1" magic (reused from
+ *  ODWallManager's walls_*.bin magic bytes - harmless, the two are never read
+ *  by the same code path, callers key entirely off filename), then a
+ *  LENGTH-PREFIXED UTF-8 generation id (NOT the fixed 16-byte ASCII-hex field
+ *  ReadGenerationId() above expects - deliberately a different, simpler
+ *  header shape, so this is parsed by hand rather than reusing that helper),
+ *  then a station count and N flat (x,y,z) float32 triples in cm, UE world
+ *  frame. Shared (2026-08-26) between AODTerrainManager (runtime carve) and
+ *  AODForestManager (road-exclusion) - see FStationSpatialHash's comment for
+ *  why each manager still builds its own hash rather than sharing one
+ *  instance. */
+inline bool ParseRoadStationSidecarFile(const FString& Path, TArray<FRoadStation>& OutStations, FString& OutGenId)
+{
+	TArray<uint8> Bin;
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'S' || Bin[3] != '1')
+	{
+		return false;
+	}
+
+	const uint8* Cur = Bin.GetData() + 4;
+	const uint8* End = Bin.GetData() + Bin.Num();
+	auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+
+	if (Remaining() < 4)
+	{
+		return false;
+	}
+	const uint32 GenIdLen = ReadU32LE(Cur); Cur += 4;
+	if (Remaining() < (int64)GenIdLen)
+	{
+		return false;
+	}
+	FUTF8ToTCHAR Converter(reinterpret_cast<const ANSICHAR*>(Cur), GenIdLen);
+	OutGenId = FString(Converter.Length(), Converter.Get());
+	Cur += GenIdLen;
+
+	if (Remaining() < 4)
+	{
+		return false;
+	}
+	const uint32 N = ReadU32LE(Cur); Cur += 4;
+	const int64 NeedBytes = (int64)N * 12;
+	if (Remaining() < NeedBytes)
+	{
+		return false;
+	}
+
+	OutStations.SetNumUninitialized(N);
+	for (uint32 i = 0; i < N; ++i)
+	{
+		OutStations[i].X = ReadF32LE(Cur + i * 12 + 0);
+		OutStations[i].Y = ReadF32LE(Cur + i * 12 + 4);
+		OutStations[i].Z = ReadF32LE(Cur + i * 12 + 8);
+	}
+	return true;
+}

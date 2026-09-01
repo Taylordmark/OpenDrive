@@ -191,6 +191,162 @@ def despike_ground(ground, threshold_m=DEM_SPIKE_THRESHOLD_M):
     return ground
 
 
+# Post-repair despike (2026-08-27, Taylor's Lake Hughes screenshot: a road
+# baked as a near-vertical "wall" - a shiny asphalt stripe climbing straight
+# up a hillside near the town of Lake Hughes, with tall carve-wall shoulders
+# either side). Traced to MIN_BRIDGE_CLEARANCE_M's floor (build_road_
+# stations.py) being applied to a short (2-3 station, 10-15 m) OSM bridge tag
+# with NO easing ramp into/out of the lift: `h = np.where(is_bridge_only_s,
+# np.maximum(h, raw_ground + MIN_BRIDGE_CLEARANCE_M), h)` runs AFTER grade_
+# smooth_elevation() and is never re-clamped afterward, so a tiny bridge tag
+# (a culvert/creek crossing, not a real elevated span) jumps the road
+# straight up to raw_ground+4m for its tagged stations and straight back
+# down at the far edge - both edges bypassing every ROAD_CLASS_GRADE ceiling
+# entirely. A full-network grade scan found the exact same bounce-back
+# signature (up sharply, hold 1-3 stations, down sharply) recurring across
+# dozens of unrelated short bridge tags (De Wolfe Road, Vasquez Canyon Road,
+# Sierra Highway, Placerita Canyon Road, ...) - a systemic gap in the
+# clearance floor, not a one-off DEM artifact, so the fix is a final,
+# generic despike pass over the FULLY assembled per-station profile (after
+# fill_structure_gaps/MIN_BRIDGE_CLEARANCE_M have both already run), not a
+# targeted patch to any one upstream mechanism. Deliberately grade-based
+# (not despike_ground's fixed-metre DEM threshold - these jumps are only
+# ~4-6 m, far under DEM_SPIKE_THRESHOLD_M) and narrow-run-only, so a real,
+# sustained steep mountain climb (which keeps climbing rather than bouncing
+# back) is never touched - see the bracket checks in despike_road_profile()
+# below.
+ROAD_SPIKE_GRADE = 0.20            # per-edge |grade| beyond which an edge is
+                                    # "bad" - real roads (even ROAD_CLASS_
+                                    # GRADE's steepest, track's 18%) rarely
+                                    # exceed this even briefly; generous
+                                    # headroom above that ceiling so this
+                                    # only fires on genuine outliers, never a
+                                    # legitimate steep road
+ROAD_SPIKE_MAX_RUN_STATIONS = 6    # widest interior-station run this repairs
+                                    # as a spike (~30 m at 5 m spacing) - a
+                                    # full-network scan of every >20% edge
+                                    # (2026-08-27) found genuine short-
+                                    # culvert-scale phantom bridges (Lake
+                                    # Hughes Rd: 3 stations, Sierra Highway:
+                                    # 4 stations, ...) bracketed within this
+                                    # width, and separately found real
+                                    # highway-scale bridge decks (e.g. West
+                                    # Avenue H: 20 stations, ~100 m) that
+                                    # should NOT be flattened - this sits
+                                    # comfortably above the former and well
+                                    # below the latter, so wider runs are
+                                    # left untouched as legitimate structures
+ROAD_SPIKE_EASE_SIGMA = 1.5        # gaussian1d sigma (stations) for the
+                                    # light re-smoothing pass around each
+                                    # repair's two new joins
+
+
+def despike_road_profile(elev_m, s_m, spike_grade=ROAD_SPIKE_GRADE,
+                          max_run_stations=ROAD_SPIKE_MAX_RUN_STATIONS,
+                          ease_sigma=ROAD_SPIKE_EASE_SIGMA):
+    """Repairs isolated grade-spike outliers in a FINAL, fully-assembled
+    per-station elevation profile - i.e. after every other pipeline step
+    (DEM sampling, despike_ground, grade_smooth_elevation,
+    fill_structure_gaps, MIN_BRIDGE_CLEARANCE_M) has already run. See the
+    ROAD_SPIKE_GRADE comment block above for why this exists and why it's
+    grade-based rather than despike_ground's fixed-metre DEM threshold.
+
+    A run of 1..`max_run_stations` interior stations, bracketed by a station
+    `left` and a station `right = left + run_len + 1`, is repaired if ALL of:
+      - the edge INTO the run (left -> left+1) exceeds `spike_grade`
+      - the edge OUT of the run (right-1 -> right) exceeds `spike_grade`
+        This is the "bounces back" test itself: a spike that shoots up (or
+        down) on entry and recovers on exit trips both; a run that's merely
+        the start of a longer, still-climbing real profile only trips the
+        entry edge, at any run_len, so it's never matched (there's no
+        `right` at which the exit edge is ALSO bad but the run is still
+        inside max_run_stations, unless the real climb happens to end in
+        exactly that many stations, which the next check guards against).
+      - both edges immediately OUTSIDE the bracket (left-1 -> left and
+        right -> right+1) are within `spike_grade` - i.e. `left` and
+        `right` themselves sit on ordinary, plausible road grade, so
+        they're trustworthy interpolation anchors rather than themselves
+        part of a wider disturbance.
+    The shortest matching run_len at each position wins (checked in
+    increasing order), so a genuine 1-station notch is never mistaken for a
+    wider one that happens to also bracket it.
+
+    Repair: every interior station strictly between `left` and `right` is
+    replaced with a straight line between them, then a small window
+    straddling each new join is lightly gaussian-smoothed (reusing
+    gaussian1d, the same primitive resample_stations()/build_road_chunks()
+    already use elsewhere in this module) so the corner reads as a curve
+    instead of a kink. Only that local window is touched - everything
+    outside it, including untouched genuine bridges/climbs elsewhere in the
+    profile, is left exactly as-is.
+
+    Returns (elev_fixed, repairs): a NEW array (input is not mutated) and a
+    list of {"station_idx", "before_m", "after_m"} dicts, one per station
+    actually changed by the straight-line repair (not the cosmetic ease
+    pass), in repair order - for the caller (build_road_stations.py) to log
+    per road name, so every repair stays auditable."""
+    elev = np.asarray(elev_m, dtype=float).copy()
+    s = np.asarray(s_m, dtype=float)
+    n = len(elev)
+    repairs = []
+    if n < max_run_stations + 3:
+        return elev, repairs
+    for _pass in range(2):   # 2 passes: repairing one run can newly expose
+                              # a second spike right next to it (its former
+                              # bracket edge sat right at the old run's edge)
+        ds = np.diff(s)
+        ds = np.where(ds <= 0, 1e-6, ds)
+        # grade[i] is the |grade| of the edge connecting station i and i+1
+        # (length n-1). "entry edge" of a candidate run bracketed at [left,
+        # right] is grade[left]; "exit edge" is grade[right-1]; the edges
+        # OUTSIDE the bracket are grade[left-1] and grade[right].
+        grade = np.abs(np.diff(elev)) / ds
+        any_touched = False
+        left = 1   # smallest index with a defined outside-left edge
+        while left < n - 2:
+            entry_grade = grade[left]
+            if entry_grade <= spike_grade:
+                left += 1
+                continue   # no spike starts here - entry edge isn't bad
+            outside_left_grade = grade[left - 1]
+            if outside_left_grade > spike_grade:
+                # left itself sits on a bad edge - not a trustworthy anchor;
+                # the real disturbance may start later, re-evaluate there.
+                left += 1
+                continue
+            matched = False
+            for run_len in range(1, max_run_stations + 1):
+                right = left + run_len + 1
+                if right >= n - 1:
+                    break   # no outside-right edge to confirm this width
+                exit_grade = grade[right - 1]
+                if exit_grade <= spike_grade:
+                    continue   # exit edge isn't bad yet - try a wider run
+                outside_right_grade = grade[right]
+                if outside_right_grade > spike_grade:
+                    continue   # right isn't a trustworthy anchor at this
+                                # width either - try the next width out
+                interior = np.arange(left + 1, right)
+                before_vals = elev[interior].copy()
+                elev[interior] = np.interp(s[interior], [s[left], s[right]],
+                                            [elev[left], elev[right]])
+                for ii, bv in zip(interior.tolist(), before_vals.tolist()):
+                    repairs.append({"station_idx": ii, "before_m": float(bv),
+                                     "after_m": float(elev[ii])})
+                w0 = max(0, left - 2)
+                w1 = min(n, right + 3)
+                elev[w0:w1] = gaussian1d(elev[w0:w1], ease_sigma)
+                any_touched = True
+                matched = True
+                left = right + 1   # skip past the just-repaired run
+                break
+            if not matched:
+                left += 1
+        if not any_touched:
+            break
+    return elev, repairs
+
+
 def grade_smooth_elevation(ground, spacing=STATION_SPACING, max_grade=MAX_GRADE,
                             max_grade_delta=None, pinned_edge_grades=None):
     """Grade-CONFORMING envelope over raw ground - never smooths the terrain

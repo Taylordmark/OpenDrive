@@ -126,7 +126,10 @@ def main():
         west, east = west - pad_deg, east + pad_deg
 
     mosaic, bounds = fetch_imagery_mosaic(west, south, east, north)
-    w_forest, w_grass, w_rock, w_water = classify_rgb(mosaic)
+    # classify_rgb() now also returns w_bare (2026-08-27, classify_biomes.py
+    # desert-detection fix) - unused here, this is a map-texture blend, not
+    # a biome classification.
+    w_forest, w_grass, w_rock, w_water, _w_bare = classify_rgb(mosaic)
 
     # see WATER_THRESH's comment above - gate out shadow-triggered false
     # water before it ever reaches the blend below.

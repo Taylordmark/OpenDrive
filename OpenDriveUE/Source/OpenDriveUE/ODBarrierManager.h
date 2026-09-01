@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODForestManager.h" // EODBiome, AODForestManager::RecipeForBiome() - 2026-08-27 biome-aware windbreak species
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "ODBarrierManager.generated.h"
 
@@ -111,6 +112,35 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Barrier")
 	float WallHeightCm = 400.0f;
 
+	/** Content/OpenDrive/Masks/<prefix>.bin - the SAME point-classified
+	 *  biome sidecar AODForestManager reads (pipeline/classify_biomes.py +
+	 *  export_biome_bin.py, ODB1 format). Added 2026-08-27 (Taylor's
+	 *  live-drive report: dense rows of identical bright-green trees lining
+	 *  the road through open desert) so a windbreak run through a desert/
+	 *  scrub biome picks drought-looking species (see BiomeAt()/FinalizeTile())
+	 *  instead of always the classic blob/olive/conifer trio. Empty (default)
+	 *  is auto-derived from the level's own AODRoadManager::RoadTilePrefix in
+	 *  BeginPlay() (mirrors AODGameMode::EnsureForestManager's identical
+	 *  "road_<area>_test" -> "biome_<area>_test" derivation for
+	 *  AODForestManager::BiomeFilePrefix) - resolved locally here rather than
+	 *  having ODGameMode set it, since this actor is placed directly in the
+	 *  map by unreal/build_openworld_test_level.py (BARRIER_ENABLED) and its
+	 *  BeginPlay() isn't guaranteed to run after ODGameMode's own (same class
+	 *  of ordering hazard AODForestManager::BiomeFilePrefix's
+	 *  SpawnActorDeferred() comment documents, just the consumer's BeginPlay
+	 *  racing ahead instead of the setter's). Still EditAnywhere so a level
+	 *  can override it explicitly if the derivation ever guesses wrong. */
+	UPROPERTY(EditAnywhere, Category = "Barrier")
+	FString BiomeFilePrefix;
+
+	/** Radius (cm) within which a biome point must fall to count as "found" -
+	 *  matches AODForestManager::BiomeBlendRadiusCm's role, but simpler:
+	 *  this manager only ever needs the SINGLE nearest classified point's
+	 *  biome for a coarse per-instance species pick, not a smooth
+	 *  inverse-distance blend. */
+	UPROPERTY(EditAnywhere, Category = "Barrier")
+	float BiomeSearchRadiusCm = 30000.0f;   // 300 m
+
 private:
 	static bool ParseBarrierTileFile(const FString& Path, FParsedBarrierTile& Out);
 
@@ -119,9 +149,37 @@ private:
 	void FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& Parsed);
 	void ReleaseTile(const FIntPoint& Key);
 
+	/** Loads BiomeFilePrefix into BiomePoints/BiomeBuckets - mirrors
+	 *  AODForestManager::LoadBiomePoints()'s ODB1 parsing exactly (same
+	 *  sidecar format, same file), just without that manager's
+	 *  inverse-distance blend machinery (see BiomeAt()). False (no-op) if
+	 *  BiomeFilePrefix is empty or the file doesn't exist - same "optional
+	 *  feature" convention as every other manager's prefix. */
+	bool LoadBiomePoints();
+
+	/** Nearest classified biome point to (WorldX, WorldY), or
+	 *  EODBiome::DeciduousForest (the classic-3-species trio's dominant
+	 *  look) if no biome data is loaded or nothing is within
+	 *  BiomeSearchRadiusCm - same graceful fallback as every other optional
+	 *  data source in this project. */
+	EODBiome BiomeAt(double WorldX, double WorldY) const;
+
 	TMap<FIntPoint, FBarrierTile> Tiles;
 	TSet<FIntPoint> PendingTiles;
 	TSet<FIntPoint> MissingTiles;
+
+	// Point-classified biome data for BiomeAt() (2026-08-27) - bucketed the
+	// same way AODForestManager buckets its BuildingCentroids/RoadCenterline
+	// (large point arrays queried per-candidate, not once per tile).
+	struct FBarrierBiomePoint
+	{
+		FVector2D WorldXY = FVector2D::ZeroVector;   // cm
+		EODBiome Biome = EODBiome::DeciduousForest;
+	};
+	TArray<FBarrierBiomePoint> BiomePoints;
+	TMap<FIntPoint, TArray<int32>> BiomeBuckets;
+	bool bUseBiome = false;
+	static constexpr float BiomeCellCm = 6000.0f;   // 60 m
 
 	// generation-id cross-tile check (2026-08-21, AUDIT-RELIABILITY.md
 	// SS3.1/SS5.1): the id of the first tile this manager successfully

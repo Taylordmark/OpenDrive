@@ -233,9 +233,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Suspension")
 	float RideHeightDelta = 0.0f;
 
-	/** Local-space COM height the body is nudged to (cm; axle plane = -14). */
+	/** Local-space COM height the body is nudged to (cm; axle plane = -14).
+	 *  Dropped 10 -> 4 (2026-08-27): the car rolled onto its side in fast
+	 *  corners; most of the fix is speed-sensitive steering in the pawn, but
+	 *  a lower COM buys roll margin for every input device, not just the
+	 *  keyboard. Real cars sit near or below axle height anyway. */
 	UPROPERTY(EditAnywhere, Category = "Suspension")
-	float ComLocalZ = 10.0f;
+	float ComLocalZ = 4.0f;
 
 	// --- steering ---
 	UPROPERTY(EditAnywhere, Category = "Steering")
@@ -257,6 +261,29 @@ public:
 	/** Slip angle (degrees) at which lateral grip peaks. */
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float PeakSlipAngleDeg = 9.0f;
+
+	/** Lateral tire force is applied this many cm ABOVE the contact patch
+	 *  (toward the roll center) instead of at ground level. 2026-08-27:
+	 *  cornering at speed built enough roll moment that cresting a bump
+	 *  mid-turn launched the car into airborne barrel rolls (live telemetry:
+	 *  tumbling at 33 mph, brake untouched). Ground-level Fy times a ~45 cm
+	 *  COM height is a huge flip lever; real cars fight it with anti-roll
+	 *  bars this model doesn't have, so raising the Fy application point is
+	 *  the standard sim shortcut for the same effect. Yaw response is
+	 *  unaffected (same force, same XY point). */
+	UPROPERTY(EditAnywhere, Category = "Tires")
+	float LateralForceLiftCm = 35.0f;
+
+	/** Airborne attitude damping, 1/s (roll X / pitch Y of local angular
+	 *  velocity decay toward zero while NO wheel has contact; yaw is left
+	 *  alone). Kills the crest-launch tumble: whatever roll rate the corner
+	 *  had built bleeds off in flight so the car lands flat-ish instead of
+	 *  on its roof. 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Tires")
+	float AirborneRollDampPerSec = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Tires")
+	float AirbornePitchDampPerSec = 1.0f;
 
 	/** Wheel + tire rotational inertia, kg m^2. */
 	UPROPERTY(EditAnywhere, Category = "Tires")
@@ -306,6 +333,17 @@ public:
 	}
 	float GetWheelSteerDeg(int32 i) const { return Wheels[i].SteerDeg; }
 	float GetWheelOmega(int32 i) const { return Wheels[i].Omega; }
+
+	/** Nominal (unloaded) wheel-to-ground clearance below the body pivot, cm -
+	 *  RestLengthCm + RideHeightDelta (strut extension from the pivot) + wheel
+	 *  radius. Garage/showroom placement (AODMainMenu::EnterCarConfig) uses
+	 *  this instead of a live SpringLen sample: physics is frozen there (no
+	 *  suspension settling ever happens), so the pivot's actor-origin Z is NOT
+	 *  ground level - it sits this far above it. */
+	float GetRestGroundClearanceCm() const
+	{
+		return RestLengthCm + RideHeightDelta + (Wheels.Num() > 0 ? Wheels[0].Radius : 34.0f);
+	}
 
 	/** Re-derive mass/COM (after mesh swap or ComLocalZ preset change). */
 	void MarkBodyDirty() { bBodyInit = false; }

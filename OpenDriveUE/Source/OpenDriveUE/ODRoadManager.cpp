@@ -497,19 +497,28 @@ void AODRoadManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTil
 
 void AODRoadManager::ProcessPendingChunkBuilds()
 {
-	int32 Budget = ChunksPerFrameBudget;
+	// Millisecond budget, not a chunk count (2026-08-27, fast-drive hitch
+	// investigation) - see ChunkBuildMsBudget's comment. Always finishes at
+	// least one chunk per tick (the ElapsedMs check only stops the inner loop
+	// AFTER a chunk completes) so the queue can't stall even if a single
+	// chunk alone busts the budget.
+	const double StartTime = FPlatformTime::Seconds();
+	double ElapsedMs = 0.0;
+	int32 NumChunksBuiltThisTick = 0;
 	const FTransform CompXf = GetActorTransform();   // identity today (actor
 	                                                  // always spawned at world
 	                                                  // origin) - kept explicit
 	                                                  // rather than assumed.
-	while (Budget > 0 && PendingChunkBuilds.Num() > 0)
+	while (PendingChunkBuilds.Num() > 0 && (NumChunksBuiltThisTick == 0 || ElapsedMs < ChunkBuildMsBudget))
 	{
 		FPendingTileBuild& Build = PendingChunkBuilds[0];
-		while (Budget > 0 && Build.NextChunkIndex < Build.Parsed.Chunks.Num())
+		while (Build.NextChunkIndex < Build.Parsed.Chunks.Num()
+			&& (NumChunksBuiltThisTick == 0 || ElapsedMs < ChunkBuildMsBudget))
 		{
 			BuildOneChunk(Build.Key, Build.InProgress, Build.Parsed.Chunks[Build.NextChunkIndex], CompXf);
 			++Build.NextChunkIndex;
-			--Budget;
+			++NumChunksBuiltThisTick;
+			ElapsedMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
 		}
 
 		if (Build.NextChunkIndex < Build.Parsed.Chunks.Num())
@@ -529,14 +538,48 @@ void AODRoadManager::ProcessPendingChunkBuilds()
 	}
 }
 
+// Instrumentation (2026-08-27, fast-drive hitch investigation): per-stage
+// game-thread timing for one road chunk build - see CreateChunkMeshComponent
+// below for the stage boundaries. Logged unconditionally per chunk (not
+// throttled - per-build events), plus a Warning when a single chunk's total
+// exceeds WarnThresholdMs.
+static constexpr double RoadChunkBuildWarnThresholdMs = 8.0;
+
 UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	const FParsedChunk& Chunk, const FTransform& CompXf, bool bRecordSkirtSamples)
 {
+	const double StageStart = FPlatformTime::Seconds();
+	double TCreate = 0.0, TCollisionSetup = 0.0, TMeshBuild = 0.0, TMaterial = 0.0, TRegister = 0.0;
+	auto Lap = [](double& Since) -> double
+	{
+		const double Now = FPlatformTime::Seconds();
+		const double DeltaMs = (Now - Since) * 1000.0;
+		Since = Now;
+		return DeltaMs;
+	};
+	double Clock = StageStart;
+
 	const uint32 VCount = Chunk.Verts.Num() / 3;
 	const uint32 TCount = Chunk.Tris.Num() / 3;
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
+	// Async collision cook (2026-08-27, fast-drive hitch fix): set BEFORE
+	// EnableComplexAsSimpleCollision below so whichever call actually
+	// triggers RebuildPhysicsData (immediately here, or later when
+	// RegisterComponent's own collision refresh picks up EditMesh's mesh
+	// change) honors the async path - UDynamicMeshComponent::bUseAsyncCooking
+	// dispatches the triangle-mesh cook to the thread pool
+	// (BodySetup->CreatePhysicsMeshesAsync) and only does the cheap
+	// RecreatePhysicsState() on the game thread once the cook completes,
+	// instead of cooking synchronously inline. This does NOT change how many
+	// chunks call RegisterComponent() in a given frame (still exactly the
+	// ChunkBuildMsBudget-gated set below) - only the expensive cook itself
+	// moves off the game thread, so it doesn't add to the same-frame
+	// collision-REGISTRATION count the bulk-registration Chaos bug (see
+	// ChunkBuildMsBudget's comment) is about.
+	Comp->bUseAsyncCooking = true;
+	TCreate = Lap(Clock);
 
 	// 2026-08-26: RegisterComponent() used to run before EditMesh() ever
 	// populated geometry, and EnableComplexAsSimpleCollision()/
@@ -552,6 +595,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	// register once mesh + collision are both fully final.
 	Comp->EnableComplexAsSimpleCollision();
 	Comp->SetCollisionProfileName(TEXT("BlockAll"));
+	TCollisionSetup = Lap(Clock);
 
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
 	{
@@ -600,6 +644,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			}
 		}
 	});
+	TMeshBuild = Lap(Clock);
 
 	// one-way carriageways (e.g. a divided highway's own direction) get
 	// the no-center-yellow variant - RoadMat's baked centerline only
@@ -610,8 +655,30 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	{
 		Comp->SetMaterial(0, ChunkMat);
 	}
+	TMaterial = Lap(Clock);
 
 	Comp->RegisterComponent();
+	TRegister = Lap(Clock);
+
+	const double TotalMs = (FPlatformTime::Seconds() - StageStart) * 1000.0;
+	// TCollisionSetup is just the flag/profile-name assignment;
+	// bUseAsyncCooking moves the actual physics cook off this synchronous
+	// path (see Comp->bUseAsyncCooking's comment above) - the cook cost
+	// would otherwise show up folded into TRegister (RegisterComponent is
+	// what actually triggers RebuildPhysicsData once EditMesh has dirtied
+	// the mesh), so a big TRegister here despite bUseAsyncCooking=true would
+	// mean the async path isn't engaging as expected.
+	UE_LOG(LogTemp, Display,
+		TEXT("ODRoadManager: BuildOneChunk verts=%d tris=%d totalMs=%.2f ")
+		TEXT("[create=%.2f collisionSetup=%.2f meshBuild=%.2f material=%.2f register=%.2f]"),
+		VCount, TCount, TotalMs, TCreate, TCollisionSetup, TMeshBuild, TMaterial, TRegister);
+	if (TotalMs > RoadChunkBuildWarnThresholdMs)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODRoadManager: BuildOneChunk exceeded %.1fms threshold - totalMs=%.2f ")
+			TEXT("[create=%.2f collisionSetup=%.2f meshBuild=%.2f material=%.2f register=%.2f]"),
+			RoadChunkBuildWarnThresholdMs, TotalMs, TCreate, TCollisionSetup, TMeshBuild, TMaterial, TRegister);
+	}
 
 	return Comp;
 }

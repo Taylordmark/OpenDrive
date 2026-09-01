@@ -82,7 +82,7 @@ import numpy as np
 import requests
 
 import build_terrain_mesh_tiles as btmt
-from build_road_network import split_excluding_tunnels
+from build_road_network import split_excluding_tunnels, write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks, road_ue_z_m)
@@ -91,6 +91,19 @@ from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 BACKUP_DIR = OUT_DIR / "_road_backup_junction_pads"
 TERRAIN_BACKUP_DIR = OUT_DIR / "_terrain_backup_junction_pads"
+SIDECAR_PATH = OUT_DIR / f"roadstations_{AREA_NAME}.bin"
+SIDECAR_BACKUP_DIR = OUT_DIR / "_sidecar_backup_junction_pads"
+
+# How close (UE-frame cm) a regraded station's ORIGINAL x/y has to land to a
+# sidecar entry's x/y to count as "the same station" - both are computed by
+# the exact same `east_m*100.0, -north_m*100.0` conversion (road_mesh_common.
+# build_road_chunks / write_station_sidecar) from what should be the
+# bit-identical underlying float, so a real match is a fraction of a
+# millimeter apart; a few cm of slack only guards against float32-rounding
+# in the on-disk sidecar (it's written as float32, this script does math in
+# float64) without risking a false match to a different, merely-nearby
+# station (station spacing is 500cm, so anything under ~50cm is unambiguous).
+SIDECAR_MATCH_EPS_CM = 5.0
 
 JUNCTION_SEARCH_RADIUS_M = 15.0    # broad-phase: how close two DIFFERENT
                                     # segments' stations must be to even try
@@ -118,6 +131,12 @@ PAD_MIN_ANGLE_DEG = 20.0           # floor for the sin() in the radius formula
                                     # so a near-parallel crossing doesn't blow
                                     # the pad radius up toward infinity
 PAD_SIDES = 20
+# 2026-08-27/28, Taylor correction: a merged pad's footprint must read as
+# ONE smooth oval, not a convex-hull-of-circles polygon with visible
+# corners/lobes (see _fit_ellipse_to_circles/build_pad_chunk_ellipse
+# below). 24-32 was the requested tessellation density for that to read
+# smooth at low-poly scale; 28 splits the difference.
+ELLIPSE_SIDES = 28
 
 # Separate from crossing detection entirely: a whole cluster of residential
 # streets (Lake Hughes subdivision) were digitized as ISOLATED OSM ways whose
@@ -430,11 +449,29 @@ def find_crossings(east, north, s_m, elev, seg_ids, structural):
     return crossings
 
 
-def find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds):
+def find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds, junctions=()):
     """Segment start/end stations with no other segment's station within
     JUNCTION_OVERLAP_M (i.e. NOT already handled by find_crossings/clustering)
     but with one within ENDPOINT_SNAP_MAX_M - a real, conservatively-sized
-    topology gap worth welding shut, not a crossing to detect."""
+    topology gap worth welding shut, not a crossing to detect.
+
+    2026-08-26, Taylor (Green Valley "Lake Hughes" fork screenshot - a
+    perpendicular stub not blending into the main road, dark torn seam where
+    they should meet): a road that crosses several others near its own tail
+    end (e.g. segment 60 in green_valley, which crosses THREE different
+    roads at three separate interior points) can have its very last station
+    land within a few meters of one of those SAME crossings' pad centers -
+    find_crossings already builds a real junction/pad there from the interior
+    edge, but this function used to only check raw distance-to-nearest-
+    station, not whether a real junction already covers that point, so it
+    ALSO flagged the identical spot as a dangling endpoint and built an
+    independent straight connector spur on top of it. Two independently
+    regraded/framed pieces of geometry (the pad's fan disc and the
+    connector's own short, uncapped ribbon) covering nearly the same
+    footprint is exactly what reads as a dark seam plus an abruptly-ending
+    stub. `junctions` (already fully built by the time this runs in main())
+    lets real coverage be checked directly instead of inferred from
+    proximity alone."""
     n = len(east)
     cell = ENDPOINT_SNAP_MAX_M
     buckets = defaultdict(list)
@@ -451,6 +488,18 @@ def find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds):
 
     r2 = ENDPOINT_SNAP_MAX_M ** 2
     already2 = JUNCTION_OVERLAP_M ** 2
+
+    def covered_by_real_junction(gi):
+        # Real coverage, not just "something else is close" - a junction's
+        # pad footprint (plus the same overlap margin build_pad_chunk itself
+        # is drawn with) already caps this point, so an independent
+        # connector spur here would only duplicate/conflict with it.
+        px, py = east[gi], north[gi]
+        for j in junctions:
+            if point_in_pad(px, py, j):
+                return True
+        return False
+
     snaps = []
     for gi, seg in endpoints:
         bx, by = int(east[gi] // cell), int(north[gi] // cell)
@@ -469,6 +518,9 @@ def find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds):
             continue   # beyond the conservative snap distance - leave it alone
         if abs(elev[gi] - elev[best_j]) > JUNCTION_MAX_ELEV_DIFF_M:
             continue   # not actually at-grade with its nearest neighbor
+        if covered_by_real_junction(gi) or covered_by_real_junction(best_j):
+            continue   # a real crossing/cluster junction already pads this
+                       # exact spot (or its target) - see docstring above
         snaps.append({"gi": gi, "seg": seg, "target_gi": int(best_j),
                        "target_seg": int(seg_ids[best_j]), "dist": best_d2 ** 0.5})
     return snaps
@@ -508,35 +560,87 @@ def pad_radius_m(angle_deg):
 # junctions strung along the same road.
 CLUSTER_MERGE_M = PAD_RADIUS_MAX_M * 1.5
 
+# 2026-08-27, Taylor screenshot (Lake Hughes town, a complex junction that
+# baked as TWO separate pads at slightly different elevations, neither
+# covering the whole intersection - a dark gap between them with approach
+# roads dead-ending in vertical end caps at each pad's own edge). Root
+# cause: cluster_crossings() only folds two pairwise crossings into ONE
+# junction when they're within CLUSTER_MERGE_M (27m) of each other; OSM
+# frequently digitizes one real, larger/more complex intersection as
+# several graph nodes/crossings a bit FARTHER apart than that (wide
+# intersection, offset stop lines, a slip lane) but still close enough that
+# their drawn pad discs end up touching or nearly touching once
+# pad_radius_m() sizes them - two correctly-detected, genuinely-real
+# junctions that are nonetheless "the same intersection" and should bake as
+# one. PAD_MERGE_NEAR_MARGIN_M is the EXTRA slack (beyond the two pads'
+# own drawn radii, which already include PAD_OVERLAP_MARGIN_M) added when
+# deciding whether two pads are "close enough to merge" - i.e. two pads
+# merge if dist(centers) <= r_i_drawn + r_j_drawn + PAD_MERGE_NEAR_MARGIN_M,
+# not only when they already overlap outright (gap<=0). Sized well below
+# CLUSTER_MERGE_M (27m) and PAD_RADIUS_MAX_M (18m) - a scan of every
+# junction pair in green_valley within 60m of each other found real
+# node-split artifacts (same physical intersection, split by OSM) clustered
+# tightly at gaps of 0-8m, then a gap to legitimately separate, closely
+# strung intersections (subdivision T's every 20-40m) starting around 24m -
+# 8.0m sits in that natural valley, catching the former without touching
+# the latter.
+PAD_MERGE_NEAR_MARGIN_M = 8.0
+
 
 def cluster_crossings(crossings):
-    """Union-find crossings whose xy falls within CLUSTER_MERGE_M of each
-    other. Returns a list of clusters (each a list of crossing dicts)."""
-    parent = list(range(len(crossings)))
+    """Groups crossings whose xy falls within CLUSTER_MERGE_M of each other.
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    2026-08-27, Taylor (green_valley terrain-cliff investigation): the
+    original implementation used plain union-find single-linkage - i.e. two
+    crossings merge if EITHER is within CLUSTER_MERGE_M of the OTHER,
+    transitively. Single-linkage has no bound on the resulting group's own
+    diameter: a dense residential subdivision grid (real, closely-spaced,
+    but individually SEPARATE T-intersections every 20-30m along a street)
+    chains crossing-to-crossing all the way down the block, collapsing
+    dozens of genuinely distinct intersections into ONE "junction" whose
+    bounding box can span hundreds of meters (measured live on green_valley:
+    a single chained group of 50 pairwise crossings across segments 1780/
+    1998/2864/2955/3382/3852 spanning ~220m). That one junction then picks
+    ONE flat_seg/elevation/snap-anchor for the whole group, so every OTHER
+    member's XY snap distance (see the snap_xy blend in main()) balloons up
+    to that group's full span (measured: one station snapped 193m from its
+    original position) instead of the intended "meters, not tens of
+    meters" a real single intersection produces. That in turn (a) blows a
+    canyon-sized hole in the terrain regrade/carve near that spot (a huge
+    contributor to the terrain-cliff bug this investigation started from)
+    and (b) leaves the ORIGINAL (pre-snap) station position with no nearby
+    road geometry at all, showing up as a verify_road_fit.py "no road tile/
+    triangle covering this station" miss.
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
+    Fixed by switching to a SEED-RADIUS grouping instead: each group is
+    seeded by its lowest-index not-yet-assigned crossing, and only pulls in
+    OTHER crossings within CLUSTER_MERGE_M of THAT SAME SEED point (not
+    transitively from whatever else has already joined the group). This
+    caps every group's bounding diameter at 2*CLUSTER_MERGE_M by
+    construction - generous enough to still catch a real, tight multi-way
+    cluster (the documented "a real 3+-way where road C meets both A and B
+    a few meters apart" case, all within one CLUSTER_MERGE_M-radius disc of
+    each other) while making the subdivision-chain failure mode
+    geometrically impossible."""
+    n = len(crossings)
+    assigned = [False] * n
+    groups = []
     r2 = CLUSTER_MERGE_M ** 2
-    for i in range(len(crossings)):
-        xi, yi = crossings[i]["xy"]
-        for j in range(i + 1, len(crossings)):
+    for seed in range(n):
+        if assigned[seed]:
+            continue
+        sx, sy = crossings[seed]["xy"]
+        assigned[seed] = True
+        group = [seed]
+        for j in range(seed + 1, n):
+            if assigned[j]:
+                continue
             xj, yj = crossings[j]["xy"]
-            if (xi - xj) ** 2 + (yi - yj) ** 2 <= r2:
-                union(i, j)
-
-    groups = defaultdict(list)
-    for i, c in enumerate(crossings):
-        groups[find(i)].append(c)
-    return list(groups.values())
+            if (sx - xj) ** 2 + (sy - yj) ** 2 <= r2:
+                assigned[j] = True
+                group.append(j)
+        groups.append([crossings[i] for i in group])
+    return groups
 
 
 def build_pad_chunk(name, center_xy, elev_m, radius_m, sides=PAD_SIDES):
@@ -546,6 +650,50 @@ def build_pad_chunk(name, center_xy, elev_m, radius_m, sides=PAD_SIDES):
     needed (unlike v1/v2's hull-of-corners approach)."""
     cx, cy = center_xy
     z_m = road_ue_z_m(elev_m, ROAD_LIFT, ORIGIN_HEIGHT_M)
+    ring = [(cx + radius_m * math.cos(2.0 * math.pi * k / sides),
+             cy + radius_m * math.sin(2.0 * math.pi * k / sides)) for k in range(sides)]
+    return _build_pad_fan(name, (cx, cy), z_m, ring)
+
+
+def build_pad_chunk_hull(name, hull_members, elev_m, margin, sides=PAD_SIDES):
+    """Like build_pad_chunk, but the ring is the convex-hull-of-circles
+    polygon _hull_polygon() computes for a merged pad (see
+    merge_overlapping_pads) instead of a plain circle - same fan topology,
+    UVs, and winding, just a differently-shaped ring.
+
+    SUPERSEDED 2026-08-27/28 (Taylor correction): a merged pad's footprint
+    must read as one smooth oval, not a convex hull with visible corners/
+    lobes - see build_pad_chunk_ellipse below, which merge_overlapping_pads
+    and main() now actually call. Left this (and _hull_polygon/
+    _convex_hull/_point_in_convex_polygon below) in place, unused, only as
+    documented history of the approach that was tried and rejected - not
+    called from anywhere anymore."""
+    ring = _hull_polygon(hull_members, margin, sides)
+    cx = sum(p[0] for p in ring) / len(ring)
+    cy = sum(p[1] for p in ring) / len(ring)
+    z_m = road_ue_z_m(elev_m, ROAD_LIFT, ORIGIN_HEIGHT_M)
+    return _build_pad_fan(name, (cx, cy), z_m, ring)
+
+
+def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES):
+    """Like build_pad_chunk, but the ring is the fitted-ellipse boundary
+    _ellipse_polygon() computes for a merged pad (see
+    _fit_ellipse_to_circles/merge_overlapping_pads) instead of a plain
+    circle - same fan topology, UVs, and winding, just a differently-
+    shaped ring. The hub vertex is the ellipse's own center (well-defined,
+    unlike build_pad_chunk_hull's average-of-ring-points approximation)."""
+    cx, cy, _a0, _b0, _theta = ellipse
+    ring = _ellipse_polygon(ellipse, margin, sides)
+    z_m = road_ue_z_m(elev_m, ROAD_LIFT, ORIGIN_HEIGHT_M)
+    return _build_pad_fan(name, (cx, cy), z_m, ring)
+
+
+def _build_pad_fan(name, hub_xy, z_m, ring):
+    """Shared fan-mesh builder for build_pad_chunk/build_pad_chunk_hull:
+    hub vertex 0 at hub_xy (UE-frame elevation z_m) plus a ring of (x, y)
+    points (pipeline-frame meters), triangulated as a fan."""
+    cx, cy = hub_xy
+    sides = len(ring)
     verts = [cx * 100.0, -cy * 100.0, z_m * 100.0]
     # RoadMat reads U across build_road_chunks()'s skirt-L/pave-L/pave-R/
     # skirt-R profile (U=0..1), with the yellow centerline stripe baked in
@@ -565,9 +713,7 @@ def build_pad_chunk(name, center_xy, elev_m, radius_m, sides=PAD_SIDES):
     # fallback height). Flatness ruled out; see merge_chunk_into's docstring
     # for the confirmed cause (disconnected islands) and its fix (bridge
     # triangles).
-    for k in range(sides):
-        ang = 2.0 * math.pi * k / sides
-        vx, vy = cx + radius_m * math.cos(ang), cy + radius_m * math.sin(ang)
+    for vx, vy in ring:
         verts.extend([vx * 100.0, -vy * 100.0, z_m * 100.0])
         uvs.extend([PAD_UV[0], PAD_UV[1]])
     # CONFIRMED ROOT CAUSE (2026-08-26): this fan must wind (0,a,b), not
@@ -595,6 +741,461 @@ def build_pad_chunk(name, center_xy, elev_m, radius_m, sides=PAD_SIDES):
         tris.extend([0, a, b])
     return {"name": name, "vertices": [round(v, 1) for v in verts],
             "uvs": [round(v, 4) for v in uvs], "triangles": tris, "oneway": False}
+
+
+def _pad_draw_radius(j):
+    """The actual on-disk footprint of a junction's disc - same
+    "+PAD_OVERLAP_MARGIN_M" build_pad_chunk itself is always called with, so
+    two pads whose DRAWN shapes touch/overlap (not just their bare
+    radius_m) are the ones that need merging. Only meaningful for a plain
+    circular junction (merge_overlapping_pads' own overlap test, before any
+    merged "hull" shapes exist yet)."""
+    return j["radius_m"] + PAD_OVERLAP_MARGIN_M
+
+
+def _convex_hull(points):
+    """Monotone-chain (Andrew's algorithm) 2D convex hull. Returns CCW-
+    ordered vertices, no repeated closing point. Pure Python, no scipy
+    dependency (matches the rest of this file)."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _hull_polygon(hull_members, margin, sides):
+    """Convex hull of a UNION of circles (cx, cy, r), each grown by
+    `margin` first (a disk grown by a scalar is just a bigger disk, so
+    margin-then-hull == hull-then-offset for a uniform margin here).
+
+    An earlier version tried to build this straight from each disk's exact
+    2D support function - for direction unit-vector d, a disk's support
+    value (center-origin)*d + r is exact - by plotting, for `sides` evenly
+    spaced angles theta, a point at (support value) along direction theta
+    FROM THE CENTROID. That is wrong in general: the support function's
+    value at direction d is the position of the true boundary point
+    PROJECTED onto d, not that point's distance from the centroid along d
+    - the two only coincide when the tangent point happens to lie exactly
+    on the ray from the centroid in direction d, which is only true for a
+    disk centered on the centroid itself. For every other (off-center)
+    member it silently plotted a point INSIDE the true hull, clipping that
+    member's own far edge and producing a polygon that failed to cover
+    points that are unambiguously inside one of the original disks
+    (caught by a coverage unit test, not by the one real dataset this was
+    exercised against - none of green_valley's junction clusters happened
+    to overlap when this bug was live).
+
+    The robust fix: sample each (margin-grown) disk's circumference
+    directly and take the discrete 2D convex hull of all the sample
+    points. This has no such projection error for any arrangement of
+    members - by construction every sampled boundary point is a real point
+    of the union, and the hull of real points can only ever wrap them, not
+    clip them. `sides` here means "total boundary samples across all
+    members" (split evenly per member, minimum 24 each) rather than the
+    output vertex count - the convex hull only keeps whichever samples are
+    actually extreme points, so the returned polygon is usually much
+    smaller than `sides`. As with the old approach, connecting samples
+    with straight chords slightly undershoots each member's true circular
+    arc between samples; that sagitta is well inside the slack
+    PAD_OVERLAP_MARGIN_M already budgets for this kind of gap elsewhere in
+    this file (see that constant's own docstring)."""
+    per_member = max(sides // max(len(hull_members), 1), 24)
+    pts = []
+    for mx, my, mr in hull_members:
+        r = mr + margin
+        for k in range(per_member):
+            theta = 2.0 * math.pi * k / per_member
+            pts.append((mx + r * math.cos(theta), my + r * math.sin(theta)))
+    return _convex_hull(pts)
+
+
+def _point_in_convex_polygon(px, py, pts, tol=1e-6):
+    """Standard convex-polygon membership test: the point is inside iff
+    every polygon edge (traversed in the same order pts is already in) has
+    it on the same side. _hull_polygon always emits points in increasing-
+    theta (consistently CCW) order, so this is safe to call directly on its
+    output.
+
+    _hull_polygon's boundary includes long, nearly-straight runs of samples
+    wherever the true hull-of-disks boundary follows a flat tangent-line
+    facet between two members (as opposed to an arc). Along such a run,
+    consecutive sampled points are almost exactly collinear, so the raw
+    cross product is a tiny value whose SIGN is floating-point noise rather
+    than signal - comparing it against exactly 0.0 lets that noise flip
+    `sign` and reject points that are genuinely inside. Treat any
+    near-zero cross product (|cross| <= tol) as "on the line" instead of
+    picking a side."""
+    sign = 0
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+        if abs(cross) > tol:
+            s = 1 if cross > 0.0 else -1
+            if sign == 0:
+                sign = s
+            elif s != sign:
+                return False
+    return True
+
+
+def _fit_ellipse_to_circles(hull_members):
+    """Fits a single ellipse over a merged group's member pad circles
+    (mx, my, mr) - 2026-08-27/28, Taylor: the hull-of-circles shape
+    (see _hull_polygon above) reads as a lumpy multi-cornered blob for a
+    real merged intersection, not the single smooth oval a driver expects.
+    This replaces it with an actual fitted ellipse, chosen so it fully
+    covers every member's drawn circle:
+
+      - center: each member's (x, y) weighted by its OWN radius_m (a
+        bigger member pulls the shared center further toward itself, same
+        intuition as a mass-weighted centroid).
+      - orientation: the principal axis of the (radius-weighted) 2x2
+        covariance of member centers around that center, via the closed-
+        form 2x2 symmetric-matrix eigenvector angle
+        theta = 0.5*atan2(2*cxy, cxx-cyy). A degenerate/near-concentric
+        group (covariance ~ 0) falls back to theta=0, which is harmless -
+        see the semi-axis sizing below: a near-concentric group naturally
+        comes out with a~=b (near-circular) regardless of which angle
+        theta lands on, exactly the "a circle IS an ellipse, don't
+        special-case it" behavior Taylor asked for.
+      - semi-axes, base size: for each member, project its center onto the
+        major/minor unit directions (du, dv) and take a = max(|du_i|+r_i),
+        b = max(|dv_i|+r_i) - "center-projection extent + that member's
+        own radius along each axis", per Taylor's spec.
+      - semi-axes, coverage fix-up: the base (a, b) above is necessary but
+        NOT sufficient in general - a member circle offset DIAGONALLY from
+        the ellipse center can still poke past an ellipse whose axis
+        projections merely bound that circle's own axis-aligned bounding
+        box, the exact same "support-function-vs-axis-projection" trap
+        _hull_polygon's own docstring documents for the old (rejected)
+        hull approach (verified against a synthetic 3-circle case while
+        implementing this - the literal spec formula alone left ~10% of
+        a large member's own boundary outside the ellipse at the diagonal
+        points). Fixed by uniformly inflating the base (a, b) - scaling
+        both by the same factor k>=1, so the fitted shape/orientation from
+        the spec's formula is preserved, just grown - via bisection on k
+        against every member's TRUE circular boundary (64 samples/member,
+        not just its bounding box), so the final (a, b) provably contains
+        every member circle in full, not merely its axis-aligned extent.
+
+    Returns (cx, cy, a, b, theta) with margin=0 baked in - callers add
+    PAD_OVERLAP_MARGIN_M (or whatever margin they need) on top of the
+    returned (a, b) themselves (see _ellipse_polygon/_point_in_ellipse),
+    which is EXACT, not an approximation: shifting every member's r by a
+    constant shifts every max() term (and, by the same argument, every
+    per-sample containment bound checked below) by that same constant, so
+    growing an already-covering (a, b) by a uniform +margin can only ever
+    grow its coverage margin further, never shrink it. a/b are NOT ordered
+    by magnitude (a is always the extent along the theta axis, b along
+    theta+90deg) - an ellipse doesn't care which is numerically bigger,
+    and neither does _ellipse_polygon/_point_in_ellipse."""
+    wsum = sum(mr for _mx, _my, mr in hull_members)
+    if wsum <= 0.0:
+        n = float(len(hull_members))
+        cx = sum(mx for mx, _my, _mr in hull_members) / n
+        cy = sum(my for _mx, my, _mr in hull_members) / n
+    else:
+        cx = sum(mx * mr for mx, _my, mr in hull_members) / wsum
+        cy = sum(my * mr for _mx, my, mr in hull_members) / wsum
+
+    cxx = cxy = cyy = 0.0
+    wtot = 0.0
+    for mx, my, mr in hull_members:
+        w = max(mr, 1e-6)
+        dx, dy = mx - cx, my - cy
+        cxx += w * dx * dx
+        cxy += w * dx * dy
+        cyy += w * dy * dy
+        wtot += w
+    cxx /= wtot
+    cxy /= wtot
+    cyy /= wtot
+    if abs(cxx - cyy) < 1e-9 and abs(cxy) < 1e-9:
+        theta = 0.0
+    else:
+        theta = 0.5 * math.atan2(2.0 * cxy, cxx - cyy)
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -math.sin(theta), math.cos(theta)
+
+    a = b = 0.0
+    for mx, my, mr in hull_members:
+        dx, dy = mx - cx, my - cy
+        du = dx * ux + dy * uy
+        dv = dx * vx + dy * vy
+        a = max(a, abs(du) + mr)
+        b = max(b, abs(dv) + mr)
+    a = max(a, 1e-6)
+    b = max(b, 1e-6)
+
+    # Coverage fix-up (see docstring): find the smallest uniform scale
+    # k >= 1 such that scaling (a, b) by k makes the ellipse contain every
+    # sampled point on every member's TRUE circular boundary, not just the
+    # base formula's axis-projection bound. covers(k) is monotonic in k
+    # (scaling an ellipse up can only ever grow the region it covers), so
+    # a doubling search for an upper bound followed by bisection converges
+    # to the exact minimal covering k.
+    def covers(k):
+        aa, bb = a * k, b * k
+        for mx, my, mr in hull_members:
+            dx, dy = mx - cx, my - cy
+            for s in range(64):
+                t = 2.0 * math.pi * s / 64
+                px, py = mx + mr * math.cos(t), my + mr * math.sin(t)
+                pdx, pdy = px - cx, py - cy
+                du = pdx * ux + pdy * uy
+                dv = pdx * vx + pdy * vy
+                if (du * du) / (aa * aa) + (dv * dv) / (bb * bb) > 1.0:
+                    return False
+        return True
+
+    if not covers(1.0):
+        hi = 1.0
+        while not covers(hi):
+            hi *= 2.0
+        lo = hi / 2.0
+        for _ in range(40):
+            mid = (lo + hi) / 2.0
+            if covers(mid):
+                hi = mid
+            else:
+                lo = mid
+        # tiny safety pad beyond the bisected bound - 64 boundary samples
+        # per member approximates the true (continuous) circle closely but
+        # not exactly, so nudge past the numerically-found threshold
+        # rather than sit exactly on it.
+        a, b = a * hi * 1.001, b * hi * 1.001
+
+    return cx, cy, a, b, theta
+
+
+def _ellipse_polygon(ellipse, margin, sides=ELLIPSE_SIDES):
+    """Tessellates the boundary of `ellipse` (cx, cy, a, b, theta, all with
+    margin=0 baked in - see _fit_ellipse_to_circles) grown by `margin`,
+    into `sides` evenly parametric-angle-spaced points (not true arc-
+    length spacing - fine for a rendering/carve boundary at this vertex
+    count, same as the plain-circle pads build_pad_chunk already draws
+    this way). CCW by construction (angle increases 0->2pi)."""
+    cx, cy, a0, b0, theta = ellipse
+    a, b = a0 + margin, b0 + margin
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -math.sin(theta), math.cos(theta)
+    pts = []
+    for k in range(sides):
+        t = 2.0 * math.pi * k / sides
+        ct, st = math.cos(t), math.sin(t)
+        pts.append((cx + a * ct * ux + b * st * vx,
+                     cy + a * ct * uy + b * st * vy))
+    return pts
+
+
+def _point_in_ellipse(px, py, ellipse, margin):
+    """Exact analytic point-in-ellipse test (no polygon tessellation
+    needed) for `ellipse` (margin=0 baked in) grown by `margin` - see
+    _fit_ellipse_to_circles for why growing a/b by a constant margin this
+    way is exact, not approximate."""
+    cx, cy, a0, b0, theta = ellipse
+    a, b = a0 + margin, b0 + margin
+    if a <= 0.0 or b <= 0.0:
+        return px == cx and py == cy
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -math.sin(theta), math.cos(theta)
+    dx, dy = px - cx, py - cy
+    du = dx * ux + dy * uy
+    dv = dx * vx + dy * vy
+    return (du * du) / (a * a) + (dv * dv) / (b * b) <= 1.0
+
+
+def point_in_pad(px, py, j, margin=PAD_OVERLAP_MARGIN_M):
+    """True if (px, py) (pipeline-frame meters) falls inside junction j's
+    footprint - a plain circle for an ordinary junction, or the fitted
+    ellipse merge_overlapping_pads() built for a merged one (see
+    _fit_ellipse_to_circles). `margin` defaults to the same
+    PAD_OVERLAP_MARGIN_M build_pad_chunk itself always draws with (used by
+    covered_by_real_junction(), which wants "is this inside the actual
+    drawn pad"); pass margin=0 for the smaller bare-radius keep-out test
+    the ribbon-omission code uses (which deliberately stays a bit inside
+    the drawn pad edge, not flush with it - see PAD_OVERLAP_MARGIN_M's own
+    docstring)."""
+    if j.get("shape") == "ellipse":
+        return _point_in_ellipse(px, py, j["ellipse"], margin)
+    r = j["radius_m"] + margin
+    return (px - j["xy"][0]) ** 2 + (py - j["xy"][1]) ** 2 <= r * r
+
+
+def merge_overlapping_pads(junctions):
+    """Union-find junctions whose DRAWN pad discs overlap, nearly touch, or
+    (see PAD_MERGE_NEAR_MARGIN_M) sit close enough to be the SAME real
+    intersection split across multiple OSM graph nodes, and replace each
+    group of 2+ with a single smooth convex pad covering the union instead
+    of shipping two (or more) separate, disjoint fans.
+
+    2026-08-26, Taylor screenshot (Elizabeth Lake Road / Andrade Corner):
+    two real crossing CLUSTERS a bit too far apart for cluster_crossings'
+    CLUSTER_MERGE_M to fold into one junction, but close enough that their
+    drawn discs overlapped outright, rendered as a lumpy double blob - each
+    disc is individually correct, the problem is purely "two shapes where
+    the driver expects one."
+
+    2026-08-27, Taylor screenshot (Lake Hughes town): a related but
+    DISTINCT failure mode - two pads that DON'T overlap at all, so the
+    original version of this function (gap<=0 only) left them exactly as
+    two separate discs at two independently-chosen elevations, with a
+    strip of un-padded, un-clipped ground between/around them (the "gap
+    reads as a floating dark disc, roads dead-end in vertical caps" report -
+    each ribbon is cleanly cut at its own pad's edge, same as always, but
+    nothing covers the space between the two pad edges). The merge test
+    below now also fires when the gap is small but positive (see
+    PAD_MERGE_NEAR_MARGIN_M's own docstring for why that particular slack
+    value was chosen and what it deliberately does NOT catch).
+
+    This runs on the crossing-derived `junctions` list BEFORE
+    find_dangling_endpoints(), so covered_by_real_junction() (via
+    point_in_pad) already sees the merged footprint - a dangling endpoint
+    that falls in the gap between the original circles, but inside the
+    merged hull, is correctly treated as already covered instead of
+    getting an independent connector spur double-padded on top.
+
+    Geometry: the merged footprint is exactly the convex hull of the union
+    of the group's own circles (see _hull_polygon) - by construction this
+    can only ever be a strict superset of every original disc PLUS the
+    space between them, so the merge never regresses coverage, for a pair
+    or for a larger multi-junction cluster alike (no PCA/ellipse-fit
+    approximation that could clip a member's far edge). Elevation is a
+    SINGLE value, not averaged: it reuses the elevation of whichever
+    member's own flat_seg had the smallest local grade (the same
+    "flattest road keeps its profile, junction sits at its height" rule
+    build_road_chunks applies to a single junction, extended across the
+    whole merged group). `reps`/`flat_seg` from every member are unioned
+    onto the merged junction too (first-seen wins on a shared seg) so the
+    caller can re-run the transition-blend regrade for every connected
+    road across the WHOLE merged group toward this one elevation - without
+    that follow-up pass (done by main(), see its own comment), a member
+    that used to be its own cluster's flattest road would still carry its
+    ORIGINAL unregraded profile even after being folded into a merged pad
+    pinned to a different member's elevation, which would just relocate
+    the elevation-mismatch bug from "two discs" to "one disc, one abrupt
+    step where an unregraded approach meets it"."""
+    n = len(junctions)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        xi, yi = junctions[i]["xy"]
+        ri = _pad_draw_radius(junctions[i])
+        for k in range(i + 1, n):
+            xk, yk = junctions[k]["xy"]
+            rk = _pad_draw_radius(junctions[k])
+            if (xi - xk) ** 2 + (yi - yk) ** 2 <= (ri + rk + PAD_MERGE_NEAR_MARGIN_M) ** 2:
+                union(i, k)
+
+    groups = defaultdict(list)
+    for i in range(n):
+        groups[find(i)].append(i)
+
+    merged = []
+    n_groups_merged = 0
+    merge_log = []
+    for idxs in groups.values():
+        if len(idxs) == 1:
+            merged.append(junctions[idxs[0]])
+            continue
+        n_groups_merged += 1
+        members = [junctions[i] for i in idxs]
+        hull_members = [(j["xy"][0], j["xy"][1], j["radius_m"]) for j in members]
+        ellipse = _fit_ellipse_to_circles(hull_members)
+        cx, cy, a0, b0, theta = ellipse
+        # scalar "reach" for callers that only know about plain circles
+        # (regrade_terrain_at_junctions' tile footprint, the end-of-run
+        # summary print) - a0/b0 already guarantee full member coverage
+        # along their own axes (see _fit_ellipse_to_circles), so the
+        # larger of the two is never an undersized bound for a generic
+        # "how far from xy could this pad's edge reach" question.
+        radius_m = max(a0, b0)
+        ellipse_area_m2 = math.pi * a0 * b0
+
+        flattest = min(members, key=lambda j: j.get("flat_grade", 0.0))
+
+        # Union every member's road-approach reps onto the merged junction
+        # (first-seen wins on a shared seg, same dedup rule the per-cluster
+        # loop already uses) - see the docstring above for why main() needs
+        # this to re-blend every OTHER member's approaches toward the one
+        # elevation actually used here, not just the flattest member's own.
+        combined_reps = {}
+        for m in members:
+            for seg, e in m.get("reps", {}).items():
+                combined_reps.setdefault(seg, e)
+
+        merged.append({
+            "xy": (cx, cy),
+            "elev": flattest["elev"],
+            # generic "reach" for callers that only know about plain
+            # circles (regrade_terrain_at_junctions' tile footprint, the
+            # end-of-run summary print) - see comment above.
+            "radius_m": radius_m,
+            "shape": "ellipse",
+            "hull_members": hull_members,
+            "ellipse": ellipse,
+            "flat_seg": flattest["flat_seg"], "flat_grade": flattest.get("flat_grade", 0.0),
+            "snap_xy": flattest["xy"],
+            "reps": combined_reps,
+            "n_roads": len(combined_reps),
+            "segs": set().union(*(j["segs"] for j in members)),
+        })
+        member_pts = ", ".join(f"({j['xy'][0]:.0f},{j['xy'][1]:.0f}) r={j['radius_m']:.1f}m "
+                                f"elev={j['elev']:.2f}m segs={sorted(j['segs'])}" for j in members)
+        merge_log.append(
+            f"merge: {len(members)} pad(s) -> 1 ellipse pad @ ({cx:.0f},{cy:.0f}) "
+            f"a={a0:.1f}m b={b0:.1f}m theta={math.degrees(theta):.0f}deg "
+            f"elev={flattest['elev']:.2f}m (from seg {flattest['flat_seg']}) "
+            f"area={ellipse_area_m2:.0f}m^2 <- [{member_pts}]")
+
+    if n_groups_merged:
+        print(f"merged {sum(len(g) for g in groups.values() if len(g) > 1)} overlapping/near pad(s) "
+              f"into {n_groups_merged} combined ellipse pad(s) "
+              f"({n} junction(s) -> {len(merged)} after merge)")
+        for line in merge_log:
+            print("  " + line)
+    return merged
+
+
+def _polygon_area(pts):
+    """Shoelace formula - used only for the merge-log's human-readable
+    footprint size, not for any geometry/collision decision."""
+    n = len(pts)
+    if n < 3:
+        return 0.0
+    a = 0.0
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
 
 
 # ------------------------------------------------------------------ main
@@ -697,6 +1298,124 @@ def build_solo_junction(junctions, raw, target_xy=(-2485.0, 7115.0), stub_len_m=
           f"removed {removed} other tile(s). Rerun without --solo to restore the full map.")
 
 
+# ------------------------------------------------------------- pad->terrain rim anchors
+# 2026-08-27, Taylor (live drive-test: a junction pad sitting proud of the
+# surrounding terrain with a sheer cliff at its boundary). Root cause: the
+# normal terrain carve (build_terrain_mesh_tiles.carve_grid_m) blends every
+# grid point toward its NEAREST STATION's elevation - which works great
+# ALONG a road corridor, where "nearest station" is always a point on that
+# same road whose regraded elevation already agrees with the ground it sits
+# on. A junction PAD, though, is a flat disc (or hull, for a merged multi-
+# junction group) whose radius can reach well past either road's own
+# ROAD_HALF_WIDTH - especially a shallow-angle crossing, where pad_radius_m()
+# deliberately grows the disc to cover the elongated overlap parallelogram.
+# Out at the wide part of that disc, away from either centerline, the
+# terrain grid's OWN nearest station can be a perfectly ordinary, un-
+# regraded point well down one of the roads (not blended toward the
+# junction elevation at all) - so the carve there tracks that other point's
+# natural grade instead of the pad's constant height, and the two disagree
+# right at the pad edge by however much that road's grade changed over the
+# gap. Measured across every junction in green_valley (throwaway analysis,
+# not part of this file): median edge-vs-terrain step ~0.4m, worst case
+# 6.5m, with ~7% of junctions over 1m - not universal, but a real and
+# fairly common defect, worse at bigger/shallower-angle pads.
+#
+# v1 of this fix (since replaced) added a SECOND, ad-hoc pass after the
+# normal carve: any terrain vertex within a per-junction "feather ring"
+# outside the pad edge got force-blended toward the pad's flat elevation by
+# distance alone, regardless of whether the normal carve already had the
+# right answer there. That broke exactly the case it needed to leave alone:
+# a real station sitting just past a wide/shallow pad's edge is very often
+# already correctly served by the ordinary nearest-station carve (it's
+# usually its OWN nearest station, or a nearby one on the same, already-
+# regraded approach), but the ad-hoc pass's single "worst-direction" feather
+# width got applied all the way around the pad, overriding those
+# already-correct points with the pad's constant elevation anyway. Caught by
+# re-running verify_terrain_fit.py after the fix landed: SHIPPED max
+# deviation from a station's own expected elevation got WORSE (3.02m ->
+# 6.80m), and every one of the worst offenders sat 0-20m from a pad edge -
+# squarely inside that ring, not the pre-existing, unrelated 50m regrade-
+# transition effect.
+#
+# v2 (this version) fixes the ROOT CAUSE instead of papering over its
+# symptom: feed the carve extra synthetic "rim stations" - points sampled
+# around each pad's own drawn boundary (circle or hull polygon, same shape
+# build_pad_chunk/build_pad_chunk_hull actually draws), each carrying the
+# pad's own pinned elevation - into the SAME station arrays
+# regrade_terrain_at_junctions() already hands to build_tile()/
+# carve_grid_m(). No second pass, no separate blend law, no override: the
+# existing nearest-station-wins search (see carve_grid_m's own docstring)
+# just gets more candidates to choose from. Where a real corridor station is
+# genuinely nearest (the already-working case), argmin keeps picking it,
+# completely unchanged. Where the wide part of a pad had no nearby correct
+# anchor before (the actual bug), a rim point is now the nearest thing
+# around, and the carve's own already-tuned inner/outer smoothstep taper
+# (TERRAIN_CARVE_INNER_M/OUTER_M) blends toward it exactly the way it does
+# for every other station on the map - not a bespoke width/slope heuristic
+# that has to be re-derived and can disagree with the rest of the terrain.
+PAD_RIM_SPACING_M = 3.0   # arc-length spacing between synthetic rim anchors -
+                          # tight enough that carve_grid_m's per-pixel
+                          # nearest-station search (which has no notion of
+                          # "the pad edge is a continuous curve", just
+                          # discrete points) never sees a gap wider than a
+                          # single DEM/grid cell along the boundary.
+
+
+def _pad_rim_points(j, spacing_m=PAD_RIM_SPACING_M):
+    """Points (pipeline-frame meters) sampled around junction j's own DRAWN
+    pad boundary - the exact circle build_pad_chunk() fans out for a plain
+    junction, or the exact fitted-ellipse boundary build_pad_chunk_ellipse()
+    fans out for a merged one (via the same _ellipse_polygon() helper),
+    resampled to ~spacing_m apart so a long boundary run gets intermediate
+    points, not just the tessellation vertices."""
+    if j.get("shape") == "ellipse":
+        poly = _ellipse_polygon(j["ellipse"], PAD_OVERLAP_MARGIN_M, sides=64)
+    else:
+        cx, cy = j["xy"]
+        r = j["radius_m"] + PAD_OVERLAP_MARGIN_M
+        n = max(8, int(math.ceil(2.0 * math.pi * r / spacing_m)))
+        return [(cx + r * math.cos(2.0 * math.pi * k / n),
+                 cy + r * math.sin(2.0 * math.pi * k / n)) for k in range(n)]
+
+    pts = []
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        steps = max(1, int(math.ceil(seg_len / spacing_m)))
+        for s in range(steps):
+            t = s / steps
+            pts.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t))
+    return pts
+
+
+def _augment_station_data_with_pad_rims(station_data, junctions):
+    """Appends one synthetic, never-excluded "station" per rim point (see
+    _pad_rim_points) to the (lat0, lon0, st_x_cm, st_y_cm, st_elev,
+    st_exclude) tuple build_tile()/carve_grid_m() consume, each carrying its
+    junction's own pinned elevation - see the module comment above for why
+    this replaces a separate feather/blend pass instead of adding one."""
+    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude = station_data
+    if not junctions:
+        return station_data
+    rim_x, rim_y, rim_elev = [], [], []
+    for j in junctions:
+        for (px, py) in _pad_rim_points(j):
+            rim_x.append(px)
+            rim_y.append(py)
+            rim_elev.append(j["elev"])
+    rim_x_cm = np.asarray(rim_x, dtype=np.float64) * 100.0
+    rim_y_cm = -np.asarray(rim_y, dtype=np.float64) * 100.0
+    rim_elev = np.asarray(rim_elev, dtype=np.float64)
+    rim_exclude = np.zeros(len(rim_x), dtype=bool)
+    return (lat0, lon0,
+            np.concatenate([st_x_cm, rim_x_cm]),
+            np.concatenate([st_y_cm, rim_y_cm]),
+            np.concatenate([st_elev, rim_elev]),
+            np.concatenate([st_exclude, rim_exclude]))
+
+
 def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded_elev,
                                   terrain_exclude):
     """Re-carve the (small) set of terrain tiles a snapped junction actually
@@ -705,7 +1424,11 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     /write_tile_bin() as plain library calls rather than re-deriving the DEM-
     sample+carve math here, so the terrain-side result matches exactly what a
     full terrain rebake would produce for these coordinates (2026-08-25,
-    Taylor: keep the XY snap, fix the terrain instead of the pad).
+    Taylor: keep the XY snap, fix the terrain instead of the pad). Synthetic
+    pad-rim "stations" (_augment_station_data_with_pad_rims, see the module
+    comment above it) are folded into that same station set before the carve
+    runs, so the ordinary nearest-station blend - unchanged - closes the
+    residual cliff a wide/shallow-angle pad's boundary can otherwise leave.
 
     Needs network access - build_tile() samples fresh DEM tiles per run (see
     build_terrain_mesh_tiles.sample_dem's docstring on why there's no on-disk
@@ -714,15 +1437,20 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
     # A junction's own pad radius plus TERRAIN_CARVE_OUTER_M (how far a
     # station can still influence the carve - see that constant's own
-    # comment) is the true footprint that can change; padding out to the
-    # tile corners in every direction is simpler than exact overlap math and
-    # this only ever adds at most one extra neighboring tile per junction.
+    # comment) is the true footprint that can change. Enumerate every tile
+    # the resulting box actually overlaps (not just the 4 corner tiles) -
+    # 2026-08-27: the old corner-only version silently skipped a middle
+    # tile whenever the box spanned 3+ tiles in one axis; harmless today
+    # (TERRAIN_TILE_SIZE_CM=2km dwarfs any single junction's own radius+150m
+    # reach) but a large merged/hull pad or a bigger future radius could hit
+    # exactly that gap, so this is now correct for any size box instead of
+    # relying on it staying small by coincidence.
     for j in junctions:
         cx_cm, cy_cm = j["xy"][0] * 100.0, -j["xy"][1] * 100.0
         r_cm = (j["radius_m"] + btmt.TERRAIN_CARVE_OUTER_M) * 100.0
-        j["_terrain_tiles"] = {
-            (int((cx_cm + dx) // tile_cm), int((cy_cm + dy) // tile_cm))
-            for dx in (-r_cm, r_cm) for dy in (-r_cm, r_cm)}
+        tx0, tx1 = int((cx_cm - r_cm) // tile_cm), int((cx_cm + r_cm) // tile_cm)
+        ty0, ty1 = int((cy_cm - r_cm) // tile_cm), int((cy_cm + r_cm) // tile_cm)
+        j["_terrain_tiles"] = {(tx, ty) for tx in range(tx0, tx1 + 1) for ty in range(ty0, ty1 + 1)}
 
     tiles_needed = set().union(*(j["_terrain_tiles"] for j in junctions)) if junctions else set()
     if not tiles_needed:
@@ -731,7 +1459,8 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
 
     st_x_cm = regraded_east * 100.0
     st_y_cm = -regraded_north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude)
+    station_data = _augment_station_data_with_pad_rims(
+        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude), junctions)
 
     session = requests.Session()
     caches = ({}, {})
@@ -740,6 +1469,8 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     if not TERRAIN_BACKUP_DIR.exists():
         TERRAIN_BACKUP_DIR.mkdir(parents=True)
     backed_up = 0
+    paths = {}
+    built = {}
     for (tx, ty) in sorted(tiles_needed):
         path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         backup_path = TERRAIN_BACKUP_DIR / path.name
@@ -749,11 +1480,149 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
         # every junction-adjacent tile is, by construction, within the road
         # corridor - always a NEAR tile (full-res grid + collision), never
         # the coarse background/far LOD.
-        tile = btmt.build_tile(tx, ty, True, station_data, session, caches)
-        btmt.write_tile_bin(path, tile, gen_id_bytes)
+        built[(tx, ty)] = btmt.build_tile(tx, ty, True, station_data, session, caches)
+        paths[(tx, ty)] = path
+
+    for key, tile in built.items():
+        btmt.write_tile_bin(paths[key], tile, gen_id_bytes)
     print(f"regrade_terrain: re-carved {len(tiles_needed)} terrain tile(s) "
-          f"around {len(junctions)} junction(s)"
+          f"around {len(junctions)} junction(s) using pad-rim anchors"
           + (f", backed up {backed_up} original(s) -> {TERRAIN_BACKUP_DIR}" if backed_up else ""))
+
+
+def read_station_sidecar(path):
+    """Parses the ODS1 layout write_station_sidecar() (build_road_network.py)
+    writes: magic, gen-id string, station count, then N*(x_cm,y_cm,z_cm)
+    float32 triples, UE world frame. Returns (gen_id_str, x_cm, y_cm, z_cm)
+    as float64 numpy arrays (upcast for the matching/math below - the file
+    itself stays float32, matching write_station_sidecar's own dtype)."""
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"ODS1":
+            raise ValueError(f"{path}: bad magic {magic!r}, expected b'ODS1'")
+        (gen_len,) = struct.unpack("<I", f.read(4))
+        gen_id = f.read(gen_len).decode("ascii")
+        (n,) = struct.unpack("<I", f.read(4))
+        flat = np.frombuffer(f.read(n * 3 * 4), dtype="<f4")
+    flat = flat.astype(np.float64)
+    return gen_id, flat[0::3].copy(), flat[1::3].copy(), flat[2::3].copy()
+
+
+def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
+    """Mirrors this script's road-tile patching (write_tile() over the
+    backed-up originals) for the OTHER on-disk artifact the runtime terrain
+    carve reads: roadstations_{AREA_NAME}.bin. Without this, the sidecar
+    keeps shipping PRE-pad station elevations forever (it's written once by
+    build_road_network.py, long before this script ever runs), so
+    AODTerrainManager's async tile carve digs toward the old, un-regraded
+    height right under every junction pad - terrain pokes through the pad,
+    and a visible step appears where a regraded approach meets un-recarved
+    ground (2026-08-26, Taylor: Johnson Road / Andrade Corner). Matches
+    sidecar entries to the regraded station set by ORIGINAL x/y (the
+    sidecar was built from unregraded road_stations.json, so its x/y is
+    exactly the pre-patch east/north this script also started from) and
+    overwrites only their z - x/y are left untouched, same as the road-tile
+    patch never moves a station whose ribbon isn't rebuilt for it.
+
+    `regraded_mask` selects which of the flat (all-segments-concatenated)
+    station arrays actually changed elevation; `orig_east`/`orig_north` are
+    that same flat array's UNREGRADED positions (used as the match key) and
+    `new_elev` its POST-regrade elevation (DEM-frame meters, same units
+    road_ue_z_m expects)."""
+    if not SIDECAR_PATH.exists():
+        print(f"no station sidecar at {SIDECAR_PATH} - skipping sidecar patch "
+              f"(older build_road_network.py run, or not yet generated)")
+        return
+
+    if not SIDECAR_BACKUP_DIR.exists():
+        SIDECAR_BACKUP_DIR.mkdir(parents=True)
+    backup_path = SIDECAR_BACKUP_DIR / SIDECAR_PATH.name
+    if not backup_path.exists():
+        backup_path.write_bytes(SIDECAR_PATH.read_bytes())
+        print(f"backed up original (unpatched) station sidecar -> {backup_path}")
+    else:
+        print(f"reusing existing sidecar backup baseline at {backup_path}")
+
+    gen_id, sc_x, sc_y, sc_z = read_station_sidecar(backup_path)
+
+    idxs = np.nonzero(regraded_mask)[0]
+    px_cm = orig_east[idxs] * 100.0
+    py_cm = -orig_north[idxs] * 100.0
+    pz_cm = road_ue_z_m(new_elev[idxs], ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
+
+    # Same bucket-by-cell pattern used everywhere else in this file (e.g.
+    # find_crossings/find_dangling_endpoints) - N=~29k sidecar stations is
+    # cheap to bucket once, then each of the (typically few hundred)
+    # regraded stations only checks its own cell's handful of candidates
+    # instead of an O(N*M) brute-force scan.
+    cell = max(SIDECAR_MATCH_EPS_CM * 4.0, STATION_SPACING * 100.0)
+    buckets = defaultdict(list)
+    for si in range(len(sc_x)):
+        buckets[(int(sc_x[si] // cell), int(sc_y[si] // cell))].append(si)
+
+    eps2 = SIDECAR_MATCH_EPS_CM ** 2
+    matched = 0
+    ambiguous = 0
+    for k in range(len(idxs)):
+        bx, by = int(px_cm[k] // cell), int(py_cm[k] // cell)
+        best_si, best_d2 = -1, eps2
+        hits = 0
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for si in buckets.get((bx + dx, by + dy), ()):
+                    d2 = (sc_x[si] - px_cm[k]) ** 2 + (sc_y[si] - py_cm[k]) ** 2
+                    if d2 <= eps2:
+                        hits += 1
+                        if d2 < best_d2:
+                            best_d2, best_si = d2, si
+        if best_si < 0:
+            continue   # this regraded station has no sidecar entry (e.g. it
+                       # fell inside a tunnel run, which write_station_sidecar
+                       # excludes but this script's flat station arrays don't)
+        if hits > 1:
+            ambiguous += 1   # still patches the single closest match below
+        sc_z[best_si] = pz_cm[k]
+        matched += 1
+
+    unmatched = len(idxs) - matched
+    print(f"sidecar patch: {matched}/{len(idxs)} regraded station(s) matched "
+          f"to a sidecar entry within {SIDECAR_MATCH_EPS_CM:.0f}cm"
+          + (f", {unmatched} unmatched (likely tunnel-excluded)" if unmatched else "")
+          + (f", {ambiguous} had >1 candidate within epsilon (closest used)" if ambiguous else ""))
+
+    write_station_sidecar(SIDECAR_PATH, [(sc_x, sc_y, sc_z)], pack_generation_id(gen_id))
+    print(f"rewrote station sidecar ({len(sc_x)} station(s), unchanged count) -> {SIDECAR_PATH}")
+
+
+def _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy, bounds, structural,
+                                   s_m, elev, east, north, regraded, regraded_east, regraded_north):
+    """Smoothstep-blend every road in `reps` OTHER than `flat_seg` from its
+    ORIGINAL profile (elev/east/north - never a running `regraded*`, so
+    repeat calls for overlapping junctions don't compound) down/up to
+    (junction_elev, snap_xy) over TRANSITION_LEN_M, writing the result into
+    the regraded/regraded_east/regraded_north arrays in place. Pulled out of
+    the per-cluster loop in main() (v3/v4's original single-junction blend)
+    so the exact same blend can also be re-run, post-merge, for a merged
+    hull junction's whole combined member set - see main()'s own comment on
+    why a merged junction needs this run a second time instead of trusting
+    each member's original (pre-merge, different-elevation) blend."""
+    half = int(round(TRANSITION_LEN_M / STATION_SPACING)) + 1
+    for seg, e in reps.items():
+        if seg == flat_seg:
+            continue   # the flattest road keeps its own profile untouched
+        lo, hi = bounds[seg]
+        k0, k1 = max(lo, e["edge"] - half), min(hi, e["edge"] + half)
+        for k in range(k0, k1 + 1):
+            if structural[k]:
+                continue
+            d = abs(s_m[k] - e["s"])
+            if d > TRANSITION_LEN_M:
+                continue
+            t = d / TRANSITION_LEN_M
+            weight = 1.0 - (3.0 * t * t - 2.0 * t * t * t)   # 1 at crossing, 0 at edge
+            regraded[k] = elev[k] * (1.0 - weight) + junction_elev * weight
+            regraded_east[k] = east[k] * (1.0 - weight) + snap_xy[0] * weight
+            regraded_north[k] = north[k] * (1.0 - weight) + snap_xy[1] * weight
 
 
 def main():
@@ -831,32 +1700,51 @@ def main():
         radius_m = pad_radius_m(min(c["angle_deg"] for c in cl))
 
         junctions.append({"xy": (cx, cy), "elev": junction_elev, "radius_m": radius_m,
-                           "flat_seg": flat_seg, "n_roads": len(reps), "segs": set(reps.keys())})
+                           "flat_seg": flat_seg, "flat_grade": grades[flat_seg],
+                           "snap_xy": snap_xy, "reps": reps,
+                           "n_roads": len(reps), "segs": set(reps.keys()), "shape": "circle"})
 
-        half = int(round(TRANSITION_LEN_M / STATION_SPACING)) + 1
-        for seg, e in reps.items():
-            if seg == flat_seg:
-                continue   # the flattest road keeps its own profile untouched
-            lo, hi = bounds[seg]
-            k0, k1 = max(lo, e["edge"] - half), min(hi, e["edge"] + half)
-            for k in range(k0, k1 + 1):
-                if structural[k]:
-                    continue
-                d = abs(s_m[k] - e["s"])
-                if d > TRANSITION_LEN_M:
-                    continue
-                t = d / TRANSITION_LEN_M
-                weight = 1.0 - (3.0 * t * t - 2.0 * t * t * t)   # 1 at crossing, 0 at edge
-                # blend from the ORIGINAL profile (elev/east/north), not a
-                # running `regraded*`, so two nearby junctions on the same
-                # road don't compound each other's distortion - later writes
-                # simply win on any overlap (rare: TRANSITION_LEN_M=50m)
-                regraded[k] = elev[k] * (1.0 - weight) + junction_elev * weight
-                regraded_east[k] = east[k] * (1.0 - weight) + snap_xy[0] * weight
-                regraded_north[k] = north[k] * (1.0 - weight) + snap_xy[1] * weight
+        _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy,
+                                       bounds, structural, s_m, elev, east, north,
+                                       regraded, regraded_east, regraded_north)
 
     n_regraded = int(np.sum(~np.isclose(regraded, elev)))
-    print(f"regraded {n_regraded} station(s) across {len(junctions)} junction(s)")
+    print(f"regraded {n_regraded} station(s) across {len(junctions)} junction(s) (pre-merge)")
+
+    n_junctions_before_merge = len(junctions)
+    # Two crossing CLUSTERS too far apart for cluster_crossings' own
+    # CLUSTER_MERGE_M to fold into one junction can still have OVERLAPPING
+    # (or, per PAD_MERGE_NEAR_MARGIN_M, nearly-overlapping) drawn pad discs -
+    # fold those into single fitted-ellipse pads now, before
+    # find_dangling_endpoints() runs, so its covered_by_real_junction() guard
+    # sees the merged footprint (see merge_overlapping_pads' docstring).
+    junctions = merge_overlapping_pads(junctions)
+    print(f"junction pad count: {n_junctions_before_merge} before merge -> {len(junctions)} after merge "
+          f"(crossing-derived pads only, before dangling-endpoint connector spurs are added below)")
+
+    # A merged (shape="ellipse") junction picked ONE elevation (its flattest
+    # member's) but every member OTHER than that flattest one was already
+    # regraded, above, toward ITS OWN pre-merge elevation/anchor point - left
+    # alone, that's exactly the "two pads at different elevations" bug
+    # relocated one step downstream: one pad now, but a step where a
+    # not-actually-regraded-to-this-elevation approach meets it. Re-run the
+    # identical transition blend for every member's roads (all of
+    # combined_reps except the group's own flat_seg) toward the merged
+    # elev/snap_xy so the whole merged group shares one consistent graded
+    # surface, same as a single cluster always has.
+    n_reblended_junctions = 0
+    for j in junctions:
+        if j.get("shape") != "ellipse":
+            continue
+        n_reblended_junctions += 1
+        _blend_approaches_to_junction(j["reps"], j["flat_seg"], j["elev"], j["snap_xy"],
+                                       bounds, structural, s_m, elev, east, north,
+                                       regraded, regraded_east, regraded_north)
+    if n_reblended_junctions:
+        n_regraded_after = int(np.sum(~np.isclose(regraded, elev)))
+        print(f"re-blended approaches for {n_reblended_junctions} merged junction(s) "
+              f"toward their single merged elevation ({n_regraded_after} station(s) "
+              f"regraded total, was {n_regraded} before merge)")
 
     # Separate problem from crossing detection: roads whose endpoint was
     # simply never topologically connected to anything (see
@@ -866,7 +1754,7 @@ def main():
     # plus a small pad to paper over the T-seam where it meets the target
     # road (2026-08-25, Taylor: "I was on a road and it just ended...
     # supposed to be an intersection there").
-    snaps = find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds)
+    snaps = find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds, junctions)
     print(f"found {len(snaps)} dangling endpoint(s) within {ENDPOINT_SNAP_MAX_M:.0f}m "
           f"of another road - welding with a connector spur")
     connector_chunks = []
@@ -898,7 +1786,8 @@ def main():
         connector_chunks.extend(chunks)
         junctions.append({"xy": (east[tgi], north[tgi]), "elev": pin_elev,
                            "radius_m": ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M,
-                           "flat_seg": tseg, "n_roads": 2, "segs": {seg, tseg}})
+                           "flat_seg": tseg, "flat_grade": min(grade_a, grade_b),
+                           "n_roads": 2, "segs": {seg, tseg}, "shape": "circle"})
 
     # write regraded elevation/XY back into per-segment lists for build_road_chunks
     off = 0
@@ -911,6 +1800,18 @@ def main():
 
     regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
                                   terrain_exclude)
+
+    # The runtime terrain carve (AODTerrainManager) doesn't only read the
+    # road-mesh tiles patched above - it reads roadstations_{AREA_NAME}.bin,
+    # a separate sidecar build_road_network.py writes straight from
+    # UNREGRADED road_stations.json, long before this script's pad/regrade
+    # pass ever runs. Left unpatched, that sidecar keeps shipping pre-pad
+    # elevations forever, so the carve digs to the wrong height near every
+    # junction. `regraded`/`elev` are still the SAME flat, all-segments
+    # arrays used throughout this function (both cluster regrades and the
+    # dangling-endpoint connector welds write into `regraded`), so the mask
+    # below covers both.
+    patch_station_sidecar(regraded != elev, east, north, regraded)
 
     if "--solo" in sys.argv:
         solo_xy = None
@@ -1015,8 +1916,7 @@ def main():
             # ribbon-vs-ribbon overlap entirely instead of trying to paper
             # over it.
             inside_circle = np.array([
-                any((e[i] - j["xy"][0]) ** 2 + (nn[i] - j["xy"][1]) ** 2 <= j["radius_m"] ** 2
-                    for j in junctions)
+                any(point_in_pad(e[i], nn[i], j, margin=0.0) for j in junctions)
                 for i in range(len(e))])
             inside_prox = np.array([overlaps_other_road(goff + lo + i, si) for i in range(len(e))])
             inside = inside_circle | inside_prox
@@ -1063,8 +1963,12 @@ def main():
             n_standalone += 1
 
     for k, j in enumerate(junctions):
-        pad = build_pad_chunk(f"junctionpad_{k:04d}", j["xy"],
-                               j["elev"], j["radius_m"] + PAD_OVERLAP_MARGIN_M)
+        if j.get("shape") == "ellipse":
+            pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}", j["ellipse"],
+                                           j["elev"], PAD_OVERLAP_MARGIN_M)
+        else:
+            pad = build_pad_chunk(f"junctionpad_{k:04d}", j["xy"],
+                                   j["elev"], j["radius_m"] + PAD_OVERLAP_MARGIN_M)
         host = nearest_chunk(all_chunks, j["xy"])
         if host is not None:
             merge_chunk_into(host, pad)

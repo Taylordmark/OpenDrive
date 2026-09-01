@@ -91,6 +91,7 @@ from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_
 from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
                                despike_ground, clamp_plausible_elevation,
+                               despike_road_profile,
                                classify_wall_stations, reconcile_junction_elevations)
 
 # ---------------------------------------------------------------- config
@@ -551,6 +552,7 @@ def main():
     segments = []
     total_km = 0.0
     n_grade_warnings = 0
+    n_spike_repairs = 0
     for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway) in enumerate(kept):
         east = (latlon[:, 1] - lon0) * m_per_deg_lon
         north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
@@ -631,6 +633,24 @@ def main():
             clearance_floor = raw_ground + MIN_BRIDGE_CLEARANCE_M
             h = np.where(is_bridge_only_s, np.maximum(h, clearance_floor), h)
 
+        # Final despike pass (2026-08-27, Lake Hughes Road "vertical wall"
+        # bug - see despike_road_profile()'s docstring in road_mesh_common.py
+        # for the full root-cause writeup): the clearance floor just above
+        # (and, more rarely, a residual DEM/interpolation artifact) can jump
+        # a short run of stations straight up/down with no grade limiting at
+        # all, bypassing every check that ran earlier in this function. Runs
+        # LAST, after every other elevation step, so it sees exactly the
+        # profile that's about to ship - repairing narrow bounce-back spikes
+        # by interpolation without touching any real sustained climb.
+        h, spike_repairs = despike_road_profile(h, s)
+        if spike_repairs:
+            n_spike_repairs += len(spike_repairs)
+            for r in spike_repairs:
+                si = r["station_idx"]
+                rn = road_name_s[si] if si < len(road_name_s) else "?"
+                print(f"  SPIKE REPAIR: seg{idx:03d} '{rn}' station {si}: "
+                      f"{r['before_m']:.2f}m -> {r['after_m']:.2f}m")
+
         # Log-only grade sanity check (2026-07-28): an abutment-to-abutment
         # (or portal-to-portal) grade steeper than any plausible real
         # structure usually means a mis-tagged way or a bad abutment pick,
@@ -666,6 +686,9 @@ def main():
     if n_grade_warnings:
         print(f"{n_grade_warnings} structure span(s) exceeded the "
               f"{STRUCTURE_GRADE_WARN * 100:.0f}% grade sanity ceiling (see WARNING lines above)")
+    if n_spike_repairs:
+        print(f"{n_spike_repairs} station(s) despiked by the final grade-spike "
+              f"repair pass (see SPIKE REPAIR lines above)")
 
     # cross-segment elevation-conflict pass (2026-07-25) - needs every
     # segment's final resampled stations first, hence deferred until after

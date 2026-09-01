@@ -46,24 +46,33 @@ origin-height mixup).
 # a smaller query succeeds where the larger one didn't before deciding
 # whether to expand back. Whole-local-area bbox this replaced:
 # BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
+#
+# EXPANDED BACK (2026-08-26) - Taylor's explicit ask: the full Green Valley
+# <-> Santa Clarita loop, not just the tight corridor, so it includes
+# Highway 14, Bouquet Canyon Rd, and San Francisquito Canyon Rd end to end
+# (he expects to see the chaparral biome appear around Hwy 14, the lower/
+# southern part of this bbox, per the mid-latitude classification fix).
+# Overpass has not been retried against this exact bbox since the 2026-08-22
+# bad patch above; if it 504s/502s/429s again, retry with backoff several
+# times before considering re-shrinking.
 AREA_NAME = "green_valley"
-# south, west, north, east - tight corridor around Green Valley Rd/the
-# Green Valley community and Lake Hughes, not the full Sierra Pelona area.
-BBOX_SNWE = (34.55, -118.50, 34.68, -118.35)
+# south, west, north, east - the whole-local-area bbox: Sierra Pelona ridge,
+# Green Valley/Lake Hughes, Bouquet Canyon Rd, San Francisquito Canyon Rd,
+# and Hwy 14 down toward Santa Clarita.
+BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
 
-# Background-visuals bbox (2026-08-22): wider than BBOX_SNWE, used ONLY by
-# build_terrain_mesh_tiles.py (raw-DEM far tiles, no road carving, no
-# collision - same code path that already renders the 6 km horizon ring
-# around the corridor, just extended to cover this whole area instead) and
-# build_map_texture.py (imagery fetch for the in-game map background) -
-# NOT by the OSM road/place/building fetch, which stays scoped to
-# BBOX_SNWE above so the corridor's road/building fidelity is unaffected
-# and Overpass never sees a query sized for this bbox. This is the
-# original whole-local-area bbox BBOX_SNWE was shrunk from (see history
-# above) - Sierra Pelona ridge, Bouquet Canyon Reservoir, Elizabeth
-# Lake/Lake Hughes. Leave unset (None) for an area that doesn't need a
-# wider visual backdrop than its own corridor.
-BACKGROUND_BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
+# Background-visuals bbox (2026-08-22, widened 2026-08-26): wider than
+# BBOX_SNWE, used ONLY by build_terrain_mesh_tiles.py (raw-DEM far tiles, no
+# road carving, no collision - same code path that already renders the 6 km
+# horizon ring around the corridor, just extended to cover this whole area
+# instead) and build_map_texture.py (imagery fetch for the in-game map
+# background) - NOT by the OSM road/place/building fetch, which stays
+# scoped to BBOX_SNWE above so the corridor's road/building fidelity is
+# unaffected and Overpass never sees a query sized for this bbox. Padded
+# ~0.1 deg beyond the new BBOX_SNWE on each side (2026-08-26, since
+# BBOX_SNWE grew to match this bbox exactly) so the horizon ring still has
+# backdrop beyond the Green Valley <-> Santa Clarita loop itself.
+BACKGROUND_BBOX_SNWE = (34.25, -118.72, 34.82, -118.18)
 
 # Fetch_osm_network.py grabs every drivable road in the bbox. Kept at None
 # (no ref filter, every drivable road including ramps/cross streets) per
@@ -93,11 +102,15 @@ ROAD_REF_REGEX = None
 # Waiʻanae ranges (real land, not open ocean, despite the bbox spanning
 # coast to coast).
 # Green Valley (2026-08-22): tight-corridor bbox center (34.615, -118.425)
-# sampled 829.9 m - lands near the Green Valley community itself. (The
-# original whole-local-area bbox center (34.535, -118.45) sampled 879.4 m,
-# in the Sierra Pelona foothills between Bouquet Canyon and San
-# Francisquito Canyon - kept here in case the bbox expands back.)
-ORIGIN_HEIGHT_M = 829.9
+# sampled 829.9 m - lands near the Green Valley community itself. (Kept here
+# for history now that the bbox expanded back below.)
+#
+# Green Valley whole-local-area (2026-08-26 expansion): bbox center
+# (34.535, -118.45) sampled 879.4 m, in the Sierra Pelona foothills between
+# Bouquet Canyon and San Francisquito Canyon - this is the value documented
+# above as already-sampled for this exact bbox, reused as-is rather than
+# resampling.
+ORIGIN_HEIGHT_M = 879.4
 
 # Arc 7.2 slice 2: world-space grid size (cm) road-network chunks are
 # bucketed into for tile streaming (export_road_mesh_bin.py). MUST match

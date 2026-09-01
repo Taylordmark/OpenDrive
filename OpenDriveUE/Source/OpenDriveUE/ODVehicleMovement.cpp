@@ -191,6 +191,25 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	TickTires(Body, Dt);
 	TickAero(Body);
 
+	// airborne attitude damping - see AirborneRollDampPerSec's comment. Only
+	// with ALL wheels off the ground, so it can never fight the tire model.
+	bool bAnyContact = false;
+	for (const FODWheel& W : Wheels)
+	{
+		bAnyContact |= W.bInContact;
+	}
+	if (!bAnyContact
+		&& (AirborneRollDampPerSec > 0.0f || AirbornePitchDampPerSec > 0.0f))
+	{
+		const FTransform Xf = Body->GetComponentTransform();
+		FVector AngLocal = Xf.InverseTransformVectorNoScale(
+			Body->GetPhysicsAngularVelocityInDegrees());
+		AngLocal.X *= FMath::Max(1.0f - AirborneRollDampPerSec * Dt, 0.0f);
+		AngLocal.Y *= FMath::Max(1.0f - AirbornePitchDampPerSec * Dt, 0.0f);
+		Body->SetPhysicsAngularVelocityInDegrees(
+			Xf.TransformVectorNoScale(AngLocal));
+	}
+
 	// ---- 10 Hz trace, same -odtrace flag as the audio hooks ----
 	if (LastTraceTime == 0.0)
 	{
@@ -662,7 +681,19 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			const float Vx = FVector::DotProduct(Vel, Fwd) / 100.0f;   // m/s
 			const float Vy = FVector::DotProduct(Vel, Right) / 100.0f;
 
-			const float Fz = W.FzSm;   // real suspension load, kg cm/s^2
+			// real suspension load, kg cm/s^2 - but CAPPED for grip purposes.
+			// The suspension force is clamped at 6x corner weight (needed so
+			// landings don't explode the solver), and a hard brake-dive's
+			// spring+damper spike really reaches it - which fed the friction
+			// circle up to ~4g of decel, and with any steer input a matching
+			// lateral spike at ground level that catapulted the car into
+			// multi-rotation barrel rolls (2026-08-27, reproduced headless:
+			// brake+half-steer at 70 mph -> airborne, thrown 5 m UP, roll
+			// wrapped past 180). Tires can't use load a real contact patch
+			// never sees: 2.5x static corner weight covers real weight
+			// transfer (a 1g stop puts ~1.7-2x on the front axle) with margin.
+			const float Fz = FMath::Min(
+				W.FzSm, 2.5f * QuarterMassKg * 980.0f);
 			const float Mu = MuPeak * SurfaceGrip(W.Surface.Get())
 				* (bFront ? FrontGripScale : RearGripScale);
 
@@ -716,7 +747,11 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 				Fx = FMath::Clamp(Fx, -FxStop, FxStop);
 			}
 
-			Body->AddForceAtLocation(Fwd * Fx + Right * Fy, W.ContactPoint);
+			// Fx at the true contact (brake dive / squat should feel real);
+			// Fy raised toward the roll center - see LateralForceLiftCm.
+			Body->AddForceAtLocation(Fwd * Fx, W.ContactPoint);
+			Body->AddForceAtLocation(Right * Fy,
+				W.ContactPoint + Up * LateralForceLiftCm);
 
 			if (bFront)
 			{

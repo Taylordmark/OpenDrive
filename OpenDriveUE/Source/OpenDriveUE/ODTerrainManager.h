@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
+#include "Templates/SharedPointer.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "ODTerrainManager.generated.h"
 
@@ -22,6 +24,98 @@ struct FParsedTerrainTile
 	// (2026-08-21) - see AODTerrainManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
+
+	// Runtime carve (2026-08-26, Arc 7 rescope) output, Phase 2 only -
+	// populated by AODTerrainManager::ApplyRoadCarve when
+	// bEnableRuntimeCutWalls is on, empty otherwise. Flat x,y,z (cm) / tri
+	// index triples for a vertical "cut face" ribbon quad strip - see
+	// ApplyRoadCarve's comment for what this is (and, just as importantly,
+	// what it is NOT - ODWallManager's own baked walls are a different
+	// algorithm entirely).
+	TArray<float> WallVerts;
+	TArray<uint32> WallTris;
+
+	// Runtime per-vertex ground tint (2026-08-26, terrain biome tint task) -
+	// one sRGB FColor per Verts entry, populated by
+	// AODTerrainManager::ApplyBiomeTint in the SAME async parse-thread pass
+	// as ApplyRoadCarve above, when bEnableBiomeTint is on. Empty when the
+	// tint pass is disabled or there was nothing nearby to tint against -
+	// BuildTile leaves the mesh's color overlay unset in that case, which
+	// reads as neutral (1,1,1,1) white to the material's vertex-color
+	// multiply, i.e. a clean no-op back to the untinted look.
+	TArray<FColor> VertColors;
+};
+
+// FRoadStation/FStationSpatialHash now live in ODBinSidecarUtil.h
+// (2026-08-26, carve-clamp/road-exclusion rescope) - AODForestManager builds
+// its own copy of the same hash for road-exclusion, see that header's
+// comment for why the type moved out of here.
+
+/** One point-classified biome sample - mirrors AODForestManager's own
+ *  FBiomePoint but carries only what the terrain vertex-tint pass needs.
+ *  Biome is stored as a bare uint8 (the EODBiome ordinal) rather than
+ *  including ODForestManager.h's enum in THIS header - ODTerrainManager.cpp
+ *  casts it to EODBiome itself, next to its own ground-tint table, so this
+ *  header doesn't pick up a cross-manager type dependency for one byte. */
+struct FBiomeSample
+{
+	float X = 0.0f, Y = 0.0f; // cm, UE world frame
+	uint8 Biome = 0;          // EODBiome ordinal (ODForestManager.h)
+};
+
+/** Read-only spatial hash over every classified biome point
+ *  (Content/OpenDrive/Masks/biome_{area}_test.bin - pipeline/classify_biomes.py
+ *  + export_biome_bin.py, the SAME sidecar AODForestManager's BlendAt() reads),
+ *  built once in AODTerrainManager::LoadBiomeSidecar (BeginPlay) and shared
+ *  read-only into the tile-parse thread pool exactly like FStationSpatialHash
+ *  below - see that struct's comment, the reasoning is identical. Kept as a
+ *  SEPARATE copy from AODForestManager's own linear-scan BiomePoints array:
+ *  that one is only ever queried once per 96 m forest tile (BlendAt()), cheap
+ *  even unbucketed, but this manager calls its own blend once per terrain
+ *  VERTEX - up to NEAR_GRID_N^2 (257^2) per tile - so it needs the same
+ *  cell-bucketed lookup FStationSpatialHash already uses for that reason. */
+struct FBiomeSpatialHash
+{
+	// 200 m: biome points are sampled ~10x sparser than road stations
+	// (classify_biomes.py samples every 10th road station) - a cell this
+	// size still gives a query box a handful of candidates rather than an
+	// empty or single-point bucket.
+	static constexpr float CellSizeCm = 20000.0f;
+
+	TArray<FBiomeSample> Points;
+	TMap<FIntPoint, TArray<int32>> Cells;
+
+	void Build(TArray<FBiomeSample>&& InPoints)
+	{
+		Points = MoveTemp(InPoints);
+		Cells.Reset();
+		for (int32 i = 0; i < Points.Num(); ++i)
+		{
+			const FIntPoint Cell(FMath::FloorToInt(Points[i].X / CellSizeCm),
+			                      FMath::FloorToInt(Points[i].Y / CellSizeCm));
+			Cells.FindOrAdd(Cell).Add(i);
+		}
+	}
+
+	/** Same coarse cell-overlap semantics as FStationSpatialHash::QueryBox -
+	 *  see that comment. */
+	void QueryBox(float MinX, float MinY, float MaxX, float MaxY, TArray<int32>& OutIndices) const
+	{
+		const int32 CxMin = FMath::FloorToInt(MinX / CellSizeCm);
+		const int32 CxMax = FMath::FloorToInt(MaxX / CellSizeCm);
+		const int32 CyMin = FMath::FloorToInt(MinY / CellSizeCm);
+		const int32 CyMax = FMath::FloorToInt(MaxY / CellSizeCm);
+		for (int32 cy = CyMin; cy <= CyMax; ++cy)
+		{
+			for (int32 cx = CxMin; cx <= CxMax; ++cx)
+			{
+				if (const TArray<int32>* Bucket = Cells.Find(FIntPoint(cx, cy)))
+				{
+					OutIndices.Append(*Bucket);
+				}
+			}
+		}
+	}
 };
 
 /** Coarse = the cheap, no-collision "always there so there's no hole"
@@ -43,6 +137,11 @@ struct FTerrainTile
 {
 	TObjectPtr<UDynamicMeshComponent> Comp;
 	ETileFidelity Fidelity = ETileFidelity::Coarse;
+
+	// Phase 2 runtime cut-wall ribbon (bEnableRuntimeCutWalls), null unless
+	// that's on AND ApplyRoadCarve actually found a wall-worthy hard-clamped
+	// edge on this tile - most tiles never populate this.
+	TObjectPtr<UDynamicMeshComponent> WallComp;
 };
 
 /** A tile whose file has parsed and is waiting for its mesh/collision to
@@ -135,18 +234,201 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Terrain")
 	int32 MaxNewLoadsPerTick = 2;
 
-	/** Cap on tiles actually BUILT (mesh + collision) per tick, once
+	/** Millisecond budget for tile BUILDS (mesh + collision) per tick, once
 	 *  parsed - see ProcessPendingTileBuilds. Mirrors
-	 *  AODRoadManager::ChunksPerFrameBudget's reasoning: bulk same-frame
+	 *  AODRoadManager::ChunkBuildMsBudget's reasoning: bulk same-frame
 	 *  UDynamicMeshComponent collision creation is the suspected trigger
 	 *  for a still-open Chaos/UE5.8 physics-registration bug, so builds
 	 *  (including fidelity upgrades/downgrades) are spread across ticks
-	 *  even though load dispatch already is. */
+	 *  even though load dispatch already is.
+	 *
+	 *  2026-08-27 (fast-drive hitch investigation): converted from a bare
+	 *  tile-COUNT budget (was TileBuildsPerFrameBudget=2) to a time budget -
+	 *  a fixed count doesn't actually bound frame time: a Near tile's dense
+	 *  ~66k-vert adaptive mesh costs vastly more game-thread time to build
+	 *  than a ~441-vert Coarse tile, so "2 tiles/frame" could mean anywhere
+	 *  from under a millisecond to a real hitch depending on which 2
+	 *  happened to be queued. ProcessPendingTileBuilds now keeps building
+	 *  queued tiles while accumulated stage time stays under this budget,
+	 *  always finishing at least one tile per tick so the queue can never
+	 *  fully stall. Collision cook itself is additionally moved off this
+	 *  budget's critical path via bUseAsyncCooking (see BuildTile) - see
+	 *  that comment for why a bare ms cap on the synchronous portion still
+	 *  wasn't enough on its own. */
 	UPROPERTY(EditAnywhere, Category = "Terrain")
-	int32 TileBuildsPerFrameBudget = 2;
+	float TileBuildMsBudget = 3.0f;
+
+	/** Phase 2 (2026-08-26, runtime carve rescope): experimental, DEFAULT-OFF
+	 *  runtime approximation of ODWallManager's offline-baked retaining
+	 *  walls - emits a vertical "cut face" ribbon wherever this manager's
+	 *  own runtime carve (ApplyRoadCarve) hard-clamps a vertex down by more
+	 *  than RuntimeCutWallThresholdCm. This is deliberately NOT a port of
+	 *  ODWallManager's real algorithm (road_mesh_common.classify_wall_
+	 *  stations + build_retaining_walls.py's union-find/2-means/PCA-axis
+	 *  ruled-surface mesh, driven by genuine cross-road/switchback elevation
+	 *  CONFLICTS between two DIFFERENT roads' stations) - it's a much
+	 *  simpler "does this tile's OWN carve cut in hard enough to look like a
+	 *  cliff" heuristic against the SAME per-vertex carve this manager
+	 *  already computes. Most ordinary road cuts don't trip it and are
+	 *  correctly left as bare sloped terrain, matching the pipeline's own
+	 *  "only genuine conflicts get a wall" behavior, but the two mechanisms
+	 *  can and will occasionally disagree at the margins. Left off by
+	 *  default so it can't visibly double up with (or clutter around)
+	 *  ODWallManager's own tiles until someone's actually driven both side
+	 *  by side - see the runtime-carve task report for the full reasoning. */
+	UPROPERTY(EditAnywhere, Category = "Terrain|RuntimeWalls (experimental)")
+	bool bEnableRuntimeCutWalls = false;
+
+	/** Minimum (raw terrain Z - carved Z) at a hard-clamped vertex, cm,
+	 *  before it's considered "wall-worthy" - see bEnableRuntimeCutWalls.
+	 *  500 cm (5 m) default: comfortably above HARD_CLAMP_MARGIN_M's own
+	 *  15 cm bias so ordinary shoulder carving never trips it. */
+	UPROPERTY(EditAnywhere, Category = "Terrain|RuntimeWalls (experimental)")
+	float RuntimeCutWallThresholdCm = 500.0f;
+
+	/** How far BELOW the nearest station's elevation a hard-clamped vertex is
+	 *  pinned, cm (2026-08-26, carve-clamp guarantee fix). Was a fixed 15 cm
+	 *  (HARD_CLAMP_MARGIN_M, matching the pipeline's own offline bake) - bumped
+	 *  up and made tunable because Taylor's live drive still found green
+	 *  terrain patches poking through the pavement at that margin: 15 cm is
+	 *  thin enough that render-target/collision float precision and the
+	 *  vertex-normal-driven material blend could still read as "at/above
+	 *  road" right at the footprint edge. Default 40 cm (~0.4 m) - tune by
+	 *  feel from here rather than a recompile. */
+	UPROPERTY(EditAnywhere, Category = "Terrain")
+	float RoadCarveClampMarginCm = 40.0f;
+
+	/** Temporary QA instrumentation (2026-08-26, carve-clamp guarantee fix):
+	 *  when on, every NEAR-fidelity tile that carves against at least one
+	 *  in-bounds road station gets a post-carve spot-check - see
+	 *  VerifyCarveGuarantee's definition - that samples the just-carved
+	 *  surface directly above a handful of that tile's own stations and logs
+	 *  how many sit above (station elevation - RoadCarveClampMarginCm), i.e.
+	 *  how many would still poke through the pavement. Should read zero
+	 *  violations once the dynamic clamp-radius fix (see ApplyRoadCarve) is
+	 *  working; left default-off since the brute-force per-triangle point
+	 *  lookup it does isn't worth paying for once that's confirmed - flip on
+	 *  with -odverifycarve on the command line instead of a recompile (see
+	 *  BeginPlay), same convention as -odcollisionradius=. */
+	UPROPERTY(EditAnywhere, Category = "Terrain")
+	bool bVerifyCarveGuarantee = false;
+
+	/** Runtime per-vertex ground tint (2026-08-26): biome + elevation +
+	 *  road-distance + deterministic noise, blended into a per-vertex color
+	 *  in the same async parse-thread pass as ApplyRoadCarve - see
+	 *  ApplyBiomeTint. Default ON; M_GroundStylized (unreal/
+	 *  apply_ground_material.py) was reworked to multiply its existing
+	 *  grass/rock blend by this. Turning it off leaves every tile's color
+	 *  overlay unpopulated, which the material's vertex-color multiply reads
+	 *  as neutral white (no-op) - a clean A/B toggle against the old flat
+	 *  look with no material swap needed. */
+	UPROPERTY(EditAnywhere, Category = "Terrain|Tint")
+	bool bEnableBiomeTint = true;
+
+	/** Lerp factor between neutral white (0 - tint pass fully invisible even
+	 *  though the color overlay IS populated) and the fully-computed tint
+	 *  (1) - a finer-grained knob than the bool above for tuning how strong
+	 *  the effect reads once it's confirmed to be running at all. */
+	UPROPERTY(EditAnywhere, Category = "Terrain|Tint")
+	float BiomeTintStrength = 1.0f;
+
+	/** Loading-gate readiness check (2026-08-27, spawn-loading-screen task):
+	 *  true once there's no parse/build work queued AND every tile key within
+	 *  CollisionRadius of AroundPos is resident at Near fidelity - a tile
+	 *  whose file simply doesn't exist on disk (MissingCoarseTiles/
+	 *  MissingNearTiles) doesn't count against readiness, it's the expected
+	 *  "nothing there" outcome for anything off the route corridor. Read-only,
+	 *  cheap (bounded by the same small CollisionRadius/TileSizeCm box
+	 *  Tick()'s own near-upgrade pass iterates), safe to poll every frame from
+	 *  AODMainMenu while the loading screen is up. */
+	bool IsInitialStreamingSettled(const FVector& AroundPos) const;
+
+	/** Progress numbers for the loading screen's "terrain N/M" line - within
+	 *  the same CollisionRadius box IsInitialStreamingSettled checks, M is the
+	 *  box's tile count and N is how many of those are already resolved
+	 *  (Near-resident, or confirmed to have no file at that fidelity). */
+	void GetStreamingProgress(const FVector& AroundPos, int32& OutReady, int32& OutTotal) const;
 
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);
+	// ParseRoadStationSidecarFile moved to ODBinSidecarUtil.h (2026-08-26) -
+	// shared free function, AODForestManager now calls the same one.
+	static bool ParseBiomeSidecarFile(const FString& Path, TArray<FBiomeSample>& OutPoints);
+
+	/** Runtime port of pipeline/build_terrain_mesh_tiles.py's carve_grid_m()
+	 *  - see the .cpp definition for the full port notes. Static + free of
+	 *  any UObject/actor state (only Hash, a read-only thread-safe struct,
+	 *  is touched) so it's safe to call from the same ThreadPool task that
+	 *  already runs ParseTerrainTileFile, before the parsed tile is ever
+	 *  handed back to the game thread.
+	 *
+	 *  Fidelity (2026-08-27, mid-distance road-float fix) widens the dynamic
+	 *  hard-clamp radius further on Coarse tiles than on Near - Coarse's own
+	 *  ~100 m vertex spacing (FAR_GRID_N=21 over a 2000 m tile) means the
+	 *  1.5x-adjacent-edge multiplier that's already proven sufficient on
+	 *  Near's dense, martini-adaptive grid (via -odverifycarve) can still
+	 *  leave a coarse vertex the nearest-in-mesh candidate to a road corridor
+	 *  stretch without actually landing inside the clamp radius - see the
+	 *  .cpp definition's DynamicClampRadiusCm comment. OutMaxLiftCm is the
+	 *  new sibling to OutMaxDropCm: the carve now also has a hard-clamp
+	 *  RAISE (not just the pre-existing lower/cut clamp), which is what
+	 *  actually closes daylight under a road sitting above too-low terrain
+	 *  ("the road floats") rather than just guaranteeing terrain never pokes
+	 *  up through the road. */
+	static void ApplyRoadCarve(FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
+		const FStationSpatialHash& Hash, ETileFidelity Fidelity, bool bBuildWalls, float WallThresholdCm,
+		float ClampMarginCm, int32& OutVertsTouched, float& OutMaxDropCm, float& OutMaxLiftCm,
+		int32& OutHardClampedVerts);
+
+	/** Statistically-impossible-vertex safety net (2026-08-27, phantom-shard
+	 *  investigation): a vertex whose Z differs from EVERY one of its own
+	 *  mesh-adjacent neighbors (via Tile.Tris, same "actual triangulation
+	 *  adjacency" approach ApplyRoadCarve's MaxAdjEdgeCm already uses, since
+	 *  the ODT1 vertex order is NOT documented as row-major - see
+	 *  VerifyCarveGuarantee's comment) by more than ThresholdCm is repaired
+	 *  in place to the average of those neighbor Zs, and logged (tile key,
+	 *  vertex index, original Z, neighbor Zs). Investigated as the suspected
+	 *  cause of a live-reported floating inverted-pyramid terrain shard near
+	 *  a known open Z ~= -829.9 m phantom-geometry issue (see
+	 *  AODForestManager's GroundSanityMaxDeltaCm comment) - an offline-bin
+	 *  audit against the actual live tile data found ZERO such vertices, so
+	 *  this is a safety net against a currently-unreproduced (data is clean
+	 *  today) but plausible future/runtime cause, not a fix for a confirmed
+	 *  data defect. Runs on the RAW parsed tile, before ApplyRoadCarve, so a
+	 *  future corrupt vertex can't poison the carve's own neighbor-distance
+	 *  math (MaxAdjEdgeCm) or its taper search. */
+	static void RepairOutlierVertices(FParsedTerrainTile& Tile, const FIntPoint& Key, float ThresholdCm,
+		int32& OutNumRepaired, float& OutMaxDeltaCm);
+
+	/** Temporary QA spot-check (2026-08-26) - see bVerifyCarveGuarantee's
+	 *  comment. Static + free of any UObject/actor state, same reasoning as
+	 *  ApplyRoadCarve above, called right after it from the same ThreadPool
+	 *  task on the ALREADY-CARVED Tile. Brute-force point-in-triangle search
+	 *  (no assumption about the grid's row/col vertex ordering, unlike a
+	 *  direct index computation) - fine for a handful of spot-check samples
+	 *  per tile load, not something to run every tick. */
+	static void VerifyCarveGuarantee(const FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
+		const FStationSpatialHash& Hash, float ClampMarginCm,
+		int32& OutSampled, int32& OutViolations,
+		float& OutMaxGapCm, float& OutSumGapCm);
+
+	/** Runtime per-vertex ground tint (2026-08-26) - see FParsedTerrainTile::
+	 *  VertColors and bEnableBiomeTint. Static + free of any UObject/actor
+	 *  state (only the two read-only hash structs are touched) so it's safe
+	 *  to call from the same ThreadPool task that already runs
+	 *  ParseTerrainTileFile/ApplyRoadCarve. StationHash is reused rather than
+	 *  re-queried by the carve step - same station data, a second cheap
+	 *  QueryBox call, purely for the "how far is this vertex from a road"
+	 *  signal the carve itself has no reason to expose. Out* stats feed a
+	 *  gated per-tile log line proving the pass runs with plausible
+	 *  variation - see RequestTileLoad's call site. */
+	static void ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
+		const FBiomeSpatialHash& BiomeHash, const FStationSpatialHash& StationHash,
+		float TintStrength, int32& OutVertsTinted, int32& OutDistinctBiomes,
+		float& OutMinLuma, float& OutMaxLuma);
+
+	void LoadRoadStationSidecar();
+	void LoadBiomeSidecar();
 
 	void RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity);
 	void OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed);
@@ -187,6 +469,22 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> TerrainMat;
+
+	// Runtime terrain carve (2026-08-26, Arc 7 rescope): loaded once in
+	// BeginPlay from roadstations_{area}.bin, never mutated again - shared
+	// (thread-safe, read-only) into every tile-parse ThreadPool task via
+	// ApplyRoadCarve. Null if the sidecar was missing/corrupt at startup -
+	// RequestTileLoad's carve step is a no-op in that case (terrain still
+	// streams, just uncarved beyond whatever the offline bake already did).
+	TSharedPtr<FStationSpatialHash, ESPMode::ThreadSafe> StationHash;
+
+	// Runtime ground tint (2026-08-26): loaded once in BeginPlay from
+	// biome_{area}_test.bin, never mutated again - shared (thread-safe,
+	// read-only) into every tile-parse ThreadPool task via ApplyBiomeTint.
+	// Null if the sidecar was missing/corrupt at startup - the tint pass
+	// still runs in that case (elevation/road/noise signals only), just
+	// without a real per-point biome color to blend.
+	TSharedPtr<FBiomeSpatialHash, ESPMode::ThreadSafe> BiomeHash;
 
 	double LastDiagTime = 0.0;
 };

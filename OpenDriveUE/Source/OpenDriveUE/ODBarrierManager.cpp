@@ -1,6 +1,7 @@
 #include "ODBarrierManager.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODRoadManager.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -8,15 +9,22 @@
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
 using namespace UE::Geometry;
 
-// TreeMeshPaths now lives in ODBinSidecarUtil.h (2026-08-22) - was
-// independently duplicated here and in ODForestManager.cpp, which collided
-// under the standalone Game target's unity build (C2374/C2086).
+// TreeMeshPaths/ExtendedTreeMeshPaths/NumExtendedTreeSpecies/
+// PickWeightedIndex all live in ODBinSidecarUtil.h (2026-08-22/2026-08-27) -
+// were independently duplicated across this file and ODForestManager.cpp,
+// which collided under the standalone Game target's unity build
+// (C2374/C2086). This manager now scatters from the SAME extended 7-species
+// set ODForestManager uses (2026-08-27 biome-aware windbreak fix, see
+// BiomeAt()/FinalizeTile()) rather than the classic 3 - TreeMeshPaths itself
+// is unused here now, kept imported only because ODBinSidecarUtil.h pulls it
+// in as part of the same header.
 
 AODBarrierManager::AODBarrierManager()
 {
@@ -28,11 +36,131 @@ void AODBarrierManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	for (const TCHAR* Path : TreeMeshPaths)
+	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
 		TreeMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
 	}
 	BushMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/OpenDrive/Trees/bush.bush"));
+
+	// Auto-derive BiomeFilePrefix from the level's own AODRoadManager if the
+	// level (or a designer) hasn't already set one explicitly - see
+	// BiomeFilePrefix's own header comment for why this is resolved locally
+	// instead of via AODGameMode setting the property after spawn.
+	if (BiomeFilePrefix.IsEmpty())
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<AODRoadManager> It(World); It; ++It)
+			{
+				FString Area = It->RoadTilePrefix;
+				Area.RemoveFromStart(TEXT("road_"));
+				Area.RemoveFromEnd(TEXT("_test"));
+				if (!Area.IsEmpty())
+				{
+					BiomeFilePrefix = FString::Printf(TEXT("biome_%s_test"), *Area);
+				}
+				break;
+			}
+		}
+	}
+	LoadBiomePoints();
+}
+
+bool AODBarrierManager::LoadBiomePoints()
+{
+	if (BiomeFilePrefix.IsEmpty())
+	{
+		return false;   // no RoadManager found (or it had no derivable area name) - use the classic-3 fallback
+	}
+	// ODB1 format - X_cm f32, Y_cm f32, Biome u8, ForestWeight255 u8 - see
+	// AODForestManager::LoadBiomePoints() for the identical parse this
+	// mirrors (same sidecar file, same format). The ForestWeight byte isn't
+	// needed here (only the classified biome id is), read past but discarded.
+	TArray<uint8> Bin;
+	const FString BinPath = FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
+	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || Bin[3] != '1')
+	{
+		return false;
+	}
+	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
+		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
+	constexpr int32 RecordBytes = 4 + 4 + 1 + 1;
+	if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODBarrierManager: %s truncated/corrupt (N=%d, %lld bytes)"),
+			*BinPath, N, Bin.Num());
+		return false;
+	}
+	BiomePoints.SetNumUninitialized(N);
+	const uint8* P = Bin.GetData() + 8;
+	for (int32 i = 0; i < N; ++i, P += RecordBytes)
+	{
+		float X, Y;
+		FMemory::Memcpy(&X, P, 4);
+		FMemory::Memcpy(&Y, P + 4, 4);
+		BiomePoints[i].WorldXY = FVector2D(X, Y);
+		BiomePoints[i].Biome = (EODBiome)P[8];
+		const FIntPoint Cell(FMath::FloorToInt(X / BiomeCellCm), FMath::FloorToInt(Y / BiomeCellCm));
+		BiomeBuckets.FindOrAdd(Cell).Add(i);
+	}
+	bUseBiome = true;
+	UE_LOG(LogTemp, Display,
+		TEXT("ODBarrierManager: loaded %d biome point(s) from %s for windbreak species pick"),
+		N, *BinPath);
+	return true;
+}
+
+EODBiome AODBarrierManager::BiomeAt(double WorldX, double WorldY) const
+{
+	if (!bUseBiome)
+	{
+		return EODBiome::DeciduousForest;
+	}
+	const int32 Cx = FMath::FloorToInt(WorldX / BiomeCellCm);
+	const int32 Cy = FMath::FloorToInt(WorldY / BiomeCellCm);
+	const int32 MaxRing = FMath::CeilToInt(BiomeSearchRadiusCm / BiomeCellCm);
+	int32 BestIdx = INDEX_NONE;
+	double BestDistSq = TNumericLimits<double>::Max();
+	for (int32 Ring = 0; Ring <= MaxRing; ++Ring)
+	{
+		for (int32 dy = -Ring; dy <= Ring; ++dy)
+		{
+			for (int32 dx = -Ring; dx <= Ring; ++dx)
+			{
+				if (FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring)
+				{
+					continue;   // interior cells already visited on an earlier ring
+				}
+				if (const TArray<int32>* Bucket = BiomeBuckets.Find(FIntPoint(Cx + dx, Cy + dy)))
+				{
+					for (int32 Idx : *Bucket)
+					{
+						const double DistSq = FVector2D::DistSquared(
+							BiomePoints[Idx].WorldXY, FVector2D(WorldX, WorldY));
+						if (DistSq < BestDistSq)
+						{
+							BestDistSq = DistSq;
+							BestIdx = Idx;
+						}
+					}
+				}
+			}
+		}
+		// Found something, and no farther ring could possibly be closer
+		// (every point in ring R+1 is at least R*BiomeCellCm away) - stop early.
+		if (BestIdx != INDEX_NONE && BestDistSq <= FMath::Square((double)Ring * BiomeCellCm))
+		{
+			break;
+		}
+	}
+	if (BestIdx == INDEX_NONE || BestDistSq > FMath::Square((double)BiomeSearchRadiusCm))
+	{
+		return EODBiome::DeciduousForest;
+	}
+	return BiomePoints[BestIdx].Biome;
 }
 
 void AODBarrierManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -166,12 +294,16 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 {
 	FBarrierTile& Tile = Tiles.Add(Key);
 
-	// one HISM per species (3 trees + bush) - visual only, no collision
-	// (the wall chunks below do the actual blocking)
-	Tile.Hisms.SetNum(4);
-	for (int32 m = 0; m < 4; ++m)
+	// one HISM per species (NumExtendedTreeSpecies trees + bush) - visual
+	// only, no collision (the wall chunks below do the actual blocking).
+	// Extended 2026-08-27 from the original fixed 4 (3 classic trees + bush)
+	// alongside the biome-aware species pick below - see BiomeFilePrefix's
+	// header comment.
+	constexpr int32 BushHismIdx = NumExtendedTreeSpecies;
+	Tile.Hisms.SetNum(NumExtendedTreeSpecies + 1);
+	for (int32 m = 0; m < NumExtendedTreeSpecies + 1; ++m)
 	{
-		UStaticMesh* Mesh = m == 3 ? BushMesh.Get() : TreeMeshes[m].Get();
+		UStaticMesh* Mesh = m == BushHismIdx ? BushMesh.Get() : TreeMeshes[m].Get();
 		if (!Mesh)
 		{
 			continue;
@@ -185,17 +317,62 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 		Tile.Hisms[m] = Hism;
 	}
 
+	// Per-instance species pick (2026-08-27, biome-aware windbreak fix) -
+	// each barrier point independently samples the biome at its own position
+	// (finer-grained than "the run's location" the task described, since a
+	// long run can cross a biome boundary) and picks from that biome's own
+	// SpeciesWeight mix (AODForestManager::RecipeForBiome(), the SAME table
+	// BuildTile() uses) instead of always uniform-random among the classic 3.
+	// Tree-vs-bush odds (25% bush) match the original RandRange(0,3)==3 case
+	// exactly, just decided before the species roll instead of folded into
+	// one 4-way roll, since bush isn't part of the 7-way SpeciesWeight table.
+	int32 SpeciesInstanceCounts[NumExtendedTreeSpecies] = {};
+	int32 BushInstanceCount = 0;
 	for (const FParsedBarrierPoint& Pt : Parsed.Points)
 	{
 		FRandomStream Rng(Pt.Seed);
-		const int32 Species = Rng.RandRange(0, 3);   // 0-2 tree species, 3 = bush
+		const bool bBush = Rng.FRand() < 0.25f;
+		const float SpeciesPick = Rng.FRand();
 		const float Scale = Rng.FRandRange(0.85f, 1.3f);
-		if (UHierarchicalInstancedStaticMeshComponent* Hism = Tile.Hisms[Species])
+		const float Yaw = Rng.FRandRange(0.0f, 360.0f);
+
+		int32 HismIdx;
+		if (bBush)
 		{
-			const FTransform InstXf(FRotator(0, Rng.FRandRange(0.0f, 360.0f), 0),
-				Pt.Pos, FVector(Scale));
+			HismIdx = BushHismIdx;
+			++BushInstanceCount;
+		}
+		else
+		{
+			const EODBiome Biome = BiomeAt(Pt.Pos.X, Pt.Pos.Y);
+			HismIdx = PickWeightedIndex(SpeciesPick,
+				AODForestManager::RecipeForBiome(Biome).SpeciesWeight, NumExtendedTreeSpecies);
+			++SpeciesInstanceCounts[HismIdx];
+		}
+		if (UHierarchicalInstancedStaticMeshComponent* Hism = Tile.Hisms[HismIdx])
+		{
+			const FTransform InstXf(FRotator(0, Yaw, 0), Pt.Pos, FVector(Scale));
 			Hism->AddInstance(InstXf);
 		}
+	}
+
+	// Per-tile biome/species verification log (2026-08-27) - mirrors
+	// AODForestManager::BuildTile()'s own per-tile species-mix Display log so
+	// a headless/live run can confirm windbreak rows through desert/scrub
+	// biomes actually pick drought-looking species instead of the classic
+	// blob/olive/conifer trio. Sampled once at the tile's center rather than
+	// per-point (a single representative biome reads better than a
+	// point-by-point dump for a whole tile's worth of instances).
+	{
+		const EODBiome TileBiome = BiomeAt(
+			(Key.X + 0.5) * (double)TileSizeCm, (Key.Y + 0.5) * (double)TileSizeCm);
+		UE_LOG(LogTemp, Display,
+			TEXT("ODBarrierManager: tile (%d,%d) biome=%s windbreak species blob=%d olive=%d "
+			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | bush=%d"),
+			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)TileBiome),
+			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
+			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
+			SpeciesInstanceCounts[6], BushInstanceCount);
 	}
 
 	// the actual guaranteed collision: a continuous mesh, not discrete

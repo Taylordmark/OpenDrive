@@ -267,11 +267,35 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		{
 			continue;
 		}
-		const FVector2D A = ToMap(FVector(Smooth[i - 1], 0));
-		const FVector2D B = ToMap(FVector(Smooth[i], 0));
-		if (bCircular && !InPanel(A) && !InPanel(B))
+		FVector2D A = ToMap(FVector(Smooth[i - 1], 0));
+		FVector2D B = ToMap(FVector(Smooth[i], 0));
+		if (bCircular)
 		{
-			continue;
+			// clip the segment to the panel disc - the old both-endpoints-out
+			// skip let a segment with one endpoint inside draw at full length,
+			// streaking across the whole screen (live 2026-08-28)
+			const float R = PanelSize * 0.5f;
+			const FVector2D D = B - A;
+			const float DD = D.SizeSquared();
+			if (DD < KINDA_SMALL_NUMBER)
+			{
+				if (!InPanel(A)) { continue; }
+			}
+			else
+			{
+				// solve |A + t*D - PanelMid|^2 = R^2 for t, keep [t0,t1] within [0,1]
+				const FVector2D F = A - PanelMid;
+				const float Bq = 2.0f * FVector2D::DotProduct(F, D);
+				const float Cq = F.SizeSquared() - R * R;
+				const float Disc = Bq * Bq - 4.0f * DD * Cq;
+				if (Disc < 0.0f) { continue; }
+				const float SqrtDisc = FMath::Sqrt(Disc);
+				const float T0 = FMath::Max((-Bq - SqrtDisc) / (2.0f * DD), 0.0f);
+				const float T1 = FMath::Min((-Bq + SqrtDisc) / (2.0f * DD), 1.0f);
+				if (T1 <= T0) { continue; }
+				B = A + D * T1;
+				A = A + D * T0;
+			}
 		}
 		FCanvasLineItem Seg(A, B);
 		Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
@@ -375,27 +399,79 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		Canvas->DrawItem(T);
 	};
 
-	// ---- loading: waiting on IsGroundSnapped() after a teleport (2026-07-26) -
-	// fully opaque so the player never sees the car airborne/popping in while
-	// a fresh area's road/terrain tiles are still streaming
+	// ---- loading: waiting on IsGroundSnapped() after a teleport (2026-07-26),
+	// PLUS AODTerrainManager/AODRoadManager's own initial-streaming settle
+	// (2026-08-27, spawn-loading-screen task) - fully opaque so the player
+	// never sees the car airborne/popping in, or the world visibly filling in
+	// around it, while a fresh area's road/terrain tiles are still streaming.
 	if (Menu->GetStage() == EODMenuStage::Loading)
 	{
 		FCanvasTileItem Black(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
 			FLinearColor(0, 0, 0, 1.0f));
 		Black.BlendMode = SE_BLEND_Translucent;
 		Canvas->DrawItem(Black);
-		Text(TEXT("Loading..."), Canvas->SizeX * 0.5f - 90.0f, Canvas->SizeY * 0.5f - 20.0f,
-			2.0f, FLinearColor::White);
+
+		const float CX = Canvas->SizeX * 0.5f;
+		const float CY = Canvas->SizeY * 0.5f;
+
+		// animated dots (0-3, ~2 per second) so a long hold still reads as
+		// "working", not a frozen/hung screen
+		const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+		const int32 NumDots = FMath::FloorToInt(FMath::Fmod(Now, 2.0) / 2.0 * 4.0);
+		FString Dots;
+		for (int32 i = 0; i < NumDots; ++i)
+		{
+			Dots += TEXT(".");
+		}
+
+		Text(TEXT("LOADING WORLD") + Dots, CX - 150.0f, CY - 30.0f, 2.2f, FLinearColor::White);
+
+		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
+		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
+		if (TerrainTotal > 0 || RoadTotal > 0)
+		{
+			const FString Progress = FString::Printf(TEXT("terrain %d/%d · roads %d/%d"),
+				TerrainReady, TerrainTotal, RoadReady, RoadTotal);
+			Text(Progress, CX - 110.0f, CY + 30.0f, 1.1f, FLinearColor(0.7f, 0.75f, 0.8f));
+		}
 		return;
 	}
 
 	// ---- car config: keyboard rows on the left, the spinning car behind ----
+	// Palette restyled 2026-08 to match the new garage set (cool-white LED
+	// hex ceiling, black walls, glossy dark floor) - colors/decoration only,
+	// no row/logic/layout changes below. A dark translucent panel sits
+	// behind the text block so it reads as part of the room instead of
+	// floating text over whatever's rendering behind it; the selected-row
+	// highlight stays a warm accent (now a cooled amber rather than gold) so
+	// it still pops against the cool garage backdrop instead of blending in.
 	if (Menu->GetStage() == EODMenuStage::CarConfig)
 	{
 		const bool bGarage = Menu->IsGarageMode();
 		const float Mx = 90.0f;
 		float My = Canvas->SizeY * 0.5f - 180.0f;
-		Text(bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"), Mx, My, 2.2f, FLinearColor::White);
+
+		// panel background - dark blue-black, matching the garage's black
+		// walls, with a thin cool-cyan top/bottom rule for a hex-ceiling-ish
+		// accent line rather than a plain flat rectangle.
+		const float PanelW = 620.0f;
+		const float PanelTop = My - 30.0f;
+		const float PanelH = 44.0f * Menu->NumRows() + 150.0f;
+		FCanvasTileItem Panel(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, PanelH),
+			FLinearColor(0.02f, 0.03f, 0.05f, 0.78f));
+		Panel.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(Panel);
+		FCanvasTileItem RuleTop(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, 2.0f),
+			FLinearColor(0.55f, 0.85f, 1.0f, 0.55f));
+		RuleTop.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(RuleTop);
+		FCanvasTileItem RuleBottom(FVector2D(Mx - 30.0f, PanelTop + PanelH - 2.0f), FVector2D(PanelW, 2.0f),
+			FLinearColor(0.55f, 0.85f, 1.0f, 0.55f));
+		RuleBottom.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(RuleBottom);
+
+		Text(bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"), Mx, My, 2.2f,
+			FLinearColor(0.75f, 0.9f, 1.0f));
 		My += 80.0f;
 		for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
 		{
@@ -403,7 +479,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 			Menu->GetRow(Row, Label, Value);
 			const bool bSel = Row == Menu->GetSelected();
 			const FLinearColor Col = bSel
-				? FLinearColor(1.0f, 0.8f, 0.3f) : FLinearColor(0.85f, 0.85f, 0.85f);
+				? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
 			Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx, My, 1.5f, Col);
 			if (!Value.IsEmpty())
 			{
@@ -414,7 +490,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		Text(bGarage
 				? TEXT("arrows change    enter select    esc/Resume Driving to continue")
 				: TEXT("arrows change    enter select    (Drive to pick a location)"),
-			Mx, My + 24.0f, 1.0f, FLinearColor(0.6f, 0.6f, 0.6f));
+			Mx, My + 24.0f, 1.0f, FLinearColor(0.5f, 0.62f, 0.7f));
 		return;
 	}
 

@@ -222,6 +222,40 @@ HARD_CLAMP_MARGIN_M = 0.15    # matches TERRAIN_CARVE_DROP_M's own small gap
 TERRAIN_CARVE_CUT_INNER_M = 25.0
 TERRAIN_CARVE_CUT_OUTER_M = 75.0
 
+# FAR-tile burying bug (2026-08-26, Taylor: Lake Hughes Road screenshot -
+# "the road was not vanishing, it was being buried by terrain" on a distant
+# hillside, NOT a spawn-radius pop-in gap). Root cause, confirmed numerically
+# via a throwaway check against the real build_tile(is_near=False) path
+# before this fix: FAR_GRID_N=21 over a 2000 m tile is ~100 m vertex spacing,
+# but carve_grid_m's own saturation radius (TERRAIN_CARVE_INNER_M=50 m, or
+# TERRAIN_CARVE_CUT_INNER_M=25 m on a cut/hillside pixel) and the actual
+# paved+skirt hard-clamp radius (HARD_CLAMP_RADIUS_M=7.5 m) are both far
+# narrower than that spacing - direct point-sampling at the sparse 100 m grid
+# routinely lands every vertex outside the carve's effective radius of the
+# road, so the coarse surface just interpolates raw hillside DEM straight
+# through where the road actually is. Measured on green_valley's route
+# stations: 78.7% of in-scope stations showed the FAR-resolution mesh sitting
+# above the intended (carved) road surface, median +0.90 m, up to +42 m on
+# the worst tile - not a rare edge case, the FAR grid's normal behavior on
+# sloped/curvy ground.
+#
+# Fix: sample+carve at a much finer internal resolution first (this many
+# fine samples per FAR_GRID_N output cell), then downsample to the FAR_GRID_N
+# output grid by taking the MINIMUM elevation in each output vertex's own
+# footprint (half a fine-cell towards each neighbor), not by point-sampling.
+# martini-style adaptive triangulation isn't used here (see FAR_GRID_N's own
+# comment - far tiles intentionally stay a cheap uniform grid), so this is
+# the equivalent guarantee for a uniform grid: an output vertex can never end
+# up above the finest carve result anywhere in its own neighborhood, the same
+# reasoning HARD_CLAMP_MARGIN_M already relies on for near tiles (a min/clamp
+# survives naive downsampling/interpolation, a direct sample does not).
+# Factor of 10 puts the fine sampling at 2000/((21-1)*10) = 10 m spacing -
+# comfortably inside TERRAIN_CARVE_CUT_INNER_M (25 m) so a real cut face gets
+# several fine samples across it instead of being averaged/skipped entirely,
+# matching the same "several grid cells across the feature" reasoning
+# TERRAIN_CARVE_CUT_INNER_M's own comment already used for near tiles.
+FAR_SUPERSAMPLE = 10
+
 # Elevation-conflict detection (station pairs close in XY, too far apart in
 # Z to be the same piece of ground - e.g. a switchback doubling back on
 # itself, or two different chains crossing) used to be reimplemented here
@@ -414,6 +448,28 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     return out.reshape(shape)
 
 
+def downsample_min_grid(fine, n, factor):
+    """Downsamples a (sample_n, sample_n) fine grid - sample_n = (n-1)*factor+1
+    - to an (n, n) coarse grid by taking the MIN value within each output
+    vertex's own footprint (half a fine-cell towards each neighbor, clamped
+    at the tile edges). See FAR_SUPERSAMPLE's comment for why min, not a
+    direct point-sample or an average, is required here."""
+    sample_n = fine.shape[0]
+    half = factor // 2
+    bounds = []
+    for i in range(n):
+        c = i * factor
+        lo = max(0, c - half)
+        hi = min(sample_n, c + half + 1)
+        bounds.append((lo, hi))
+    out = np.empty((n, n), dtype=fine.dtype)
+    for oi, (ylo, yhi) in enumerate(bounds):
+        row_block = fine[ylo:yhi, :]
+        for oj, (xlo, xhi) in enumerate(bounds):
+            out[oi, oj] = row_block[:, xlo:xhi].min()
+    return out
+
+
 _MARTINI_CACHE = {}
 
 
@@ -523,16 +579,22 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
 
     x0_cm, x1_cm = tx * tile_cm, (tx + 1) * tile_cm
     y0_cm, y1_cm = ty * tile_cm, (ty + 1) * tile_cm
-    xs_cm = np.linspace(x0_cm, x1_cm, n)
-    ys_cm = np.linspace(y0_cm, y1_cm, n)
-    gx_cm, gy_cm = np.meshgrid(xs_cm, ys_cm)   # (n, n), row j = north, col i = east
 
-    east_m = gx_cm / 100.0
-    north_m = -gy_cm / 100.0
+    # FAR tiles sample+carve at a much finer internal resolution than their
+    # (n x n) output grid, then downsample by MIN - see FAR_SUPERSAMPLE's
+    # comment. NEAR tiles are unaffected: sample_n == n, downsample is a
+    # no-op reshape below.
+    sample_n = n if is_near else (n - 1) * FAR_SUPERSAMPLE + 1
+    xs_cm_fine = np.linspace(x0_cm, x1_cm, sample_n)
+    ys_cm_fine = np.linspace(y0_cm, y1_cm, sample_n)
+    gx_cm_fine, gy_cm_fine = np.meshgrid(xs_cm_fine, ys_cm_fine)   # row j = north, col i = east
+
+    east_m = gx_cm_fine / 100.0
+    north_m = -gy_cm_fine / 100.0
     lat = lat0 + north_m / M_PER_DEG_LAT
     lon = lon0 + east_m / m_per_deg_lon
 
-    elev = sample_dem(lat.reshape(-1), lon.reshape(-1), zoom, session, cache).reshape(n, n)
+    elev = sample_dem(lat.reshape(-1), lon.reshape(-1), zoom, session, cache).reshape(sample_n, sample_n)
 
     # prefilter stations to ones that could plausibly matter (cheap - exact
     # carve_grid_m call below is what actually matters for correctness, this
@@ -550,6 +612,12 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     if keep.any():
         elev = carve_grid_m(elev, east_m, north_m,
                              st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep])
+
+    if is_near:
+        gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
+    else:
+        gx_cm, gy_cm = np.meshgrid(np.linspace(x0_cm, x1_cm, n), np.linspace(y0_cm, y1_cm, n))
+        elev = downsample_min_grid(elev, n, FAR_SUPERSAMPLE)
 
     z_cm = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) * 100.0
 

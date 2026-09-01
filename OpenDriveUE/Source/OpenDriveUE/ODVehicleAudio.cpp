@@ -7,6 +7,7 @@
 #include "ODEngineSynth.h"
 #include "ODRoadNoiseSynth.h"
 #include "ODVehicleMovement.h"
+#include "ODVehiclePawn.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
 AODVehicleAudio::AODVehicleAudio()
@@ -80,11 +81,26 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 	}
 	EnsureSynths(Car);
 
+	// 2026-08-27 fix ("engine runs in the garage"): UODVehicleMovement::
+	// TickComponent returns immediately while the body isn't simulating
+	// physics (showroom/garage - see SetShowroom(true)), which freezes
+	// EngineRpm at whatever it was the instant physics stopped instead of
+	// decaying it - it never reaches zero on its own. This actor isn't
+	// paused (the boot menu deliberately no longer pauses the world), so it
+	// kept feeding that frozen, nonzero rpm/throttle/load into the synth
+	// every tick, which kept audibly idling/revving the whole time the car
+	// sat in the garage. Feed silence instead while parked; SetEngineState's
+	// own internal smoothing (SmRpm etc.) fades it out cleanly rather than
+	// cutting hard.
+	const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Car);
+	const bool bParked = VehiclePawn && VehiclePawn->IsInShowroom();
+
 	// the movement sim owns engine telemetry; fuel cuts and shift cuts
 	// arrive via EffectiveThrottle so they're audible for free
-	const float Rpm = Move->GetRpm();
-	Engine->SetEngineState(Rpm, Move->GetEffectiveThrottle(), Move->GetLoad());
-	Engine->SetIgnitionCut(Move->IsIgnitionCut());   // hard edge, unsmoothed
+	const float Rpm = bParked ? 0.0f : Move->GetRpm();
+	Engine->SetEngineState(Rpm, bParked ? 0.0f : Move->GetEffectiveThrottle(),
+		bParked ? 0.0f : Move->GetLoad());
+	Engine->SetIgnitionCut(bParked ? false : Move->IsIgnitionCut());   // hard edge, unsmoothed
 
 	// surface color from the first grounded wheel's contact material
 	float Cutoff = 3200.0f;                 // asphalt hiss default
@@ -108,8 +124,12 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 		}
 		break;
 	}
-	const float Speed01 = FMath::Abs(Move->GetForwardSpeed()) / TopSpeed;
-	Road->SetRoadState(Speed01, Cutoff, bGrounded);
+	// same frozen-telemetry reasoning as the engine above - GetForwardSpeed()
+	// holds whatever it was the instant physics froze, which can be nonzero
+	// (e.g. the pause-menu "Garage" round trip mid-brake) - force silence
+	// while parked instead of trusting it.
+	const float Speed01 = bParked ? 0.0f : FMath::Abs(Move->GetForwardSpeed()) / TopSpeed;
+	Road->SetRoadState(Speed01, Cutoff, bParked ? false : bGrounded);
 
 	// diagnostic heartbeat (audio bring-up, 2026-07-15)
 	static double LastLog = 0.0;

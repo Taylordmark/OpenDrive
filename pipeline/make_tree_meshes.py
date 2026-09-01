@@ -1,11 +1,15 @@
 """Stylized low-poly foliage meshes + shared color palette texture.
 
 Solid faceted geometry (no alpha cards): blob trees, a conifer, grass tuft,
-bush. Faces carry per-face normals (vn) for the faceted look and UV into a
-palette strip. Only these meshes are stored - placement is runtime grass.
+bush, plus biome-distinct flora (scrub oak, manzanita, yucca/Joshua tree,
+sagebrush, canyon oak - 2026-08-27). Faces carry per-face normals (vn) for
+the faceted look and UV into a palette strip. Only these meshes are stored -
+placement is runtime scatter (AODForestManager).
 
 Outputs: obj/tree_blob.obj, tree_olive.obj, tree_conifer.obj,
-         grass_tuft.obj, bush.obj, textures/T_TreePalette.png
+         grass_tuft.obj, bush.obj, tree_scrub_oak.obj, tree_manzanita.obj,
+         tree_yucca.obj, sagebrush.obj, tree_canyon_oak.obj,
+         textures/T_TreePalette.png
 """
 
 import math
@@ -29,6 +33,22 @@ PALETTE = [
     (0.16, 0.40, 0.23),   # 5 conifer light
     (0.07, 0.24, 0.13),   # 6 conifer dark
     (0.36, 0.56, 0.14),   # 7 grass
+    # --- biome-distinct flora additions (2026-08-27): muted, sun-bleached CA
+    # palette on purpose - the saturated blob/olive/conifer greens above are
+    # part of the "every biome looks the same" complaint, so none of these
+    # reuse those cells.
+    (0.32, 0.24, 0.16),   # 8  gnarled trunk (scrub oak) - grey-brown
+    (0.42, 0.46, 0.18),   # 9  scrub oak canopy light - olive-drab
+    (0.24, 0.28, 0.10),   # 10 scrub oak canopy dark
+    (0.45, 0.22, 0.12),   # 11 manzanita stem - red-brown
+    (0.35, 0.42, 0.24),   # 12 manzanita leaf light - dusty sage
+    (0.20, 0.26, 0.14),   # 13 manzanita leaf dark
+    (0.38, 0.48, 0.36),   # 14 yucca/joshua body - blue-green desert
+    (0.24, 0.34, 0.24),   # 15 yucca/joshua dark
+    (0.52, 0.54, 0.42),   # 16 sagebrush - dusty grey-green
+    (0.18, 0.12, 0.08),   # 17 canyon oak trunk - dark
+    (0.30, 0.38, 0.16),   # 18 canyon oak canopy light
+    (0.14, 0.22, 0.08),   # 19 canyon oak canopy dark
 ]
 N_CELL = len(PALETTE)
 
@@ -135,6 +155,24 @@ class Mesh:
             p1 = base_c + np.array([math.cos(a1) * r, math.sin(a1) * r, 0])
             self.tri(p0, p1, tip, cell, center=base_c + np.array([0, 0, h / 3]))
 
+    def cone_dir(self, base, direction, r, length, cell, segs=6):
+        """Like cone(), but along an arbitrary axis instead of always +Z -
+        used for yucca/Joshua-tree spikes that splay outward, not just up."""
+        base = np.asarray(base, dtype=float)
+        d = np.asarray(direction, dtype=float)
+        d = d / np.linalg.norm(d)
+        tip = base + d * length
+        arbitrary = np.array([0.0, 0.0, 1.0]) if abs(d[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        u = np.cross(d, arbitrary)
+        u /= np.linalg.norm(u)
+        v = np.cross(d, u)
+        for s in range(segs):
+            a0 = 2 * math.pi * s / segs
+            a1 = 2 * math.pi * (s + 1) / segs
+            p0 = base + (u * math.cos(a0) + v * math.sin(a0)) * r
+            p1 = base + (u * math.cos(a1) + v * math.sin(a1)) * r
+            self.tri(p0, p1, tip, cell, center=base + d * (length / 3))
+
     def trunk(self, r, h, cell=0):
         pts = [(-r, -r), (r, -r), (r, r), (-r, r)]
         for i in range(4):
@@ -196,5 +234,60 @@ m.blob((-45, -30, 55), 75, 1, 2, squash=0.75, detail=0)
 m.blob((50, 20, 50), 65, 1, 2, squash=0.7, detail=0)
 m.blob((0, 45, 75), 60, 1, 2, squash=0.75, detail=0)
 m.save("bush")
+
+# --- biome-distinct flora (2026-08-27, "chaparral isn't working and all the
+# trees are the same" fix): every biome up to now spawned the same 3
+# classic-canopy meshes above at different densities - these give each
+# biome an actually different SILHOUETTE + color, not just density/tint.
+
+# scrub oak (chaparral): short, gnarled, asymmetric - low trunk, several
+# small offset canopy blobs instead of one clean sphere cluster, olive-drab.
+m = Mesh()
+m.trunk(16, 230, cell=8)
+m.blob((25, -10, 300), 150, 9, 10, squash=0.75)
+m.blob((-70, 30, 260), 110, 9, 10, squash=0.7)
+m.blob((10, 60, 340), 95, 9, 10, squash=0.7)
+m.save("tree_scrub_oak")
+
+# manzanita: large sparse shrub, red-brown stem, dusty-sage sparse leaf
+# clumps (not a full canopy - manzanita reads mostly as bare stem).
+m = Mesh()
+m.trunk(14, 300, cell=11)
+m.blob((70, -20, 350), 140, 12, 13, squash=0.8)
+m.blob((-60, 40, 300), 115, 12, 13, squash=0.75)
+m.save("tree_manzanita")
+
+# yucca / Joshua tree: thick short trunk topped with a spiky radiating
+# burst - built from cone_dir() spikes splayed up and outward, not the
+# rounded-blob canopy every other tree in this set uses.
+m = Mesh()
+m.trunk(30, 480, cell=0)
+_top = np.array([0, 0, 480])
+for _s in range(9):
+    _a = 2 * math.pi * _s / 9
+    _out = np.array([math.cos(_a), math.sin(_a), 0.0])
+    _dir = _out * 0.55 + np.array([0, 0, 1.0]) * 0.75
+    m.cone_dir(_top, _dir, 16, 260, 14 if _s % 2 == 0 else 15, segs=5)
+m.save("tree_yucca")
+
+# sagebrush: dry, low, grey-green tuft - shrub-class (no trunk, no
+# collision at spawn time, same handling as grass_tuft/bush).
+m = Mesh()
+m.blob((-16, -10, 24), 34, 16, 16, squash=0.55, detail=0)
+m.blob((18, 12, 20), 27, 16, 16, squash=0.5, detail=0)
+m.blob((0, 22, 26), 22, 16, 16, squash=0.55, detail=0)
+m.save("sagebrush")
+
+# canyon oak: taller, darker oak for canyon/badlands country - same family
+# shape as tree_olive but scaled up and shifted into a darker, less
+# saturated green so it doesn't just read as "another blob tree".
+m = Mesh()
+m.trunk(28, 900, cell=17)
+m.blob((0, 0, 1380), 470, 18, 19, squash=0.82)
+for k in range(3):
+    a = 2 * math.pi * k / 3
+    m.blob((math.cos(a) * 310, math.sin(a) * 310, 1180 + k * 90),
+           310, 18, 19, squash=0.8)
+m.save("tree_canyon_oak")
 
 write_palette()

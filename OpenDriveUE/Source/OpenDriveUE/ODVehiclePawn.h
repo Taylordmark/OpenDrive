@@ -10,6 +10,19 @@ class UODVehicleMovement;
 class USpringArmComponent;
 class UStaticMeshComponent;
 
+/** Which driving input source is in control (2026-08-27 controller/wheel
+ *  support). Auto = "last device wins": whichever of Keyboard/Gamepad/Wheel
+ *  most recently produced non-zero input drives the car; the other two are
+ *  ignored (mouse freelook is independent of this and always live). The
+ *  explicit modes pin the car to one source regardless of what else moves. */
+enum class EODInputDevice : uint8
+{
+	Auto,
+	Keyboard,
+	Gamepad,
+	Wheel,
+};
+
 /**
  * The OD car (Chaos rip-out, 2026-07-18): a simulating static-mesh Body, our
  * own UODVehicleMovement for ALL vehicle physics, manual wheel visuals, and
@@ -67,9 +80,34 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float LookPitchMaxDeg = 70.0f;
 
+	/** Seconds of no mouse movement before freelook eases back to the
+	 *  straight-ahead chase view. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float LookRecenterDelaySec = 1.0f;
+
+	/** Recenter ease rate (FInterpTo speed, 1/s) - higher snaps back faster. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float LookRecenterSpeed = 4.0f;
+
 	/** Steering input speed toward full lock (1/s) and back to center. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float SteerRate = 2.5f;
+
+	/** Speed-sensitive keyboard steering (2026-08-27): tapping A/D at highway
+	 *  speed used to command the same full-lock target as a parking-lot turn,
+	 *  which is what flips the car. Below FadeStart the key still means full
+	 *  lock; by FadeEnd it only means HighSpeedSteerFrac of lock, and the
+	 *  ramp-toward-lock rate shrinks by the same factor (return-to-center
+	 *  stays fast). Applies to the KEYBOARD path only - analog devices carry
+	 *  their own resolution. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float SteerFadeStartCmS = 900.0f;   // ~20 mph
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float SteerFadeEndCmS = 3600.0f;    // ~80 mph
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float HighSpeedSteerFrac = 0.35f;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float SteerReturnRate = 5.0f;
@@ -117,11 +155,23 @@ public:
 	 *  in front of a fixed camera (the menu drives the yaw). Off restores the
 	 *  normal chase cam. */
 	void SetShowroom(bool bOn);
+	/** True while the showroom/garage preview is active (SetShowroom(true) has
+	 *  run and SetShowroom(false) hasn't since) - AODVehicleAudio checks this
+	 *  to mute the engine synth while parked (2026-08-27: the boot menu no
+	 *  longer pauses the world, so UODVehicleMovement keeps the pawn's last
+	 *  RPM frozen-but-nonzero and the synth kept audibly idling/revving). */
+	bool IsInShowroom() const { return bInShowroom; }
 
 	/** Drop the car at a chosen road point (map spawn pick) and re-arm the
 	 *  existing PM_Asphalt ground-snap so TrySnapToGround settles it on the
 	 *  road - reuses the proven spawn placement, no new logic. */
 	void TeleportToSpawn(const FVector& RoadPoint, float YawDeg);
+
+	/** Flip recovery (R, 2026-08-27): right the car in place - keep position
+	 *  and heading, zero roll/pitch, lift slightly, and re-arm the ground
+	 *  snap with a SHORTENED fallback so an off-road reset (no asphalt under
+	 *  the trace) settles in seconds instead of the full spawn timeout. */
+	void ResetVehicle();
 
 	/** Place the car at a FIXED, self-contained location (the main menu's
 	 *  showroom void, 2026-07-28) with no ground-snap wait at all - unlike
@@ -140,6 +190,48 @@ public:
 	 *  the player never sees the car hovering mid-air while a freshly-
 	 *  teleported area's tiles are still streaming in. */
 	bool IsGroundSnapped() const { return bGroundSnapped; }
+
+	// --- controller/wheel device selection (2026-08-27) ---
+	/** Explicit device pin, or Auto (last-device-wins). Persisted to
+	 *  GameUserSettings.ini (see ODVehiclePawn.cpp's Save/LoadInputDeviceMode)
+	 *  the same lightweight way other one-off settings in this project are
+	 *  kept - no SaveGame object exists yet, and this is one CVar-sized value. */
+	EODInputDevice GetInputDeviceMode() const { return DeviceMode; }
+	void SetInputDeviceMode(EODInputDevice Mode);
+	/** The device actually driving the car THIS tick - equal to
+	 *  GetInputDeviceMode() unless that's Auto, in which case it's whichever
+	 *  device most recently produced input. The menu's row displays this
+	 *  resolved value next to "Auto" so it reads as live, not just a mode name. */
+	EODInputDevice GetActiveInputDevice() const { return ActiveDevice; }
+	static FString InputDeviceModeToString(EODInputDevice Mode);
+
+	/** Degrees-of-rotation scale for a wheel's steering axis (1.0 = wheel's
+	 *  full physical lock-to-lock maps 1:1 to the car's full steering lock;
+	 *  0.5 would mean the wheel needs to turn twice as far - use this to
+	 *  match a specific wheel's configured rotation range without adding any
+	 *  response curve, which wheel steering must not have). */
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	float WheelDegreesOfRotationScale = 1.0f;
+
+	/** Which RawInput GenericUSBController_AxisN (1-based) feeds each wheel
+	 *  channel - varies per wheel model/driver, so these are exposed rather
+	 *  than guessed. Defaults are a reasonable Logitech/Thrustmaster-shaped
+	 *  starting guess (1=wheel rotation, 2=throttle, 3=brake); adjust to taste
+	 *  once real hardware is plugged in (see class comment / task report). */
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	int32 WheelSteerAxisIndex = 1;
+
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	int32 WheelThrottleAxisIndex = 2;
+
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	int32 WheelBrakeAxisIndex = 3;
+
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	bool bWheelInvertThrottle = false;
+
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	bool bWheelInvertBrake = false;
 
 private:
 	void ThrottlePressed() { bThrottleKey = true; }
@@ -192,17 +284,31 @@ private:
 	float BaseCameraPitchDeg = 0.0f;
 	float LookYawDeg = 0.0f;
 	float LookPitchDeg = 0.0f;
-	void UpdateFreeLook();
+	double LastLookInputTime = 0.0;
+	void UpdateFreeLook(float DeltaSeconds);
 
 	bool bGroundSnapped = false;
+	bool bInShowroom = false;   // see IsInShowroom() above
 	double SpawnTime = 0.0;
 	double LastSnapLogTime = 0.0;
+	double LastRollLogTime = 0.0;   // rollover-tripwire log throttle
+	double LastScriptLogTime = 0.0; // 1 Hz scripted-drive telemetry throttle
 	// generous: the road tile at the spawn point now gets priority in
 	// AODRoadManager's own wait-queue (closest-to-player, not first-parsed),
 	// so this should rarely be hit, but a long fallback is cheap insurance
 	// against a genuinely slow first-load (cold disk cache, etc.)
 	static constexpr double GroundSnapTimeoutSec = 20.0;
 	static constexpr float GroundClearanceCm = 100.0f;
+
+	// 2026-08-26: hold the car kinematic this long AFTER the asphalt trace
+	// first connects before releasing physics. A trace hit proves the road
+	// is QUERYABLE, not that its physics body is fully registered for
+	// simulation contact - Taylor fell straight through the road twice on
+	// junction spawns where the pad had just been built (the open
+	// Chaos/UE5.8 registration bug's window). The settle restarts if the
+	// asphalt hit lapses mid-wait.
+	static constexpr double GroundSnapSettleSec = 3.0;
+	double SnapReadyTime = 0.0;
 
 	// scripted-drive hooks (-odrev/-odlift/-odsteer/-odbrake), parsed at
 	// BeginPlay; -odthr=0.45 caps the scripted (and key) throttle for
@@ -211,4 +317,80 @@ private:
 	float HookThrottle = 1.0f;
 	// -odveh=T: cycle to the next car once at T s (headless V-swap test)
 	float VehSwapAt = -1.0f;
+	// -odsetvat=T -odsetv=CMS: at T s, hard-set body velocity to CMS cm/s
+	// along the current facing, once. Exists because no test area has a
+	// straight long enough to actually reach highway speed under scripted
+	// throttle - this is the only way to brake-test FROM high speed headless.
+	float SetVAt = -1.0f;
+	float SetVCmS = 0.0f;
+
+	// ===========================================================================
+	// Controller (gamepad) + racing wheel input (2026-08-27). Kept entirely
+	// separate from the keyboard block above so the two can be edited without
+	// conflicting: this section only ever WRITES its own dedicated members
+	// (GamepadSteerAxis/GamepadThrottleAxis/... below, RawWheelAxis[]) and
+	// reads them back in Tick(); it never reaches into bThrottleKey/bLeftKey/
+	// SmSteer/etc. Analog gamepad/wheel axes deliberately BYPASS the keyboard
+	// smoothing (SmSteer/SmThrottle/SmBrake) - an analog input is already
+	// smooth, so routing it through the same rate-limited interpolation used
+	// to fake analog behavior out of on/off keys would only add lag. Wheel
+	// axes additionally get NO response curve and NO deadzone (full 1:1
+	// range, scaled only by WheelDegreesOfRotationScale) - unlike the gamepad
+	// stick, a wheel is already a precise analog position, not a spring-
+	// loaded stick that rests dead-center and needs a curve to feel good off
+	// center.
+	// ===========================================================================
+
+	void GamepadSteerAxis(float Value);
+	void GamepadThrottleAxis(float Value);
+	void GamepadBrakeAxis(float Value);
+	void GamepadLookXAxis(float Value) { GamepadLookX = Value; }
+	void GamepadLookYAxis(float Value) { GamepadLookY = Value; }
+	void GamepadHandbrakePressed();
+	void GamepadHandbrakeReleased();
+
+	// raw analog values latched by the bound axis keys above/below, consumed
+	// (and zero-checked for "was this device just used") once per Tick
+	float GamepadSteerRaw = 0.0f;     // post deadzone+curve, [-1,1]
+	float GamepadThrottleRaw = 0.0f;  // [0,1]
+	float GamepadBrakeRaw = 0.0f;     // [0,1]
+	float GamepadLookX = 0.0f;        // right stick, raw [-1,1], consumed in UpdateFreeLook
+	float GamepadLookY = 0.0f;
+	bool bGamepadHandbrake = false;
+
+	static constexpr float GamepadDeadzone = 0.15f;
+	UPROPERTY(EditAnywhere, Category = "Input|Gamepad")
+	float GamepadLookSensitivityDegPerSec = 120.0f;
+
+	/** RawInput GenericUSBController_Axis1..6 (0-based here), latched
+	 *  raw/normalized 0..1 by the RawInput plugin - see WheelSteerAxisIndex
+	 *  etc. (public section above) for which of these feeds which channel.
+	 *  Bound via lambdas in SetupPlayerInputComponent (BindAxisKey's
+	 *  GetDelegateForManualSet()), not named per-axis functions, since the
+	 *  RawInput key names are only known at runtime (module registers them on
+	 *  plugin load) and there's no way to know in advance which physical axis
+	 *  a given wheel model puts steering/throttle/brake on. */
+	static constexpr int32 NumWheelAxesBound = 6;
+	float RawWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+	float PrevWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+	bool bWheelHandbrake = false;
+	void WheelHandbrakePressed() { bWheelHandbrake = true; }
+	void WheelHandbrakeReleased() { bWheelHandbrake = false; }
+
+	void SetupGamepadAndWheelInput(UInputComponent* Input);
+
+	// --- device selection state (Auto = last-device-wins) ---
+	EODInputDevice DeviceMode = EODInputDevice::Auto;
+	EODInputDevice ActiveDevice = EODInputDevice::Keyboard;
+	double LastKeyboardInputTime = 0.0;
+	double LastGamepadInputTime = 0.0;
+	double LastWheelInputTime = 0.0;
+	// change-detection baselines: an analog device counts as "just used" when
+	// its latched value moves at all since last tick, not merely "away from
+	// center" - a wheel's pedals commonly idle at a hard extreme (not 0.5),
+	// so "away from center" can't tell idle from active for those axes.
+	float PrevGamepadSteerRaw = 0.0f, PrevGamepadThrottleRaw = 0.0f, PrevGamepadBrakeRaw = 0.0f;
+	void UpdateActiveInputDevice();
+	static void SaveInputDeviceMode(EODInputDevice Mode);
+	static EODInputDevice LoadInputDeviceMode();
 };

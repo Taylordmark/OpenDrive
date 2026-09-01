@@ -28,16 +28,59 @@ real elev_m through the tunnel for a future real-bore pass.
 
 import json
 import math
+import struct
 from pathlib import Path
 
 import numpy as np
 
+from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 from road_mesh_common import STATION_SPACING, ROAD_LIFT, build_road_chunks, road_ue_z_m
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
 STATIONS_PATH = OUT / "road_stations.json"
+MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+
+
+def write_station_sidecar(path, segment_geoms, gen_id_bytes):
+    """Writes the ODS1 road-station sidecar (Arc 7 runtime-carve slice):
+    every road station's final UE-world-frame (cm) position, at the exact
+    same 5 m spacing and post-regrade elevation build_road_chunks() just
+    used to build road_mesh.json's ribbon geometry - so the C++ runtime
+    terrain carve can read station elevations far beyond the road-mesh
+    spawn radius (out to the 6 km terrain visual radius) without
+    re-deriving anything road_mesh_common.py already computed.
+
+    `segment_geoms` is the same list of (cx, cy, cz) UE-frame (cm) station-
+    centerline arrays main() already builds per non-tunnel run (tunnel
+    stretches get no road mesh, so they're excluded here too - this sidecar
+    only ever describes stations the road mesh itself is built from).
+
+    Layout (pinned contract w/ AODRoadManager's C++ station reader - do not
+    change without updating both sides):
+        'O','D','S','1'                              magic (4 bytes)
+        uint32 LE  generation-id string byte length L
+        L bytes    UTF-8 generation id (generation_id.py)
+        uint32 LE  station count N
+        N * (float32 x_cm, float32 y_cm, float32 z_cm)   UE world frame,
+                   same frame/units as road_mesh.json's exported vertices
+    """
+    gen_id_utf8 = gen_id_bytes  # already ASCII bytes from pack_generation_id
+    with open(path, "wb") as f:
+        f.write(b"ODS1")
+        f.write(struct.pack("<I", len(gen_id_utf8)))
+        f.write(gen_id_utf8)
+        total = sum(len(cx) for cx, cy, cz in segment_geoms)
+        f.write(struct.pack("<I", total))
+        for cx, cy, cz in segment_geoms:
+            n = len(cx)
+            interleaved = np.empty(n * 3, dtype=np.float32)
+            interleaved[0::3] = cx
+            interleaved[1::3] = cy
+            interleaved[2::3] = cz
+            f.write(interleaved.tobytes())
+    return total
 
 
 def split_excluding_tunnels(is_tunnel):
@@ -118,6 +161,13 @@ def main():
         raise SystemExit("No segments in road_stations.json - check build_road_stations.py's output.")
 
     (OUT / "road_mesh.json").write_text(json.dumps({"segments": segments}))
+
+    MASKS_DIR.mkdir(parents=True, exist_ok=True)
+    gen_id = compute_generation_id()
+    gen_id_bytes = pack_generation_id(gen_id)
+    station_sidecar_path = MASKS_DIR / f"roadstations_{AREA_NAME}.bin"
+    n_stations = write_station_sidecar(station_sidecar_path, segment_geoms, gen_id_bytes)
+    print(f"station sidecar: {n_stations} stations -> {station_sidecar_path}")
 
     # Player start near the CENTER of the built area, not just "the longest
     # segment's start" (that put a test spawn ~500 m past the bbox's edge

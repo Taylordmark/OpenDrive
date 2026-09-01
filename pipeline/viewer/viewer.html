@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenDrive Car Preview</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #1b1d22; color: #e8e8ec;
+    font-family: Consolas, "Courier New", monospace;
+    overflow: hidden;
+  }
+  #wrap { position: relative; width: 100vw; height: 100vh; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+
+  #hud {
+    position: absolute; top: 10px; left: 10px; right: 10px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none;
+  }
+  #buttons { pointer-events: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  button {
+    background: #2b2e37; color: #e8e8ec; border: 1px solid #454955;
+    padding: 6px 10px; font-family: inherit; font-size: 12px;
+    cursor: pointer; border-radius: 4px;
+  }
+  button:hover { background: #383c47; }
+  button.active { background: #4b6bff; border-color: #6c86ff; color: #fff; }
+
+  #status {
+    pointer-events: auto;
+    font-size: 11px; text-align: right; max-width: 40%;
+    color: #9aa0ab;
+  }
+  #buildline { white-space: nowrap; }
+  #buildline.ok { color: #7ee08a; }
+  #buildline.building { color: #e0c97e; }
+
+  #errbanner {
+    position: absolute; left: 10px; right: 10px; bottom: 10px;
+    max-height: 40vh; overflow: auto;
+    background: rgba(120, 20, 20, 0.92); border: 1px solid #c04040;
+    color: #ffe3e3; font-size: 12px; padding: 8px 10px; border-radius: 4px;
+    white-space: pre-wrap; display: none;
+  }
+  #errbanner.show { display: block; }
+
+  #hint {
+    position: absolute; bottom: 10px; left: 10px;
+    font-size: 11px; color: #6f7480; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="gl"></canvas>
+  <div id="hud">
+    <div id="buttons"></div>
+    <div id="status">
+      <div id="buildline">connecting...</div>
+    </div>
+  </div>
+  <div id="hint">drag: orbit &nbsp; wheel: zoom &nbsp; shift/right-drag: pan</div>
+  <div id="errbanner"></div>
+</div>
+
+<script>
+"use strict";
+
+// ------------------------------------------------------------------ config
+const CARS = ["SM_Car_Sedan", "SM_Car_Coupe", "SM_Car_Sport", "SM_Car_Proto"];
+const WHEEL_NAME = "SM_CarWheel";
+const ALL_LABEL = "All Four";
+const REF_WHEEL_RADIUS_CM = 34.0;
+
+let currentMode = CARS[0];   // one of CARS, or ALL_LABEL
+let showAll = false;
+
+// ------------------------------------------------------------------ canvas / gl
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+if (!gl) {
+  document.getElementById("errbanner").className = "show";
+  document.getElementById("errbanner").textContent = "WebGL is not available in this browser.";
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth * dpr, h = canvas.clientHeight * dpr;
+  if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) {
+    canvas.width = Math.round(w);
+    canvas.height = Math.round(h);
+  }
+}
+window.addEventListener("resize", resize);
+
+// ------------------------------------------------------------------ shaders
+const VERT_SRC = `
+  attribute vec3 aPos;
+  attribute vec3 aNormal;
+  attribute vec2 aUV;
+  uniform mat4 uModel;
+  uniform mat4 uView;
+  uniform mat4 uProj;
+  uniform mat3 uNormalMat;
+  varying vec3 vNormal;
+  varying vec2 vUV;
+  void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    gl_Position = uProj * uView * world;
+    vNormal = normalize(uNormalMat * aNormal);
+    vUV = aUV;
+  }
+`;
+const FRAG_SRC = `
+  precision mediump float;
+  varying vec3 vNormal;
+  varying vec2 vUV;
+  uniform sampler2D uPalette;
+  uniform vec3 uLightDir;
+  uniform float uAmbient;
+  void main() {
+    vec3 n = normalize(vNormal);
+    // abs(): double-sided lighting - hull faces have mixed winding so some
+    // normals point into the body; without this they shade flat-dark
+    float ndl = abs(dot(n, uLightDir));
+    float lit = clamp(uAmbient + ndl * (1.0 - uAmbient), 0.0, 1.0);
+    vec3 base = texture2D(uPalette, vUV).rgb;
+    gl_FragColor = vec4(base * lit, 1.0);
+  }
+`;
+
+const GRID_VERT_SRC = `
+  attribute vec3 aPos;
+  uniform mat4 uView;
+  uniform mat4 uProj;
+  void main() { gl_Position = uProj * uView * vec4(aPos, 1.0); }
+`;
+const GRID_FRAG_SRC = `
+  precision mediump float;
+  uniform vec3 uColor;
+  void main() { gl_FragColor = vec4(uColor, 1.0); }
+`;
+
+function compileShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error("shader compile error: " + gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+function linkProgram(vsrc, fsrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(vsrc, gl.VERTEX_SHADER));
+  gl.attachShader(p, compileShader(fsrc, gl.FRAGMENT_SHADER));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error("program link error: " + gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
+let prog, gridProg;
+let attribs = {}, uniforms = {};
+let gAttribs = {}, gUniforms = {};
+
+function initGL() {
+  prog = linkProgram(VERT_SRC, FRAG_SRC);
+  attribs.pos = gl.getAttribLocation(prog, "aPos");
+  attribs.normal = gl.getAttribLocation(prog, "aNormal");
+  attribs.uv = gl.getAttribLocation(prog, "aUV");
+  uniforms.model = gl.getUniformLocation(prog, "uModel");
+  uniforms.view = gl.getUniformLocation(prog, "uView");
+  uniforms.proj = gl.getUniformLocation(prog, "uProj");
+  uniforms.normalMat = gl.getUniformLocation(prog, "uNormalMat");
+  uniforms.palette = gl.getUniformLocation(prog, "uPalette");
+  uniforms.lightDir = gl.getUniformLocation(prog, "uLightDir");
+  uniforms.ambient = gl.getUniformLocation(prog, "uAmbient");
+
+  gridProg = linkProgram(GRID_VERT_SRC, GRID_FRAG_SRC);
+  gAttribs.pos = gl.getAttribLocation(gridProg, "aPos");
+  gUniforms.view = gl.getUniformLocation(gridProg, "uView");
+  gUniforms.proj = gl.getUniformLocation(gridProg, "uProj");
+  gUniforms.color = gl.getUniformLocation(gridProg, "uColor");
+
+  gl.enable(gl.DEPTH_TEST);
+  // no backface culling: the car hulls have mixed winding and the in-game
+  // material (M_Car2) is two-sided - culling here would show phantom holes
+  // that don't exist in UE (and vice versa)
+  gl.clearColor(0.106, 0.114, 0.133, 1.0);
+}
+
+// ------------------------------------------------------------------ mat4 helpers (minimal)
+function mat4Identity() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k*4+j] * b[i*4+k];
+      out[i*4+j] = sum;
+    }
+  }
+  return out;
+}
+function mat4Perspective(fovyRad, aspect, near, far) {
+  const f = 1.0 / Math.tan(fovyRad / 2);
+  const out = new Float32Array(16);
+  out[0] = f / aspect; out[5] = f;
+  out[10] = (far + near) / (near - far); out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+function mat4Translate(x, y, z) {
+  const out = mat4Identity();
+  out[12] = x; out[13] = y; out[14] = z;
+  return out;
+}
+function mat4Scale(s) {
+  const out = mat4Identity();
+  out[0] = s; out[5] = s; out[10] = s;
+  return out;
+}
+function mat4LookAt(eye, center, up) {
+  function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+  function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];}
+  function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+  function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+  const zax = norm(sub(eye, center));
+  const xax = norm(cross(up, zax));
+  const yax = cross(zax, xax);
+  const out = new Float32Array(16);
+  out[0]=xax[0]; out[1]=yax[0]; out[2]=zax[0]; out[3]=0;
+  out[4]=xax[1]; out[5]=yax[1]; out[6]=zax[1]; out[7]=0;
+  out[8]=xax[2]; out[9]=yax[2]; out[10]=zax[2]; out[11]=0;
+  out[12]=-dot(xax,eye); out[13]=-dot(yax,eye); out[14]=-dot(zax,eye); out[15]=1;
+  return out;
+}
+function mat3FromMat4(m) {
+  return new Float32Array([m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10]]);
+}
+
+// ------------------------------------------------------------------ OBJ parsing
+// Format emitted by make_car_meshes.py: v/vt/vn one triple per vertex (flat
+// shaded, no sharing), f a/a/a b/b/b c/c/c using 1-based matching indices.
+function parseOBJ(text) {
+  const positions = [], uvs = [], normals = [];
+  const lines = text.split("\n");
+  const outPos = [], outUV = [], outNormal = [];
+  let triCount = 0;
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li].trim();
+    if (!line || line[0] === "#") continue;
+    const parts = line.split(/\s+/);
+    const tag = parts[0];
+    if (tag === "v") {
+      positions.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+    } else if (tag === "vt") {
+      uvs.push([parseFloat(parts[1]), parseFloat(parts[2])]);
+    } else if (tag === "vn") {
+      normals.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+    } else if (tag === "f") {
+      triCount++;
+      for (let k = 1; k <= 3; k++) {
+        const idx = parts[k].split("/").map(s => s ? parseInt(s, 10) : 0);
+        const vi = idx[0] - 1;
+        const ti = (idx[1] || idx[0]) - 1;
+        const ni = (idx[2] || idx[0]) - 1;
+        const p = positions[vi] || [0, 0, 0];
+        const t = uvs[ti] || [0, 0];
+        const n = normals[ni] || [0, 0, 1];
+        outPos.push(p[0], p[1], p[2]);
+        outUV.push(t[0], t[1]);
+        outNormal.push(n[0], n[1], n[2]);
+      }
+    }
+  }
+  return {
+    positions: new Float32Array(outPos),
+    uvs: new Float32Array(outUV),
+    normals: new Float32Array(outNormal),
+    triCount,
+    vertCount: outPos.length / 3,
+  };
+}
+
+function buildGLMesh(parsed) {
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, parsed.positions, gl.STATIC_DRAW);
+
+  const uvBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, parsed.uvs, gl.STATIC_DRAW);
+
+  const nrmBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, parsed.normals, gl.STATIC_DRAW);
+
+  return { posBuf, uvBuf, nrmBuf, count: parsed.vertCount };
+}
+
+function drawGLMesh(mesh, modelMat, viewMat, projMat) {
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.posBuf);
+  gl.enableVertexAttribArray(attribs.pos);
+  gl.vertexAttribPointer(attribs.pos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.nrmBuf);
+  gl.enableVertexAttribArray(attribs.normal);
+  gl.vertexAttribPointer(attribs.normal, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.uvBuf);
+  gl.enableVertexAttribArray(attribs.uv);
+  gl.vertexAttribPointer(attribs.uv, 2, gl.FLOAT, false, 0, 0);
+
+  gl.uniformMatrix4fv(uniforms.model, false, modelMat);
+  gl.uniformMatrix4fv(uniforms.view, false, viewMat);
+  gl.uniformMatrix4fv(uniforms.proj, false, projMat);
+  gl.uniformMatrix3fv(uniforms.normalMat, false, mat3FromMat4(modelMat));
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, paletteTex);
+  gl.uniform1i(uniforms.palette, 0);
+  gl.uniform3f(uniforms.lightDir, 0.4, 0.6, -0.7);
+  gl.uniform1f(uniforms.ambient, 0.35);
+
+  gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+}
+
+// ------------------------------------------------------------------ palette texture
+let paletteTex = null;
+let paletteImg = null;
+
+function loadPaletteTexture(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      paletteImg = img;
+      if (!paletteTex) paletteTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, paletteTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      resolve();
+    };
+    img.onerror = reject;
+    img.src = url + "?t=" + Date.now();
+  });
+}
+
+// ------------------------------------------------------------------ camera (orbit)
+let camDist = 700;
+let camYaw = -0.9;     // radians, 3/4 front view
+let camPitch = 0.35;
+let camTarget = [0, 0, 20];
+let dragging = null;   // "orbit" | "pan" | null
+let lastMouse = [0, 0];
+
+function orbitEye() {
+  const cp = Math.cos(camPitch), sp = Math.sin(camPitch);
+  const cy = Math.cos(camYaw), sy = Math.sin(camYaw);
+  return [
+    camTarget[0] + camDist * cp * cy,
+    camTarget[1] + camDist * cp * sy,
+    camTarget[2] + camDist * sp,
+  ];
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  dragging = (e.button === 2 || e.shiftKey) ? "pan" : "orbit";
+  lastMouse = [e.clientX, e.clientY];
+  canvas.classList.add("dragging");
+  e.preventDefault();
+});
+window.addEventListener("mouseup", () => { dragging = null; canvas.classList.remove("dragging"); });
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - lastMouse[0], dy = e.clientY - lastMouse[1];
+  lastMouse = [e.clientX, e.clientY];
+  if (dragging === "orbit") {
+    camYaw += dx * 0.008;
+    camPitch += dy * 0.008;
+    camPitch = Math.max(-1.5, Math.min(1.5, camPitch));
+  } else if (dragging === "pan") {
+    const eye = orbitEye();
+    const fwd = [camTarget[0]-eye[0], camTarget[1]-eye[1], camTarget[2]-eye[2]];
+    const len = Math.hypot(fwd[0], fwd[1], fwd[2]) || 1;
+    const fx = fwd[0]/len, fy = fwd[1]/len, fz = fwd[2]/len;
+    const upv = [0, 0, 1];
+    const right = [fy*upv[2]-fz*upv[1], fz*upv[0]-fx*upv[2], fx*upv[1]-fy*upv[0]];
+    const rl = Math.hypot(right[0], right[1], right[2]) || 1;
+    const rx = right[0]/rl, ry = right[1]/rl;
+    const trueUp = [
+      right[1]*fz - right[2]*fy,
+      right[2]*fx - right[0]*fz,
+      right[0]*fy - right[1]*fx,
+    ];
+    const scale = camDist * 0.0016;
+    camTarget[0] -= rx * dx * scale;
+    camTarget[1] -= ry * dx * scale;
+    camTarget[0] += trueUp[0] * dy * scale;
+    camTarget[1] += trueUp[1] * dy * scale;
+    camTarget[2] += trueUp[2] * dy * scale;
+  }
+});
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("wheel", (e) => {
+  camDist *= Math.pow(1.0012, e.deltaY);
+  camDist = Math.max(60, Math.min(6000, camDist));
+  e.preventDefault();
+}, { passive: false });
+
+// ------------------------------------------------------------------ scene state
+const glMeshes = {};       // name -> {mesh, parsed}
+let manifest = null;       // parsed cars_manifest.json, or null
+
+function carURL(name) { return "/obj/" + name + ".obj"; }
+
+async function fetchOBJ(name) {
+  const res = await fetch(carURL(name), { cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + name);
+  const text = await res.text();
+  return parseOBJ(text);
+}
+
+async function loadCar(name) {
+  const parsed = await fetchOBJ(name);
+  glMeshes[name] = { mesh: buildGLMesh(parsed), parsed };
+}
+
+async function loadWheel() {
+  const parsed = await fetchOBJ(WHEEL_NAME);
+  glMeshes[WHEEL_NAME] = { mesh: buildGLMesh(parsed), parsed };
+}
+
+async function loadManifest() {
+  try {
+    const res = await fetch("/manifest", { cache: "no-store" });
+    if (!res.ok) { manifest = null; return; }
+    manifest = await res.json();
+  } catch (e) {
+    manifest = null;
+  }
+}
+
+function manifestFor(carName) {
+  if (!manifest) return null;
+  // Accept a couple of plausible shapes: {DisplayName/key -> fields} or a list.
+  const shortName = carName.replace(/^SM_Car_/, "");
+  const candidates = [carName, shortName, shortName.toLowerCase()];
+  if (Array.isArray(manifest)) {
+    for (const entry of manifest) {
+      const key = entry.Name || entry.DisplayName || entry.name;
+      if (key && candidates.includes(key)) return entry;
+    }
+  } else if (typeof manifest === "object") {
+    for (const c of candidates) {
+      if (manifest[c]) return manifest[c];
+    }
+  }
+  return null;
+}
+
+// ------------------------------------------------------------------ render
+function drawGrid(viewMat, projMat) {
+  const size = 2000, step = 100, z = -34;
+  const verts = [];
+  for (let x = -size; x <= size; x += step) {
+    verts.push(x, -size, z, x, size, z);
+  }
+  for (let y = -size; y <= size; y += step) {
+    verts.push(-size, y, z, size, y, z);
+  }
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+
+  gl.useProgram(gridProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(gAttribs.pos);
+  gl.vertexAttribPointer(gAttribs.pos, 3, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(gUniforms.view, false, viewMat);
+  gl.uniformMatrix4fv(gUniforms.proj, false, projMat);
+  gl.uniform3f(gUniforms.color, 0.22, 0.24, 0.28);
+  gl.drawArrays(gl.LINES, 0, verts.length / 3);
+  gl.deleteBuffer(buf);
+}
+
+function drawCarAt(carName, offsetXY, viewMat, projMat) {
+  const entry = glMeshes[carName];
+  if (!entry) return;
+  const model = mat4Translate(offsetXY[0], offsetXY[1], 0);
+  drawGLMesh(entry.mesh, model, viewMat, projMat);
+
+  const wheelEntry = glMeshes[WHEEL_NAME];
+  const info = manifestFor(carName);
+  if (!wheelEntry || !info) return;
+  const fx = info.FrontAxleXCm, rx = info.RearAxleXCm;
+  const ty = info.HalfTrackYCm, wr = info.WheelRadiusCm;
+  if ([fx, rx, ty, wr].some(v => typeof v !== "number" || !isFinite(v))) return;
+  const scale = wr / REF_WHEEL_RADIUS_CM;
+  const positions = [
+    [fx, ty], [fx, -ty], [rx, ty], [rx, -ty],
+  ];
+  for (const [px, py] of positions) {
+    const m = mat4Multiply(
+      mat4Translate(offsetXY[0] + px, offsetXY[1] + py, 0),
+      mat4Scale(scale)
+    );
+    drawGLMesh(wheelEntry.mesh, m, viewMat, projMat);
+  }
+}
+
+function render() {
+  resize();
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const aspect = canvas.width / Math.max(1, canvas.height);
+  const projMat = mat4Perspective(50 * Math.PI / 180, aspect, 10, 20000);
+  const eye = orbitEye();
+  const viewMat = mat4LookAt(eye, camTarget, [0, 0, 1]);
+
+  drawGrid(viewMat, projMat);
+
+  if (paletteTex) {
+    if (showAll) {
+      const gap = 650;
+      CARS.forEach((name, i) => {
+        drawCarAt(name, [0, (i - 1.5) * gap], viewMat, projMat);
+      });
+    } else {
+      drawCarAt(currentMode, [0, 0], viewMat, projMat);
+    }
+  }
+
+  requestAnimationFrame(render);
+}
+
+// ------------------------------------------------------------------ UI: buttons
+const buttonsEl = document.getElementById("buttons");
+function makeButton(label, onClick) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  buttonsEl.appendChild(b);
+  return b;
+}
+
+const carButtons = {};
+CARS.forEach((name) => {
+  const label = name.replace(/^SM_Car_/, "");
+  carButtons[name] = makeButton(label, () => {
+    showAll = false;
+    currentMode = name;
+    updateButtonStates();
+    ensureCarLoaded(name);
+  });
+});
+const allButton = makeButton(ALL_LABEL, () => {
+  showAll = true;
+  updateButtonStates();
+  CARS.forEach(ensureCarLoaded);
+});
+
+function updateButtonStates() {
+  CARS.forEach((name) => {
+    carButtons[name].classList.toggle("active", !showAll && currentMode === name);
+  });
+  allButton.classList.toggle("active", showAll);
+}
+updateButtonStates();
+
+async function ensureCarLoaded(name) {
+  if (glMeshes[name]) return;
+  try {
+    await loadCar(name);
+  } catch (e) {
+    console.error("failed to load", name, e);
+  }
+}
+
+// ------------------------------------------------------------------ /status polling
+const buildlineEl = document.getElementById("buildline");
+const errbannerEl = document.getElementById("errbanner");
+let knownObjMtimes = {};
+
+async function pollStatus() {
+  try {
+    const res = await fetch("/status", { cache: "no-store" });
+    const data = await res.json();
+
+    if (data.exit_code === 0) {
+      buildlineEl.className = "ok";
+      buildlineEl.textContent = "rebuilt " + (data.last_build_time ? data.last_build_time.split(" ")[1] || data.last_build_time : "");
+      errbannerEl.className = "";
+      errbannerEl.textContent = "";
+    } else if (data.building) {
+      buildlineEl.className = "building";
+      buildlineEl.textContent = "building...";
+    } else if (data.exit_code !== null) {
+      buildlineEl.className = "";
+      buildlineEl.style.color = "#ff8080";
+      buildlineEl.textContent = "build FAILED (exit " + data.exit_code + ")";
+      errbannerEl.className = "show";
+      errbannerEl.textContent = data.output || "(no output captured)";
+    } else {
+      buildlineEl.textContent = "waiting for first build...";
+    }
+
+    const mtimes = data.obj_mtimes || {};
+    let changed = false;
+    for (const k in mtimes) {
+      if (knownObjMtimes[k] !== mtimes[k]) { changed = true; break; }
+    }
+    if (changed && data.exit_code === 0) {
+      knownObjMtimes = mtimes;
+      await reloadAllLoadedMeshes();
+    } else {
+      knownObjMtimes = mtimes;
+    }
+  } catch (e) {
+    buildlineEl.className = "";
+    buildlineEl.style.color = "#ff8080";
+    buildlineEl.textContent = "lost connection to preview server";
+  }
+}
+
+async function reloadAllLoadedMeshes() {
+  const names = Object.keys(glMeshes);
+  for (const name of names) {
+    try {
+      const isWheel = name === WHEEL_NAME;
+      if (isWheel) await loadWheel(); else await loadCar(name);
+    } catch (e) {
+      console.error("reload failed for", name, e);
+    }
+  }
+  await loadManifest();
+}
+
+// ------------------------------------------------------------------ boot
+async function boot() {
+  try {
+    initGL();
+  } catch (e) {
+    errbannerEl.className = "show";
+    errbannerEl.textContent = "WebGL init failed: " + e.message;
+    return;
+  }
+  await loadPaletteTexture("/textures/T_CarPalette2.png");
+  await loadManifest();
+  await ensureCarLoaded(currentMode);
+  await loadWheel().catch(() => {});
+  requestAnimationFrame(render);
+  pollStatus();
+  setInterval(pollStatus, 1000);
+}
+boot();
+</script>
+</body>
+</html>

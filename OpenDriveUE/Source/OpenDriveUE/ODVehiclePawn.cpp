@@ -11,6 +11,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
+#include "Misc/ConfigCacheIni.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
@@ -20,6 +21,16 @@ namespace
 {
 const TCHAR* ChassisPath = TEXT("/Game/OpenDrive/Car/chassis.chassis");
 const TCHAR* WheelPath = TEXT("/Game/OpenDrive/Car/wheel.wheel");
+
+// pipeline/make_car_meshes.py's SM_CarWheel (procedural 4-car set,
+// 2026-08-27) is authored once at this radius and shared by all four new
+// UODVehicleDefs; ApplyVehicleDef below visually rescales it per car
+// (Def->WheelRadiusCm / this) so e.g. Proto's smaller low-profile wheel and
+// Sport's bigger one both read correctly with no extra wheel meshes. The
+// older per-car wheel.obj/wheel_gt.obj are each already authored at their
+// own radius (both 34), so this scale evaluates to 1.0 for them - no visual
+// change to the existing placeholder/GT cars.
+constexpr float ReferenceWheelMeshRadiusCm = 34.0f;
 }
 
 AODVehiclePawn::AODVehiclePawn()
@@ -109,8 +120,16 @@ void AODVehiclePawn::LoadVehicleDefs()
 	IAssetRegistry& AR = ARM.Get();
 	// A -game launch can reach this BeginPlay before the async content scan has
 	// indexed the vehicle defs (seen live: "0 found" with the assets on disk),
-	// so force a synchronous scan of their folder before querying.
-	AR.ScanPathsSynchronous({TEXT("/Game/OpenDrive/Car")}, /*bForceRescan*/true);
+	// so force a synchronous scan of their folder(s) before querying.
+	// /Game/OpenDrive/Car (singular) holds the original placeholder Coupe/GT
+	// defs; /Game/OpenDrive/Cars (plural) holds the 2026-08-27 procedural
+	// 4-car set, imported into a separate folder specifically so it couldn't
+	// collide with the originals - both need to be scanned or the plural
+	// folder's defs are invisible to the asset-registry query below (seen
+	// live: only 2 of 6 defs found before this fix).
+	AR.ScanPathsSynchronous(
+		{TEXT("/Game/OpenDrive/Car"), TEXT("/Game/OpenDrive/Cars")},
+		/*bForceRescan*/true);
 
 	FARFilter Filter;
 	Filter.ClassPaths.Add(UODVehicleDef::StaticClass()->GetClassPathName());
@@ -166,13 +185,24 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 
 	if (UStaticMesh* Wheel = Def->WheelMesh.LoadSynchronous())
 	{
+		// visual-only scale to match this car's WheelRadiusCm against the
+		// mesh's own authored radius (see ReferenceWheelMeshRadiusCm above) -
+		// does not touch UODVehicleMovement's wheel table, which already
+		// takes WheelRadiusCm straight from the def for the physics radius.
+		const float WheelVisualScale = Def->WheelRadiusCm / ReferenceWheelMeshRadiusCm;
 		for (UStaticMeshComponent* WV : WheelVisuals)
 		{
 			if (WV)
 			{
 				WV->SetStaticMesh(Wheel);
+				WV->SetRelativeScale3D(FVector(WheelVisualScale));
 			}
 		}
+		UE_LOG(LogTemp, Display,
+			TEXT("ODVehiclePawn: wheel visuals set for '%s' - mesh '%s', radius %.0f cm ")
+			TEXT("(mesh authored at %.0f cm, visual scale %.2f), %d wheel component(s)"),
+			*Def->DisplayName, *Wheel->GetName(), Def->WheelRadiusCm,
+			ReferenceWheelMeshRadiusCm, WheelVisualScale, WheelVisuals.Num());
 	}
 
 	if (bWasSimulating)
@@ -226,6 +256,7 @@ void AODVehiclePawn::SetShowroom(bool bOn)
 	{
 		return;
 	}
+	bInShowroom = bOn;
 	if (bOn)
 	{
 		Body->SetSimulatePhysics(false);
@@ -259,6 +290,22 @@ void AODVehiclePawn::SetShowroom(bool bOn)
 		// back to the normal chase cam - re-attach with the arm's usual
 		// (relative) transform, not the showroom's absolute one
 		Camera->AttachToComponent(SpringArm, FAttachmentTransformRules::SnapToTargetIncludingScale);
+
+		// 2026-08-27 fix ("garage round-trip paralyzes the car"): this branch
+		// never restored physics, only the camera. AODMainMenu::StartAt()
+		// (fresh-boot / map-select path) gets away with it because it always
+		// calls TeleportToSpawn() right after, which re-disables physics for
+		// its own ground-snap wait and TrySnapToGround() re-enables it once
+		// settled. But AODMainMenu::ResumeFromGarage() (pause-menu "Garage"
+		// mid-drive round trip) calls ONLY SetShowroom(false) - no teleport,
+		// no re-snap - so the car was left permanently kinematic (no physics,
+		// so no input could move it) after returning from the garage. The car
+		// is already resting on real ground going into the garage in that
+		// case (bGroundSnapped stays true throughout), so it's safe to just
+		// re-enable physics directly here; TeleportToSpawn's own
+		// SetSimulatePhysics(false) immediately after this call in the other
+		// path makes this a harmless no-op flicker for that case.
+		Body->SetSimulatePhysics(true);
 	}
 }
 
@@ -269,6 +316,8 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 		return;
 	}
 	SpringArm->bInheritYaw = true;   // ensure showroom framing is dropped
+	LookYawDeg = 0.0f;   // re-center the freelook orbit behind the car for the new spawn
+	LookPitchDeg = 0.0f;
 
 	// Lift to a high absolute altitude (not a relative +offset) so the
 	// asphalt ground-snap trace always starts ABOVE the real road surface -
@@ -283,7 +332,64 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 	// new spot; TrySnapToGround handles the settle from here
 	bGroundSnapped = false;
 	SpawnTime = GetWorld()->GetTimeSeconds();
+	SnapReadyTime = 0.0;
 	LastSnapLogTime = 0.0;
+}
+
+void AODVehiclePawn::ResetVehicle()
+{
+	// only meaningful while actually driving - not mid-spawn-settle (the
+	// snap owns the body then) and not in the showroom (physics frozen)
+	if (!Body || !bGroundSnapped || !Body->IsSimulatingPhysics())
+	{
+		return;
+	}
+	const float Yaw = GetActorRotation().Yaw;
+	Body->SetSimulatePhysics(false);
+
+	// find a CLEAR spot to right the car in: righting it in place inside a
+	// tree trunk (Taylor: "hitting r near a tree merged me into the tree")
+	// re-creates the exact interpenetration the lift was meant to avoid.
+	// Test the upright hull at the current spot first, then a small ring of
+	// sideways/back/forward offsets, and take the first that doesn't overlap
+	// anything blocking; if everything is blocked, keep the current spot
+	// (the settle's kinematic phase still prevents a violent ejection).
+	const FQuat UprightRot = FRotator(0.0f, Yaw, 0.0f).Quaternion();
+	const FVector HullExtent = Body->Bounds.BoxExtent * 0.9f;
+	const FVector Fwd2D = FRotator(0.0f, Yaw, 0.0f).Vector();
+	const FVector Right2D = FVector::CrossProduct(FVector::UpVector, Fwd2D);
+	const FVector BaseLoc = GetActorLocation() + FVector(0.0f, 0.0f, 150.0f);
+	const FVector Offsets[] = {
+		FVector::ZeroVector,
+		Right2D * 250.0f, Right2D * -250.0f,
+		Fwd2D * -350.0f, Fwd2D * 350.0f,
+		Right2D * 500.0f, Right2D * -500.0f,
+	};
+	FVector ChosenLoc = BaseLoc;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+	for (const FVector& Off : Offsets)
+	{
+		if (!GetWorld()->OverlapBlockingTestByProfile(BaseLoc + Off, UprightRot,
+			TEXT("Vehicle"), FCollisionShape::MakeBox(HullExtent), Params))
+		{
+			ChosenLoc = BaseLoc + Off;
+			break;
+		}
+	}
+	SetActorLocation(ChosenLoc, false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorRotation(FRotator(0.0f, Yaw, 0.0f));
+
+	// re-arm the ground snap, but back-date SpawnTime so the no-asphalt
+	// fallback fires after ~3 s instead of the full spawn timeout - a reset
+	// often happens OFF the road (that's why the car flipped), where the
+	// PM_Asphalt trace will never succeed.
+	bGroundSnapped = false;
+	SpawnTime = GetWorld()->GetTimeSeconds() - (GroundSnapTimeoutSec - 3.0);
+	SnapReadyTime = 0.0;
+	LastSnapLogTime = 0.0;
+	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: flip-recovery reset at %s"),
+		*GetActorLocation().ToCompactString());
 }
 
 void AODVehiclePawn::PlaceInShowroom(const FVector& Loc)
@@ -304,6 +410,11 @@ void AODVehiclePawn::PlaceInShowroom(const FVector& Loc)
 void AODVehiclePawn::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// controller/wheel device selection (2026-08-27): restore whatever the
+	// player last picked in the menu (or Auto, the default for a fresh install)
+	DeviceMode = LoadInputDeviceMode();
+	ActiveDevice = EODInputDevice::Keyboard;
 
 	// selectable cars: discover defs, spawn as index 0 (the base coupe). Falls
 	// back to the hardcoded coupe meshes if no def assets exist yet.
@@ -328,6 +439,19 @@ void AODVehiclePawn::BeginPlay()
 	FParse::Value(FCommandLine::Get(), TEXT("odthr="), HookThrottle);
 	FParse::Value(FCommandLine::Get(), TEXT("odbrake="), BrakeAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odveh="), VehSwapAt);
+	FParse::Value(FCommandLine::Get(), TEXT("odsetvat="), SetVAt);
+	FParse::Value(FCommandLine::Get(), TEXT("odsetv="), SetVCmS);
+
+	// -odvehidx=N: jump straight to vehicle def index N at spawn (headless
+	// screenshot verification of a specific car - 2026-08-27, procedural car
+	// generator pass). Unlike -odveh=T's single next-car cycle, this picks
+	// an absolute index immediately so a batch of -odshot runs can each grab
+	// one car without chaining cycle counts.
+	int32 VehIdx = -1;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odvehidx="), VehIdx) && Vehicles.IsValidIndex(VehIdx))
+	{
+		SetVehicleByIndex(VehIdx);
+	}
 
 	// held kinematic until TrySnapToGround confirms real ground beneath us -
 	// see the declaration comment for why (PlayerStart's baked height can
@@ -421,33 +545,48 @@ void AODVehiclePawn::TrySnapToGround()
 
 	if (!bOnRoad && !bTimedOut)
 	{
+		SnapReadyTime = 0.0;   // asphalt hit lapsed (or never came) - restart the settle window
 		return;   // keep waiting for the road surface specifically - retry next tick
 	}
 
-	if (bHit)
+	if (SnapReadyTime == 0.0)
 	{
+		SnapReadyTime = Now;
 		UE_LOG(LogTemp, Display,
 			TEXT("ODVehiclePawn: ground-snap resolved after %.1fs - moving from z=%.0f to "
-			     "z=%.0f (hit z=%.0f, physmat=%s, onRoad=%d)"),
-			Now - SpawnTime, Loc.Z, Hit.ImpactPoint.Z + GroundClearanceCm, Hit.ImpactPoint.Z,
-			Hit.PhysMaterial.IsValid() ? *Hit.PhysMaterial->GetName() : TEXT("none"), bOnRoad);
+			     "z=%.0f (hit z=%.0f, physmat=%s, onRoad=%d), holding %.1fs settle before "
+			     "releasing physics"),
+			Now - SpawnTime, Loc.Z, bHit ? Hit.ImpactPoint.Z + GroundClearanceCm : Loc.Z,
+			bHit ? Hit.ImpactPoint.Z : 0.0f,
+			(bHit && Hit.PhysMaterial.IsValid()) ? *Hit.PhysMaterial->GetName() : TEXT("none"),
+			bOnRoad, GroundSnapSettleSec);
 		if (bTimedOut && !bOnRoad)
 		{
 			UE_LOG(LogTemp, Warning,
 				TEXT("ODVehiclePawn: ground-snap timed out after %.1fs waiting for the "
 				     "road surface specifically - settling for whatever's below (%s)"),
 				GroundSnapTimeoutSec,
-				Hit.PhysMaterial.IsValid() ? *Hit.PhysMaterial->GetName() : TEXT("none"));
+				(bHit && Hit.PhysMaterial.IsValid()) ? *Hit.PhysMaterial->GetName() : TEXT("none"));
 		}
+		if (!bHit)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ODVehiclePawn: ground-snap timed out after %.1fs - no terrain found "
+				     "below spawn, will release physics at the original spawn height"),
+				GroundSnapTimeoutSec);
+		}
+	}
+	if (bHit)
+	{
+		// keep tracking the surface each tick through the settle - if the
+		// road's height shifts as neighboring tiles finish building, the car
+		// follows rather than releasing at a stale height
 		SetActorLocation(FVector(Loc.X, Loc.Y, Hit.ImpactPoint.Z + GroundClearanceCm),
 			false, nullptr, ETeleportType::TeleportPhysics);
 	}
-	else
+	if (Now - SnapReadyTime < GroundSnapSettleSec)
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODVehiclePawn: ground-snap timed out after %.1fs - no terrain found "
-			     "below spawn, releasing physics at the original spawn height"),
-			GroundSnapTimeoutSec);
+		return;   // held kinematic on the surface until collision has had time to register
 	}
 
 	Body->SetSimulatePhysics(true);
@@ -483,6 +622,244 @@ void AODVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 	}
 	// V: cycle to the next car (garage groundwork - dev-facing live hot-swap)
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AODVehiclePawn::CycleVehicle);
+	// R: flip recovery - right the car in place (see ResetVehicle)
+	Input->BindKey(EKeys::R, IE_Pressed, this, &AODVehiclePawn::ResetVehicle);
+
+	SetupGamepadAndWheelInput(Input);
+}
+
+// ===========================================================================
+// Controller (gamepad) + racing wheel input (2026-08-27) - see the member
+// declarations' block comment in ODVehiclePawn.h for the design rationale.
+// ===========================================================================
+
+namespace
+{
+// FInputAxisKeyBinding's constructor does `ensure(AxisKey.IsAxis1D())` - an
+// unregistered key (IsValid() false, e.g. a RawInput GenericUSBController_
+// AxisN name the plugin never got to register - see below) OR a registered
+// but non-analog key (IsValid() true, IsAxis1D() false - e.g. a digital
+// button-style key) both fail that check and fire a "Handled ensure" on
+// EVERY BindAxisKey call for that key, every time this pawn spawns. Guard
+// every axis-key bind through here instead of trusting the FKey by name.
+bool IsBindableAxis1DKey(const FKey& Key, const TCHAR* DebugName)
+{
+	if (!Key.IsValid() || !Key.IsAxis1D())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODVehiclePawn: skipping axis bind for '%s' (key '%s') - not a registered 1D axis key "
+			     "(IsValid=%d, IsAxis1D=%d). Expected with zero controllers/wheels connected for "
+			     "device-specific keys; anything else is a key-name bug."),
+			DebugName, *Key.ToString(), Key.IsValid(), Key.IsValid() && Key.IsAxis1D());
+		return false;
+	}
+	return true;
+}
+}
+
+void AODVehiclePawn::SetupGamepadAndWheelInput(UInputComponent* Input)
+{
+	// --- gamepad: standard XInput keys, no project-settings axis mapping
+	// needed (same DIRECT-input philosophy as the keyboard binds above).
+	// NOTE (2026-08-27 bug fix): Gamepad_LeftTrigger/Gamepad_RightTrigger are
+	// the DIGITAL (ButtonAxis) trigger keys, not analog - EKeys registers
+	// those with FKeyDetails::ButtonAxis, NOT Axis1D, so binding them via
+	// BindAxisKey ensure-fired on IsAxis1D() every time this pawn spawned,
+	// with or without a gamepad plugged in. The actual analog axis keys are
+	// Gamepad_LeftTriggerAxis/Gamepad_RightTriggerAxis (flagged Axis1D).
+	if (IsBindableAxis1DKey(EKeys::Gamepad_LeftX, TEXT("GamepadSteer")))
+	{
+		Input->BindAxisKey(EKeys::Gamepad_LeftX, this, &AODVehiclePawn::GamepadSteerAxis);
+	}
+	if (IsBindableAxis1DKey(EKeys::Gamepad_RightTriggerAxis, TEXT("GamepadThrottle")))
+	{
+		Input->BindAxisKey(EKeys::Gamepad_RightTriggerAxis, this, &AODVehiclePawn::GamepadThrottleAxis);
+	}
+	if (IsBindableAxis1DKey(EKeys::Gamepad_LeftTriggerAxis, TEXT("GamepadBrake")))
+	{
+		Input->BindAxisKey(EKeys::Gamepad_LeftTriggerAxis, this, &AODVehiclePawn::GamepadBrakeAxis);
+	}
+	if (IsBindableAxis1DKey(EKeys::Gamepad_RightX, TEXT("GamepadLookX")))
+	{
+		Input->BindAxisKey(EKeys::Gamepad_RightX, this, &AODVehiclePawn::GamepadLookXAxis);
+	}
+	if (IsBindableAxis1DKey(EKeys::Gamepad_RightY, TEXT("GamepadLookY")))
+	{
+		Input->BindAxisKey(EKeys::Gamepad_RightY, this, &AODVehiclePawn::GamepadLookYAxis);
+	}
+	Input->BindKey(EKeys::Gamepad_FaceButton_Bottom, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
+	Input->BindKey(EKeys::Gamepad_FaceButton_Bottom, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
+	// menu navigation while driving-screen input is live is cheap to add here
+	// (AODMainMenu binds its OWN separate Dpad/face-button keys for the menu
+	// stage itself - these are just so a gamepad-only player isn't stuck
+	// needing a keyboard to reach the menu's Drive/Resume row from in-car).
+	Input->BindKey(EKeys::Gamepad_Special_Right, IE_Pressed, this, &AODVehiclePawn::CycleVehicle);
+
+	// --- racing wheel: RawInput plugin's GenericUSBController_AxisN, bound
+	// via manual-set lambdas (index-parametrized) rather than named per-axis
+	// functions - see the RawWheelAxis[] declaration comment for why. These
+	// keys only actually fire if the RawInput plugin is enabled (it is, see
+	// OpenDriveUE.uproject) AND its default-device auto-registration picked
+	// up a connected HID joystick/wheel; with nothing plugged in they simply
+	// never fire and RawWheelAxis[] stays at its startup default. The
+	// IsBindableAxis1DKey guard covers the case (confirmed live, 2026-08-27)
+	// where the plugin hasn't registered these FNames as keys at all yet -
+	// FKey::IsValid() is false for an unregistered name, so the ensure that
+	// used to fire here is now a one-line warning log instead. */
+	for (int32 i = 0; i < NumWheelAxesBound; ++i)
+	{
+		const FKey WheelAxisKey(FName(*FString::Printf(TEXT("GenericUSBController_Axis%d"), i + 1)));
+		if (!IsBindableAxis1DKey(WheelAxisKey, *FString::Printf(TEXT("WheelAxis%d"), i + 1)))
+		{
+			continue;
+		}
+		Input->BindAxisKey(WheelAxisKey).AxisDelegate.GetDelegateForManualSet().BindLambda(
+			[this, i](float Value)
+			{
+				RawWheelAxis[i] = Value;
+			});
+	}
+	// Button 1 is a guess at "the first button on the wheel" for the
+	// handbrake (most wheels put paddle-shifters/face buttons there) -
+	// remap by changing this one key if a specific wheel differs. BindKey
+	// (digital) has no IsAxis1D()-style ensure, so no guard needed here.
+	Input->BindKey(FKey(FName(TEXT("GenericUSBController_Button1"))), IE_Pressed,
+		this, &AODVehiclePawn::WheelHandbrakePressed);
+	Input->BindKey(FKey(FName(TEXT("GenericUSBController_Button1"))), IE_Released,
+		this, &AODVehiclePawn::WheelHandbrakeReleased);
+}
+
+void AODVehiclePawn::GamepadSteerAxis(float Value)
+{
+	// deadzone, then a mild x*|x| response curve (Taylor: "an analog stick
+	// ... a mild response curve, x*|x| feels right for steering") - full
+	// precision near center, full lock still reachable at full deflection.
+	// Deliberately NOT applied to keyboard (SmSteer's own fade/rate logic
+	// above is untouched) or to the wheel (1:1, no curve - see class notes).
+	const float Mag = FMath::Abs(Value);
+	if (Mag < GamepadDeadzone)
+	{
+		GamepadSteerRaw = 0.0f;
+		return;
+	}
+	// rescale so the curve still reaches +/-1 at full deflection instead of
+	// leaving a dead gap just past the deadzone
+	const float Rescaled = (Mag - GamepadDeadzone) / (1.0f - GamepadDeadzone);
+	GamepadSteerRaw = FMath::Sign(Value) * Rescaled * Rescaled;
+}
+
+void AODVehiclePawn::GamepadThrottleAxis(float Value)
+{
+	GamepadThrottleRaw = Value < GamepadDeadzone ? 0.0f : Value;
+}
+
+void AODVehiclePawn::GamepadBrakeAxis(float Value)
+{
+	GamepadBrakeRaw = Value < GamepadDeadzone ? 0.0f : Value;
+}
+
+void AODVehiclePawn::GamepadHandbrakePressed() { bGamepadHandbrake = true; }
+void AODVehiclePawn::GamepadHandbrakeReleased() { bGamepadHandbrake = false; }
+
+namespace
+{
+const TCHAR* InputDeviceConfigSection = TEXT("OpenDrive.Input");
+const TCHAR* InputDeviceConfigKey = TEXT("DeviceMode");
+}
+
+void AODVehiclePawn::SaveInputDeviceMode(EODInputDevice Mode)
+{
+	GConfig->SetInt(InputDeviceConfigSection, InputDeviceConfigKey,
+		static_cast<int32>(Mode), GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+}
+
+EODInputDevice AODVehiclePawn::LoadInputDeviceMode()
+{
+	int32 Saved = static_cast<int32>(EODInputDevice::Auto);
+	GConfig->GetInt(InputDeviceConfigSection, InputDeviceConfigKey, Saved, GGameUserSettingsIni);
+	if (Saved < 0 || Saved > static_cast<int32>(EODInputDevice::Wheel))
+	{
+		Saved = static_cast<int32>(EODInputDevice::Auto);
+	}
+	return static_cast<EODInputDevice>(Saved);
+}
+
+void AODVehiclePawn::SetInputDeviceMode(EODInputDevice Mode)
+{
+	DeviceMode = Mode;
+	SaveInputDeviceMode(Mode);
+}
+
+FString AODVehiclePawn::InputDeviceModeToString(EODInputDevice Mode)
+{
+	switch (Mode)
+	{
+	case EODInputDevice::Auto: return TEXT("Auto");
+	case EODInputDevice::Keyboard: return TEXT("Keyboard");
+	case EODInputDevice::Gamepad: return TEXT("Gamepad");
+	case EODInputDevice::Wheel: return TEXT("Wheel");
+	default: return TEXT("?");
+	}
+}
+
+void AODVehiclePawn::UpdateActiveInputDevice()
+{
+	const double Now = GetWorld()->GetTimeSeconds();
+
+	// keyboard: any drive key currently held counts as "just used"
+	if (bThrottleKey || bBrakeKey || bLeftKey || bRightKey)
+	{
+		LastKeyboardInputTime = Now;
+	}
+
+	// gamepad: latched value changed since last tick (covers stick return-
+	// to-center too, which is itself a real "still touching it" signal)
+	if (GamepadSteerRaw != PrevGamepadSteerRaw || GamepadThrottleRaw != PrevGamepadThrottleRaw
+		|| GamepadBrakeRaw != PrevGamepadBrakeRaw || bGamepadHandbrake)
+	{
+		LastGamepadInputTime = Now;
+	}
+	PrevGamepadSteerRaw = GamepadSteerRaw;
+	PrevGamepadThrottleRaw = GamepadThrottleRaw;
+	PrevGamepadBrakeRaw = GamepadBrakeRaw;
+
+	// wheel: any bound axis moved since last tick (pedals commonly idle at a
+	// hard extreme rather than 0.5, so "away from center" can't tell idle
+	// from active - a CHANGE can)
+	bool bWheelChanged = bWheelHandbrake;
+	for (int32 i = 0; i < NumWheelAxesBound; ++i)
+	{
+		if (!FMath::IsNearlyEqual(RawWheelAxis[i], PrevWheelAxis[i], 0.0005f))
+		{
+			bWheelChanged = true;
+		}
+		PrevWheelAxis[i] = RawWheelAxis[i];
+	}
+	if (bWheelChanged)
+	{
+		LastWheelInputTime = Now;
+	}
+
+	if (DeviceMode != EODInputDevice::Auto)
+	{
+		ActiveDevice = DeviceMode;
+		return;
+	}
+	// Auto: last device wins. Ties (all zero, e.g. right at BeginPlay) fall
+	// back to Keyboard so a keyboard-only player sees exactly today's
+	// behavior with no gamepad/wheel plugged in.
+	ActiveDevice = EODInputDevice::Keyboard;
+	double Best = LastKeyboardInputTime;
+	if (LastGamepadInputTime > Best)
+	{
+		Best = LastGamepadInputTime;
+		ActiveDevice = EODInputDevice::Gamepad;
+	}
+	if (LastWheelInputTime > Best)
+	{
+		ActiveDevice = EODInputDevice::Wheel;
+	}
 }
 
 void AODVehiclePawn::HandbrakePressed()
@@ -495,7 +872,7 @@ void AODVehiclePawn::HandbrakeReleased()
 	Movement->SetHandbrakeInput(false);
 }
 
-void AODVehiclePawn::UpdateFreeLook()
+void AODVehiclePawn::UpdateFreeLook(float DeltaSeconds)
 {
 	// raw poll, same DIRECT-input philosophy as the keyboard axes below - no
 	// axis mapping needed, so nothing to configure in project settings. Signs
@@ -509,21 +886,53 @@ void AODVehiclePawn::UpdateFreeLook()
 	}
 	float MouseX = 0.0f, MouseY = 0.0f;
 	PC->GetInputMouseDelta(MouseX, MouseY);
-	if (MouseX == 0.0f && MouseY == 0.0f)
+	// gamepad right stick (2026-08-27): same freelook, fed as an additional
+	// delta source alongside the mouse - a stick reports a held POSITION, not
+	// a per-frame delta like the mouse, so it's scaled by DeltaSeconds here
+	// (a small deadzone keeps stick noise from fighting the recenter timer).
+	if (FMath::Abs(GamepadLookX) > GamepadDeadzone)
+	{
+		MouseX += GamepadLookX * GamepadLookSensitivityDegPerSec * DeltaSeconds;
+	}
+	if (FMath::Abs(GamepadLookY) > GamepadDeadzone)
+	{
+		MouseY += -GamepadLookY * GamepadLookSensitivityDegPerSec * DeltaSeconds;
+	}
+	if (MouseX != 0.0f || MouseY != 0.0f)
+	{
+		LastLookInputTime = GetWorld()->GetTimeSeconds();
+		LookYawDeg = FMath::UnwindDegrees(LookYawDeg + MouseX * MouseLookSensitivity);
+		LookPitchDeg = FMath::Clamp(
+			LookPitchDeg - MouseY * MouseLookSensitivity, LookPitchMinDeg, LookPitchMaxDeg);
+	}
+	else if (GetWorld()->GetTimeSeconds() - LastLookInputTime > LookRecenterDelaySec)
+	{
+		// hands off the mouse for a beat: ease back to the straight-ahead
+		// chase view. FInterpTo on the unwound yaw takes the short way
+		// around (e.g. from 350 deg it eases through 360, not back across
+		// the car), because UnwindDegrees keeps yaw in [-180, 180].
+		if (LookYawDeg == 0.0f && LookPitchDeg == 0.0f)
+		{
+			return;
+		}
+		LookYawDeg = FMath::FInterpTo(LookYawDeg, 0.0f, DeltaSeconds, LookRecenterSpeed);
+		LookPitchDeg = FMath::FInterpTo(LookPitchDeg, 0.0f, DeltaSeconds, LookRecenterSpeed);
+		if (FMath::Abs(LookYawDeg) < 0.05f && FMath::Abs(LookPitchDeg) < 0.05f)
+		{
+			LookYawDeg = 0.0f;
+			LookPitchDeg = 0.0f;
+		}
+	}
+	else
 	{
 		return;
 	}
-	LookYawDeg = FMath::UnwindDegrees(LookYawDeg + MouseX * MouseLookSensitivity);
-	LookPitchDeg = FMath::Clamp(
-		LookPitchDeg - MouseY * MouseLookSensitivity, LookPitchMinDeg, LookPitchMaxDeg);
 	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg + LookPitchDeg, LookYawDeg, 0.0f));
 }
 
 void AODVehiclePawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-
-	UpdateFreeLook();
 
 	if (!bGroundSnapped)
 	{
@@ -533,6 +942,19 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 			return;   // still frozen waiting for a real ground reading
 		}
 	}
+
+	// only orbit the camera once the car is actually driveable - polling
+	// GetInputMouseDelta() from BeginPlay onward (as this used to) soaks up
+	// whatever mouse movement happens during the menu-to-drive handoff (e.g.
+	// clicking "Drive" while the cursor is still visible/free for UI), so by
+	// the time the car appears LookYawDeg already has a large accumulated
+	// offset baked in - looked exactly like a frozen, off-to-the-side camera
+	// that mouse nudges barely dented.
+	UpdateFreeLook(DeltaSeconds);
+
+	// controller/wheel device selection (2026-08-27) - resolves ActiveDevice
+	// (Auto = last-device-wins) from this frame's latched axis/key state.
+	UpdateActiveInputDevice();
 
 	// scripted-drive hooks override the keys (headless verification)
 	const float Now = GetWorld()->GetTimeSeconds();
@@ -553,14 +975,32 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	{
 		bBrakeKey = true;
 	}
+	if (SetVAt > 0.0f && Now > SetVAt && Body->IsSimulatingPhysics())
+	{
+		SetVAt = -1.0f;   // once
+		Body->SetPhysicsLinearVelocity(GetActorForwardVector() * SetVCmS);
+		UE_LOG(LogTemp, Display,
+			TEXT("ODVehiclePawn SCRIPTDRIVE: velocity hard-set to %.0f cm/s"),
+			SetVCmS);
+	}
 
 	// keyboard keys -> smoothed axes; the ONLY input shaping in the game
-	const float SteerTarget =
+	float SteerTarget =
 		(bRightKey ? 1.0f : 0.0f) - (bLeftKey ? 1.0f : 0.0f);
+	// speed-sensitive scale (see the UPROPERTY comment): both the lock the
+	// key can command AND the rate it ramps there shrink with speed; the
+	// return-to-center rate is deliberately left at full strength.
+	const float FadeT = FMath::Clamp(
+		(FMath::Abs(Movement->GetForwardSpeed()) - SteerFadeStartCmS) /
+			FMath::Max(SteerFadeEndCmS - SteerFadeStartCmS, 1.0f),
+		0.0f, 1.0f);
+	const float FadeS = FadeT * FadeT * (3.0f - 2.0f * FadeT);
+	const float SteerScale = FMath::Lerp(1.0f, HighSpeedSteerFrac, FadeS);
+	SteerTarget *= SteerScale;
 	const float Rate = FMath::Abs(SteerTarget) > 0.01f &&
 		FMath::Sign(SteerTarget) != FMath::Sign(SmSteer)
-			? SteerRate + SteerReturnRate
-			: (FMath::Abs(SteerTarget) > 0.01f ? SteerRate : SteerReturnRate);
+			? SteerRate * SteerScale + SteerReturnRate
+			: (FMath::Abs(SteerTarget) > 0.01f ? SteerRate * SteerScale : SteerReturnRate);
 	SmSteer = FMath::FInterpConstantTo(SmSteer, SteerTarget, DeltaSeconds, Rate);
 	SmThrottle = FMath::FInterpConstantTo(
 		SmThrottle, bThrottleKey ? HookThrottle : 0.0f, DeltaSeconds, PedalRate);
@@ -571,9 +1011,47 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		SmSteer = 0.5f;
 	}
 
-	Movement->SetSteeringInput(SmSteer);
-	Movement->SetThrottleInput(SmThrottle);
-	Movement->SetBrakeInput(SmBrake);
+	// controller/wheel device selection (2026-08-27): feed Movement from
+	// whichever device is active this tick. Gamepad/wheel axes are already
+	// their own final values (deadzone+curve applied in the Gamepad*Axis
+	// callbacks above; wheel is 1:1 below) - they do NOT go through
+	// SmSteer/SmThrottle/SmBrake, which stay exactly the keyboard path.
+	if (ActiveDevice == EODInputDevice::Gamepad)
+	{
+		Movement->SetSteeringInput(GamepadSteerRaw);
+		Movement->SetThrottleInput(GamepadThrottleRaw);
+		Movement->SetBrakeInput(GamepadBrakeRaw);
+		Movement->SetHandbrakeInput(bGamepadHandbrake);
+	}
+	else if (ActiveDevice == EODInputDevice::Wheel)
+	{
+		// wheel: full range, 1:1, NO deadzone and NO response curve (unlike
+		// the gamepad stick above) - only the configurable degrees-of-
+		// rotation scale and per-pedal invert flags, per the task spec.
+		auto WheelAxis = [this](int32 OneBasedIndex) -> float
+		{
+			const int32 Idx = FMath::Clamp(OneBasedIndex - 1, 0, NumWheelAxesBound - 1);
+			return RawWheelAxis[Idx];
+		};
+		const float SteerRaw01 = WheelAxis(WheelSteerAxisIndex);
+		const float WheelSteer = FMath::Clamp(
+			(SteerRaw01 * 2.0f - 1.0f) * WheelDegreesOfRotationScale, -1.0f, 1.0f);
+		float WheelThrottle = WheelAxis(WheelThrottleAxisIndex);
+		float WheelBrake = WheelAxis(WheelBrakeAxisIndex);
+		if (bWheelInvertThrottle) { WheelThrottle = 1.0f - WheelThrottle; }
+		if (bWheelInvertBrake) { WheelBrake = 1.0f - WheelBrake; }
+		Movement->SetSteeringInput(WheelSteer);
+		Movement->SetThrottleInput(WheelThrottle);
+		Movement->SetBrakeInput(WheelBrake);
+		Movement->SetHandbrakeInput(bWheelHandbrake);
+	}
+	else   // Keyboard (also the Auto-mode default with nothing else plugged in)
+	{
+		Movement->SetSteeringInput(SmSteer);
+		Movement->SetThrottleInput(SmThrottle);
+		Movement->SetBrakeInput(SmBrake);
+		// handbrake already applied directly by HandbrakePressed/Released
+	}
 
 	// wheel visuals: suspension travel + steer + spin from our sim
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
@@ -584,5 +1062,56 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		WheelVisuals[i]->SetRelativeLocation(Movement->GetWheelLocalPos(i));
 		WheelVisuals[i]->SetRelativeRotation(
 			FRotator(-WheelSpinDeg[i], Movement->GetWheelSteerDeg(i), 0.0f));
+	}
+
+	// rollover tripwire (2026-08-27): Taylor reported hard braking at speed
+	// launching multi-rotation barrel rolls. Log the full state the moment
+	// roll goes wild so headless scripted-drive repros (-odrev/-odbrake) can
+	// pin down WHICH force starts it (tire Fy vs chassis-nose ground contact
+	// vs a carve edge). Throttled; silent in normal driving.
+	if (bGroundSnapped && Body->IsSimulatingPhysics())
+	{
+		const FVector AngVelLocal = Body->GetComponentTransform()
+			.InverseTransformVectorNoScale(Body->GetPhysicsAngularVelocityInDegrees());
+		const float RollDeg = GetActorRotation().Roll;
+		if ((FMath::Abs(AngVelLocal.X) > 300.0f || FMath::Abs(RollDeg) > 60.0f)
+			&& GetWorld()->GetTimeSeconds() - LastRollLogTime > 0.25)
+		{
+			LastRollLogTime = GetWorld()->GetTimeSeconds();
+			UE_LOG(LogTemp, Warning,
+				TEXT("ODVehiclePawn ROLLOVER: v=%.0f cm/s roll=%.0f pitch=%.0f "
+				     "angvel(local xyz)=%.0f/%.0f/%.0f brake=%.2f steer=%.2f "
+				     "contact=%d%d%d%d z=%.0f"),
+				Movement->GetForwardSpeed(), RollDeg, GetActorRotation().Pitch,
+				AngVelLocal.X, AngVelLocal.Y, AngVelLocal.Z, SmBrake, SmSteer,
+				Movement->IsWheelInContact(0) ? 1 : 0,
+				Movement->IsWheelInContact(1) ? 1 : 0,
+				Movement->IsWheelInContact(2) ? 1 : 0,
+				Movement->IsWheelInContact(3) ? 1 : 0,
+				GetActorLocation().Z);
+		}
+
+		// 1 Hz scripted-drive telemetry: only when a headless hook is armed
+		// (-odrev/-odbrake/...), so real play stays silent. Exists because the
+		// first BrakeRoll repro ran 60 s "clean" while the car was actually
+		// stuck off-road at ~10% speed the whole time - a repro is only
+		// trustworthy if the log proves the speed it braked from.
+		if ((RevAt > 0.0f || BrakeAt > 0.0f || SteerAt > 0.0f || LiftAt > 0.0f)
+			&& GetWorld()->GetTimeSeconds() - LastScriptLogTime > 1.0)
+		{
+			LastScriptLogTime = GetWorld()->GetTimeSeconds();
+			UE_LOG(LogTemp, Display,
+				TEXT("ODVehiclePawn SCRIPTDRIVE: t=%.1f v=%.0f cm/s roll=%.1f "
+				     "pitch=%.1f thr=%.2f brake=%.2f steer=%.2f contact=%d%d%d%d "
+				     "pos=%.0f/%.0f/%.0f"),
+				GetWorld()->GetTimeSeconds(), Movement->GetForwardSpeed(),
+				GetActorRotation().Roll, GetActorRotation().Pitch,
+				SmThrottle, SmBrake, SmSteer,
+				Movement->IsWheelInContact(0) ? 1 : 0,
+				Movement->IsWheelInContact(1) ? 1 : 0,
+				Movement->IsWheelInContact(2) ? 1 : 0,
+				Movement->IsWheelInContact(3) ? 1 : 0,
+				GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+		}
 	}
 }

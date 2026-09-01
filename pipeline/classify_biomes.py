@@ -90,7 +90,19 @@ def fetch_imagery_mosaic(west, south, east, north):
 
 def classify_rgb(mosaic):
     """Same heuristic as make_detail_textures.py - kept in sync by eye, not
-    import, since that script is stage-square-shaped and this is bbox-shaped."""
+    import, since that script is stage-square-shaped and this is bbox-shaped.
+
+    w_bare added here (2026-08-27, NOT mirrored back to make_detail_textures.py
+    - that script only paints ground texture and has no biome to get wrong)
+    to fix a real Green Valley/Palmdale rebake bug: w_forest was previously
+    defined purely as the 1-minus-everything-else leftover bucket, so bare
+    warm-toned desert dirt/sand (which is neither clearly grass, nor rock
+    -  w_rock's green<0.04-AND-val>0.45 rock signature is much stricter than
+    typical dry soil - nor water) fell entirely into w_forest and got
+    classified as dense Deciduous/Chaparral canopy. w_bare picks out that
+    bright, low-saturation, warm (red > blue) signature explicitly so it can
+    be routed to BIOME_DESERT in pick_biome() instead of masquerading as
+    forest cover."""
     sat = mosaic.astype(np.float32) / 255.0
     r, g, b = sat[..., 0], sat[..., 1], sat[..., 2]
     val = sat.max(axis=2)
@@ -98,8 +110,47 @@ def classify_rgb(mosaic):
     w_water = np.clip((0.28 - val) * 8, 0, 1) * np.clip((b - r + 0.05) * 8, 0, 1)
     w_grass = np.clip(green * 6, 0, 1) * np.clip((val - 0.32) * 6, 0, 1)
     w_rock = np.clip((0.04 - green) * 8, 0, 1) * np.clip((val - 0.45) * 6, 0, 1)
-    w_forest = np.clip(1.0 - w_grass - w_rock - w_water, 0, 1)
-    return w_forest, w_grass, w_rock, w_water
+    # weakly-green (not vegetated, but not rock's near-zero-green extreme
+    # either) + warm-toned (red channel above blue - tan/ochre soil, not
+    # grey rock or blue-tinted shadow) => bare/desert ground. Brightness
+    # floor kept low (0.20, not requiring full sun) so shadowed/dim dry
+    # scrub still reads as bare rather than falling to the w_forest leftover
+    # bucket by default - real forest canopy stays distinguishable because
+    # its green channel dominates (green > 0) even in shadow, which the
+    # (0.18 - green) term still excludes.
+    w_bare = (np.clip((val - 0.20) * 4, 0, 1)
+              * np.clip((0.18 - green) * 5, 0, 1)
+              * np.clip((r - b + 0.02) * 8, 0, 1))
+    w_forest = np.clip(1.0 - w_grass - w_rock - w_water - w_bare, 0, 1)
+    return w_forest, w_grass, w_rock, w_water, w_bare
+
+
+RUGGED_WINDOW = 21    # stations (5 m spacing) => ~100 m centered window
+CANYON_GRADE_MIN = 0.06   # 6% local grade floor - below this, "rock-colored"
+                          # ground is flat bare soil/pavement, not badlands
+
+
+def segment_ruggedness(elev, s_m, window=RUGGED_WINDOW):
+    """Local terrain ruggedness proxy: the steepest station-to-station grade
+    (|delta elevation| / |delta s|) within a window centered on each point,
+    computed at the road's native 5 m station spacing (BEFORE the
+    SAMPLE_STRIDE subsampling in main()) so a short steep stretch isn't
+    smoothed away by only landing on every 10th point. Computed per-segment
+    (not on the globally concatenated arrays) since s_m resets to 0 at each
+    segment start and a cross-segment diff would be bogus."""
+    elev = np.asarray(elev, dtype=np.float64)
+    s_m = np.asarray(s_m, dtype=np.float64)
+    if len(elev) < 2:
+        return np.zeros_like(elev)
+    d_elev = np.diff(elev)
+    d_s = np.diff(s_m)
+    d_s = np.where(np.abs(d_s) < 1e-6, 1e-6, d_s)
+    grade = np.abs(d_elev / d_s)
+    grade = np.concatenate([grade, grade[-1:]])   # align back to len(elev)
+    pad = window // 2
+    padded = np.pad(grade, (pad, pad), mode="edge")
+    windows = np.stack([padded[i:i + len(grade)] for i in range(window)])
+    return windows.max(axis=0)
 
 
 def sample_bilinear(chan, bounds, lon, lat):
@@ -116,16 +167,31 @@ def sample_bilinear(chan, bounds, lon, lat):
         + c10 * (1 - fx) * fy + c11 * fx * fy
 
 
-def pick_biome(w_forest, w_grass, w_rock, w_water, elev_m, lat_deg):
+def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg, grade=1.0):
     """Elevation/latitude bands tuned for the Skagit/Cascades loop specifically
     (see module docstring) - not a general-purpose elevation->biome model. A
     real per-region model is the ESA WorldCover + climate-raster work (7.3).
     Extended 2026-07-23 (Arc 7.0 pivot) from 7 to 14 archetypes using the same
     coarse RGB+elevation signal plus latitude as a tropics/arctic proxy - this
     stays a placeholder until 7.3's real classifier lands, it just widens the
-    output space to match the full archetype list."""
+    output space to match the full archetype list.
+
+    `grade` (2026-08-27 fix): local terrain ruggedness (see
+    segment_ruggedness), defaults to 1.0 (always "rugged") for any caller
+    that doesn't have station spacing to derive it from. w_rock's
+    green<0.04-ish + bright signature is satisfied by BOTH grey eroded rock
+    AND bright warm bare desert soil (tan/ochre dirt has red/blue both above
+    green, so `green = g - max(r, b)` reads deeply negative same as rock) -
+    color alone can't tell flat bright bare valley floor apart from steep
+    rocky badlands. Found live: the Antelope Valley floor near Antelope
+    Acres (~34.78N -118.35W - flat, bright, warm bare soil/sparse scrub)
+    was classifying CanyonBadlands solely off w_rock, despite having
+    near-zero road grade. CanyonBadlands is now gated on actual ruggedness;
+    flat "rock-colored" ground falls through to the w_bare check below and
+    lands in Desert instead, while genuinely steep eroded terrain (high
+    grade) still commits to Canyon/Alpine same as before."""
     abs_lat = abs(lat_deg)
-    if w_rock > 0.35:
+    if w_rock > 0.35 and grade > CANYON_GRADE_MIN:
         if elev_m > 1200.0 or (elev_m > 500.0 and abs_lat > 35.0):
             return BIOME_ALPINE
         return BIOME_CANYON
@@ -135,6 +201,18 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, elev_m, lat_deg):
         return BIOME_WETLAND
     if abs_lat > 60.0 and w_forest < 0.5:
         return BIOME_ARCTIC
+    # BIOME_DESERT was completely unreachable before this (2026-08-27 fix):
+    # w_forest is a leftover bucket (1 - grass - rock - water), and bare warm
+    # desert dirt/sand doesn't trip w_rock's strict near-zero-green+bright
+    # signature, so it fell straight into w_forest and lost to the
+    # w_forest>=w_grass branch below every time - Green Valley's expanded
+    # rebake toward Palmdale/Hwy 14 came back 25712 Deciduous / 10702
+    # Chaparral / 6899 Canyon / 0 Desert out of 43313 points, i.e. dense lush
+    # forest painted over what should read as sparse high-desert scrub. A
+    # strong bare-ground signal (see classify_rgb's w_bare) now commits to
+    # Desert before the forest-vs-grass split gets a chance to eat it.
+    if w_bare > 0.35 and w_forest < 0.6:
+        return BIOME_DESERT
     if w_forest >= w_grass:
         if abs_lat < 23.5:
             return BIOME_RAINFOREST
@@ -168,6 +246,11 @@ def main():
     lon = np.concatenate([np.array(seg["lon"]) for seg in data["segments"]])
     lat = np.concatenate([np.array(seg["lat"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
+    # grade computed per-segment (s_m resets per segment) at native 5 m
+    # spacing, then concatenated in the same order as the other arrays so
+    # it survives the shared SAMPLE_STRIDE subsampling below intact.
+    grade = np.concatenate([segment_ruggedness(seg["elev_m"], seg["s_m"])
+                             for seg in data["segments"]])
     # east_m/north_m are already in the SAME local frame (origin = bbox
     # center) every other consumer uses - reuse directly rather than
     # re-deriving the lon/lat projection a second time. UE frame is
@@ -175,6 +258,7 @@ def main():
     east_m = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north_m = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     lon, lat, elev = lon[::SAMPLE_STRIDE], lat[::SAMPLE_STRIDE], elev[::SAMPLE_STRIDE]
+    grade = grade[::SAMPLE_STRIDE]
     east_m, north_m = east_m[::SAMPLE_STRIDE], north_m[::SAMPLE_STRIDE]
     x_cm, y_cm = east_m * 100.0, -north_m * 100.0
     print(f"{len(lon)} sample point(s) (every {SAMPLE_STRIDE}th station)")
@@ -185,15 +269,17 @@ def main():
     south, north = float(lat.min() - buf_lat), float(lat.max() + buf_lat)
 
     mosaic, bounds = fetch_imagery_mosaic(west, south, east, north)
-    w_forest, w_grass, w_rock, w_water = classify_rgb(mosaic)
+    w_forest, w_grass, w_rock, w_water, w_bare = classify_rgb(mosaic)
 
     sf = sample_bilinear(w_forest, bounds, lon, lat)
     sg = sample_bilinear(w_grass, bounds, lon, lat)
     sr = sample_bilinear(w_rock, bounds, lon, lat)
     sw = sample_bilinear(w_water, bounds, lon, lat)
+    sb = sample_bilinear(w_bare, bounds, lon, lat)
 
     biomes = [pick_biome(float(sf[i]), float(sg[i]), float(sr[i]), float(sw[i]),
-                          float(elev[i]), float(lat[i])) for i in range(len(lon))]
+                          float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]))
+              for i in range(len(lon))]
     forest_weight = np.clip(sf + 0.3 * sg, 0, 1)   # density signal, not just the forest channel
 
     out = {

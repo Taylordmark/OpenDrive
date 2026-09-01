@@ -166,19 +166,33 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Road")
 	int32 MaxNewLoadsPerTick = 2;
 
-	/** Cap on chunk *components* (NewObject/RegisterComponent/collision-enable)
-	 *  built per tick, across however many tiles are mid-build at once (2026-
-	 *  08-25, Taylor: full-map junction-pad collision investigation) - see
-	 *  ProcessPendingChunkBuilds's header comment on OnTileParsed for why this
-	 *  exists: building every chunk in a big same-frame burst (a full map's
-	 *  ~260 near-tile chunks) left some components' physics state reporting
-	 *  itself valid yet never actually queryable in the world's physics scene,
-	 *  while the identical geometry built in a small burst (--solo, 5 chunks)
-	 *  worked immediately - a Chaos/UE5.8 bulk-registration issue, not a bug
-	 *  in this class's own bookkeeping. Spreading the same total work across
-	 *  more frames avoids ever hitting that many same-frame registrations. */
+	/** Millisecond budget for chunk *components* (NewObject/RegisterComponent/
+	 *  collision-enable) built per tick, across however many tiles are
+	 *  mid-build at once (2026-08-25, Taylor: full-map junction-pad collision
+	 *  investigation) - see ProcessPendingChunkBuilds's header comment on
+	 *  OnTileParsed for why this exists: building every chunk in a big
+	 *  same-frame burst (a full map's ~260 near-tile chunks) left some
+	 *  components' physics state reporting itself valid yet never actually
+	 *  queryable in the world's physics scene, while the identical geometry
+	 *  built in a small burst (--solo, 5 chunks) worked immediately - a
+	 *  Chaos/UE5.8 bulk-registration issue, not a bug in this class's own
+	 *  bookkeeping. Spreading the same total work across more frames avoids
+	 *  ever hitting that many same-frame registrations.
+	 *
+	 *  2026-08-27 (fast-drive hitch investigation): converted from a bare
+	 *  chunk-COUNT budget (was ChunksPerFrameBudget=8) to a time budget, same
+	 *  reasoning as AODTerrainManager::TileBuildMsBudget - chunk vertex counts
+	 *  vary a lot (a merged host+junction-pad chunk vs. a short ordinary
+	 *  ribbon segment), so a fixed count per tick doesn't actually bound frame
+	 *  time. ProcessPendingChunkBuilds keeps building queued chunks while
+	 *  accumulated stage time stays under this budget, always finishing at
+	 *  least one chunk per tick. Collision cook cost is additionally moved off
+	 *  this budget's critical path via bUseAsyncCooking (see
+	 *  CreateChunkMeshComponent) without changing how many chunks actually
+	 *  REGISTER per frame - see that function's comment for why that
+	 *  distinction matters against the bulk-registration bug above. */
 	UPROPERTY(EditAnywhere, Category = "Road")
-	int32 ChunksPerFrameBudget = 8;
+	float ChunkBuildMsBudget = 3.0f;
 
 	/** Content/OpenDrive/Masks/<prefix>.bin - full-density road centerline
 	 *  (pipeline/export_road_centerline_bin.py, same ODC1 sidecar format
@@ -265,6 +279,24 @@ public:
 	 *  and face the car along it. False if no centerline is loaded. */
 	bool NearestRoadPoint(const FVector2D& Query, FVector2D& OutPoint,
 		float& OutYawDeg) const;
+
+	/** Loading-gate readiness check (2026-08-27, spawn-loading-screen task):
+	 *  true once there are no chunk builds queued and no tile parses in
+	 *  flight. Unlike AODTerrainManager's version this isn't keyed to a
+	 *  position/radius - roads only ever load the ring around the player to
+	 *  begin with (SpawnRadius), so "nothing pending or in-flight" already
+	 *  means everything currently in reach is fully built. */
+	bool IsInitialStreamingSettled() const { return PendingChunkBuilds.Num() == 0 && PendingTiles.Num() == 0; }
+
+	/** Progress numbers for the loading screen's "roads N/M" line - N is
+	 *  fully-resident tiles, M adds in-flight ones (parsing or queued for
+	 *  their chunk build) so the count grows as the ring dispatches and
+	 *  catches back up as each tile finishes. */
+	void GetStreamingProgress(int32& OutBuilt, int32& OutTotal) const
+	{
+		OutBuilt = Tiles.Num();
+		OutTotal = Tiles.Num() + PendingTiles.Num();
+	}
 
 private:
 	void LoadCenterline();

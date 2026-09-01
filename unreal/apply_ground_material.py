@@ -113,9 +113,42 @@ tools = unreal.AssetToolsHelpers.get_asset_tools()
 MEL = unreal.MaterialEditingLibrary
 
 mat_path = f"{MAT_DIR}/{MAT_NAME}"
+
+# Vertex-color ground tint (2026-08-26, terrain biome tint task): this script
+# used to fully DELETE and re-create M_GroundStylized every run. That turned
+# out to be unreliable in headless -run=pythonscript mode: EditorAssetLibrary
+# .delete_asset() would intermittently/repeatably fail ("something still
+# holds a live reference to it") on a material that had just been through
+# MEL.recompile_material() + save_asset() in an earlier run, even with zero
+# Python references left and zero asset-registry referencers - almost
+# certainly the async shader-compile/material-resource machinery keeping the
+# UMaterial alive a little longer than a plain load+delete would. Deleting
+# nothing sidesteps the whole problem: if the asset already exists, load it,
+# log its current graph for a real before/after record, then wipe its
+# expressions with delete_all_material_expressions() (an in-place clear, not
+# an asset delete) and rebuild onto the SAME UMaterial object. This is what
+# makes the script actually re-runnable, which it needs to be as a repeatable
+# pipeline step.
 if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
-    unreal.EditorAssetLibrary.delete_asset(mat_path)
-mat = tools.create_asset(MAT_NAME, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mat = unreal.load_asset(mat_path)
+    log("--- pre-edit M_GroundStylized expression graph ---")
+    try:
+        old_exprs = MEL.get_material_expressions(mat)
+        for expr in old_exprs:
+            pos = MEL.get_material_expression_node_position(expr)
+            log(f"  {expr.get_class().get_name()} @ {pos}")
+        # the exact node this change taps - confirms what's really driving
+        # MP_BASE_COLOR before the graph gets cleared and rebuilt below.
+        base_color_node = MEL.get_material_property_input_node(
+            mat, unreal.MaterialProperty.MP_BASE_COLOR)
+        log(f"  MP_BASE_COLOR currently driven by: "
+            f"{base_color_node.get_class().get_name() if base_color_node else None}")
+    except Exception as exc:  # inspection is best-effort/diagnostic only - never block the rebuild
+        log(f"  (inspection failed, proceeding with rebuild anyway: {exc})")
+    log("--- end pre-edit graph ---")
+    MEL.delete_all_material_expressions(mat)
+else:
+    mat = tools.create_asset(MAT_NAME, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
 
 # ---- slope = dot(vertex normal, world up) - 1.0 on flat ground, ~0 on cliffs
 normal = MEL.create_material_expression(
@@ -195,12 +228,46 @@ rock_n_tex.set_editor_property("texture", tex_rock_n)
 rock_n_tex.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
 connect_uv(detail_uv, rock_n_tex)
 
-# tint the sampled texture by the same constants used to tune the flat
-# color before - the texture supplies per-pixel variation, the constant
-# still sets the overall hue (keeps the 2026-07-28 color-tuning history valid)
+# GRASS branch (2026-08-27 rework): hue now comes from the per-vertex biome
+# tint, NOT from GRASS_COLOR. The original design multiplied the biome tint
+# over an already-green textured base at the very end of the graph - but
+# multiply can only darken channels, so a tan desert tint could never
+# overcome the green base (and the near-identical dark greens would have
+# rendered forests almost black). Discovered 2026-08-27 when Antelope
+# Valley rendered lush green over correctly-baked Canyon-tan vertex colors
+# ... which it turned out were never wired into the shipped asset at all.
+# Now: desaturate the grass detail texture to pure brightness variation,
+# regain it toward ~1.0, and let the vertex color BE the ground hue.
+# AODTerrainManager bakes absolute ground colors (BiomeGroundTintTable's
+# Deciduous entry ~= the old GRASS_COLOR), and fills a default green when a
+# tile has no biome data, so flat ground everywhere stays sensibly colored.
+# Rock cliffs keep ROCK_COLOR via the slope lerp below - the biome tint
+# only owns the flat/"grass" branch. GRASS_COLOR itself is now unused by
+# the graph (kept above for the tuning-history record).
+vertex_tint = MEL.create_material_expression(mat, unreal.MaterialExpressionVertexColor, -600, -300)
+grass_desat = MEL.create_material_expression(mat, unreal.MaterialExpressionDesaturation, -500, -450)
+MEL.connect_material_expressions(grass_tex, "RGB", grass_desat, "")
+# detail texture averages ~0.5 luma; x2 recenters variation around 1.0 so
+# the vertex tint's own brightness carries through unchanged on average
+grass_var_gain = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -500, -250)
+grass_var_gain.set_editor_property("r", 2.0)
+grass_var = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -450, -400)
+MEL.connect_material_expressions(grass_desat, "", grass_var, "A")
+MEL.connect_material_expressions(grass_var_gain, "", grass_var, "B")
 grass_tinted = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -400, -350)
-MEL.connect_material_expressions(grass_tex, "RGB", grass_tinted, "A")
-MEL.connect_material_expressions(grass, "", grass_tinted, "B")
+MEL.connect_material_expressions(grass_var, "", grass_tinted, "A")
+# VertexColor's RGB output pin is NOT addressable as "RGB" in UE 5.8's
+# python binding - connecting with "RGB" silently no-ops (returns false,
+# nothing raises), leaving Multiply.B unconnected so it falls back to its
+# ConstB=1.0 default and the tint vanishes. Same gotcha family as the
+# Clamp note below; caught 2026-08-27 by the saved-asset graph probe
+# (scratchpad verify_groundmat_graph.py: inputs=['Multiply', 'None']).
+# "" selects the first (RGB) output, same as every other node here.
+for pin in ("", "RGB"):
+    if MEL.connect_material_expressions(vertex_tint, pin, grass_tinted, "B"):
+        break
+else:
+    raise RuntimeError("could not connect VertexColor -> grass tint multiply")
 rock_tinted = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -400, 150)
 MEL.connect_material_expressions(rock_tex, "RGB", rock_tinted, "A")
 MEL.connect_material_expressions(rock, "", rock_tinted, "B")
@@ -287,6 +354,9 @@ MEL.connect_material_expressions(lerp, "", final_lerp, "A")
 MEL.connect_material_expressions(sand, "", final_lerp, "B")
 MEL.connect_material_expressions(sand_factor, "", final_lerp, "Alpha")
 
+# biome tint is applied in the GRASS branch above (vertex color IS the hue),
+# not multiplied over the finished blend here - see the 2026-08-27 comment on
+# the grass branch for why the old end-of-graph multiply could never work.
 MEL.connect_material_property(final_lerp, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
 # roughness: lower over sand (damp-looking) - lerp the same way as color
@@ -313,6 +383,8 @@ MEL.recompile_material(mat)
 # apply_building_material.py had the identical gap from its original
 # authorship, fixed the same way, same day.
 unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
-log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' (grass={GRASS_COLOR}, rock={ROCK_COLOR}, "
+log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' (rock={ROCK_COLOR}, "
     f"sand={SAND_COLOR}, beach_band={BEACH_BAND_CM:.1f}cm, "
-    f"SeaLevelZCm param default={SEA_LEVEL_Z_CM:.1f} (ORIGIN_HEIGHT_M={ORIGIN_HEIGHT_M}))")
+    f"SeaLevelZCm param default={SEA_LEVEL_Z_CM:.1f} (ORIGIN_HEIGHT_M={ORIGIN_HEIGHT_M}), "
+    f"flat-ground hue = biome vertex color x desaturated grass detail "
+    f"(AODTerrainManager::ApplyBiomeTint, 2026-08-27 rework))")
