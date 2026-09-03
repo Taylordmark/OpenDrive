@@ -117,22 +117,38 @@ class Mesh:
         radius = float(np.mean([np.linalg.norm(p[:2] - centroid[:2]) for p in top]))
         return centroid, radius
 
-    def card_cluster(self, center, size_w, size_h, cell, n_cross=2, base_az=None):
+    def card_cluster(self, center, size_w, size_h, cell, n_cross=2, base_az=None,
+                      up_dir=None):
         """A small crossed-quad clump of foliage cards centered on 'center'
         (spans center +/- size_h/2 vertically, not base-up-only - a card
         that only grows up from its attach point reads as a thin flag; a
         card centered on it fills crown volume with far fewer clusters) -
         the standard billboard-card-tree technique. Planes are spread evenly
         over pi radians around world-Z (a plane at theta and theta+pi are
-        the same double-sided plane, so pi is the full unique range)."""
+        the same double-sided plane, so pi is the full unique range).
+        up_dir: optional (x,y,z) direction the card grows toward (default
+        world-Z). Conifer boughs droop down-and-out rather than standing
+        as vertical curtains - see scatter_cone_crown's droop arg, which
+        computes this per-cluster."""
         if base_az is None:
             base_az = rng.uniform(0, math.pi)
         uv = cell_uv_rect(cell)
+        c = np.asarray(center, dtype=float)
+        if up_dir is None:
+            up_ref = np.array([0.0, 0.0, 1.0])
+        else:
+            up_ref = np.asarray(up_dir, dtype=float)
+            n = np.linalg.norm(up_ref)
+            up_ref = up_ref / n if n > 1e-6 else np.array([0.0, 0.0, 1.0])
         for k in range(n_cross):
             az = base_az + math.pi * k / n_cross
             right = np.array([math.cos(az), math.sin(az), 0.0])
-            up = np.array([0.0, 0.0, 1.0])
-            c = np.asarray(center, dtype=float)
+            # orthogonalize up against this plane's right axis so the quad
+            # stays non-degenerate even when up_ref isn't purely vertical
+            # (droopy conifer boughs - see scatter_cone_crown's droop arg)
+            up = up_ref - right * np.dot(up_ref, right)
+            un = np.linalg.norm(up)
+            up = up / un if un > 1e-6 else np.array([0.0, 0.0, 1.0])
             bl = c - right * size_w / 2 - up * size_h * 0.3
             br = c + right * size_w / 2 - up * size_h * 0.3
             tl = bl + up * size_h
@@ -186,15 +202,27 @@ class Mesh:
 def scatter_cone_crown(mesh, base_h, apex_h, base_r, top_r_frac, n_clusters,
                         cell, size_w, size_h, taper_pow=1.0, lean=None,
                         jitter_r=0.18, n_cross=2, az_range=None, az_center=0.0,
-                        tier_bands=None):
+                        tier_bands=None, droop=False, n_bands=None):
     """Scatter card clusters over a cone-shaped crown envelope. az_range
     (radians, None = full 2pi) + az_center let krummholz bias foliage to one
     side (wind-shear look). tier_bands: optional list of (t_lo, t_hi) to
-    sample from (layered/shelfy look, e.g. spruce) instead of continuous t."""
+    sample from (layered/shelfy look, e.g. spruce) instead of continuous t.
+
+    n_bands: when set (and tier_bands isn't), height is stratified into
+    n_bands equal bands and clusters are assigned round-robin across them
+    (instead of pure uniform-random t) so no band can come up empty by luck
+    - this is what keeps a dense conifer crown from getting random vertical
+    sky-gaps. droop=True tilts each cluster's card plane down-and-out
+    (blend of outward radial + downward) instead of straight up - reads as
+    a drooping bough instead of a vertical foliage curtain."""
     total_h = apex_h - base_h
-    for _ in range(n_clusters):
+    for i in range(n_clusters):
         if tier_bands:
             lo, hi = tier_bands[rng.integers(0, len(tier_bands))]
+            t = rng.uniform(lo, hi)
+        elif n_bands:
+            band = i % n_bands
+            lo, hi = band / n_bands, (band + 1) / n_bands
             t = rng.uniform(lo, hi)
         else:
             t = rng.uniform(0.0, 1.0)
@@ -210,7 +238,14 @@ def scatter_cone_crown(mesh, base_h, apex_h, base_r, top_r_frac, n_clusters,
         cy = dy + math.sin(ang) * r
         w = rng.uniform(*size_w) * (0.6 + 0.4 * (1 - t))  # slightly bigger low, smaller near tip
         hh = rng.uniform(*size_h)
-        mesh.card_cluster((cx, cy, h), w, hh, cell, n_cross=n_cross)
+        up_dir = None
+        if droop:
+            # outward radial (away from trunk axis) blended with a downward
+            # tilt - real conifer boughs angle out and slightly down from
+            # the trunk, not straight up like a flagpole.
+            out = np.array([math.cos(ang), math.sin(ang), 0.0])
+            up_dir = out * 0.55 + np.array([0.0, 0.0, 0.6])
+        mesh.card_cluster((cx, cy, h), w, hh, cell, n_cross=n_cross, up_dir=up_dir)
 
 
 def scatter_ellipsoid_crown(mesh, center, rx, ry, rz, n_clusters, cell,
@@ -259,10 +294,10 @@ def build_lodgepole_pine(name, height_scale=1.0, crown_start_frac=0.42):
     _, _ = m.trunk(profile, "bark_conifer", lean=lean)
     scatter_cone_crown(
         m, base_h=crown_h, apex_h=total_h, base_r=280 * height_scale,
-        top_r_frac=0.06, n_clusters=46, cell="pine_needle",
-        size_w=(130 * height_scale, 220 * height_scale),
-        size_h=(190 * height_scale, 300 * height_scale),
-        taper_pow=1.4, lean=lean, n_cross=2)
+        top_r_frac=0.06, n_clusters=104, cell="pine_needle",
+        size_w=(110 * height_scale, 190 * height_scale),
+        size_h=(170 * height_scale, 260 * height_scale),
+        taper_pow=1.4, lean=lean, n_cross=2, droop=True, n_bands=10)
     m.save(name, {"bark_conifer": BARK_TEX["bark_conifer"], "foliage": FOLIAGE_TEX})
 
 
@@ -272,7 +307,7 @@ def build_engelmann_spruce(name):
     total_h = 1500
     trunk_r0 = 30
     m = Mesh()
-    crown_h = total_h * 0.12  # spruce keeps branches almost to the ground
+    crown_h = total_h * 0.34  # continuous cone from ~35-40% height to tip
     profile = [(0, trunk_r0), (total_h * 0.4, trunk_r0 * 0.75),
                (total_h * 0.8, trunk_r0 * 0.45), (total_h, trunk_r0 * 0.1)]
     lean = conifer_lean(sway_amp=10)
@@ -280,8 +315,8 @@ def build_engelmann_spruce(name):
     tiers = [(0.0, 0.18), (0.18, 0.38), (0.38, 0.58), (0.58, 0.76), (0.76, 0.92), (0.92, 1.0)]
     scatter_cone_crown(
         m, base_h=crown_h, apex_h=total_h, base_r=340, top_r_frac=0.05,
-        n_clusters=58, cell="spruce_needle", size_w=(140, 240), size_h=(190, 310),
-        taper_pow=0.85, lean=lean, n_cross=3, tier_bands=tiers)
+        n_clusters=124, cell="spruce_needle", size_w=(120, 200), size_h=(170, 270),
+        taper_pow=0.85, lean=lean, n_cross=3, tier_bands=tiers, droop=True)
     m.save(name, {"bark_conifer": BARK_TEX["bark_conifer"], "foliage": FOLIAGE_TEX})
 
 
@@ -291,14 +326,14 @@ def build_subalpine_fir(name):
     total_h = 1400
     trunk_r0 = 24
     m = Mesh()
-    crown_h = total_h * 0.08
+    crown_h = total_h * 0.36  # continuous cone from ~35-40% height to tip
     profile = [(0, trunk_r0), (total_h * 0.5, trunk_r0 * 0.6), (total_h, trunk_r0 * 0.08)]
     lean = conifer_lean(sway_amp=8)
     m.trunk(profile, "bark_conifer", lean=lean)
     scatter_cone_crown(
         m, base_h=crown_h, apex_h=total_h, base_r=250, top_r_frac=0.03,
-        n_clusters=52, cell="fir_needle", size_w=(110, 180), size_h=(150, 230),
-        taper_pow=1.7, lean=lean, n_cross=2, jitter_r=0.12)
+        n_clusters=112, cell="fir_needle", size_w=(100, 160), size_h=(140, 200),
+        taper_pow=1.7, lean=lean, n_cross=2, jitter_r=0.12, droop=True, n_bands=10)
     m.save(name, {"bark_conifer": BARK_TEX["bark_conifer"], "foliage": FOLIAGE_TEX})
 
 

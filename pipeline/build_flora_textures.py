@@ -195,6 +195,58 @@ def make_conifer_cell(name, color, twig_color, n_needles, needle_len, spread_deg
     return cv
 
 
+def irregular_blob_points(cx, cy, r, n=16, jitter=0.4, elong=(1.0, 1.0), ang=0.0):
+    pts = []
+    ca, sa = math.cos(ang), math.sin(ang)
+    for i in range(n):
+        theta = 2 * math.pi * i / n
+        rad = r * (1 + rng.uniform(-jitter, jitter))
+        x = math.cos(theta) * rad * elong[0]
+        y = math.sin(theta) * rad * elong[1]
+        pts.append((cx + x * ca - y * sa, cy + x * sa + y * ca))
+    return pts
+
+
+def make_bough_cell(name, color_dark, color_light, twig_color, n_blobs, elong,
+                     n_edge_needles=120):
+    """Dense, near-opaque conifer bough sprite (2026-09-03 fix - the earlier
+    sparse-strand needle_sprig() read as "moss on a bare pole" rather than a
+    branch once instanced at any density; live-drive feedback flagged
+    tree_conifer specifically). A handful of large overlapping irregular
+    blobs build up a solid needle mass, mottled dark/light for depth, with a
+    thin fringe of individual needle strokes only along the silhouette edge
+    to keep it from reading as a smooth cutout blob. Used for pine/spruce/
+    fir only - krummholz keeps the old sparse needle_sprig() cell on
+    purpose (its wind-battered sparseness is intentional)."""
+    cv = new_cell_canvas()
+    draw = ImageDraw.Draw(cv)
+    s = CELL_PX * SS
+    draw.line([(s * 0.5, s * 0.97), (s * 0.5, s * 0.2)], fill=twig_color,
+              width=max(2, int(s * 0.014)))
+    for _ in range(n_blobs):
+        cx = rng.uniform(s * 0.22, s * 0.78)
+        cy = rng.uniform(s * 0.1, s * 0.8)
+        r = rng.uniform(s * 0.16, s * 0.26)
+        el = (elong[0] * rng.uniform(0.85, 1.15), elong[1] * rng.uniform(0.85, 1.15))
+        ang = rng.uniform(-0.35, 0.35)
+        pts = irregular_blob_points(cx, cy, r, n=16, jitter=0.38, elong=el, ang=ang)
+        t = rng.uniform(0.0, 1.0)
+        col = tuple(int(color_dark[i] * (1 - t) + color_light[i] * t) for i in range(3))
+        draw.polygon(pts, fill=col + (255,))
+    # ragged silhouette fringe - short needle strokes scattered near the
+    # blob-mass edges so the outline breaks up instead of reading smooth.
+    for _ in range(n_edge_needles):
+        cx = rng.uniform(s * 0.12, s * 0.88)
+        cy = rng.uniform(s * 0.06, s * 0.85)
+        ang = rng.uniform(0, 2 * math.pi)
+        ln = rng.uniform(s * 0.05, s * 0.11)
+        ex, ey = cx + math.cos(ang) * ln, cy + math.sin(ang) * ln
+        col = tuple(int(min(255, max(0, c + rng.integers(-18, 12)))) for c in color_dark)
+        draw.line([(cx, cy), (ex, ey)], fill=col, width=max(1, int(s * 0.007)))
+    cv = cv.resize((CELL_PX, CELL_PX), Image.LANCZOS)
+    return cv
+
+
 def leaf_shape(draw, cx, cy, w, h, ang, color):
     """A simple pointed-oval leaf polygon, rotated."""
     pts = []
@@ -237,15 +289,18 @@ def make_atlas():
     atlas = Image.new("RGBA", (ATLAS_W, ATLAS_H), (0, 0, 0, 0))
 
     cells = {
-        "pine_needle": make_conifer_cell(
-            "pine_needle", (44, 92, 48, 255), (58, 40, 24, 255),
-            n_needles=10, needle_len=0.34, spread_deg=22, n_sprigs=7),
-        "spruce_needle": make_conifer_cell(
-            "spruce_needle", (58, 104, 96, 255), (52, 36, 22, 255),
-            n_needles=16, needle_len=0.22, spread_deg=45, n_sprigs=9),
-        "fir_needle": make_conifer_cell(
-            "fir_needle", (36, 78, 58, 255), (48, 34, 22, 255),
-            n_needles=18, needle_len=0.18, spread_deg=60, n_sprigs=10),
+        # pine/spruce/fir: dense near-opaque bough mass (2026-09-03 fix -
+        # see make_bough_cell's docstring). Darker overall than the old
+        # sparse-strand cells per the "near-opaque, dark green" direction.
+        "pine_needle": make_bough_cell(
+            "pine_needle", (26, 58, 30), (46, 88, 46), (58, 40, 24, 255),
+            n_blobs=9, elong=(0.8, 1.5)),
+        "spruce_needle": make_bough_cell(
+            "spruce_needle", (34, 68, 62), (58, 100, 92), (52, 36, 22, 255),
+            n_blobs=11, elong=(1.0, 1.15)),
+        "fir_needle": make_bough_cell(
+            "fir_needle", (22, 50, 36), (40, 76, 56), (48, 34, 22, 255),
+            n_blobs=11, elong=(1.1, 1.0)),
         "krummholz_needle": make_conifer_cell(
             "krummholz_needle", (60, 88, 60, 255), (66, 48, 30, 255),
             n_needles=8, needle_len=0.20, spread_deg=50, n_sprigs=5),
