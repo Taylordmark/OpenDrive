@@ -8,13 +8,84 @@
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/Crc.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
 using namespace UE::Geometry;
+
+namespace
+{
+	// Combine two 32-bit hash values (Boost-style hash_combine) - used below
+	// to build a handful of decorrelated per-building pseudo-random channels
+	// from the building's own baked footprint, with no new pipeline/sidecar
+	// data needed (see BuildingVertexColorForFacade()'s own comment for why
+	// this lives here instead of a shared header - it's a one-file need).
+	uint32 HashCombine32(uint32 A, uint32 B)
+	{
+		return A ^ (B + 0x9e3779b9u + (A << 6) + (A >> 2));
+	}
+
+	float HashToUnitFloat(uint32 H)
+	{
+		return (float)(H % 1000000u) / 1000000.0f;
+	}
+
+	/** Per-building facade-material selectors, packed into vertex color and
+	 *  read back by M_BuildingFacade (unreal/apply_building_material.py) -
+	 *  the material-variation channel this streaming architecture can
+	 *  actually afford: buildings are ONE UDynamicMeshComponent EACH (not
+	 *  HISM-instanced, see FBuildingTile's header comment), so there's no
+	 *  per-instance custom data to write into, and creating ~1800 separate
+	 *  MIDs (one per building, live in the field) would multiply that
+	 *  already-heavy per-building draw-call count by real per-MID overhead
+	 *  for nothing - a single shared material reading a per-vertex value is
+	 *  the same "avoid per-building MIDs" convention AODTerrainManager's own
+	 *  vertex-color biome tint already established, just carrying different
+	 *  payload channels:
+	 *    R - wall material variant selector (M_BuildingFacade buckets this
+	 *        into N discrete wall texture sets - brick/siding/stucco/
+	 *        concrete - via floor(R*N), a HARD per-building pick, not a
+	 *        blend, so one building always reads as one material)
+	 *    G - window-lit-fraction seed offset (decorrelates which windows
+	 *        read as lit between buildings that would otherwise share the
+	 *        same per-window hash pattern from a coincidentally similar
+	 *        facade UV phase)
+	 *    B - unused (reserved; kept at a stable hash rather than 0/1 so a
+	 *        future third channel doesn't have to re-derive the whole hash)
+	 *  Computed from the footprint's own baked centroid (deterministic,
+	 *  unique per building's location - no way-id plumbing needed through
+	 *  the ODU1 binary format) rather than any RNG, so re-finalizing the
+	 *  same building (e.g. after a pending-retry) always yields the exact
+	 *  same variant. */
+	FVector4f BuildingVertexColorForFacade(const FParsedBuilding& B)
+	{
+		const uint32 VCount = B.Verts.Num() / 3;
+		double CentroidX = 0.0, CentroidY = 0.0;
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			CentroidX += B.Verts[v * 3 + 0];
+			CentroidY += B.Verts[v * 3 + 1];
+		}
+		if (VCount > 0)
+		{
+			CentroidX /= VCount;
+			CentroidY /= VCount;
+		}
+
+		const uint32 Hx = FCrc::MemCrc32(&CentroidX, sizeof(CentroidX));
+		const uint32 Hy = FCrc::MemCrc32(&CentroidY, sizeof(CentroidY));
+		const uint32 H1 = HashCombine32(Hx, Hy);
+		const uint32 H2 = HashCombine32(Hy, HashCombine32(Hx, 0x2545F491u));
+		const uint32 H3 = HashCombine32(H1, 0xABCDEF01u);
+
+		return FVector4f(HashToUnitFloat(H1), HashToUnitFloat(H2), HashToUnitFloat(H3), 1.0f);
+	}
+}
 
 AODBuildingManager::AODBuildingManager()
 {
@@ -318,13 +389,22 @@ void AODBuildingManager::CreateBuildingComponent(FBuildingTile& Tile, const FPar
 	// "no tilt from terrain normal").
 	Comp->SetRelativeLocation(FVector(0.0, 0.0, ZOffsetCm));
 
+	// Same per-building facade selectors on every vertex (see
+	// BuildingVertexColorForFacade()'s comment for why vertex color, not a
+	// per-building MID, is this streaming architecture's instancing-safe
+	// variation channel).
+	const FVector4f FacadeColor = BuildingVertexColorForFacade(B);
+
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
 	{
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
+		Mesh.Attributes()->EnablePrimaryColors();
+		FDynamicMeshColorOverlay* Color = Mesh.Attributes()->PrimaryColors();
 
 		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
 		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+		TArray<int32> ColorIds; ColorIds.SetNumUninitialized(VCount);
 
 		for (uint32 v = 0; v < VCount; ++v)
 		{
@@ -336,6 +416,17 @@ void AODBuildingManager::CreateBuildingComponent(FBuildingTile& Tile, const FPar
 			UvIds[v] = UV->AppendElement(
 				FVector2f(B.Uvs[v * 2 + 0], B.Uvs[v * 2 + 1]));
 		}
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			// Vertex color here is NOT sRGB display color - see
+			// BuildingVertexColorForFacade()'s comment, these are raw
+			// [0,1) selector/seed values the material reads back directly,
+			// so the component below deliberately does NOT set
+			// SetVertexColorSpaceTransformMode (leaves it at the default
+			// linear-in/linear-out None, unlike AODTerrainManager's tint
+			// overlay which IS perceptual color).
+			ColorIds[v] = Color->AppendElement(FacadeColor);
+		}
 		for (uint32 t = 0; t < TCount; ++t)
 		{
 			const uint32 I0 = B.Tris[t * 3 + 0];
@@ -345,8 +436,20 @@ void AODBuildingManager::CreateBuildingComponent(FBuildingTile& Tile, const FPar
 			if (Tid >= 0)
 			{
 				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+				Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
 			}
 		}
+
+		// Per-vertex normals, averaged only over triangles sharing the same
+		// vertex ID - since extrude_footprint() never shares a vertex
+		// between two different wall quads (or between a wall's top ring
+		// and the roof fan's own ring, despite being at the same position),
+		// this yields clean flat-per-quad wall normals and a flat roof
+		// normal, NOT a smoothed edge between them - exactly what the
+		// facade material's wall-vs-roof mask (M_BuildingFacade, keyed off
+		// vertex normal Z) needs to read a crisp roofline. Same call
+		// AODTerrainManager::BuildTile uses for its own mesh.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 
 	// buildings always collide - unlike terrain's near/far split, a

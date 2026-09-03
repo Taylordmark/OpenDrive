@@ -1,0 +1,73 @@
+{
+  "_comment": "Building-facade art-direction overhaul (2026-09-03, see next steps.md §7.15 and unreal/apply_building_material.py): replaces M_BuildingFacade's flat horizontal-stripe placeholder (frac(V)<0.5 window-band hack) with real CC0 PBR wall/roof texture sets, blended per-building via vertex color and overlaid with an in-shader window grid. CC0 PBR sets from ambientCG (https://ambientcg.com) - the whole site is published CC0 1.0 (public domain, no attribution required; see https://ambientcg.com/about). All zips fetched at 2K-PNG resolution via ambientCG's public download API (https://ambientcg.com/get?file=<AssetId>_2K-PNG.zip), no login required. Same convention as content_src/textures/ground/ and content_src/textures/road/ (download script + manifest.json ARE committed, extracted binaries are NOT - see repo .gitignore).",
+  "resolution": "2K",
+  "format": "PNG (Color/Roughness/AmbientOcclusion), PNG NormalGL",
+  "textures": [
+    {
+      "role": "wall_brick_red",
+      "asset_id": "Bricks074",
+      "display_name": "Bricks 074",
+      "source_url": "https://ambientcg.com/view?id=Bricks074",
+      "download_url": "https://ambientcg.com/get?file=Bricks074_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/Bricks074",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Red brick wall variant 1 - main street storefront/rowhouse facade look."
+    },
+    {
+      "role": "wall_brick_tan",
+      "asset_id": "Bricks053",
+      "display_name": "Bricks 053",
+      "source_url": "https://ambientcg.com/view?id=Bricks053",
+      "download_url": "https://ambientcg.com/get?file=Bricks053_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/Bricks053",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Tan/buff brick wall variant 2 - distinct enough from Bricks074 to read as a different building at a glance."
+    },
+    {
+      "role": "wall_wood_siding",
+      "asset_id": "WoodSiding001",
+      "display_name": "Wood Siding 001",
+      "source_url": "https://ambientcg.com/view?id=WoodSiding001",
+      "download_url": "https://ambientcg.com/get?file=WoodSiding001_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/WoodSiding001",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Horizontal wood siding - mountain-town residential/cabin-style facade."
+    },
+    {
+      "role": "wall_stucco",
+      "asset_id": "Plaster001",
+      "display_name": "Plaster 001",
+      "source_url": "https://ambientcg.com/view?id=Plaster001",
+      "download_url": "https://ambientcg.com/get?file=Plaster001_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/Plaster001",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Stucco/plaster wall - lighter-toned facade variant."
+    },
+    {
+      "role": "wall_concrete",
+      "asset_id": "Concrete034",
+      "display_name": "Concrete 034",
+      "source_url": "https://ambientcg.com/view?id=Concrete034",
+      "download_url": "https://ambientcg.com/get?file=Concrete034_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/Concrete034",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Plain concrete/precast wall - larger City-archetype buildings. Same asset_id content_src/textures/road/Concrete034 already uses for road shoulders; fetched again here as its own copy so the building material's import script doesn't reach across domain dirs."
+    },
+    {
+      "role": "roof",
+      "asset_id": "RoofingTiles007",
+      "display_name": "Roofing Tiles 007",
+      "source_url": "https://ambientcg.com/view?id=RoofingTiles007",
+      "download_url": "https://ambientcg.com/get?file=RoofingTiles007_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/building/RoofingTiles007",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Shingle roof - applied to top-facing (roof) triangles via vertex-normal Z mask."
+    }
+  ]
+}

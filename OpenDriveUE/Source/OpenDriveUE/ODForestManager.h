@@ -7,6 +7,7 @@
 
 class UCapsuleComponent;
 class UHierarchicalInstancedStaticMeshComponent;
+class UMaterialInterface;
 class UStaticMesh;
 
 /** A named regional flora recipe (Arc 7.3 "per-region foliage recipes"),
@@ -499,6 +500,19 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UStaticMesh> ScrubMesh;
+
+	// Real CC0 rock texture (bonus scope, building-facade art-direction pass,
+	// 2026-09-03 - see unreal/apply_rock_material.py) - RockMeshes' /Engine/
+	// BasicShapes Cube/Sphere otherwise render with the engine's own plain
+	// grey default material (no SetMaterial call existed anywhere in this
+	// file before this), which is exactly the flat untextured boulder look
+	// reported live. Applied to each rock HISM in BuildTile() -
+	// used_with_instanced_static_meshes MUST be set on this material asset
+	// (apply_rock_material.py sets it) or it silently falls back to the same
+	// grey default on an HISM at runtime, same gotcha AODForestManager's own
+	// tree bark material already hit once (see next steps.md §7.15).
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RockMat;
 
 	// Per-mesh "how far below its own pivot does the mesh's geometry extend"
 	// (local, unscaled cm; <= 0) - added 2026-08-27 (live-drive report:

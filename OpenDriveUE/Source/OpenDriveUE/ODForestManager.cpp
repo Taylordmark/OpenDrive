@@ -7,6 +7,7 @@
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "LandscapeProxy.h"
+#include "Materials/MaterialInterface.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -142,6 +143,13 @@ void AODForestManager::BeginPlay()
 		nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")));
 	ScrubMesh = LoadObject<UStaticMesh>(
 		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"));
+
+	// Real CC0 rock texture (bonus scope, 2026-09-03) - see RockMat's own
+	// header comment. Missing asset (script not yet run) is not fatal - the
+	// HISM SetMaterial() call in BuildTile() just no-ops, same "optional
+	// dependency" convention every LoadObject in this file already follows.
+	RockMat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030"));
 
 	// Base-pivot offsets for ground cover (2026-08-27) - see
 	// RockMeshBaseOffsetCm/ScrubMeshBaseOffsetCm's declaration in
@@ -1375,6 +1383,14 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
 		Hism->SetupAttachment(RootComponent);
 		Hism->SetStaticMesh(Mesh);
+		// Rock batches only (m >= RockBatchBase, excluding the scrub batch,
+		// which keeps grass_tuft's own material) - see RockMat's header
+		// comment for why this exists: without it, RockMeshes' engine
+		// BasicShapes render with the flat grey engine default.
+		if (m >= RockBatchBase && m != ScrubBatchIdx && RockMat)
+		{
+			Hism->SetMaterial(0, RockMat);
+		}
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
 		Hism->SetCastShadow(!bLowVeg);

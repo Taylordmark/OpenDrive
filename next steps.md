@@ -2186,9 +2186,41 @@ What landed, in order:
      in-game at both Vail (`ScreenShot00253.png`) and Frisco
      (`ScreenShot00255.png`).
 
+- **Buildings (this pass, 2026-09-03):** replaced the striped-slab
+  placeholder with real facade materials. Root cause: `M_BuildingFacade`
+  (`unreal/apply_building_material.py`) was a flat `frac(V)<0.5` horizontal
+  window-band hack over one wall color/one window tint — the "dark blue-gray
+  horizontally-striped slabs" Taylor flagged were that hack rendering as
+  intended, not a bug. Landed: 6 CC0 2K sets from ambientCG
+  (`content_src/textures/building/` — Bricks074, Bricks053, WoodSiding001,
+  Plaster001, Concrete034, RoofingTiles007, see that dir's `manifest.json`),
+  imported via `unreal/import_building_textures.py`, and a rebuilt
+  `M_BuildingFacade` with an in-shader procedural window grid (floor height
+  3.2 m / bay width 2.5 m, both mirroring `pipeline/build_building_mesh.py`'s
+  own constants) — dark glass rects, ~12% warm-emissive (lit rooms, visible
+  at `-odhour=19`), taller storefront openings on the ground floor, roof
+  texture picked out by vertex-normal Z. Per-building wall-material variant
+  is a HARD pick among the 5 wall sets (not a blend), driven by a per-vertex
+  color channel `AODBuildingManager::CreateBuildingComponent`
+  (`ODBuildingManager.cpp`) now writes — computed from the building's own
+  baked footprint centroid hash, no pipeline/sidecar format change needed.
+  Chose vertex color over per-building `MaterialInstanceDynamic`s
+  deliberately: buildings are one `UDynamicMeshComponent` EACH (not
+  HISM-instanced — no per-instance custom data slot exists), and live tiles
+  can hold ~1800 of them, so ~1800 MIDs would add real overhead a shared
+  material + vertex channel avoids entirely. Verified in-game, no material
+  compile errors: Frisco day (`ScreenShot00257.png`), Breckenridge day
+  (`ScreenShot00259.png`), Frisco dusk (`ScreenShot00261.png`, confirms lit
+  windows). Bonus: also textured the gray untextured boulder/rock ground
+  cover (`AODForestManager`'s `RockMeshes` - two `/Engine/BasicShapes`
+  primitives, Cube/Sphere, that never had any material set at all before
+  this - see `ODForestManager.h`'s `RockMat` comment) with the already-
+  imported Rock030 CC0 set (`unreal/apply_rock_material.py`, reusing
+  `/Game/OpenDrive/Textures/Ground/Rock030` rather than a new download) -
+  `used_with_instanced_static_meshes` set since these render via HISM,
+  verified at Vail (`ScreenShot00263.png`).
+
 **Known leftovers (not addressed this pass):**
-- Striped slab buildings are still the biggest remaining "Fortnite-ish"
-  offender — unscoped, not touched by any of the above.
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.
 - `-odrev` scripted drives still veer off-road at some towns (pre-existing,
