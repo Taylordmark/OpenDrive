@@ -2257,16 +2257,44 @@ What landed, in order:
   *relation*, not a simple way, so `build_water_tiles.py` was silently never
   baking it at all — added outer-ring assembly for multipolygon relations
   (inner/hole members still not subtracted, documented limitation). Could
-  **not** get an in-game screenshot of the reservoir itself: every vantage
-  tried sits on a `fidelity=Coarse` FAR terrain tile, and Coarse terrain has
-  no lake hole and appears to sit at/above the water's own baked elevation
-  there, burying the flat water mesh entirely (matches this file's own
-  `ODTerrainManager` FAR/NEAR DEM-zoom-mismatch warning elsewhere in this
-  doc) — a separate, pre-existing, out-of-scope terrain issue, not a
-  material bug. Material graph verified headless (all 4 shading-model pins
-  connected) but not eyeballed in-game; needs either a terrain-side fix
-  (lake holes, or matching FAR-tile DEM zoom to the water bake's) or a small
-  water-elevation upward bias before a real look pass is possible.
+  **not** get an in-game screenshot of the reservoir itself at the time:
+  every vantage tried sits on a `fidelity=Coarse` FAR terrain tile, and
+  Coarse terrain has no lake hole and appears to sit at/above the water's
+  own baked elevation there, burying the flat water mesh entirely.
+
+  **RESOLVED (2026-09-03, follow-on pass):** `pipeline/build_terrain_mesh_
+  tiles.py` now depresses the terrain surface under every baked lake
+  polygon, in both the NEAR and FAR/Coarse tile paths. Approach: reads the
+  water bake's own output back (`OUT_DIR/water_<AREA>_test_tile_*.bin`,
+  the literal geometry `AODWaterManager` places at runtime — no OSM
+  re-fetch, no re-derived DEM elevation) via a new `load_lake_beds()`,
+  recovering each lake's outer boundary generically from its triangle soup
+  (any mesh edge shared by exactly one triangle is a boundary edge, chained
+  into a ring — works regardless of ear-clip/fan-fallback triangulation or
+  Dillon's 4-segment multipolygon outer ring) plus its exact baked surface
+  Z. `apply_water_depression()` then overrides any grid point inside a
+  lake polygon with a bed elevation `WATER_BED_MIN_DEPTH_M` (2 m) below the
+  water plane at the shoreline, ramping to `WATER_BED_MAX_DEPTH_M` (5 m)
+  over `WATER_BED_FALLOFF_M` (40 m) via distance-to-edge falloff for a
+  shoreline-then-basin shape — applied once, on each tile's FINAL grid
+  (post road-carve, post FAR downsample), so NEAR and FAR/Coarse tiles get
+  identical treatment. Per-lake tile-bbox reject keeps cost down (only
+  tiles actually overlapping a lake do any point-in-polygon work); no
+  signature change to `build_tile()` — every existing caller (forest
+  ground-truth, junction pads, `verify_terrain_fit.py`) picks up lake beds
+  automatically via a lazily-cached `_get_lake_beds()`. Rebaked
+  summit_county terrain (1221 tiles, 305 near/collision + 916 far, plus 305
+  coarse fallbacks) after confirming the water bake still runs clean (312
+  water tiles, 1185 lakes, Dillon Reservoir still 1918 verts at tile
+  (4,-5)). Verified in-game at two vantages: Swan Mountain Rd/Keystone
+  shoreline (`-odspawnx=1374341 -odspawny=-846975`, near tile, right at the
+  water's edge) and Dillon Dam Rd/Frisco (`-odspawnx=733226
+  -odspawny=-807394`, overlooking the wide/far open water) — both show a
+  clean, continuous reflective water surface meeting the shore with no
+  terrain poking through and no gaps, town skyline visible across the lake
+  in both. No collision anomalies in the log (no ground-snap failures, no
+  generation-id mismatches); car still spawns and idles normally on
+  pavement at both spawns.
 
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar

@@ -53,6 +53,7 @@ ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
 import json
 import math
 import struct
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -60,7 +61,7 @@ import requests
 from pymartini import Martini
 
 import test_areas
-from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
+from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m,
                                classify_wall_stations)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
@@ -270,6 +271,210 @@ FAR_SUPERSAMPLE = 10
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+
+# Lake-bed depression (2026-09-03, Arc 7.15 follow-on): build_water_tiles.py
+# bakes lake surfaces at their exact runtime Z (AODWaterManager places every
+# lake vert verbatim, no runtime offset - see ODWaterManager.cpp's
+# CreateLakeComponent comment), but nothing ever told the TERRAIN bake a
+# lake was there, so the ground kept its raw/carved DEM height straight
+# through a reservoir's footprint - at Dillon Reservoir that raw height
+# sits at/above the water plane, burying it (no visible water, "dry land
+# where the reservoir should be").
+#
+# Fix: read the water bake's OWN baked .bin tiles back (every
+# water_<AREA>_test_tile_*.bin in OUT_DIR, regardless of which terrain tile
+# they were bucketed under - build_water_tiles.py buckets a whole lake by
+# its centroid, so a big reservoir's mesh can extend well outside its own
+# bucket tile's 2 km box) as the source of truth for both the lake polygon
+# AND its surface elevation - no re-fetching OSM, no re-running the DEM
+# percentile calc (which could drift from the actual baked value), just the
+# literal geometry ODWaterManager will place at runtime. A lake mesh's
+# OUTER boundary is recovered generically from its triangle soup (any edge
+# shared by exactly one triangle is a boundary edge, chained into a ring) -
+# this works regardless of ear-clip vs. fan-fallback triangulation and
+# naturally ignores the interior island/point vertices build_water_tiles.py
+# already documents as NOT subtracted (they're interior to the solid
+# triangulated water, so they never appear as boundary edges).
+WATER_TILE_GLOB = f"water_{AREA_NAME}_test_tile_*.bin"
+WATER_BED_MIN_DEPTH_M = 2.0     # bed depth right at the shoreline
+WATER_BED_MAX_DEPTH_M = 5.0     # bed depth WATER_BED_FALLOFF_M+ into the lake
+WATER_BED_FALLOFF_M = 40.0      # shoreline->interior depth ramp distance
+
+
+def _read_lake_bin_tile(path):
+    """Parses one water_<AREA>_test_tile_<tx>_<ty>.bin (ODL1 format, see
+    build_water_tiles.py's module docstring) -> list of (verts (N,3)
+    float32 cm, tris (T,3) uint32) per lake in the file. Read-only reuse of
+    the water bake's own output; this format is intentionally NOT re-derived
+    from OSM/DEM here (see this module's lake-bed-depression comment)."""
+    raw = path.read_bytes()
+    if raw[:4] != b"ODL1":
+        return []
+    cur = 4 + GENERATION_ID_BYTES
+    (lake_count,) = struct.unpack_from("<I", raw, cur); cur += 4
+    lakes = []
+    for _ in range(lake_count):
+        vcount, tcount = struct.unpack_from("<II", raw, cur); cur += 8
+        verts = np.frombuffer(raw, dtype="<f4", count=vcount * 3, offset=cur).reshape(-1, 3)
+        cur += vcount * 12
+        cur += vcount * 8  # uvs - not needed for the depression test, skip over
+        tris = np.frombuffer(raw, dtype="<u4", count=tcount * 3, offset=cur).reshape(-1, 3)
+        cur += tcount * 12
+        lakes.append((verts.copy(), tris.copy()))
+    return lakes
+
+
+def _extract_boundary_rings(tris):
+    """Any edge shared by exactly one triangle is a mesh boundary edge -
+    chains them (via shared vertex ids) into closed ring(s) of vertex
+    indices. Works for any flat triangulated disk regardless of
+    ear-clip/fan-fallback method or how many disjoint outer loops a
+    multipolygon-relation lake (e.g. Dillon Reservoir's 4 outer segments)
+    produced."""
+    edge_count = defaultdict(int)
+    for a, b, c in tris:
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge_count[(min(u, v), max(u, v))] += 1
+    boundary = [e for e, n in edge_count.items() if n == 1]
+    adj = defaultdict(list)
+    for u, v in boundary:
+        adj[u].append(v)
+        adj[v].append(u)
+    visited = set()
+    rings = []
+    for u, v in boundary:
+        if (u, v) in visited:
+            continue
+        ring = [u]
+        prev, cur = u, v
+        visited.add((u, v)); visited.add((v, u))
+        while cur != ring[0]:
+            ring.append(cur)
+            nxt = next((n for n in adj[cur] if n != prev and (cur, n) not in visited), None)
+            if nxt is None:
+                break
+            visited.add((cur, nxt)); visited.add((nxt, cur))
+            prev, cur = cur, nxt
+        if cur == ring[0] and len(ring) >= 3:
+            rings.append(ring)
+    return rings
+
+
+def load_lake_beds():
+    """Every baked lake's boundary ring (gx_cm/gy_cm-frame, i.e. the SAME
+    x=east_m*100, y=-north_m*100 convention build_tile()'s grid uses) plus
+    its baked surface Z (cm) and bounding box, read back from
+    OUT_DIR/water_<AREA>_test_tile_*.bin. Returns [] (terrain bakes with no
+    lake depression, same "no hole" tolerance every other missing-tile path
+    here already has) if no water tiles have been baked yet - run
+    build_water_tiles.py first to get lake beds."""
+    paths = sorted(OUT_DIR.glob(WATER_TILE_GLOB))
+    lakes = []
+    for path in paths:
+        for verts, tris in _read_lake_bin_tile(path):
+            if len(tris) == 0:
+                continue
+            for ring_idx in _extract_boundary_rings(tris):
+                ring_xy = verts[ring_idx][:, :2]
+                z_cm = float(verts[ring_idx[0], 2])
+                lakes.append({
+                    "ring_x": ring_xy[:, 0].astype(np.float64),
+                    "ring_y": ring_xy[:, 1].astype(np.float64),
+                    "z_cm": z_cm,
+                    "bbox": (float(ring_xy[:, 0].min()), float(ring_xy[:, 0].max()),
+                             float(ring_xy[:, 1].min()), float(ring_xy[:, 1].max())),
+                })
+    if lakes:
+        print(f"  loaded {len(lakes)} lake bed(s) from {len(paths)} water tile(s) for "
+              f"terrain depression")
+    else:
+        print(f"  no baked water tiles found ({WATER_TILE_GLOB}) - terrain will NOT "
+              f"depress for lakes; run build_water_tiles.py first for visible water")
+    return lakes
+
+
+def _point_in_polygon(px, py, ring_x, ring_y):
+    """Vectorized even-odd ray-casting point-in-polygon test, same algorithm
+    as build_water_tiles.point_in_polygon (independent copy - see this
+    module's lake-bed-depression comment for why the water bake's baked
+    OUTPUT is reused instead of importing that module's fetch/elevation
+    code)."""
+    n = len(ring_x)
+    inside = np.zeros(len(px), dtype=bool)
+    j = n - 1
+    for i in range(n):
+        xi, yi, xj, yj = ring_x[i], ring_y[i], ring_x[j], ring_y[j]
+        denom = (yj - yi) if abs(yj - yi) > 1e-9 else 1e-9
+        cross = ((yi > py) != (yj > py)) & (px < (xj - xi) * (py - yi) / denom + xi)
+        inside ^= cross
+        j = i
+    return inside
+
+
+def _dist_to_ring(px, py, ring_x, ring_y):
+    """Min distance (cm) from each point to the polygon boundary (point-to-
+    segment over every ring edge) - used only for the shoreline->interior
+    depth falloff, so approximate/segment-wise is plenty."""
+    n = len(ring_x)
+    min_d = np.full(len(px), np.inf)
+    for i in range(n):
+        x1, y1 = ring_x[i], ring_y[i]
+        x2, y2 = ring_x[(i + 1) % n], ring_y[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        seg_len2 = dx * dx + dy * dy
+        t = 0.0 if seg_len2 < 1e-6 else np.clip(((px - x1) * dx + (py - y1) * dy) / seg_len2, 0.0, 1.0)
+        cx, cy = x1 + t * dx, y1 + t * dy
+        min_d = np.minimum(min_d, np.hypot(px - cx, py - cy))
+    return min_d
+
+
+def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
+    """For every grid point inside a baked lake polygon, override z_cm with
+    a bed elevation comfortably below that lake's own baked water-plane Z
+    (WATER_BED_MIN_DEPTH_M at the shore, ramping to WATER_BED_MAX_DEPTH_M
+    over WATER_BED_FALLOFF_M) instead of leaving raw/carved DEM height in
+    place - see this module's lake-bed-depression comment. Applied to the
+    tile's FINAL grid (post road-carve, post FAR downsample), so it covers
+    both the NEAR and FAR tile paths identically - build_tile() calls this
+    once, after z_cm is computed, before either triangulation branch."""
+    if not lakes:
+        return z_cm
+    tile_x0, tile_x1 = float(gx_cm.min()), float(gx_cm.max())
+    tile_y0, tile_y1 = float(gy_cm.min()), float(gy_cm.max())
+    flat_x = gx_cm.reshape(-1)
+    flat_y = gy_cm.reshape(-1)
+    flat_z = z_cm.reshape(-1).copy()
+    touched = False
+    for lake in lakes:
+        bx0, bx1, by0, by1 = lake["bbox"]
+        if bx1 < tile_x0 or bx0 > tile_x1 or by1 < tile_y0 or by0 > tile_y1:
+            continue  # cheap tile/lake bbox reject before any per-point test
+        inside = _point_in_polygon(flat_x, flat_y, lake["ring_x"], lake["ring_y"])
+        if not inside.any():
+            continue
+        touched = True
+        idx = np.nonzero(inside)[0]
+        dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
+        depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
+            np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
+        flat_z[idx] = lake["z_cm"] - depth_m * 100.0
+    return flat_z.reshape(z_cm.shape) if touched else z_cm
+
+
+_LAKE_BEDS_CACHE = None
+
+
+def _get_lake_beds():
+    """Lazily loads+caches load_lake_beds() once per process - build_tile()
+    calls this internally (no signature change) so every existing caller
+    (build_forest_elevation.py, experimental_junction_pads.py,
+    verify_terrain_fit.py, this module's own main()) picks up lake-bed
+    depression automatically and identically, off the same disk read done
+    only once."""
+    global _LAKE_BEDS_CACHE
+    if _LAKE_BEDS_CACHE is None:
+        _LAKE_BEDS_CACHE = load_lake_beds()
+    return _LAKE_BEDS_CACHE
 
 
 def load_stations():
@@ -620,6 +825,12 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
         elev = downsample_min_grid(elev, n, FAR_SUPERSAMPLE)
 
     z_cm = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) * 100.0
+
+    # Lake-bed depression - see this module's top-of-file comment next to
+    # WATER_BED_MIN_DEPTH_M. Applied here (after road carve/downsample, on
+    # the tile's FINAL grid) so it covers NEAR and FAR tiles identically,
+    # before either triangulation branch below sees z_cm.
+    z_cm = apply_water_depression(gx_cm, gy_cm, z_cm, _get_lake_beds())
 
     if is_near:
         # AUDIT.md item 1: adaptive martini triangulation instead of a
