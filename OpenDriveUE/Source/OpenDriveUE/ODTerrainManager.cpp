@@ -71,13 +71,30 @@ static constexpr float ConflictMinGapCm = 100.0f;   // CONFLICT_MIN_GAP_M (1 m)
 // the elevation/road/noise signals are pure runtime math against data this
 // manager already has loaded (carved Verts, StationHash).
 
-// Green Valley's own plausible elevation range is 0-2200 m
-// (pipeline/test_areas.py's ELEV_PLAUSIBLE_M) - these bands are sized
-// against THAT area, not a generic guess. A different AREA_NAME would want
-// these re-tuned, same as every other area-specific constant in this file
-// (e.g. SEA_LEVEL_Z_CM in unreal/apply_ground_material.py).
-static constexpr float ElevLowCm = 60000.0f;    // 600 m - at/below: full "rich/dark low green" bias
-static constexpr float ElevHighCm = 170000.0f;  // 1700 m - at/above: full "grey/rocky" bias
+// Retuned 2026-09-03 for summit_county (Phase 3a ground-visual overhaul) -
+// these were still Green Valley's own plausible elevation range (0-2200 m
+// absolute, ElevLowCm/ElevHighCm as small POSITIVE offsets from that area's
+// near-sea-level ORIGIN_HEIGHT_M) and had gone stale for the new active area
+// (pipeline/test_areas.py ACTIVE_AREA flipped to summit_county 2026-09-01,
+// ORIGIN_HEIGHT_M=3435.3 m - see that constant's comment). At summit_county's
+// origin, world Z=0 sits at 3435 m ASL, so the OLD 60000-170000 cm band
+// (meant to read as "600-1700 m absolute") instead read as "4035-5135 m
+// absolute" here - entirely above every real point in the area (peak
+// elevation is Quandary's 4348 m), so the elevation-driven low/high tint
+// bias silently never engaged at all; every tile read the same flat
+// mid-blend regardless of real elevation. Real terrain here spans roughly
+// 2364-4053 m (ELEV_PLAUSIBLE_M's sampled range) i.e. UE Z from about
+// -107000 to +62000 cm - bands below sized against valley floors (Frisco/
+// Dillon ~2700 m) through low peaks, distinct from the higher treeline/
+// snow-line bands unreal/apply_ground_material.py's own TREELINE_LOW_CM/
+// SNOW_LOW_CM use (those model where trees/snow physically stop; this pair
+// is a softer/lower-elevation "valley green -> foothill grey" cosmetic
+// gradient feeding the vertex TINT only, not the material's texture-layer
+// picks). A different AREA_NAME would want these re-tuned again, same as
+// every other area-specific constant in this file (e.g. SEA_LEVEL_Z_CM in
+// unreal/apply_ground_material.py, itself already ORIGIN_HEIGHT_M-derived).
+static constexpr float ElevLowCm = -70000.0f;   // ~2735 m - at/below: full "rich/dark low green" bias
+static constexpr float ElevHighCm = 40000.0f;   // ~3835 m - at/above: full "grey/rocky" bias
 static const FLinearColor ElevLowBias(0.02f, 0.10f, 0.02f);
 static const FLinearColor ElevHighBias(0.40f, 0.40f, 0.40f);
 

@@ -1,0 +1,73 @@
+{
+  "_comment": "Phase 3a ground-visual overhaul (real biome-driven terrain surfaces, The Crew 2 art-direction target - see unreal/apply_ground_material.py). CC0 PBR sets from ambientCG (https://ambientcg.com) - the whole site is published CC0 1.0 (public domain, no attribution required; see https://ambientcg.com/about). All zips fetched at 2K-PNG resolution via ambientCG's public download API (https://ambientcg.com/get?file=<AssetId>_2K-PNG.zip), no login required. Same convention as content_src/textures/road/ (download script + manifest.json ARE committed, extracted binaries are NOT - see repo .gitignore).",
+  "resolution": "2K",
+  "format": "PNG (Color/Roughness/AmbientOcclusion), PNG NormalGL",
+  "textures": [
+    {
+      "role": "alpine_grass_meadow",
+      "asset_id": "Grass001",
+      "display_name": "Grass 001",
+      "source_url": "https://ambientcg.com/view?id=Grass001",
+      "download_url": "https://ambientcg.com/get?file=Grass001_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Grass001",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Summit County valley-floor/meadow base layer - low elevation, flat ground, PlainsGrassland/RockyFoothill/DeciduousForest biome tints multiply over this."
+    },
+    {
+      "role": "forest_floor_lichen",
+      "asset_id": "Ground068",
+      "display_name": "Ground 068",
+      "source_url": "https://ambientcg.com/view?id=Ground068",
+      "download_url": "https://ambientcg.com/get?file=Ground068_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Ground068",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Mossy/lichen-covered ground - blended in under EvergreenForest biome tint for the conifer-forest slopes."
+    },
+    {
+      "role": "dirt_trail",
+      "asset_id": "Ground037",
+      "display_name": "Ground 037",
+      "source_url": "https://ambientcg.com/view?id=Ground037",
+      "download_url": "https://ambientcg.com/get?file=Ground037_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Ground037",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Packed dirt/sparse patchy grass - road-verge dusty-shoulder blend and general dirt breakup on the grass layer."
+    },
+    {
+      "role": "rock_cliff",
+      "asset_id": "Rock030",
+      "display_name": "Rock 030",
+      "source_url": "https://ambientcg.com/view?id=Rock030",
+      "download_url": "https://ambientcg.com/get?file=Rock030_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Rock030",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Steep-slope exposed rock face - sampled triplanar (world XY + XZ/YZ) so it doesn't stretch on near-vertical cliffs."
+    },
+    {
+      "role": "scree_talus",
+      "asset_id": "Gravel030",
+      "display_name": "Gravel 030",
+      "source_url": "https://ambientcg.com/view?id=Gravel030",
+      "download_url": "https://ambientcg.com/get?file=Gravel030_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Gravel030",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Loose broken-rock talus - AlpineBare/ArcticTundra biome base above treeline, distinct from the bedrock rock_cliff layer."
+    },
+    {
+      "role": "snow",
+      "asset_id": "Snow006",
+      "display_name": "Snow 006",
+      "source_url": "https://ambientcg.com/view?id=Snow006",
+      "download_url": "https://ambientcg.com/get?file=Snow006_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/ground/Snow006",
+      "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
+      "notes": "Altitude snow-line layer above ~3500 m equivalent, noise-broken-up blend over rock/scree/grass beneath it."
+    }
+  ]
+}
