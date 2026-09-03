@@ -45,18 +45,81 @@ from pathlib import Path
 import numpy as np
 
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
 M_PER_DEG_LAT = 111132.0
 ROAD_EXCLUSION_M = ROAD_HALF_WIDTH + SKIRT_EXTRA + 2.0   # +2 m slop margin
 
 LEVEL_HEIGHT_M = 3.2
-# stories, when the OSM way has no building:levels tag - "City" (2026-07-27,
-# real downtown density per classify_settlements.py) deliberately reads as
-# a genuine high-rise range, not a taller version of a town building; real
-# per-building OSM levels/height tags (parsed in fetch_osm_buildings.py)
-# still win over this fallback whenever a way actually has one.
-DEFAULT_LEVEL_RANGE = {"AmericanTown": (1, 3), "City": (8, 35)}
+# stories, when the OSM way has no building:levels/height tag (parsed in
+# fetch_osm_buildings.py, which still wins over all of this whenever a way
+# actually has one).
+#
+# Keyed by the building's OWN `building=*` tag first (2026-09-03 fix - see
+# test_areas.py's MAX_BUILDING_LEVELS docstring for the full story): a real
+# small mountain town like Frisco/Breckenridge has no reliable settlement-
+# density signal to lean on the way Honolulu-vs-Kailua did (see
+# classify_settlements.py) - the overwhelming majority of ITS buildings,
+# residential and commercial alike, are tagged generic untyped
+# `building=yes`, so classify_settlements.py's "City" archetype fired on
+# ordinary downtown blocks and this module's old archetype-only defaulting
+# put them at genuine-high-rise heights (8-35 stories). Per-building-type
+# defaults use the actual tag on each way when it names a real type;
+# ARCHETYPE_LEVEL_RANGE is now only the fallback for the untyped/unknown
+# remainder, same as before this fix. MAX_BUILDING_LEVELS (test_areas.py)
+# is the final backstop, applied below to every level count regardless of
+# where it came from.
+BUILDING_TYPE_LEVEL_RANGE = {
+    # small residential / outbuildings - one or two stories, never more
+    "house": (1, 2), "detached": (1, 2), "semidetached_house": (1, 2),
+    "residential": (1, 2), "terrace": (1, 2), "bungalow": (1, 1),
+    "farm": (1, 2), "cabin": (1, 1), "static_caravan": (1, 1),
+    "houseboat": (1, 1), "garage": (1, 1), "shed": (1, 1), "roof": (1, 1),
+    "carport": (1, 1), "greenhouse": (1, 1), "construction": (1, 2),
+    # small commercial / retail - storefronts, not office towers
+    "commercial": (1, 2), "retail": (1, 2), "shop": (1, 2),
+    # multi-unit residential - genuinely taller than a house, still modest
+    "apartments": (3, 4), "dormitory": (3, 4),
+    # civic / hospitality
+    "church": (2, 3), "school": (2, 3), "public": (2, 3),
+    "government": (2, 3), "fire_station": (1, 2), "office": (3, 6),
+    "hotel": (3, 5),
+}
+# Fallback when the way's building=* tag isn't in the table above (mainly
+# the generic/untyped "yes", this dataset's majority tag in every populated
+# tile checked so far - real downtown AND ordinary town alike, see
+# classify_settlements.py's own 2026-07-28 finding) or archetype is unknown.
+#
+# Scaled off MAX_BUILDING_LEVELS (test_areas.py) rather than a fixed (8, 35)
+# per-archetype constant, and in two stages, both found live against the
+# actual summit_county bake (2026-09-03):
+#
+#   1st attempt - a fixed downtown-Honolulu-tuned "City" floor of 8 stories,
+#   clamped down to the area cap AFTER rolling the dice, didn't work: every
+#   "City"-tile untyped building rolled well above the cap and got
+#   flattened to one single monotonous height (the cap value itself) - a
+#   range whose floor already exceeds the area's cap can't produce anything
+#   but the cap.
+#
+#   2nd attempt - deriving the range's floor from the cap too (e.g.
+#   max_levels // 2 .. max_levels) fixed the flattening but, checked live
+#   at Frisco's North 6th Ave spawn, still read as a uniform wall of 3-6
+#   story mid-rises: real downtown Frisco/Breckenridge is mostly 1-3
+#   stories with only the occasional taller lodge/condo block, not "always
+#   at least half the area cap".
+#
+# So the "City" range now spans the FULL 1..max_levels band and leans on
+# the RNG jitter itself (uniform, not weighted) to make tall buildings the
+# minority outcome rather than the guaranteed floor - a summit_county
+# roll (1..6) is low-story roughly 2 times out of 3, occasionally hits the
+# 4-6 "taller block" range, and never exceeds the area cap; Oahu's roll
+# (1..40) still comes out looking like a real Honolulu high-rise district
+# in aggregate (mean story count ~20) while no longer making literally
+# every untyped building implausibly tall.
+def archetype_level_range(archetype, max_levels):
+    if archetype == "City":
+        return 1, max_levels
+    return 1, min(3, max_levels)
 FACADE_TILE_M = 4.0   # UV repeat period on walls/roof, matches this
                        # project's DETAIL_TILE_CM-style tiling convention
 
@@ -201,9 +264,11 @@ def main():
         rng = random.Random(b["way_id"])
         levels = b["levels"]
         if levels is None:
-            lo, hi = DEFAULT_LEVEL_RANGE.get(archetype, (1, 2))
+            tag_range = BUILDING_TYPE_LEVEL_RANGE.get(b.get("building_tag"))
+            lo, hi = tag_range if tag_range is not None else archetype_level_range(archetype, MAX_BUILDING_LEVELS)
             levels = rng.randint(lo, hi)
-        height_cm = max(1, levels) * LEVEL_HEIGHT_M * 100.0
+        levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
+        height_cm = levels * LEVEL_HEIGHT_M * 100.0
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
         out.append({

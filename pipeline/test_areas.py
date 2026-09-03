@@ -30,6 +30,7 @@ AREAS = {
         background_bbox_snwe=None,
         origin_height_m=60.0,
         elev_plausible_m=(-50.0, 2500.0),
+        max_building_levels=8,
     ),
 
     # Oahu, HI (2026-07-27) - a real island (Taylor's explicit ask, "build
@@ -47,6 +48,7 @@ AREAS = {
         background_bbox_snwe=None,
         origin_height_m=306.0,
         elev_plausible_m=(-50.0, 1300.0),
+        max_building_levels=40,   # real Honolulu high-rise downtown - keep the tall cap
     ),
 
     # Green Valley Rd / Angeles National Forest, near Palmdale, CA
@@ -68,6 +70,7 @@ AREAS = {
         background_bbox_snwe=(34.25, -118.72, 34.82, -118.18),
         origin_height_m=879.4,
         elev_plausible_m=(0.0, 2200.0),
+        max_building_levels=8,
     ),
 
     # Summit County / Vail, CO (2026-09-01) - Taylor's ask: "the area around
@@ -93,6 +96,12 @@ AREAS = {
         background_bbox_snwe=(39.25, -106.60, 39.80, -105.75),
         origin_height_m=3435.3,
         elev_plausible_m=(1800.0, 4600.0),
+        # 6 stories max (2026-09-03 skyscraper-canyon fix, see
+        # build_building_mesh.py) - a real small mountain resort town tops
+        # out at a handful of lodge/condo blocks, never a genuine downtown
+        # high-rise, no matter what classify_settlements.py's density-based
+        # "City" archetype call comes out to for a given tile.
+        max_building_levels=6,
     ),
 }
 
@@ -132,6 +141,24 @@ ROAD_REF_REGEX = None
 # subtract this first, or geometry floats ~ORIGIN_HEIGHT_M metres above the
 # rendered terrain (the Palmdale ~800 m offset bug, caught by -odseam).
 ORIGIN_HEIGHT_M = _ACTIVE["origin_height_m"]
+
+# Hard per-area sanity cap on building story count (build_building_mesh.py),
+# applied to EVERY level count that ends up data-driven - a real OSM
+# building:levels/height tag, and the per-building-type/archetype fallback
+# defaults alike. Added 2026-09-03: Frisco/Breckenridge (summit_county) were
+# extruding as a dense high-rise canyon because classify_settlements.py's
+# density-based "City" archetype (tuned against real Honolulu vs Kailua OSM
+# tagging patterns) fired on ordinary mountain-town downtown blocks - this
+# region's OSM data tags the overwhelming majority of buildings (>85% in
+# every affected tile, residential houses/garages/sheds included) with the
+# generic untyped `building=yes`, so the archetype's "few residential-tagged
+# => real downtown" signal is meaningless here and can't be trusted at all.
+# Per-building-type defaulting (see build_building_mesh.py) fixes most of
+# it directly; this cap is the backstop for whatever still slips through
+# (an untyped "yes" building still falls back to the archetype's range, and
+# a bogus/outlier real OSM tag stays possible) - same
+# defense-in-depth pattern ELEV_PLAUSIBLE_M below already uses for elevation.
+MAX_BUILDING_LEVELS = _ACTIVE["max_building_levels"]
 
 # Arc 7.2 slice 2: world-space grid size (cm) road-network chunks are
 # bucketed into for tile streaming (export_road_mesh_bin.py). MUST match

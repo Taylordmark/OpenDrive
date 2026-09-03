@@ -2219,6 +2219,35 @@ What landed, in order:
   `/Game/OpenDrive/Textures/Ground/Rock030` rather than a new download) -
   `used_with_instanced_static_meshes` set since these render via HISM,
   verified at Vail (`ScreenShot00263.png`).
+- **Building heights — skyscraper-canyon fix (2026-09-03):** the new facade
+  materials above made a pre-existing height bug glaring
+  (`ScreenShot00257.png` — Frisco reading as a 10-20+ story downtown canyon).
+  Root cause: `pipeline/classify_settlements.py`'s density-based "City"
+  archetype (tuned against real Honolulu-vs-Kailua OSM tagging, where
+  low residential-tag fraction reliably meant genuine downtown) fired on
+  ordinary Frisco/Breckenridge main-street blocks, because Summit County's
+  OSM data tags the overwhelming majority of buildings — houses, garages,
+  sheds, storefronts alike (>85% in every affected tile) — with the generic
+  untyped `building=yes`; `build_building_mesh.py` then rolled those "City"
+  buildings against an 8-35 story range meant for a real high-rise downtown.
+  Fixed in `pipeline/build_building_mesh.py`: level defaults are now keyed
+  off each building's own `building=*` tag first (house/garage/shed → 1-2,
+  retail/commercial → 1-2, apartments → 3-4, church/school/civic → 2-3,
+  hotel/office → 3-6), with the archetype-based range now only a fallback
+  for the untyped remainder and reshaped to roll uniformly across
+  `1..MAX_BUILDING_LEVELS` instead of a fixed floor (an early attempt at a
+  scaled `(cap/2, cap)` floor still read as a monotonous wall of mid-rises
+  at Frisco's North 6th Ave spawn). Added a per-area `MAX_BUILDING_LEVELS`
+  sanity cap in `test_areas.py` (6 for summit_county/skagit_cascades/
+  green_valley, 40 for oahu — preserves Honolulu's real high-rise skyline),
+  applied to every level count regardless of source (OSM tag or default).
+  Rebaked `building_mesh.json` + `buildings_*.bin` + `building_centroids_*.bin`
+  for summit_county only (no C++ changes — `ODBuildingManager` just renders
+  whatever height the pipeline bakes). Verified in-game: Frisco
+  (`ScreenShot00266.png`/`00267.png`) and Breckenridge
+  (`ScreenShot00268.png`/`00269.png`) both now read as a low-rise mountain
+  town, sky visible over rooftops, occasional taller lodge/condo block, no
+  canyon effect; car spawns fine, no new log errors.
 
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar
