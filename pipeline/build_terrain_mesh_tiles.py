@@ -53,6 +53,7 @@ ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
 import json
 import math
 import struct
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -299,6 +300,19 @@ WATER_TILE_GLOB = f"water_{AREA_NAME}_test_tile_*.bin"
 WATER_BED_MIN_DEPTH_M = 2.0     # bed depth right at the shoreline
 WATER_BED_MAX_DEPTH_M = 5.0     # bed depth WATER_BED_FALLOFF_M+ into the lake
 WATER_BED_FALLOFF_M = 40.0      # shoreline->interior depth ramp distance
+# 2026-09-03 fix: the INTERIOR falloff above starts at WATER_BED_MIN_DEPTH_M
+# immediately at the ring boundary (dist_m==0), but nothing ever touched the
+# EXTERIOR side of that same boundary - raw/carved DEM height was left in
+# place right up to the shoreline. Real DEM height at the shore is close to
+# the lake's own surface elevation, so the two combined into a sudden ~2m
+# vertical step running the entire perimeter of every lake (screenshot
+# dillon_shore3.png's "gray stepped terrain shelf" - diagnosis (a): rim
+# sticks up above the water plane and occludes it). Fix: blend the EXTERIOR
+# terrain down to the same shore target height the interior starts at,
+# over WATER_SHORE_BLEND_M outward from the ring, so the two meet with zero
+# discontinuity and the water plane can be seen lapping the bank instead of
+# stopping at a cliff edge.
+WATER_SHORE_BLEND_M = 12.0      # exterior rim->shore blend distance
 
 
 def _read_lake_bin_tile(path):
@@ -441,23 +455,52 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
         return z_cm
     tile_x0, tile_x1 = float(gx_cm.min()), float(gx_cm.max())
     tile_y0, tile_y1 = float(gy_cm.min()), float(gy_cm.max())
+    blend_cm = WATER_SHORE_BLEND_M * 100.0
     flat_x = gx_cm.reshape(-1)
     flat_y = gy_cm.reshape(-1)
     flat_z = z_cm.reshape(-1).copy()
     touched = False
     for lake in lakes:
         bx0, bx1, by0, by1 = lake["bbox"]
-        if bx1 < tile_x0 or bx0 > tile_x1 or by1 < tile_y0 or by0 > tile_y1:
-            continue  # cheap tile/lake bbox reject before any per-point test
+        # bbox reject widened by the exterior blend distance too, so the rim
+        # band just outside the ring isn't skipped.
+        if (bx1 + blend_cm < tile_x0 or bx0 - blend_cm > tile_x1 or
+                by1 + blend_cm < tile_y0 or by0 - blend_cm > tile_y1):
+            continue
         inside = _point_in_polygon(flat_x, flat_y, lake["ring_x"], lake["ring_y"])
-        if not inside.any():
+        shore_z_cm = lake["z_cm"] - WATER_BED_MIN_DEPTH_M * 100.0
+
+        if inside.any():
+            touched = True
+            idx = np.nonzero(inside)[0]
+            dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
+            depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
+                np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
+            flat_z[idx] = lake["z_cm"] - depth_m * 100.0
+
+        # Exterior rim band: blend raw terrain height down to shore_z_cm (the
+        # SAME height the interior side starts at, at dist_m==0) as points
+        # approach the ring from outside, so there is no seam at the
+        # boundary - a continuous bowl into the lake instead of a cliff.
+        outside = ~inside
+        if not outside.any():
+            continue
+        out_idx = np.nonzero(outside)[0]
+        # cheap pre-filter: only bother with points within blend_cm of the
+        # lake's (padded) bbox before paying for the exact ring distance.
+        near = ((flat_x[out_idx] > bx0 - blend_cm) & (flat_x[out_idx] < bx1 + blend_cm) &
+                (flat_y[out_idx] > by0 - blend_cm) & (flat_y[out_idx] < by1 + blend_cm))
+        if not near.any():
+            continue
+        out_idx = out_idx[near]
+        dist_m = _dist_to_ring(flat_x[out_idx], flat_y[out_idx], lake["ring_x"], lake["ring_y"]) / 100.0
+        blend_t = np.clip(1.0 - dist_m / WATER_SHORE_BLEND_M, 0.0, 1.0)  # 1 at ring, 0 at blend edge
+        rim_idx = out_idx[blend_t > 0.0]
+        if len(rim_idx) == 0:
             continue
         touched = True
-        idx = np.nonzero(inside)[0]
-        dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
-        depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
-            np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
-        flat_z[idx] = lake["z_cm"] - depth_m * 100.0
+        t = blend_t[blend_t > 0.0]
+        flat_z[rim_idx] = flat_z[rim_idx] * (1.0 - t) + shore_z_cm * t
     return flat_z.reshape(z_cm.shape) if touched else z_cm
 
 
@@ -954,11 +997,40 @@ def classify_tiles(station_data):
 
 
 def main():
+    # 2026-09-03: --lakes-only restricts the rebake to tiles that actually
+    # touch a baked lake bbox (padded by the water-depression falloff/blend
+    # distances) - a full summit_county rebake is ~55 min, but the water-
+    # depression fix only changes geometry within ~52m of a shoreline, so
+    # every other tile is byte-identical and not worth re-baking. Tiles NOT
+    # in this filtered set are left untouched on disk (delete_stale_tiles is
+    # skipped in this mode - it would otherwise treat every un-rebuilt tile
+    # as stale and delete it).
+    lakes_only = "--lakes-only" in sys.argv
+
     lat0, lon0, east, north, elev, exclude, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
     station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude)
 
     tiles = classify_tiles(station_data)
+
+    if lakes_only:
+        lakes = _get_lake_beds()
+        pad_cm = (WATER_BED_FALLOFF_M + WATER_SHORE_BLEND_M) * 100.0
+        tile_cm = TERRAIN_TILE_SIZE_CM
+        keep = {}
+        for (tx, ty), is_near in tiles.items():
+            tx0, tx1 = tx * tile_cm, (tx + 1) * tile_cm
+            ty0, ty1 = ty * tile_cm, (ty + 1) * tile_cm
+            for lake in lakes:
+                bx0, bx1, by0, by1 = lake["bbox"]
+                if not (bx1 + pad_cm < tx0 or bx0 - pad_cm > tx1 or
+                        by1 + pad_cm < ty0 or by0 - pad_cm > ty1):
+                    keep[(tx, ty)] = is_near
+                    break
+        print(f"--lakes-only: {len(keep)}/{len(tiles)} tile(s) touch a baked lake bbox "
+              f"(+{WATER_BED_FALLOFF_M + WATER_SHORE_BLEND_M:.0f}m pad)")
+        tiles = keep
+
     n_near = sum(1 for v in tiles.values() if v)
     n_far = len(tiles) - n_near
     print(f"{len(tiles)} tile(s) to build ({n_near} near/collision, {n_far} far/no-collision)")
@@ -999,11 +1071,15 @@ def main():
         if (i + 1) % 10 == 0 or i + 1 == len(tiles):
             print(f"  {i + 1}/{len(tiles)} tile(s) built")
 
-    n_stale = delete_stale_tiles(OUT_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin", written_paths)
-    print(f"deleted {n_stale} stale terrain tile(s) from a previous run")
-    n_stale_coarse = delete_stale_tiles(
-        OUT_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin", written_coarse_paths)
-    print(f"deleted {n_stale_coarse} stale coarse-fallback tile(s) from a previous run")
+    if lakes_only:
+        print(f"--lakes-only: skipping delete_stale_tiles (only a subset of tiles was rebuilt, "
+              f"the rest are intentionally left as-is)")
+    else:
+        n_stale = delete_stale_tiles(OUT_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin", written_paths)
+        print(f"deleted {n_stale} stale terrain tile(s) from a previous run")
+        n_stale_coarse = delete_stale_tiles(
+            OUT_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin", written_coarse_paths)
+        print(f"deleted {n_stale_coarse} stale coarse-fallback tile(s) from a previous run")
     print(f"Built {len(tiles)} terrain tile(s) ({n_coarse_fallback} with a coarse fallback), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 

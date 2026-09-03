@@ -2296,6 +2296,75 @@ What landed, in order:
   generation-id mismatches); car still spawns and idles normally on
   pavement at both spawns.
 
+  **CORRECTION (2026-09-03, second follow-on pass):** the "clean, continuous
+  water surface" claim above did not hold up — a reviewer's read of the two
+  screenshots it cited found neither convincing (`dillon_dam.png`: distant
+  lake washed-out white/featureless, ambiguous vs. sun glare or no water at
+  all; `dillon_shore3.png`: a gray stepped terrain shelf crossing the
+  midground with no visible water surface). Re-diagnosed from scratch,
+  cross-checking geometry numerically before touching anything:
+  - **Bug 1 (terrain, real cliff):** `apply_water_depression()` only ever
+    overrode elevation for grid points *inside* a lake ring, jumping straight
+    to `WATER_BED_MIN_DEPTH_M` below the water plane at `dist_m==0` (the ring
+    boundary itself) — points *outside* the ring were left at raw/carved DEM
+    height, untouched. Real DEM height right at a shoreline sits close to the
+    lake's own surface elevation, so combined these produced a ~2 m vertical
+    step running the ENTIRE perimeter of every lake — exactly the "gray
+    stepped terrain shelf" in `dillon_shore3.png`. Fixed by adding a matching
+    exterior blend band (new `WATER_SHORE_BLEND_M`, 12 m): terrain outside the
+    ring now smoothly interpolates from its own raw height down to the same
+    shore-target height the interior side starts at, so the two sides meet
+    with zero discontinuity. Also added a `--lakes-only` rebake mode (filters
+    `classify_tiles()`'s output to tiles whose bbox intersects a lake bbox +
+    falloff/blend padding, and skips `delete_stale_tiles` since only a subset
+    is rebuilt) so this didn't need the full ~55 min summit_county rebake —
+    368/1221 tiles touched a lake and were rebuilt in ~8 min.
+  - **Bug 2 (material, the actual dominant cause):** re-rendering after the
+    terrain fix showed **no visible change** at either original vantage —
+    proof the "shelf" wasn't (only) a geometry problem. Two compounding
+    `M_Water` (`unreal/apply_water_material.py`) defects, found by comparing
+    a water-level vantage spawned *inside* the lake polygon against the two
+    shore vantages: (a) `two_sided=True` (needed — Dillon's OSM multipolygon
+    triangulation isn't trustworthy winding) never got MSM_DEFAULT_LIT's
+    backface normal correctly flipped (same root cause `next_steps.md`
+    already documents for M_Foliage's near-black crowns, but the fix used
+    there — switching shading model — isn't an option for a material that
+    wants real specular/fresnel), so the mesh's underside read unlit-black
+    from some shore angles — the dark "cliff face" wedge under the shelf
+    edge. Fixed with the standard DefaultLit two-sided trick: multiply the
+    sampled tangent normal by `(1, 1, TwoSidedSign)` so only Z flips on a
+    backface. (b) Far more impactful: every realistic shore/overlook vantage
+    on this reservoir views the water at a near-grazing angle almost by
+    construction (camera close to the water's own elevation, looking out
+    across a flat plane) — Fresnel genuinely approaches 1.0 across nearly the
+    ENTIRE visible surface at that geometry (correct physics — this is why a
+    real lake often looks pale/sky-toned from standing height), so
+    `base_color` was blending almost fully to `SKY_TINT_COLOR` everywhere in
+    frame. Confirmed empirically: neither reducing `ROUGHNESS`
+    (0.06→0.16→0.35) nor `SPECULAR_GRAZING` (1.0→0.75→0.55) nor darkening
+    `SKY_TINT_COLOR` alone changed the shore renders at all — proved this
+    wasn't a specular-blowout problem, it was the base-color fresnel term
+    itself saturating white. Fixed with two changes together: `SKY_TINT_
+    COLOR` pushed from a pale blue-grey to a properly saturated sky blue
+    `(0.05, 0.22, 0.42)`, and a new `BASE_COLOR_FRESNEL_CAP` (0.72) clamps
+    the fresnel value driving the base-color blend (specular still uses the
+    raw fresnel) so the deep-water color always keeps a real minority share
+    even at the shallowest visible angle instead of the sky tint ever
+    reaching 100%.
+  - **Verified** (`-odhour=15`, mid-afternoon, eliminates glare ambiguity) at
+    three vantages, re-rendered after each fix and compared directly against
+    the pre-fix baseline: Dillon Dam Rd/Frisco overlook (`-odspawnx=733226
+    -odspawny=-807394`) now shows an unmistakable blue lake surface in the
+    distance where it was previously a flat white/tan expanse; Swan Mountain
+    Rd/Keystone shoreline (`-odspawnx=1374341 -odspawny=-846975`) now shows
+    clear blue water in the foreground/shore area (the far shelf still reads
+    grayer where it sits in tree-canopy shadow — expected, not a bug); a new
+    third vantage spawned inside the lake polygon itself
+    (`-odspawnx=1371343 -odspawny=-846921`) shows the car sitting on an
+    unambiguous solid blue water surface reflecting the sky, meeting the
+    shoreline cleanly with no terrain visible through it. Screenshots:
+    `dillon_fix_dam.png`, `dillon_fix_shore.png`, `dillon_fix_waterlevel.png`.
+
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.

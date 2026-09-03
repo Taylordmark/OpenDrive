@@ -66,13 +66,32 @@ WATER_COLOR = (0.015, 0.07, 0.075)
 # sky-ish blue-grey tint, faded in via Fresnel, is the cheap stylized
 # substitute for a real reflection (same "fake it with a color, not a real
 # reflection" tradeoff the rest of this material's fresnel work makes).
-SKY_TINT_COLOR = (0.58, 0.66, 0.70)
+# 2026-09-03 tuning round 2 (dillon_dam.png / dillon_shore3.png QA findings,
+# confirmed by an in-game A/B: neither the roughness/specular knobs below NOR
+# a much darker SKY_TINT_COLOR alone changed anything - every shore/overlook
+# vantage on this reservoir views the water at a near-grazing angle almost by
+# construction (camera close to the water's own elevation, looking OUT across
+# a flat plane), and Fresnel genuinely approaches 1.0 across nearly the ENTIRE
+# visible surface at that geometry, not just near true grazing incidence -
+# that's correct physics (this is why a real lake often looks pale/sky-toned
+# from standing height), but it meant base_color was blending almost fully to
+# SKY_TINT_COLOR everywhere in frame, and a merely "darker blue" sky tint
+# still read as washed-out pale blue-white once lit by a bright midday sun.
+# Two changes instead of endlessly darkening the tint further: (1) SKY_TINT_
+# COLOR pushed to a properly saturated sky blue (not just "less white"), and
+# (2) the fresnel driving the BASE COLOR blend (not the specular term) is
+# clamped below 1.0, so even at the shallowest visible angle the deep-water
+# color always keeps a real minority share of the blend instead of the sky
+# tint ever going 100%.
+SKY_TINT_COLOR = (0.05, 0.22, 0.42)
+BASE_COLOR_FRESNEL_CAP = 0.72   # clamp ceiling for the base-color fresnel blend (specular still uses raw fresnel)
 
-ROUGHNESS = 0.06          # near-mirror - sharp sun glint, not a soft sheen
-SPECULAR_BASE = 0.5
-SPECULAR_GRAZING = 1.0    # boosted further at grazing angles, on top of Fresnel's own base_reflect_fraction
+ROUGHNESS = 0.35
+SPECULAR_BASE = 0.35
+SPECULAR_GRAZING = 0.55   # boosted further at grazing angles, on top of Fresnel's own base_reflect_fraction
 
-FRESNEL_EXPONENT = 3.2
+FRESNEL_EXPONENT = 4.2    # steeper falloff than 3.2 - needs a shallower angle before sky-tint dominates,
+                           # so more of a normally-viewed lake surface reads as the deep water color
 FRESNEL_BASE_REFLECT = 0.04   # ~real water's normal-incidence reflectance (Schlick F0 for water is ~0.02-0.04)
 
 # Ripple normal: two samples of the SAME texture (see module docstring),
@@ -180,6 +199,39 @@ class G:
         return self.node(unreal.MaterialExpressionFresnel,
                           exponent=exponent, base_reflect_fraction=base_reflect_fraction)
 
+    def append(self, a, b, a_out="", b_out=""):
+        n = self.node(unreal.MaterialExpressionAppendVector)
+        self._req(MEL.connect_material_expressions(a, a_out, n, "A"), "AppendVector.A")
+        self._req(MEL.connect_material_expressions(b, b_out, n, "B"), "AppendVector.B")
+        return n
+
+    def clamp(self, a, lo, hi, a_out=""):
+        # NB: MaterialExpressionClamp's primary input pin is unnamed ("") in
+        # this UE 5.8 build's python bindings, not "Input" (module docstring).
+        n = self.node(unreal.MaterialExpressionClamp, min_default=lo, max_default=hi)
+        self._req(MEL.connect_material_expressions(a, a_out, n, ""), "Clamp.Input")
+        return n
+
+    def two_sided_sign_vec(self):
+        # 2026-09-03 fix (dillon_shore3.png QA finding: a dark cliff-like
+        # wedge under the water's leading edge from some shore angles): this
+        # material sets two_sided=True (untrusted OSM-derived triangle
+        # winding, see module docstring) so backfaces render, but UE's
+        # MSM_DEFAULT_LIT shading model does NOT auto-flip the tangent-space
+        # normal for a backface the way MSM_TWO_SIDED_FOLIAGE does (same root
+        # cause next_steps.md 7.15 documents for M_Foliage's near-black
+        # crowns, fixed there by switching shading model - not an option
+        # here, water wants real specular/fresnel, not foliage subsurface).
+        # The standard DefaultLit fix instead: multiply the sampled tangent
+        # normal by (1, 1, TwoSidedSign) so only Z flips on a backface - for
+        # a near-flat water plane the tangent Z channel IS effectively "away
+        # from the visible face", so this alone corrects N.L from negative
+        # (unlit black) to positive on the mesh's underside without
+        # perturbing the X/Y ripple detail.
+        sign = self.node(unreal.MaterialExpressionTwoSidedSign)
+        ones = self.const2(1.0, 1.0)
+        return self.append(ones, sign)
+
 
 mat_path = f"{MAT_DIR}/{MAT_NAME}"
 
@@ -228,14 +280,19 @@ uv_b = g.mul(uv0, g.const(2000.0 / RIPPLE_B_TILE_CM))
 uv_b_panned = g.panner(uv_b, RIPPLE_B_SPEED[0], RIPPLE_B_SPEED[1])
 ripple_b = g.sample(water_normal_tex, uv_b_panned, is_normal=True)
 
-ripple_normal = g.lerp(ripple_a, ripple_b, g.const(NORMAL_BLEND_ALPHA), a_out="RGB", b_out="RGB")
+ripple_normal_raw = g.lerp(ripple_a, ripple_b, g.const(NORMAL_BLEND_ALPHA), a_out="RGB", b_out="RGB")
+# flip Z on backfaces (see two_sided_sign_vec() docstring) - fixes the
+# unlit-black backface wedge a two-sided flat water plane otherwise shows
+# from below/behind its shoreline edge.
+ripple_normal = g.mul(ripple_normal_raw, g.two_sided_sign_vec())
 
 # ---------------------------------------------------------------- fresnel-driven color/specular
 fresnel = g.fresnel(FRESNEL_EXPONENT, FRESNEL_BASE_REFLECT)
 
 deep_color = g.const3(*WATER_COLOR)
 sky_color = g.const3(*SKY_TINT_COLOR)
-base_color = g.lerp(deep_color, sky_color, fresnel)
+base_fresnel = g.clamp(fresnel, 0.0, BASE_COLOR_FRESNEL_CAP)
+base_color = g.lerp(deep_color, sky_color, base_fresnel)
 
 specular = g.lerp(g.const(SPECULAR_BASE), g.const(SPECULAR_GRAZING), fresnel)
 roughness = g.const(ROUGHNESS)
@@ -280,5 +337,5 @@ if not all_ok:
 
 log(f"built + saved {MAT_NAME} (color={WATER_COLOR}, sky_tint={SKY_TINT_COLOR}, "
     f"roughness={ROUGHNESS}, specular={SPECULAR_BASE}-{SPECULAR_GRAZING}, "
-    f"fresnel_exp={FRESNEL_EXPONENT}, two_sided=True, blend=Opaque, "
+    f"fresnel_exp={FRESNEL_EXPONENT}, two_sided=True+TwoSidedSign normal fix, blend=Opaque, "
     f"ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm)")
