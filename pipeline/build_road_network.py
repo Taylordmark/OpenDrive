@@ -132,6 +132,7 @@ def main():
         # this script's work. Absent in older road_stations.json -> no tunnels.
         is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
         is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
+        highway_full = seg.get("highway_class")   # absent in older files - defaults to unknown class
         runs = list(split_excluding_tunnels(is_tunnel))
         if len(runs) > 1:
             n_tunnel_truncated += 1
@@ -144,9 +145,11 @@ def main():
             h = h_full[lo:hi]
             z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
+            highway_classes = highway_full[lo:hi] if highway_full else None
             name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
             chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
-                                                   spacing=STATION_SPACING, is_oneway=is_oneway)
+                                                   spacing=STATION_SPACING, is_oneway=is_oneway,
+                                                   highway_classes=highway_classes)
             segments.append({"name": name, "chunks": chunks})
             segment_geoms.append((cx, cy, cz))
             length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0

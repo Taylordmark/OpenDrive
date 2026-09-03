@@ -1,0 +1,62 @@
+{
+  "_comment": "Phase 2a road-visual overhaul (worn-asphalt look, The Crew 2 art-direction target). CC0 PBR sets from ambientCG (https://ambientcg.com) - the whole site is published CC0 1.0 (public domain, no attribution required; see https://ambientcg.com/about). All zips fetched at 2K-JPG resolution via ambientCG's public download API (https://ambientcg.com/get?file=<AssetId>_2K-JPG.zip), no login required. Binaries are NOT committed to git (see download_road_textures.py + repo .gitignore) - re-run that script to repopulate this folder from the URLs below.",
+  "resolution": "2K",
+  "format": "JPG (Color/Roughness/AO/Displacement), JPG NormalGL + NormalDX",
+  "textures": [
+    {
+      "role": "asphalt_worn_primary",
+      "asset_id": "Asphalt031",
+      "display_name": "Asphalt 031",
+      "source_url": "https://ambientcg.com/view?id=Asphalt031",
+      "download_url": "https://ambientcg.com/get?file=Asphalt031_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/road/Asphalt031",
+      "maps": ["Color", "NormalGL", "NormalDX", "Roughness", "AmbientOcclusion", "Displacement"],
+      "notes": "Primary worn asphalt - use for motorway/trunk/primary main travel lanes."
+    },
+    {
+      "role": "asphalt_worn_variant_a",
+      "asset_id": "Asphalt033",
+      "display_name": "Asphalt 033",
+      "source_url": "https://ambientcg.com/view?id=Asphalt033",
+      "download_url": "https://ambientcg.com/get?file=Asphalt033_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/road/Asphalt033",
+      "maps": ["Color", "NormalGL", "NormalDX", "Roughness", "AmbientOcclusion", "Displacement"],
+      "notes": "Secondary variant for material-instance blending/tiling breakup on longer stretches."
+    },
+    {
+      "role": "asphalt_worn_variant_b",
+      "asset_id": "Asphalt032",
+      "display_name": "Asphalt 032",
+      "source_url": "https://ambientcg.com/view?id=Asphalt032",
+      "download_url": "https://ambientcg.com/get?file=Asphalt032_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/road/Asphalt032",
+      "maps": ["Color", "NormalGL", "NormalDX", "Roughness", "Displacement"],
+      "notes": "Third asphalt variant - residential/tertiary/service class roads (rougher, patchier look). No AO map shipped for this asset."
+    },
+    {
+      "role": "gravel_dirt_shoulder",
+      "asset_id": "Gravel023",
+      "display_name": "Gravel 023",
+      "source_url": "https://ambientcg.com/view?id=Gravel023",
+      "download_url": "https://ambientcg.com/get?file=Gravel023_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/road/Gravel023",
+      "maps": ["Color", "NormalGL", "NormalDX", "Roughness", "AmbientOcclusion", "Displacement"],
+      "notes": "Shoulder/skirt material - the u0 UV goes outside [0,1] on skirt vertices, so the material can blend to this outside the pavement edge."
+    },
+    {
+      "role": "junction_pad_concrete",
+      "asset_id": "Concrete034",
+      "display_name": "Concrete 034",
+      "source_url": "https://ambientcg.com/view?id=Concrete034",
+      "download_url": "https://ambientcg.com/get?file=Concrete034_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "local_dir": "content_src/textures/road/Concrete034",
+      "maps": ["Color", "NormalGL", "NormalDX", "Roughness", "Displacement"],
+      "notes": "Optional - junction pads (experimental_junction_pads.py) if the follow-up agent wants a distinct road-rock/concrete surface there instead of asphalt. No AO map shipped for this asset."
+    }
+  ]
+}

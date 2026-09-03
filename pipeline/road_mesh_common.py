@@ -69,6 +69,84 @@ MAX_GRADE = DEFAULT_ROAD_CLASS_GRADE[0]    # kept for callers/comments that
                                             # just want a single reasonable
                                             # ceiling, not per-class detail
 
+# Phase 2a road-visual overhaul (2026-09-03): a small road-CLASS id table so
+# the material can pick lane-marking rules (lane count, divider style)
+# per chunk without carrying the full OSM highway= string at runtime. Grouped
+# coarser than ROAD_CLASS_GRADE above (that one needs every class distinct
+# for grade tuning; this one only needs "how many lanes / what markings"
+# distinctions, which motorway/motorway_link share, etc.) - collapsed to 7
+# buckets. Order is the wire id (0..6); do not reorder without a coordinated
+# C++/material update on whichever format version uses it (see ODR3 in
+# export_road_mesh_bin_v2.py - the current shipped ODR2 sidecars don't carry
+# this at all).
+ROAD_CLASS_ID = {
+    "motorway": 0, "motorway_link": 0,
+    "trunk": 1, "trunk_link": 1,
+    "primary": 2, "primary_link": 2,
+    "secondary": 3, "secondary_link": 3,
+    "tertiary": 4, "tertiary_link": 4, "unclassified": 4,
+    "residential": 5, "living_street": 5,
+    "service": 6, "track": 6,
+}
+DEFAULT_ROAD_CLASS_ID = 6   # unrecognized/missing highway= tag - treat like
+                             # the narrowest/least-marked class
+ROAD_CLASS_ID_NAMES = ["motorway", "trunk", "primary", "secondary",
+                        "tertiary", "residential", "service"]
+
+# First-pass lane-count guesses per highway= class (2026-09-03, ship-a-guess
+# same as ROAD_CLASS_GRADE - real OSM lanes= tags aren't fetched by
+# fetch_osm_network.py today, so this is a typical-case heuristic for the
+# material's lane-marking logic, not authoritative per-way data). Value is
+# the TWO-WAY total lane count for that class; an OSM way tagged oneway=yes
+# is assumed to be one carriageway of a divided road, so its lane count is
+# halved (rounded up, floor 1) in road_class_and_lanes() below rather than
+# doubling the table.
+ROAD_CLASS_LANES_TWOWAY = {
+    "motorway": 6, "motorway_link": 2,
+    "trunk": 4, "trunk_link": 2,
+    "primary": 2, "primary_link": 1,
+    "secondary": 2, "secondary_link": 1,
+    "tertiary": 2, "tertiary_link": 1,
+    "unclassified": 2,
+    "residential": 2, "living_street": 1,
+    "service": 1, "track": 1,
+}
+DEFAULT_ROAD_CLASS_LANES_TWOWAY = 2   # unrecognized/missing highway= tag
+
+
+def road_class_and_lanes(highway_classes, is_oneway=None):
+    """Majority-vote a chunk's stations' OSM highway= class into a single
+    (road_class_id, road_class_name, lane_count) triple - same "pick a
+    single per-chunk value from many per-station tags" approach
+    build_road_chunks() already uses for its oneway output flag (a chunk
+    boundary essentially never lands mid-carriageway, so this is a
+    tie-breaker, not a meaningfully lossy reduction).
+
+    `is_oneway` (optional, parallel bool array/list) - when true for the
+    majority-class stations, the two-way lane count from
+    ROAD_CLASS_LANES_TWOWAY is halved (round up, floor 1): an OSM way tagged
+    oneway=yes is one carriageway of what's usually a divided road, not a
+    road with half as many total lanes.
+
+    Returns (road_class_id: int, road_class_name: str, lane_count: int),
+    lane_count clamped to [1, 8] (uint8 wire field in ODR3)."""
+    if not highway_classes:
+        return DEFAULT_ROAD_CLASS_ID, ROAD_CLASS_ID_NAMES[DEFAULT_ROAD_CLASS_ID], DEFAULT_ROAD_CLASS_LANES_TWOWAY
+    counts = defaultdict(int)
+    for cls in highway_classes:
+        counts[cls] += 1
+    majority_cls = max(counts, key=counts.get)
+    road_class_id = ROAD_CLASS_ID.get(majority_cls, DEFAULT_ROAD_CLASS_ID)
+    road_class_name = ROAD_CLASS_ID_NAMES[road_class_id]
+    lanes = ROAD_CLASS_LANES_TWOWAY.get(majority_cls, DEFAULT_ROAD_CLASS_LANES_TWOWAY)
+    oneway_majority = False
+    if is_oneway is not None and len(is_oneway):
+        oneway_majority = (sum(1 for v in is_oneway if v) / len(is_oneway)) > 0.5
+    if oneway_majority and lanes >= 2:
+        lanes = max(1, -(-lanes // 2))   # ceil-div by 2, floor 1
+    lanes = max(1, min(8, lanes))
+    return road_class_id, road_class_name, lanes
+
 # Raw-DEM despike threshold (2026-07-29, found on the first full-Oahu rebake
 # with the no-smoothing grade_smooth_elevation() below: single Terrarium
 # pixels decode to garbage - e.g. a raw (0,0,0) RGB triple decodes to
@@ -447,7 +525,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        chunk_stations=CHUNK_STATIONS,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
-                       bank_gain=BANK_GAIN, is_oneway=None):
+                       bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None):
     """Build banked, skirted road mesh chunks from station arrays.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
@@ -457,10 +535,39 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     flag by majority vote across its stations - a chunk boundary essentially
     never lands mid-carriageway (chains only break at real OSM junctions),
     so this is just a tie-breaker, not a meaningfully lossy reduction.
+    `highway_classes` (optional, per-station list of OSM highway= strings,
+    e.g. road_stations.json's "highway_class") feeds the same majority-vote
+    treatment into road_class_and_lanes() for each chunk's road_class_id/
+    road_class/lane_count fields (Phase 2a road-visual overhaul, 2026-09-03).
+
+    UV convention (Phase 2a, 2026-09-03 - was: u=0..1 across the WHOLE
+    skirt+pavement profile, v=s/20 arbitrary-scaled station distance):
+        u = lateral offset normalized so u=0 is the LEFT PAVEMENT edge and
+            u=1 is the RIGHT PAVEMENT edge (off=+-road_half_width) - the
+            material can locate lane lines directly from u. Skirt vertices
+            are OUTSIDE the pavement, so their u falls outside [0,1]
+            (extrapolated linearly on the same scale, not clamped) - the
+            material can use u<0 or u>1 to blend to a shoulder/gravel look
+            past the paved edge.
+        v = station arc-length distance IN METERS, continuous along the
+            centerline and NOT rescaled by road width - a chunk's `s` values
+            already carry the segment's true along-road distance, so tiling
+            asphalt never stretches/compresses as the profile's road_half_
+            width changes between classes. (The material divides by its own
+            world-space tile size; baking a fixed /20 scale in here would
+            have permanently coupled the two.)
+    A second UV channel ("uv1") is also emitted per vertex: uv1.x = the
+    chunk's road HALF-width in meters (so u's normalization is recoverable:
+    full pavement width = 2 * uv1.x; currently constant per chunk since
+    road_half_width doesn't vary by class yet, but written per-vertex so a
+    future variable-width profile doesn't need another format bump),
+    uv1.y = reserved (0.0).
+
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
-    {"name","vertices","uvs","triangles","oneway"} schema and cx/cy/cz are
-    the UE-frame (cm) station centerline arrays for the caller's own use
-    (yaw calc, player start, stats).
+    {"name","vertices","uvs","uv1","triangles","oneway","road_class_id",
+    "road_class","lane_count"} schema and cx/cy/cz are the UE-frame (cm)
+    station centerline arrays for the caller's own use (yaw calc, player
+    start, stats).
     """
     # UE frame: X=east, Y=south(-north), Z=up, cm
     cx, cy, cz = e * 100.0, -n * 100.0, z * 100.0
@@ -498,29 +605,42 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                         cz[i] + (dz + lift) * 100.0))
         return out
 
+    # u-coordinate per profile column, normalized to the PAVEMENT edges
+    # (columns 1/2 = pave-L/pave-R at off=+-road_half_width -> u=0/1; columns
+    # 0/3 = skirt-L/skirt-R extrapolate outside [0,1] on the same scale).
+    prof_u = [off / (2.0 * road_half_width) + 0.5 for off, _dz in profile]
+
     # chunked mesh buffers; winding (A, A+right, A+forward) faces up in UE
     chunks = []
     n_st = len(s)
     for c0 in range(0, n_st - 1, chunk_stations):
         c1 = min(c0 + chunk_stations, n_st - 1)
-        verts, tris, uvs = [], [], []
+        verts, tris, uvs, uv1 = [], [], [], []
         for i in range(c0, c1 + 1):
             verts.extend(station_verts(i))
-            v = s[i] / 20.0
-            uvs.extend([(j / (n_prof - 1), v) for j in range(n_prof)])
+            v = s[i]   # meters, continuous - see build_road_chunks docstring
+            uvs.extend([(prof_u[j], v) for j in range(n_prof)])
+            uv1.extend([(road_half_width, 0.0) for _ in range(n_prof)])
         for irow in range(c1 - c0):
             b = irow * n_prof
             for j in range(n_prof - 1):
                 p, q = b + j, b + j + n_prof
                 tris.append((p, p + 1, q))
                 tris.append((p + 1, q + 1, q))
-        oneway = bool(np.mean(is_oneway[c0:c1 + 1]) > 0.5) if is_oneway is not None else False
+        oneway_mask = is_oneway[c0:c1 + 1] if is_oneway is not None else None
+        oneway = bool(np.mean(oneway_mask) > 0.5) if oneway_mask is not None else False
+        hwy_chunk = highway_classes[c0:c1 + 1] if highway_classes is not None else None
+        road_class_id, road_class_name, lane_count = road_class_and_lanes(hwy_chunk, oneway_mask)
         chunks.append({
             "name": f"{name_prefix}_{c0:04d}",
             "vertices": [round(v, 1) for xyz in verts for v in xyz],
             "uvs": [round(v, 4) for uv in uvs for v in uv],
+            "uv1": [round(v, 4) for uv in uv1 for v in uv],
             "triangles": [i for t in tris for i in t],
             "oneway": oneway,
+            "road_class_id": road_class_id,
+            "road_class": road_class_name,
+            "lane_count": lane_count,
         })
     return chunks, cx, cy, cz
 
