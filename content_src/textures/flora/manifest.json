@@ -1,0 +1,24 @@
+{
+  "bark_conifer_polyhaven.jpg": {
+    "source": "https://polyhaven.com/a/knotted_pine_bark",
+    "license": "CC0",
+    "author": "Poly Haven",
+    "downloaded": true
+  },
+  "bark_willow_polyhaven.jpg": {
+    "source": "https://polyhaven.com/a/bark_willow",
+    "license": "CC0",
+    "author": "Poly Haven",
+    "downloaded": true
+  },
+  "T_BarkAspen.png": {
+    "source": "generated",
+    "license": "CC0 (procedural, no external asset)",
+    "note": "pale trunk + black diamond scars, hand-authored gradient/noise"
+  },
+  "T_FoliageAtlas.png": {
+    "source": "generated",
+    "license": "CC0 (procedural)",
+    "note": "alpha-cutout branch/needle/leaf card atlas, 8 species cells"
+  }
+}

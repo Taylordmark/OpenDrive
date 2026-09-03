@@ -28,3 +28,12 @@ OpenDriveUE/Build/
 # manifest.json, both of which ARE tracked)
 content_src/textures/road/*/
 
+# Same convention, ground PBR sets (Phase 3a ground-visual overhaul) -
+# content_src/textures/ground/download_ground_textures.py + manifest.json
+content_src/textures/ground/*/
+
+# Same convention, flora bark photos (Phase 3b flora overhaul) - manifest.json
+# is tracked, raw downloaded photos are re-fetchable via
+# pipeline/build_flora_textures.py
+content_src/textures/flora/*.jpg
+
