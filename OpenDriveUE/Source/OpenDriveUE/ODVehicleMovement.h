@@ -95,6 +95,16 @@ public:
 	float GetThrottleInput() const { return ThrottleIn; }
 	float GetSteeringInput() const { return SteerIn; }
 
+	// --- spawn parking hold (2026-09-02) ---
+	// Full-brake hold engaged by the pawn when the ground-snap releases
+	// physics, cleared automatically on the first pedal input. Without it a
+	// car spawned on any real grade rolls away with no input (the -odpick
+	// Frisco spawn coasted ~19m down a 0.4% grade). Lives here rather than
+	// as a pawn-side SetHandbrakeInput(true) because the gamepad/wheel input
+	// paths rewrite the handbrake state every tick.
+	void EngageParkHold() { bParkHold = true; }
+	bool IsParkHeld() const { return bParkHold; }
+
 	// --- engine (pause menu swaps these live) ---
 	// tried 1400 (2026-08-25) to further flatten launch feel, but it also
 	// raises the "CoupledRpm > IdleRpm" engine-braking gate in
@@ -385,6 +395,7 @@ private:
 	// inputs
 	float ThrottleIn = 0.0f, BrakeIn = 0.0f, SteerIn = 0.0f;
 	bool bHandbrakeIn = false;
+	bool bParkHold = false;   // see EngageParkHold()
 
 	// engine/gearbox state
 	float EngineRpm = 900.0f;

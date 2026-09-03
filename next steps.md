@@ -2101,8 +2101,16 @@ traces — worth a look if surface-dependent grip ever feels wrong), and holds
 
 **Deliberately not fixed yet:** the road visibly floats ~1–2 m above terrain
 at its dead-end near the Frisco spawn (carve/end-cap mismatch at segment
-ends, cosmetic); no parking brake at spawn (a car spawned on a real grade
-will still roll); Taylor drive-test of the whole zone pending.
+ends, cosmetic); Taylor drive-test of the whole zone pending.
+
+**Parking brake at spawn (2026-09-02, follow-up):** done. `bParkHold` in
+`UODVehicleMovement`, engaged by `TrySnapToGround()` at physics release,
+cleared by the first pedal input (throttle/brake/handbrake). Two parts,
+both needed: full `MaxBrakeNm` on all wheels, plus pinning horizontal
+velocity each tick — brake torque alone still crept ~0.4 m/s downhill on
+Frisco's grade (locked wheels slide on the tire model). Verified headless:
+position bit-stable for the whole hold, clean release on the scripted
+throttle at t=20.
 
 ---
 

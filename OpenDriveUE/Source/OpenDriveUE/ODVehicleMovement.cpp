@@ -191,6 +191,20 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	TickTires(Body, Dt);
 	TickAero(Body);
 
+	// spawn parking hold, static part: brake torque alone can't hold on a
+	// grade - locked wheels still creep on the tire model (Frisco verify
+	// drifted ~0.4 m/s downhill under full BrakeNm). Pin the horizontal
+	// velocity; Z stays free so the suspension can settle. TickDrivetrain
+	// already ran this tick and clears bParkHold on the first pedal input,
+	// so the release frame is never pinned.
+	if (bParkHold)
+	{
+		FVector Vel = Body->GetPhysicsLinearVelocity();
+		Vel.X = 0.0f;
+		Vel.Y = 0.0f;
+		Body->SetPhysicsLinearVelocity(Vel);
+	}
+
 	// airborne attitude damping - see AirborneRollDampPerSec's comment. Only
 	// with ALL wheels off the ground, so it can never fight the tire model.
 	bool bAnyContact = false;
@@ -611,6 +625,13 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 	}
 	EscBrakeNm += (EscTarget - EscBrakeNm) * FMath::Min(Dt * 12.0f, 1.0f);
 
+	// spawn parking hold: full brakes until the driver's first pedal input
+	// (brake counts - that's the reverse request in this control scheme)
+	if (bParkHold && (ThrottleIn > 0.05f || BrakeIn > 0.05f || bHandbrakeIn))
+	{
+		bParkHold = false;
+	}
+
 	const float PedalBrake = Gear < 0 ? ThrottleIn : BrakeIn;
 	for (int32 i = 0; i < Wheels.Num(); ++i)
 	{
@@ -618,6 +639,7 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		W.DriveNm = W.bDriven ? WheelTq : 0.0f;
 		W.BrakeNm = PedalBrake * W.MaxBrakeNm
 			+ (bHandbrakeIn ? W.MaxHandbrakeNm : 0.0f)
+			+ (bParkHold ? W.MaxBrakeNm : 0.0f)
 			+ (i == EscWheel && EscBrakeNm > 1.0f ? EscBrakeNm : 0.0f);
 	}
 

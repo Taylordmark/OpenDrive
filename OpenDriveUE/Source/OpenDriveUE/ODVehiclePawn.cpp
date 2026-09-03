@@ -614,6 +614,12 @@ void AODVehiclePawn::TrySnapToGround()
 	Body->SetSimulatePhysics(true);
 	Body->SetPhysicsLinearVelocity(FVector::ZeroVector);
 	Body->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+	// parking hold until the driver's first pedal input - a spawn on a real
+	// grade must not roll away on its own (see EngageParkHold's comment)
+	if (Movement)
+	{
+		Movement->EngageParkHold();
+	}
 	bGroundSnapped = true;
 }
 
