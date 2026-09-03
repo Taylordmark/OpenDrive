@@ -95,6 +95,21 @@ palette.set_editor_property(
     "mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
 log(f"imported {len(meshes)} meshes + T_CarPalette2")
 
+# Nanite is auto-enabled on import by default in UE 5.8, but every chassis
+# has a "glass" slot that must be genuinely translucent (see M_CarGlass
+# below) and Nanite does not support translucent materials on any slot of a
+# Nanite mesh - the observed symptom (seen live in a first pass) was
+# "Material .../M_CarGlass missing usage flag Nanite! Default Material will
+# be used in game", i.e. the whole glass slot silently falls back to the
+# flat grey engine default. These are all low-poly procedural meshes (a few
+# hundred tris) with zero need for Nanite anyway, so just turn it off on
+# all six rather than juggle a mixed Nanite/non-Nanite material set.
+for name, mesh in meshes.items():
+    ns = mesh.get_editor_property("nanite_settings")
+    ns.set_editor_property("enabled", False)
+    mesh.set_editor_property("nanite_settings", ns)
+log("disabled Nanite on all 6 car meshes (required for the translucent glass slot)")
+
 # box collision on all five chassis (SM_CarWheel has no collision - matches
 # WheelVisuals' NoCollision setup in AODVehiclePawn's constructor)
 CHASSIS_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
@@ -114,19 +129,30 @@ for name in CHASSIS_NAMES:
 # each run (delete_all_material_expressions then recreate), same pattern
 # and same "MEL.get_used_textures reports [] in a commandlet, don't use it
 # to verify" caveat as the old single-material script.
+#
+# 2026-09-03 Crew-2-style quality pass: body pushed to a proper clear-coat
+# look via metallic~0.9/roughness~0.15 (the plain ClearCoat shading model
+# needs extra Clear Coat / Clear Coat Roughness pins this script can't
+# verify bind offline, so this is the documented fallback from next
+# steps.md); glass made genuinely translucent (BLEND_TRANSLUCENT + a
+# constant opacity, not just a low-roughness opaque tile) - PALETTE's glass
+# cell (see make_car_meshes.py) is already a cool blue-grey tint, so no
+# extra tint node is needed, just let it show through; chrome tightened to
+# roughness 0.05 (was 0.12); tire kept near-black (already true from the
+# palette cell) at roughness 0.9.
 CATEGORY_MATERIALS = {
     # category: (asset_name, roughness, metallic, two_sided, opacity_or_None)
-    "body":    ("M_CarBody", 0.35, 0.15, True, None),
+    "body":    ("M_CarBody", 0.15, 0.90, True, None),
     "plastic": ("M_CarPlastic", 0.75, 0.0, True, None),
-    "glass":   ("M_CarGlass", 0.08, 0.0, True, None),
-    "chrome":  ("M_CarChrome", 0.12, 1.0, True, None),
-    "tire":    ("M_CarTire", 0.85, 0.0, True, None),
+    "glass":   ("M_CarGlass", 0.06, 0.05, True, 0.35),
+    "chrome":  ("M_CarChrome", 0.05, 1.0, True, None),
+    "tire":    ("M_CarTire", 0.90, 0.0, True, None),
     "rim":     ("M_CarRim", 0.25, 0.85, True, None),
     "lights":  ("M_CarLights", 0.30, 0.0, True, None),
 }
 
 category_material_assets = {}
-for cat, (mat_name, roughness, metallic, two_sided, _opacity) in CATEGORY_MATERIALS.items():
+for cat, (mat_name, roughness, metallic, two_sided, opacity) in CATEGORY_MATERIALS.items():
     mat_path = f"{CAR_DIR}/{mat_name}"
     mat = None
     if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
@@ -154,7 +180,22 @@ for cat, (mat_name, roughness, metallic, two_sided, _opacity) in CATEGORY_MATERI
     metal.set_editor_property("r", metallic)
     MEL.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
 
-    mat.set_editor_property("used_with_nanite", True)
+    spec = MEL.create_material_expression(
+        mat, unreal.MaterialExpressionConstant, -500, 550)
+    spec.set_editor_property("r", 0.9 if cat in ("body", "glass", "chrome") else 0.5)
+    MEL.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
+
+    if opacity is not None:
+        # translucent glass: constant opacity, no Nanite (Nanite requires
+        # opaque/masked - leaving used_with_nanite off below for this branch).
+        op = MEL.create_material_expression(
+            mat, unreal.MaterialExpressionConstant, -500, 700)
+        op.set_editor_property("r", opacity)
+        MEL.connect_material_property(op, "", unreal.MaterialProperty.MP_OPACITY)
+        mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    else:
+        mat.set_editor_property("used_with_nanite", True)
+
     # the procedural OBJ writer's y-negation mirrors the mesh, so roughly
     # half the hull faces end up wound inward - every car material MUST be
     # two-sided or the body renders "not enclosed" (same fix as the old
@@ -163,7 +204,8 @@ for cat, (mat_name, roughness, metallic, two_sided, _opacity) in CATEGORY_MATERI
     MEL.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
     category_material_assets[cat] = mat
-    log(f"built {mat_name} (roughness {roughness}, metallic {metallic})")
+    log(f"built {mat_name} (roughness {roughness}, metallic {metallic}"
+        f"{f', opacity {opacity}' if opacity is not None else ''})")
 
 # CATEGORY_ORDER mirrors pipeline/make_car_meshes.py's CATEGORY_ORDER - used
 # as the fallback slot->category mapping (by usemtl-encounter order) if

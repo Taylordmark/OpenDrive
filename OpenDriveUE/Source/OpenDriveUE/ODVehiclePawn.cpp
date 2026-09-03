@@ -143,12 +143,27 @@ void AODVehiclePawn::LoadVehicleDefs()
 			Vehicles.Add(Def);
 		}
 	}
-	// stable order, base "Coupe" sorts to index 0 = the spawn car. TObjectPtr
-	// Sort dereferences, so the predicate takes the element type by ref.
+	// stable order, base "Coupe" used to sort to index 0 = the spawn car.
+	// TObjectPtr Sort dereferences, so the predicate takes the element type
+	// by ref.
 	Vehicles.Sort([](const UODVehicleDef& A, const UODVehicleDef& B)
 	{
 		return A.DisplayName < B.DisplayName;
 	});
+	// 2026-09-03 art-direction pass: the new replica-style 5-car set
+	// (import_car_meshes.py) should be the default spawn car, but plain
+	// alphabetical order puts the stale placeholder "Coupe" first. Rather
+	// than rely on naming to control spawn order, explicitly bubble
+	// "Muscle" (the new default) to index 0 if it's present; every other
+	// def (including the four other new cars, and the stale placeholders
+	// left behind for a later manual cleanup pass) keeps its alphabetical
+	// position and stays reachable via CycleVehicle().
+	const int32 MuscleIdx = Vehicles.IndexOfByPredicate(
+		[](const UODVehicleDef* Def) { return Def && Def->DisplayName == TEXT("Muscle"); });
+	if (MuscleIdx > 0)
+	{
+		Vehicles.Swap(0, MuscleIdx);
+	}
 	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: %d vehicle def(s) found"), Vehicles.Num());
 }
 
