@@ -55,11 +55,25 @@ origin-height mixup).
 # Overpass has not been retried against this exact bbox since the 2026-08-22
 # bad patch above; if it 504s/502s/429s again, retry with backoff several
 # times before considering re-shrinking.
-AREA_NAME = "green_valley"
+# AREA_NAME = "green_valley"
 # south, west, north, east - the whole-local-area bbox: Sierra Pelona ridge,
 # Green Valley/Lake Hughes, Bouquet Canyon Rd, San Francisquito Canyon Rd,
 # and Hwy 14 down toward Santa Clarita.
-BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
+# BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
+
+# Summit County / Vail, CO (2026-09-01) - Taylor's ask: "the area around
+# lake frisco with breck, vail, keystone, etc". First genuinely
+# high-altitude zone (valley floors ~2700 m, passes ~3500 m, peaks to
+# ~4350 m - Quandary Peak is inside this bbox), the first real US Rockies
+# entry from the Arc 7 hot-zone list, and the first area where the new
+# water system (build_water_tiles.py) covers a major reservoir (Dillon).
+# Bbox spans Hoosier Pass (south of Breckenridge) north to
+# Silverthorne/Loveland Pass, and west past Vail/Minturn - includes
+# Frisco, Dillon Reservoir, Breckenridge, Keystone, Arapahoe Basin,
+# Loveland Pass (US-6), Copper Mountain, Vail Pass (I-70), Vail, and
+# Minturn (US-24).
+AREA_NAME = "summit_county"
+BBOX_SNWE = (39.35, -106.50, 39.70, -105.85)   # south, west, north, east
 
 # Background-visuals bbox (2026-08-22, widened 2026-08-26): wider than
 # BBOX_SNWE, used ONLY by build_terrain_mesh_tiles.py (raw-DEM far tiles, no
@@ -72,7 +86,13 @@ BBOX_SNWE = (34.35, -118.62, 34.72, -118.28)
 # ~0.1 deg beyond the new BBOX_SNWE on each side (2026-08-26, since
 # BBOX_SNWE grew to match this bbox exactly) so the horizon ring still has
 # backdrop beyond the Green Valley <-> Santa Clarita loop itself.
-BACKGROUND_BBOX_SNWE = (34.25, -118.72, 34.82, -118.18)
+# BACKGROUND_BBOX_SNWE = (34.25, -118.72, 34.82, -118.18)
+
+# Summit County: padded ~0.1 deg beyond BBOX_SNWE on each side, same
+# convention as green_valley - the Gore and Tenmile ranges plus the
+# Continental Divide ridgeline east of Loveland Pass make the horizon
+# backdrop matter more here than anywhere baked so far.
+BACKGROUND_BBOX_SNWE = (39.25, -106.60, 39.80, -105.75)
 
 # Fetch_osm_network.py grabs every drivable road in the bbox. Kept at None
 # (no ref filter, every drivable road including ramps/cross streets) per
@@ -110,7 +130,16 @@ ROAD_REF_REGEX = None
 # Bouquet Canyon and San Francisquito Canyon - this is the value documented
 # above as already-sampled for this exact bbox, reused as-is rather than
 # resampling.
-ORIGIN_HEIGHT_M = 879.4
+# ORIGIN_HEIGHT_M = 879.4
+
+# Summit County (2026-09-01): bbox center (39.525, -106.175) sampled
+# 3435.3 m via a z12 Terrarium bilinear read (one-off scratch script, same
+# method as prior areas) - lands in the Tenmile/Gore high country near
+# Copper Mountain. First area whose ORIGIN is above every prior area's
+# PEAK; nothing downstream should care (it's just the local Z shift), but
+# if anything renders ~2.5 km too high/low vs green_valley expectations,
+# check this constant's consumers first.
+ORIGIN_HEIGHT_M = 3435.3
 
 # Arc 7.2 slice 2: world-space grid size (cm) road-network chunks are
 # bucketed into for tile streaming (export_road_mesh_bin.py). MUST match
@@ -173,8 +202,13 @@ TERRAIN_TILE_SIZE_CM = 200000.0   # 2 km
 # (Whole-local-area bbox (12x12 grid) sampled 317..1567 m - kept as the
 # wider (0.0, 2200.0) range below in case the bbox expands back, since
 # that range safely covers the tight-corridor span too.)
+# Summit County's range: 12x12 grid sample across the bbox (2026-09-01)
+# read 2364..4053 m, but a coarse grid misses true peaks - Quandary Peak
+# (4348 m) is inside the bbox, so the ceiling is padded to 4600. Floor
+# padded below the Eagle valley's ~2360 m grid minimum to 1800.
 ELEV_PLAUSIBLE_M = {
     "oahu": (-50.0, 1300.0),
     "green_valley": (0.0, 2200.0),
+    "summit_county": (1800.0, 4600.0),
 }
 ELEV_PLAUSIBLE_MIN_M, ELEV_PLAUSIBLE_MAX_M = ELEV_PLAUSIBLE_M[AREA_NAME]

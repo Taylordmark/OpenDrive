@@ -2033,6 +2033,79 @@ feature on `AODVehiclePawn`.
 
 ---
 
+### 7.14 Summit County / Vail zone + the town-spawn fix chain (2026-09-01/02)
+
+**New active area: `summit_county`** — Frisco, Dillon Reservoir, Breckenridge,
+Keystone, Vail, Copper Mountain, A-Basin, Loveland Pass. Bbox
+(39.35, -106.50) → (39.70, -105.85), origin height 3435.3 m (sampled z12
+Terrarium at bbox center — first area whose ORIGIN is higher than every prior
+area's peak). Full 25-stage bake complete and offline-verified: 1221 terrain /
+1161 road / 117 wall / 196 barrier / 108 building / 305 water tiles (1105
+lakes incl. Dillon Reservoir), one generation id, terrain fit mean 0.06 m max
+2.02 m, road-vs-terrain max 2.97 m. Green_valley's definition is commented out
+in `test_areas.py` per convention (4th constant-swap now — the multi-zone
+table refactor is overdue).
+
+Bake-infrastructure fixes made along the way:
+- `rebuild_area.py` now runs `build_water_tiles.py` as a stage (it postdated
+  the driver and was never registered; Dillon makes it load-bearing here).
+- `verify_terrain_fit.py` tolerance margin 1.5 → 2.5 m: commit `405de3c`
+  (MAX_ERROR_NEAR_M 2.0 → 0.3) silently dropped the gate below the documented
+  § 7.0 carve-blend residual class (~2.4 m near elevation-conflict
+  exclusions). The 2.02 m "failure" was diagnosed per-station first (Hwy 9
+  south of Frisco, 2 of 134,040 stations, 13 carve-excluded stations within
+  120 m) — it IS that residual class, so the gate moved, not the data.
+- `build_openworld_test_level.py`: FOREST_ENABLED restored to True (Oahu
+  staging leftover) and `spawn_radius` → `visual_radius` (the two-tier
+  streaming rework in `405de3c` split the property; the builder was never
+  updated and failed on first use).
+
+**The `-odpick=Frisco` spawn test then failed four distinct ways — all
+root-caused and fixed (`ODVehiclePawn`, `ODRoadManager`, `ODBuildingManager`,
+`ODForestManager`):**
+
+1. **Streaming bursts were keyed on the wrong snap state.** Building and
+   forest managers gated their one-shot placement bursts on
+   `IsGroundSnapped()` — which flips true on the exact frame physics
+   releases. ~1,800 buildings + forest scatter landed in that frame
+   (388–950 ms hitches) while the raycast-suspension car free-fell its
+   release clearance: the body tunneled straight through the road plane
+   between two game-thread wheel traces and fell ~10 m onto the terrain
+   below. New `AODVehiclePawn::IsGroundResolved()` (asphalt confirmed, car
+   held kinematic) is what heavy streaming work gates on now, so the burst
+   is absorbed during the 3 s settle hold while the car can't fall.
+2. **Release could still land mid-hitch.** TrySnapToGround now also requires
+   0.75 s of continuous sub-75 ms frames before releasing physics
+   (`SnapHitchFrameSec`/`SnapQuietSec`; the 20 s timeout still caps the
+   total wait).
+3. **Town nodes could snap to a segment's terminal station.** Frisco's label
+   centroid snapped to the literal end of a dead-end segment — half the car
+   past the pavement edge; the settle drop bounced it backwards off the road
+   end, after which it coasted ~19 m down a 0.4 % grade with no brake.
+   `NearestRoadPoint()` now detects segment breaks by station-spacing jump
+   (>25 m) and walks the snap point ≥12 m in from either end when the
+   segment has room, and computes its tangent within the segment.
+4. **The release drop itself was an 85 cm slam.** `GroundClearanceCm`
+   100 → 30: the chassis origin naturally rests ~15–20 cm above the contact
+   surface (measured), so the old value guaranteed a 1.6M-N landing spike at
+   every spawn.
+
+Verified in-game: car spawns 12 m into the segment on North 6th Avenue,
+settles gently, reports `surf=PM_Asphalt` in the drivetrain trace — **the
+first time any trace log has ever shown asphalt** (every historical log reads
+`DefaultPhysicalMaterial`, which also means past traces were sampling wheels
+that were actually off-pavement or the physmat plumbing only works via simple
+traces — worth a look if surface-dependent grip ever feels wrong), and holds
+0 mph for 35 s. Diagnostic aid added: `-odtrace` lines now include
+`pos=(x,y,z)`.
+
+**Deliberately not fixed yet:** the road visibly floats ~1–2 m above terrain
+at its dead-end near the Frisco spawn (carve/end-cap mismatch at segment
+ends, cosmetic); no parking brake at spawn (a car spawned on a real grade
+will still roll); Taylor drive-test of the whole zone pending.
+
+---
+
 ## Cross-cutting (release engineering)
 
 - **Packaging ✅ first proof (2026-07-18):** scripted `BuildCookRun`

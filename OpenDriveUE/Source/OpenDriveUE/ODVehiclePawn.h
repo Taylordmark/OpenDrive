@@ -191,6 +191,17 @@ public:
 	 *  teleported area's tiles are still streaming in. */
 	bool IsGroundSnapped() const { return bGroundSnapped; }
 
+	/** True once the snap trace has CONFIRMED real pavement under the car and
+	 *  it's being held kinematic on that surface through the settle window
+	 *  (or the snap has fully completed). Heavy one-shot streaming work that
+	 *  gates on the player's ground being real (building/forest placement
+	 *  bursts) should key on THIS, not IsGroundSnapped(): keying on the
+	 *  latter fires the burst on the exact frame physics releases, and the
+	 *  resulting 400-950ms frames let the raycast-suspension car free-fall
+	 *  through the road plane between wheel traces (Frisco spawn,
+	 *  2026-09-01). During the hold the car is frozen, so hitches are free. */
+	bool IsGroundResolved() const { return bGroundSnapped || SnapReadyTime != 0.0; }
+
 	// --- controller/wheel device selection (2026-08-27) ---
 	/** Explicit device pin, or Auto (last-device-wins). Persisted to
 	 *  GameUserSettings.ini (see ODVehiclePawn.cpp's Save/LoadInputDeviceMode)
@@ -298,7 +309,12 @@ private:
 	// so this should rarely be hit, but a long fallback is cheap insurance
 	// against a genuinely slow first-load (cold disk cache, etc.)
 	static constexpr double GroundSnapTimeoutSec = 20.0;
-	static constexpr float GroundClearanceCm = 100.0f;
+	// 30, was 100 (2026-09-01): the chassis origin naturally rests ~15-20cm
+	// above the contact surface (measured from the Frisco spawn traces), so
+	// releasing from +100 free-falls the car ~85cm - a 1.6M-N landing spike
+	// that bounced it backwards off the road-end edge. +30 leaves margin for
+	// surface tracking error while dropping the car ~15cm instead.
+	static constexpr float GroundClearanceCm = 30.0f;
 
 	// 2026-08-26: hold the car kinematic this long AFTER the asphalt trace
 	// first connects before releasing physics. A trace hit proves the road
@@ -309,6 +325,20 @@ private:
 	// asphalt hit lapses mid-wait.
 	static constexpr double GroundSnapSettleSec = 3.0;
 	double SnapReadyTime = 0.0;
+
+	// 2026-09-01: additionally require quiet frames before release. The
+	// suspension is a game-thread raycast; during streaming-burst hitches
+	// (Frisco spawn measured 388ms frames from the forest scatter) the body
+	// free-falls under physics-thread gravity for the whole frame and can
+	// tunnel straight through the road plane between two wheel traces - the
+	// settle timer alone released mid-hitch and the car dropped ~10m through
+	// pavement onto the terrain carve below. Frames longer than
+	// SnapHitchFrameSec reset a quiet-period clock; release waits for
+	// SnapQuietSec of continuous calm (GroundSnapTimeoutSec still caps the
+	// total wait so a genuinely slow machine isn't held forever).
+	static constexpr double SnapHitchFrameSec = 0.075;
+	static constexpr double SnapQuietSec = 0.75;
+	double LastHitchTime = 0.0;
 
 	// scripted-drive hooks (-odrev/-odlift/-odsteer/-odbrake), parsed at
 	// BeginPlay; -odthr=0.45 caps the scripted (and key) throttle for

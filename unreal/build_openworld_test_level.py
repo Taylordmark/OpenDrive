@@ -74,7 +74,11 @@ AREA_NAME = test_areas.AREA_NAME
 ROADS_ENABLED = True
 BUILDINGS_ENABLED = True
 BARRIER_ENABLED = True
-FOREST_ENABLED = False
+# Forest back on (2026-09-01, first summit_county build): the False here was
+# Oahu staging leftover, not a standing decision - all forest sidecars
+# (biome_*, elev_*, centerline, building centroids) are baked for this area,
+# and an evergreen-Rockies zone without trees defeats the point.
+FOREST_ENABLED = True
 # Phase 1 switchback retaining-wall geometry (2026-07-30) - see
 # ODWallManager.h and pipeline/build_retaining_walls.py. Independent of the
 # other flags: a tile with no walls_*.bin file is an ordinary tile with no
@@ -180,9 +184,15 @@ terrain_mgr.set_editor_property("terrain_tile_prefix", f"terrain_{AREA_NAME}_tes
 # (Taylor: a gap "way in the distance") - not a bad/missing tile, just a
 # runtime radius that didn't reach as far as the offline bake did. 620,000 cm
 # gives a small margin past the 6 km build radius so the edge doesn't clip.
-terrain_mgr.set_editor_property("spawn_radius", 620000.0)
+#
+# 2026-09-01: SpawnRadius was split by the two-tier streaming rework
+# (405de3c) into VisualRadius (coarse, no collision) + CollisionRadius
+# (near-fidelity upgrade) - this script wasn't updated then and failed on
+# the first summit_county rebuild. The 6.2 km rationale above applies to
+# the VISUAL tier; CollisionRadius keeps its 2 km header default.
+terrain_mgr.set_editor_property("visual_radius", 620000.0)
 log(f"spawned TerrainManager (tile prefix: terrain_{AREA_NAME}_test, "
-    f"spawn_radius=6.2km to match build_terrain_mesh_tiles.py's 6km far-tile bake)")
+    f"visual_radius=6.2km to match build_terrain_mesh_tiles.py's 6km far-tile bake)")
 
 spawn(unreal.ODScreenshotHook, (0, 0, 0), (0, 0, 0), "ScreenshotHook")
 log("spawned ScreenshotHook (-odshot works on this Landscape-free level too)")

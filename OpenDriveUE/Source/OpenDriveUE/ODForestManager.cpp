@@ -1578,8 +1578,11 @@ void AODForestManager::Tick(float DeltaSeconds)
 	// just a one-frame glitch. Fails open (proceeds anyway) for any pawn
 	// that isn't an AODVehiclePawn, matching this function's behavior
 	// before this gate existed.
+	// IsGroundResolved, not IsGroundSnapped (2026-09-01): the scatter burst
+	// belongs INSIDE the kinematic settle hold, not on the frame physics
+	// releases - see IsGroundResolved()'s declaration comment.
 	if (const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Player);
-		VehiclePawn && !VehiclePawn->IsGroundSnapped())
+		VehiclePawn && !VehiclePawn->IsGroundResolved())
 	{
 		return;
 	}

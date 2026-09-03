@@ -468,6 +468,13 @@ void AODVehiclePawn::BeginPlay()
 
 void AODVehiclePawn::TrySnapToGround()
 {
+	// sample every tick (not just post-settle) so hitches during the settle
+	// window already count against the quiet period
+	if (GetWorld()->GetDeltaSeconds() > SnapHitchFrameSec)
+	{
+		LastHitchTime = GetWorld()->GetTimeSeconds();
+	}
+
 	const FVector Loc = GetActorLocation();
 	FHitResult Hit;
 	const FVector Start(Loc.X, Loc.Y, Loc.Z + 10000.0f);     // 100 m above current
@@ -587,6 +594,21 @@ void AODVehiclePawn::TrySnapToGround()
 	if (Now - SnapReadyTime < GroundSnapSettleSec)
 	{
 		return;   // held kinematic on the surface until collision has had time to register
+	}
+
+	// frame-stability gate (see header): a streaming hitch at release lets the
+	// body tunnel through the road between game-thread wheel traces
+	if (Now - LastHitchTime < SnapQuietSec && (Now - SpawnTime) <= GroundSnapTimeoutSec)
+	{
+		if (Now - LastSnapLogTime > 1.0)
+		{
+			LastSnapLogTime = Now;
+			UE_LOG(LogTemp, Display,
+				TEXT("ODVehiclePawn: ground-snap settled but holding through streaming "
+				     "hitches (last long frame %.2fs ago, need %.2fs quiet)"),
+				Now - LastHitchTime, SnapQuietSec);
+		}
+		return;
 	}
 
 	Body->SetSimulatePhysics(true);

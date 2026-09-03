@@ -92,10 +92,25 @@ from road_mesh_common import sample_mesh_height, classify_wall_stations, WALL_EM
 # the design's own error budget showing up here. Rebaking all of Oahu
 # measured mean dev 0.26 m (still tiny - most stations fit closely) but
 # max 2.93 m, which the old 1.0 m tolerance was never going to pass.
-# MAX_ERROR_NEAR_M + 1.5 keeps the original tolerance's margin for
+# MAX_ERROR_NEAR_M + 1.5 kept the original tolerance's margin for
 # everything ELSE (carve blending, float precision) on top of the
 # simplification's own budget, with headroom above the measured 2.93 m.
-TOL_M = MAX_ERROR_NEAR_M + 1.5
+#
+# Margin widened 1.5 -> 2.5 (2026-09-01, first summit_county bake): when
+# MAX_ERROR_NEAR_M tightened 2.0 -> 0.3 (405de3c, two-tier streaming) this
+# formula silently dropped the gate 3.5m -> 1.8m, below what the
+# DOCUMENTED residual class near elevation-conflict exclusions can
+# legitimately produce at ANY mesh resolution: stations inside the
+# TERRAIN_CARVE_OUTER_M blend radius of a conflict-excluded (crossing/
+# switchback) zone get partially-raw terrain - 'next steps.md' section 7.0
+# records ~2.4m of this class at Oahu's known crossings, and summit_county's
+# first bake measured 2.02m at exactly such a spot (Hwy 9 south of Frisco,
+# 2 stations of 134,040 over the old gate, a different segment 8m higher
+# ~90m away, verified via per-station diagnosis before touching this
+# number - mean dev there was 0.06m, so the carve itself is healthy).
+# That residual is a carve-blend property, not mesh simplification, so it
+# belongs in the fixed margin, not the MAX_ERROR_NEAR_M term.
+TOL_M = MAX_ERROR_NEAR_M + 2.5
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"

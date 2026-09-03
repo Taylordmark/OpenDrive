@@ -498,7 +498,7 @@ void AODBuildingManager::Tick(float DeltaSeconds)
 	// whole fix targets. Fails open for any pawn that isn't an
 	// AODVehiclePawn, matching AODForestManager's identical gate.
 	if (const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Player);
-		VehiclePawn && !VehiclePawn->IsGroundSnapped())
+		VehiclePawn && !VehiclePawn->IsGroundResolved())
 	{
 		if (!bLoggedGroundSnapWait)
 		{

@@ -129,6 +129,13 @@ STAGES = [
     ("export_biome_bin.py", "export biome_*.bin"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
+    # WATER (2026-09-01): added when summit_county became the active area -
+    # build_water_tiles.py postdates this driver (2026-08-27) and was never
+    # registered as a stage; Dillon Reservoir makes it load-bearing here.
+    # Needs road_stations.json (shared world-frame origin) + terrain tiles
+    # (sample_dem reuse), so it sits after both; fetches its own OSM water
+    # polygons like classify_biomes fetches its own imagery.
+    ("build_water_tiles.py", "bake lake/reservoir water tiles -> water_*.bin"),
     ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
     ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
 ]

@@ -229,11 +229,13 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 			}
 			const UPhysicalMaterial* Surf = Wheels[2].Surface.Get();
 			UE_LOG(LogTemp, Display,
-				TEXT("ODDrivetrain: t=%.2f rpm=%.0f gear=%d thr=%.2f cut=%d "
+				TEXT("ODDrivetrain: t=%.2f pos=(%.0f,%.0f,%.0f) rpm=%.0f gear=%d thr=%.2f cut=%d "
 				     "coupled=%.0f spd=%.0f slip=%.2f fz=%.0f aF=%.1f FyF=%.0f "
 				     "FyR=%.0f FxR=%.0f yaw=%.0f susp=%.1f gnd=%d surf=%s "
 				     "tc=%.2f esc=%.0f abs=%d relax=%d"),
-				Now, EngineRpm, Gear, EffectiveThrottle, bTraceCut ? 1 : 0,
+				Now, Body->GetComponentLocation().X, Body->GetComponentLocation().Y,
+				Body->GetComponentLocation().Z,
+				EngineRpm, Gear, EffectiveThrottle, bTraceCut ? 1 : 0,
 				TraceCoupled, FwdSpeedCmS, TraceSlip, Wheels[2].FzSm,
 				TraceAlphaF, TraceFyF, TraceFyR, TraceFxR,
 				Body->GetPhysicsAngularVelocityInDegrees().Z,

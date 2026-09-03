@@ -255,11 +255,42 @@ bool AODRoadManager::NearestRoadPoint(const FVector2D& Query, FVector2D& OutPoin
 			Best = i;
 		}
 	}
+	// Pull the snap point in from segment ends (2026-09-01, Frisco spawn bug):
+	// town labels can snap to the terminal station of a dead-end segment, which
+	// parks half the spawned car past the pavement's end edge - the settle drop
+	// then bounced it backwards off the road entirely. RoadCenterline is all
+	// segments concatenated with no explicit break markers, so detect segment
+	// boundaries by the spacing jump (in-segment stations are ~3-5m apart) and
+	// walk Best far enough inward that a full car length sits on pavement.
+	const double BreakDistSq = 2500.0 * 2500.0;   // >25m gap = different segment
+	auto IsBreakBefore = [&](int32 i)   // break between i-1 and i
+	{
+		return i <= 0 || i >= N
+			|| FVector2D::DistSquared(RoadCenterline[i - 1], RoadCenterline[i]) > BreakDistSq;
+	};
+	int32 Lo = Best, Hi = Best;
+	while (!IsBreakBefore(Lo) && Best - Lo < 8) { --Lo; }
+	while (!IsBreakBefore(Hi + 1) && Hi - Best < 8) { ++Hi; }
+	const double EndMarginCm = 1200.0;   // ~1.5 car lengths of pavement each way
+	auto DistFrom = [&](int32 A, int32 B)   // along-segment cm between stations
+	{
+		double D = 0.0;
+		for (int32 i = A; i < B; ++i)
+		{
+			D += FVector2D::Distance(RoadCenterline[i], RoadCenterline[i + 1]);
+		}
+		return D;
+	};
+	while (Best < Hi && DistFrom(Lo, Best) < EndMarginCm
+		&& DistFrom(Best, Hi) > EndMarginCm) { ++Best; }
+	while (Best > Lo && DistFrom(Best, Hi) < EndMarginCm
+		&& DistFrom(Lo, Best) > EndMarginCm) { --Best; }
+
 	OutPoint = RoadCenterline[Best];
 	// road heading from the local tangent (forward neighbor, or backward at the
-	// very end). World frame X=east, Y=south, so yaw = atan2(dy,dx) maps
+	// segment's end). World frame X=east, Y=south, so yaw = atan2(dy,dx) maps
 	// straight through - same convention the HUD player arrow uses.
-	const FVector2D Tan = (Best + 1 < N)
+	const FVector2D Tan = (Best < Hi)
 		? RoadCenterline[Best + 1] - RoadCenterline[Best]
 		: RoadCenterline[Best] - RoadCenterline[Best - 1];
 	OutYawDeg = FMath::RadiansToDegrees(FMath::Atan2(Tan.Y, Tan.X));
