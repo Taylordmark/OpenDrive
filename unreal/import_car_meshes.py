@@ -1,16 +1,44 @@
-"""Headless: import the four procedural car meshes (pipeline/make_car_meshes.py)
-plus the shared wheel mesh into /Game/OpenDrive/Cars/, build one shared
-material off the shared palette texture, and author four new UODVehicleDef
-data assets (Sedan, Coupe S, Sport, Proto) - same make_def() pattern as
-unreal/apply_vehicle_defs.py used for the GT car.
+"""Headless: import the five replica-style procedural car meshes
+(pipeline/make_car_meshes.py: Muscle/JDM/Super/Pickup/Rally) plus the shared
+wheel mesh into /Game/OpenDrive/Cars/, build seven shared per-CATEGORY
+materials off the shared palette texture, assign them to each mesh's
+matching OBJ-derived material slot, and author five new UODVehicleDef data
+assets - same make_def() pattern as unreal/apply_vehicle_defs.py used for
+the GT car.
 
-Fully ADDITIVE (2026-08-27): DA_Vehicle_Coupe / DA_Vehicle_GT and their
-meshes in /Game/OpenDrive/Car (singular - the older folder) are untouched.
-This writes into /Game/OpenDrive/Cars (plural) instead, specifically so nothing
-here can collide with or overwrite the existing placeholder/GT assets. The
-existing "Coupe" stays the alphabetically-first spawn car for this pass; a
-later pass will retarget/replace it once these four have been drive-tested
-(see task history - not done here).
+Fully ADDITIVE (unchanged since 2026-08-27): DA_Vehicle_Coupe / DA_Vehicle_GT
+and their meshes in /Game/OpenDrive/Car (singular - the older folder) are
+untouched. This writes into /Game/OpenDrive/Cars (plural) instead. The
+2026-08-27..09-01 Sedan/Coupe S/Sport/Proto set this replaces (2026-09-03
+Phase 4a rescope: same asset folder, all-new car identities - see
+pipeline/make_car_meshes.py's module docstring) is fully superseded here;
+make_def() below deletes-and-recreates (or updates in place) so re-running
+this script after re-running the generator is idempotent. The stale
+DA_Vehicle_Sedan / DA_Vehicle_CoupeS / DA_Vehicle_Sport / DA_Vehicle_Proto
+assets and their SM_Car_Sedan/Coupe/Sport/Proto meshes from the previous
+pass are NOT deleted by this script (Python asset deletion of possibly-
+still-referenced assets is exactly the flaky operation make_def() already
+works around below) - a later UE-side pass should manually remove them
+once the new five have been drive-tested and nothing still references them.
+
+2026-09-03 material-slot split: make_car_meshes.py now writes each car OBJ
+with real multi-material-slot structure - triangles are grouped into up to
+seven `usemtl` groups named body/plastic/glass/chrome/tire/rim/lights (see
+that file's CATEGORY_OF/CATEGORY_ORDER). Unreal's OBJ importer creates one
+material slot per usemtl name it encounters, in the FIRST-SEEN order in the
+file, with material_slot_name set to that usemtl name - so after import we
+can look up each mesh's slots BY NAME and point each at the matching one of
+seven persistent UE materials (M_CarBody/M_CarGlass/M_CarChrome/
+M_CarPlastic/M_CarTire/M_CarRim/M_CarLights), each with its own metallic/
+roughness/opacity, all still sampling the ONE shared T_CarPalette2 texture
+(no new texture work - only the shading params differ per slot). This
+replaces the earlier single-material M_Car2 approach. NOT SMOKE-TESTED IN
+UE by this pass (pipeline agent constraint: no UE builds/launches) - flagged
+for a later agent to verify get_editor_property("static_materials") /
+material_slot_name actually round-trips through the OBJ importer as
+expected in UE 5.8 before relying on this; if slot-name lookup comes back
+empty, fall back to assigning by usemtl order (CATEGORY_ORDER filtered to
+categories present, same order make_car_meshes.py wrote them in).
 
 Run make_car_meshes.py first (writes data/cars/procedural/*), then:
 
@@ -33,7 +61,8 @@ def log(msg):
 
 
 # ------------------------------------------------------------------ import
-MESH_NAMES = ("SM_Car_Sedan", "SM_Car_Coupe", "SM_Car_Sport", "SM_Car_Proto", "SM_CarWheel")
+MESH_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
+              "SM_Car_Rally", "SM_CarWheel")
 tasks = []
 for name in MESH_NAMES:
     t = unreal.AssetImportTask()
@@ -66,60 +95,109 @@ palette.set_editor_property(
     "mip_gen_settings", unreal.TextureMipGenSettings.TMGS_NO_MIPMAPS)
 log(f"imported {len(meshes)} meshes + T_CarPalette2")
 
-# box collision on all four chassis (SM_CarWheel has no collision - matches
+# box collision on all five chassis (SM_CarWheel has no collision - matches
 # WheelVisuals' NoCollision setup in AODVehiclePawn's constructor)
-for name in ("SM_Car_Sedan", "SM_Car_Coupe", "SM_Car_Sport", "SM_Car_Proto"):
+CHASSIS_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
+                  "SM_Car_Rally")
+for name in CHASSIS_NAMES:
     mesh = meshes[name]
     unreal.EditorStaticMeshLibrary.remove_collisions(mesh)
     n_col = unreal.EditorStaticMeshLibrary.add_simple_collisions(
         mesh, unreal.ScriptingCollisionShapeType.BOX)
     log(f"{name}: box collision ({n_col} prim)")
 
-# ---------------------------------------------------------------- M_Car2
-# Rebuild the expression graph in place on the existing asset instead of
-# delete/recreate: delete_asset can silently fail while 5 meshes still
-# reference the material (same failure mode as make_def below), and in-place
-# rebuild is idempotent either way. (Note: MEL.get_used_textures reports []
-# even on a correctly-bound material in a commandlet - do not use it to
-# "verify" this material; it produced a false broken-texture diagnosis on
-# 2026-09-01.)
-mat_path = f"{CAR_DIR}/M_Car2"
-m_car2 = None
-if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
-    m_car2 = unreal.load_asset(mat_path)
-    if m_car2 is not None:
-        MEL.delete_all_material_expressions(m_car2)
-if m_car2 is None:
-    m_car2 = tools.create_asset("M_Car2", CAR_DIR, unreal.Material,
-                                unreal.MaterialFactoryNew())
-if m_car2 is None:
-    raise RuntimeError(f"could not create or load {mat_path}")
-ts = MEL.create_material_expression(
-    m_car2, unreal.MaterialExpressionTextureSample, -500, 0)
-ts.set_editor_property("texture", palette)
-MEL.connect_material_property(ts, "RGB", unreal.MaterialProperty.MP_BASE_COLOR)
-rough = MEL.create_material_expression(
-    m_car2, unreal.MaterialExpressionConstant, -500, 300)
-rough.set_editor_property("r", 0.40)
-MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
-m_car2.set_editor_property("used_with_nanite", True)
-# the procedural OBJ writer's y-negation mirrors the mesh, so roughly half
-# the hull faces end up wound inward - the car material MUST be two-sided or
-# the body renders "not enclosed" (seen live 2026-09-01: flat car with only
-# the double-wound decal rectangles visible). Same convention as M_Car/M_Car_GT.
-m_car2.set_editor_property("two_sided", True)
-MEL.recompile_material(m_car2)
-for mesh in meshes.values():
-    mesh.set_material(0, m_car2)
-# explicit save here (not just the trailing save_directory/save_dirty_packages
-# below) - observed once in this environment that a freshly-created Material
-# package didn't make it into that blanket save if anything later in the
-# script raised (e.g. a stale-asset delete_asset failure in make_def() on a
-# re-run) before reaching it; cheap insurance since this call is idempotent.
-unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
-log("built M_Car2 and assigned to all 5 meshes")
+# ------------------------------------------------------- seven category materials
+# One material per CATEGORY_ORDER entry in make_car_meshes.py, all sampling
+# the same shared palette texture (RGB->BaseColor, same trick as before),
+# differing only in roughness/metallic/opacity so each material category
+# actually shades like the real-world thing it represents. Rebuilt in place
+# each run (delete_all_material_expressions then recreate), same pattern
+# and same "MEL.get_used_textures reports [] in a commandlet, don't use it
+# to verify" caveat as the old single-material script.
+CATEGORY_MATERIALS = {
+    # category: (asset_name, roughness, metallic, two_sided, opacity_or_None)
+    "body":    ("M_CarBody", 0.35, 0.15, True, None),
+    "plastic": ("M_CarPlastic", 0.75, 0.0, True, None),
+    "glass":   ("M_CarGlass", 0.08, 0.0, True, None),
+    "chrome":  ("M_CarChrome", 0.12, 1.0, True, None),
+    "tire":    ("M_CarTire", 0.85, 0.0, True, None),
+    "rim":     ("M_CarRim", 0.25, 0.85, True, None),
+    "lights":  ("M_CarLights", 0.30, 0.0, True, None),
+}
 
-# ------------------------------------------------------ the four vehicle defs
+category_material_assets = {}
+for cat, (mat_name, roughness, metallic, two_sided, _opacity) in CATEGORY_MATERIALS.items():
+    mat_path = f"{CAR_DIR}/{mat_name}"
+    mat = None
+    if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
+        mat = unreal.load_asset(mat_path)
+        if mat is not None:
+            MEL.delete_all_material_expressions(mat)
+    if mat is None:
+        mat = tools.create_asset(mat_name, CAR_DIR, unreal.Material,
+                                  unreal.MaterialFactoryNew())
+    if mat is None:
+        raise RuntimeError(f"could not create or load {mat_path}")
+
+    ts = MEL.create_material_expression(
+        mat, unreal.MaterialExpressionTextureSample, -500, 0)
+    ts.set_editor_property("texture", palette)
+    MEL.connect_material_property(ts, "RGB", unreal.MaterialProperty.MP_BASE_COLOR)
+
+    rough = MEL.create_material_expression(
+        mat, unreal.MaterialExpressionConstant, -500, 250)
+    rough.set_editor_property("r", roughness)
+    MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+    metal = MEL.create_material_expression(
+        mat, unreal.MaterialExpressionConstant, -500, 400)
+    metal.set_editor_property("r", metallic)
+    MEL.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
+
+    mat.set_editor_property("used_with_nanite", True)
+    # the procedural OBJ writer's y-negation mirrors the mesh, so roughly
+    # half the hull faces end up wound inward - every car material MUST be
+    # two-sided or the body renders "not enclosed" (same fix as the old
+    # single-material M_Car2/M_Car/M_Car_GT convention).
+    mat.set_editor_property("two_sided", two_sided)
+    MEL.recompile_material(mat)
+    unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
+    category_material_assets[cat] = mat
+    log(f"built {mat_name} (roughness {roughness}, metallic {metallic})")
+
+# CATEGORY_ORDER mirrors pipeline/make_car_meshes.py's CATEGORY_ORDER - used
+# as the fallback slot->category mapping (by usemtl-encounter order) if
+# slot-NAME lookup doesn't come back populated for a given mesh (see module
+# docstring's not-smoke-tested note).
+CATEGORY_ORDER = ["body", "plastic", "glass", "chrome", "tire", "rim", "lights"]
+
+for name, mesh in meshes.items():
+    try:
+        slots = list(mesh.get_editor_property("static_materials"))
+    except Exception as exc:  # pragma: no cover - defensive, see docstring
+        log(f"{name}: could not read static_materials ({exc}) - skipping material assignment")
+        continue
+
+    slot_names = [str(s.get_editor_property("material_slot_name")) for s in slots]
+    named_ok = all(n in CATEGORY_MATERIALS for n in slot_names) and slot_names
+    if named_ok:
+        for i, cat in enumerate(slot_names):
+            mesh.set_material(i, category_material_assets[cat])
+        log(f"{name}: assigned {len(slot_names)} slot(s) by name ({slot_names})")
+    else:
+        # fallback: assign in CATEGORY_ORDER, trimmed to however many slots
+        # this mesh actually has (usemtl-encounter order matches
+        # CATEGORY_ORDER by construction on the generator side).
+        cats = CATEGORY_ORDER[:len(slots)]
+        for i, cat in enumerate(cats):
+            mesh.set_material(i, category_material_assets[cat])
+        log(f"{name}: slot names not usable ({slot_names}) - assigned "
+            f"{len(cats)} slot(s) by encounter order ({cats}) instead")
+
+unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
+log("assigned category materials to all 6 meshes")
+
+# ------------------------------------------------------ the five vehicle defs
 wheel_mesh = meshes["SM_CarWheel"]
 
 
@@ -157,35 +235,42 @@ def make_def(name, props):
 # geometry + WheelRadiusCm DO need to match each mesh's own footprint (that
 # is geometry, not tuning) so UODVehicleMovement's wheel table lines up with
 # where the visual wheels actually are.
-make_def("DA_Vehicle_Sedan", {
-    "display_name": "Sedan",
-    "chassis_mesh": meshes["SM_Car_Sedan"],
-    "front_axle_x_cm": 150.0, "rear_axle_x_cm": -142.0,
-    "half_track_y_cm": 86.0, "wheel_radius_cm": 34.0,
-    "mass_kg": 1550.0,
+make_def("DA_Vehicle_Muscle", {
+    "display_name": "Muscle",
+    "chassis_mesh": meshes["SM_Car_Muscle"],
+    "front_axle_x_cm": 140.0, "rear_axle_x_cm": -150.0,
+    "half_track_y_cm": 90.0, "wheel_radius_cm": 36.0,
+    "mass_kg": 1620.0,
 })
-make_def("DA_Vehicle_CoupeS", {
-    "display_name": "Coupe S",
-    "chassis_mesh": meshes["SM_Car_Coupe"],
-    "front_axle_x_cm": 128.0, "rear_axle_x_cm": -118.0,
-    "half_track_y_cm": 82.0, "wheel_radius_cm": 33.0,
-    "mass_kg": 1420.0,
+make_def("DA_Vehicle_JDM", {
+    "display_name": "JDM",
+    "chassis_mesh": meshes["SM_Car_JDM"],
+    "front_axle_x_cm": 124.0, "rear_axle_x_cm": -114.0,
+    "half_track_y_cm": 80.0, "wheel_radius_cm": 32.0,
+    "mass_kg": 1380.0,
 })
-make_def("DA_Vehicle_Sport", {
-    "display_name": "Sport",
-    "chassis_mesh": meshes["SM_Car_Sport"],
-    "front_axle_x_cm": 145.0, "rear_axle_x_cm": -140.0,
-    "half_track_y_cm": 92.0, "wheel_radius_cm": 35.0,
-    "mass_kg": 1500.0,
+make_def("DA_Vehicle_Super", {
+    "display_name": "Super",
+    "chassis_mesh": meshes["SM_Car_Super"],
+    "front_axle_x_cm": 118.0, "rear_axle_x_cm": -150.0,
+    "half_track_y_cm": 94.0, "wheel_radius_cm": 36.0,
+    "mass_kg": 1430.0,
 })
-make_def("DA_Vehicle_Proto", {
-    "display_name": "Proto",
-    "chassis_mesh": meshes["SM_Car_Proto"],
-    "front_axle_x_cm": 115.0, "rear_axle_x_cm": -155.0,
-    "half_track_y_cm": 90.0, "wheel_radius_cm": 30.0,
-    "mass_kg": 1280.0,
+make_def("DA_Vehicle_Pickup", {
+    "display_name": "Pickup",
+    "chassis_mesh": meshes["SM_Car_Pickup"],
+    "front_axle_x_cm": 185.0, "rear_axle_x_cm": -160.0,
+    "half_track_y_cm": 98.0, "wheel_radius_cm": 42.0,
+    "mass_kg": 2380.0,
+})
+make_def("DA_Vehicle_Rally", {
+    "display_name": "Rally",
+    "chassis_mesh": meshes["SM_Car_Rally"],
+    "front_axle_x_cm": 112.0, "rear_axle_x_cm": -118.0,
+    "half_track_y_cm": 78.0, "wheel_radius_cm": 32.0,
+    "mass_kg": 1310.0,
 })
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved 5 meshes, M_Car2, and 4 new vehicle defs")
+log("DONE - saved 6 meshes, 7 category materials, and 5 new vehicle defs")
