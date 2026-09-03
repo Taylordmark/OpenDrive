@@ -2258,6 +2258,15 @@ What landed, in order:
   final look verdict is his, this pass only closes the two defects an
   in-game review already flagged.
 
+**Perf check before the drive-test (2026-09-03, measurement only,
+`docs/perf_after_art_overhaul.md`):** headless frame-time/hitch measurement
+across Frisco static, Vail `-odrev=20` (forest corridor), and Frisco dusk
+`-odhour=19` — verdict **fine**, ~14.3-14.6 ms median (≈67-70 fps) in every
+scenario, within noise of the pre-overhaul baseline, hitch count/duration
+unchanged in character (a pre-existing ~25 s periodic hitch, present before
+this overhaul too, dominates all three runs); safe to proceed to Taylor's
+live drive-test without a tuning pass first.
+
 ---
 
 ## Cross-cutting (release engineering)
