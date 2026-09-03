@@ -699,45 +699,62 @@ def build_jdm():
 
 
 def build_super():
-    """Mid-engine wedge, Round-3 re-proportion: a long LOW 151 cm nose
-    (206->55, z only 12->28) that is ALL body panel (glass starts at the
-    cowl, x=55, well aft of the nose tip) under a steeply raked 45 cm
-    windshield (55->10, 28->112), then a SHORT 40 cm roof bubble (10->-30)
-    peaking at 114 cm just aft of the car's midpoint (~-4 cm), a C-pillar/
-    backlight drop to -80, and a long flat 115 cm engine deck/tail."""
+    """Mid-engine wedge, Round-4 re-proportion (fixes a genuine geometry
+    bug in Round-3, not just a style tweak): Round-3 set arch_margin_cm=9
+    with wheel_r=36 -> a wheel-arch notch that peaks 45 cm above axle
+    height, while belt_z (the beltline/shoulder crease the notch must stay
+    under) was only 32 - i.e. the arch notch legitimately poked 13 cm
+    ABOVE the beltline. build_hull()'s min_band clamp kept that from
+    fully self-intersecting, but the cross-section ordering (bottom ->
+    round -> sill -> shoulder) collapsed near both axles, which is what
+    read as a broken/thin plank between the wheels and a torn-looking
+    panel near the cowl - the "dune-buggy" defect. Every other preset
+    keeps a 9-12 cm spare between its arch peak and its belt_z (Muscle:
+    46 under 58, JDM: 41 under 50); Super now does too (43 under 53).
+    Fixing that also directly answers the "glass bubble too tall" note:
+    raising the shoulder from 32->53 shrinks the glass band from 82 cm to
+    61 cm without touching the fixed 114 cm roof peak. The rocker
+    (base_bottom) also drops another ~4-6 cm through the cabin for a
+    lower, thinner-looking body slab, and the nose is re-authored as one
+    continuous shallow rise (8->26 over 153 cm, no flat-then-kink) into a
+    steeply raked 40 cm windshield, a short 40 cm roof bubble peaking at
+    114 cm just aft of the car's midpoint (~-2 cm), a C-pillar/backlight
+    drop to -95, and a long tapering engine deck/tail sitting slightly
+    higher than the nose (mid-engine hump)."""
     body, dark = 4, 5
     profile = [
-        (206.0, -2.0, 12.0), (190.0, -6.0, 16.0), (150.0, -8.0, 20.0),
-        (100.0, -8.0, 24.0), (55.0, -8.0, 28.0),    # cowl / glass_x_start
-        (10.0, -8.0, 112.0),                         # steep windshield rake
-        (-30.0, -8.0, 114.0),                        # short roof bubble peak
-        (-80.0, -8.0, 90.0),                          # backlight drop / glass_x_end
-        (-140.0, -6.0, 64.0), (-195.0, -4.0, 60.0),
-        (-215.0, 0.0, 54.0),
+        (208.0, -2.0, 8.0), (170.0, -6.0, 12.0), (100.0, -10.0, 18.0),
+        (55.0, -12.0, 26.0),    # cowl / glass_x_start
+        (15.0, -12.0, 94.0),                          # steep windshield rake
+        (-25.0, -12.0, 114.0),                        # short roof bubble peak
+        (-70.0, -12.0, 100.0),
+        (-95.0, -10.0, 80.0),                          # backlight foot / glass_x_end
+        (-140.0, -8.0, 64.0), (-180.0, -4.0, 60.0),
+        (-212.0, 0.0, 54.0),
     ]
     plan = [
-        (206.0, 48.0), (190.0, 62.0), (150.0, 76.0), (100.0, 78.0),
-        (55.0, 78.0), (10.0, 78.0), (-30.0, 80.0), (-80.0, 86.0),
-        (-140.0, 94.0), (-195.0, 90.0), (-215.0, 82.0),
+        (208.0, 48.0), (170.0, 72.0), (100.0, 78.0), (55.0, 78.0),
+        (15.0, 78.0), (-25.0, 80.0), (-70.0, 84.0), (-95.0, 86.0),
+        (-140.0, 94.0), (-180.0, 90.0), (-212.0, 82.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 118.0, -150.0, 94.0, 36.0
     style = style_for(dict(
-        belt_z=32.0, bottom_width_frac=0.76, round_width_frac=0.84,
+        belt_z=53.0, bottom_width_frac=0.76, round_width_frac=0.84,
         sill_width_frac=0.96, hood_top_width_frac=0.84, glass_inset_cm=5.0,
         bulge_strength=0.13, bulge_sigma=44.0,
         front_bulge_mult=0.75, rear_bulge_mult=1.35,   # huge rear haunches
-        arch_margin_cm=9.0,
-        glass_x_start=55.0, glass_x_end=-80.0,
+        arch_margin_cm=7.0,   # tight wheel clearance, low-riding stance
+        glass_x_start=55.0, glass_x_end=-95.0,
     ))
 
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
     cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
-    mirrors(m, 48.0, local_w, 34.0)
+    mirrors(m, 48.0, local_w, 55.0)
     light_patch(m, -105.0, local_w, 4.0, PLASTIC, size=(20.0, 14.0))   # side intake, ahead of rear wheel
-    rear_wing(m, deck_x=-198.0, deck_z=58.0, half_span=76.0, stanchion_h=26.0)
-    diffuser_stripe(m, tail_x=-210.0, half_width=80.0, z_bottom=0.0)
+    rear_wing(m, deck_x=-198.0, deck_z=68.0, half_span=76.0, stanchion_h=26.0)
+    diffuser_stripe(m, tail_x=-212.0, half_width=80.0, z_bottom=0.0)
     tris = m.save("SM_Car_Super")
     length = profile[0][0] - profile[-1][0]
     height = 114.0 + wheel_r
