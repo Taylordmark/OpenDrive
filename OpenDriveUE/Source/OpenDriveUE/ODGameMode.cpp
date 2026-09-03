@@ -1,6 +1,7 @@
 #include "ODGameMode.h"
 
 #include "EngineUtils.h"
+#include "ODAtmosphereController.h"
 #include "ODForestManager.h"
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
@@ -18,6 +19,7 @@ void AODGameMode::BeginPlay()
 	Super::BeginPlay();
 	EnsureForestManager();
 	EnsureWaterManager();
+	EnsureAtmosphereController();
 }
 
 void AODGameMode::EnsureForestManager()
@@ -174,4 +176,23 @@ void AODGameMode::EnsureWaterManager()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODGameMode: spawned AODWaterManager for open-world area '%s' "
 		     "(WaterTilePrefix='%s')"), *Area, *Water->WaterTilePrefix);
+}
+
+void AODGameMode::EnsureAtmosphereController()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Unlike Forest/Water above, this doesn't need an AODRoadManager/area
+	// name - it isn't tile-streamed, and applies identically to every level.
+	for (TActorIterator<AODAtmosphereController> It(World); It; ++It)
+	{
+		return;
+	}
+
+	World->SpawnActor<AODAtmosphereController>();
+	UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned AODAtmosphereController"));
 }

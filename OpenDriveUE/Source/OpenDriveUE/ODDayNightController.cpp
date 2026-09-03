@@ -4,6 +4,7 @@
 #include "Components/SpotLightComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "EngineUtils.h"
+#include "Misc/CommandLine.h"
 #include "ODVehicleMovement.h"
 
 AODDayNightController::AODDayNightController()
@@ -14,6 +15,12 @@ AODDayNightController::AODDayNightController()
 void AODDayNightController::BeginPlay()
 {
 	Super::BeginPlay();
+	// -odhour=<H> QA override (2026-09-01, added for atmosphere/lighting
+	// screenshot passes - see AODScreenshotHook's -odshot for the matching
+	// pattern): lets a headless launch pick a specific time of day instead of
+	// always starting at StartHour, so e.g. -odhour=21 gets a night shot
+	// without waiting out a full CycleSeconds run.
+	FParse::Value(FCommandLine::Get(), TEXT("odhour="), StartHour);
 	TimeOfDay = StartHour;
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{

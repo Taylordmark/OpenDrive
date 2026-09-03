@@ -39,4 +39,12 @@ private:
 	 *  deriving its tile prefix from the level's own AODRoadManager rather
 	 *  than requiring a second hand-authored placement per area. */
 	void EnsureWaterManager();
+
+	/** Art-direction Phase 1 (2026-09-01): same "find or spawn" shape as
+	 *  EnsureForestManager/EnsureWaterManager above, guarding on
+	 *  AODAtmosphereController itself rather than any one of the several
+	 *  actor classes it in turn finds-or-spawns (SkyAtmosphere/
+	 *  ExponentialHeightFog/VolumetricCloud/PostProcessVolume) - see that
+	 *  class for why. */
+	void EnsureAtmosphereController();
 };
