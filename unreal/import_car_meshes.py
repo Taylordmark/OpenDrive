@@ -140,11 +140,20 @@ for name in CHASSIS_NAMES:
 # extra tint node is needed, just let it show through; chrome tightened to
 # roughness 0.05 (was 0.12); tire kept near-black (already true from the
 # palette cell) at roughness 0.9.
+#
+# 2026-09-03 polish fix: opacity 0.35 let the camera see straight through
+# the glass into the hollow chassis shell from behind (ScreenShot00245.png -
+# "toy" read). Raised to 0.80 (dark privacy-glass look) - PALETTE's glass
+# cell is already a fairly dark blue-grey tint (see make_car_meshes.py's
+# GLASS palette comment) so no separate tint node was needed, just letting
+# less light through it. Paired with make_car_meshes.py's new cabin-blocker
+# panel so even the residual ~20% transmission doesn't reveal an empty
+# interior at any angle.
 CATEGORY_MATERIALS = {
     # category: (asset_name, roughness, metallic, two_sided, opacity_or_None)
     "body":    ("M_CarBody", 0.15, 0.90, True, None),
     "plastic": ("M_CarPlastic", 0.75, 0.0, True, None),
-    "glass":   ("M_CarGlass", 0.06, 0.05, True, 0.35),
+    "glass":   ("M_CarGlass", 0.06, 0.05, True, 0.80),
     "chrome":  ("M_CarChrome", 0.05, 1.0, True, None),
     "tire":    ("M_CarTire", 0.90, 0.0, True, None),
     "rim":     ("M_CarRim", 0.25, 0.85, True, None),

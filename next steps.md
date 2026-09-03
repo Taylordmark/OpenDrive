@@ -2114,6 +2114,91 @@ throttle at t=20.
 
 ---
 
+### 7.15 Art-direction shift toward The Crew 2 (2026-09-03)
+
+**Intent:** Taylor's call — move scenery/roads/cars off the flat, saturated
+"Fortnite-ish" placeholder look and toward The Crew 2's grounded,
+semi-photoreal read. Free/CC0 assets only (ambientCG + Poly Haven), sourced
+per-texture with a `content_src/textures/*/manifest.json` recording the
+source URL and license next to whatever it produced.
+
+What landed, in order:
+- **Lighting/atmosphere (`3d82f91`):** new `ODAtmosphereController` +
+  `-odhour` QA flag for driving time-of-day headlessly. Gotcha: SkyAtmosphere
+  scattering-scale values are in engine-internal units that don't map
+  intuitively to real-world Rayleigh/Mie coefficients — tune by eye against a
+  reference screenshot, not by "physically correct" math.
+- **Roads (`a5980f5`, `60ace94`):** ODR2 UV re-bake plus an inert ODR3 format
+  landed first (`a5980f5`), then the real payload — a C++ ODR3 reader and
+  in-shader lane markings (`60ace94`). Two silent no-op gotchas hit and fixed
+  along the way: `MaterialExpressionVertexColor`'s alpha output pin is named
+  `"A"` under SM6 (not `"Alpha"`), and `MaterialExpressionPower`'s exponent
+  input pin is named `"Exp"` (not `"Exponent"`) — both `connect_material_
+  expressions` calls returned `False` silently rather than erroring, leaving
+  the connection simply missing with no visible symptom besides "looks
+  wrong."
+- **Terrain (`fd7ed1f`):** CC0 PBR biome/slope/altitude-blended ground
+  material. Fixed two pre-existing bugs it exposed: the same silent
+  Power-pin no-op described above (present before this pass touched the
+  material), and stale `green_valley`-era elevation constants that no longer
+  matched Summit County's much higher origin height.
+- **Flora (`42c0a5e`, `636159a`):** card-based species set (pine/spruce/fir/
+  krummholz/aspen/willow/sagebrush/grass). Gotcha: every material actually
+  rendered on an `UHierarchicalInstancedStaticMeshComponent`-placed tree
+  (bark included, not just the foliage cards) needs `used_with_instanced_
+  static_meshes` set or it silently falls back to the flat grey engine
+  default at runtime.
+- **Cars (`5fc561b`, `c810ad2`):** 3-curve replica-style body generator
+  (`5fc561b`), then the UE import pipeline and the default-car switch-over
+  (`c810ad2`). Gotcha: Nanite doesn't support translucent materials on any
+  slot of a Nanite mesh — the glass slot silently fell back to the flat grey
+  default until Nanite was disabled on all six car meshes.
+- **Polish pass (this commit):** two defects caught in in-game review after
+  the above landed —
+  1. *Conifer crowns rendering near-black/navy* (`ScreenShot00247.png`) —
+     two compounding causes: `make_bough_cell()`'s bough-mass colors in
+     `pipeline/build_flora_textures.py` were too dark for a "sunlit crown"
+     read, **and** `M_Foliage` (`unreal/build_flora_materials.py`) was plain
+     `two_sided=True`, which only disables backface culling — it does not
+     flip the backface normal for lighting, so the ~50% of every crossed
+     foliage card facing away from the sun got `N·L ≤ 0` and rendered pure
+     black. Fixed both: brightened/re-hued the pine/spruce/fir bough colors
+     toward mid forest-green (~1.7-1.9x), and switched `M_Foliage` to the
+     `MSM_TWO_SIDED_FOLIAGE` shading model with a green `MP_SUBSURFACE_COLOR`
+     so backfaces read as lit instead of unlit-black.
+  2. *Car glass exposing the hollow shell* (`ScreenShot00245.png`) — the
+     Muscle's 0.35-opacity glass let the camera see straight through the
+     body from behind, reading as a toy. Fixed both halves: `unreal/
+     import_car_meshes.py`'s `M_CarGlass` opacity raised 0.35 → 0.80
+     (dark privacy-glass, using the palette's existing blue-grey glass
+     tint), and `pipeline/make_car_meshes.py` grew a new `cabin_blocker()` —
+     a flat dark-plastic panel spanning the greenhouse x-range just below
+     the beltline, on all five presets — so even the residual transmission
+     doesn't reveal an empty interior. Also tightened the rear fascia: the
+     shared `cap()` closure in `build_hull()` got a `recessed=True` path for
+     the rear cap only, replacing the old full-width chrome-or-plastic
+     center strip + two edge-to-edge taillight panels (read as "a white
+     strip + floating orange squares") with a dark recessed band and two
+     small taillight rectangles inset from the edges. Regenerated
+     (`pipeline/build_flora_textures.py`, `pipeline/make_car_meshes.py`) and
+     reimported (`unreal/build_flora_materials.py`, `unreal/
+     import_biome_flora.py`, `unreal/import_car_meshes.py`); verified
+     in-game at both Vail (`ScreenShot00253.png`) and Frisco
+     (`ScreenShot00255.png`).
+
+**Known leftovers (not addressed this pass):**
+- Striped slab buildings are still the biggest remaining "Fortnite-ish"
+  offender — unscoped, not touched by any of the above.
+- Of the five car silhouettes, Super reads weakest against its supercar
+  reference.
+- `-odrev` scripted drives still veer off-road at some towns (pre-existing,
+  reported during the road work above, not re-investigated here).
+- Taylor's own live drive-test of the whole art pass is still pending — the
+  final look verdict is his, this pass only closes the two defects an
+  in-game review already flagged.
+
+---
+
 ## Cross-cutting (release engineering)
 
 - **Packaging ✅ first proof (2026-07-18):** scripted `BuildCookRun`

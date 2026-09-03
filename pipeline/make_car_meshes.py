@@ -401,22 +401,65 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
     # nose/tail bumper caps come straight from the authored profile ends -
     # item 1's front-bumper/rear-cutoff control points ARE the end faces,
     # no synthetic taper needed.
-    def cap(idx, light_cell, flip):
+    def cap(idx, light_cell, flip, recessed=False):
         w = float(Ws[idx].max())
-        lw = w * 0.42
         x = xs[idx]
         zb, zt = float(Zs[idx, 0]), float(Zs[idx, 4])
         trim_cell = style["cap_trim_cell"] if style["cap_trim_cell"] is not None else PLASTIC
-        for y0, y1, cell in ((-w, -lw, light_cell), (-lw, lw, trim_cell), (lw, w, light_cell)):
+
+        def band(y0, y1, cell):
             a, bq, c, d = (x, y0, zb), (x, y0, zt), (x, y1, zt), (x, y1, zb)
             if flip:
                 m.quad(d, c, bq, a, cell)
             else:
                 m.quad(a, bq, c, d, cell)
+
+        if recessed:
+            # 2026-09-03 rear-fascia fix: the old 3-band cap (light | trim |
+            # light, each ~w wide) put a full-width bright/chrome center
+            # strip next to two oversized edge-to-edge light panels - read
+            # as "a white strip + floating orange squares" (ScreenShot00245
+            # -adjacent review). Always dark plastic here (chrome belongs on
+            # the front grille bezel via cap_trim_cell, not the rear
+            # valance) with two small taillight rectangles inset from the
+            # edges so they sit flush inside a recessed dark band instead of
+            # spanning most of the rear width.
+            light_w = w * 0.16
+            edge_margin = w * 0.06
+            band(-w, -(w - edge_margin), PLASTIC)
+            band(-(w - edge_margin), -(w - edge_margin - light_w), light_cell)
+            band(-(w - edge_margin - light_w), (w - edge_margin - light_w), PLASTIC)
+            band((w - edge_margin - light_w), (w - edge_margin), light_cell)
+            band((w - edge_margin), w, PLASTIC)
+        else:
+            lw = w * 0.42
+            band(-w, -lw, light_cell)
+            band(-lw, lw, trim_cell)
+            band(lw, w, light_cell)
     cap(0, HEADLIGHT, flip=False)
-    cap(-1, TAILLIGHT, flip=True)
+    cap(-1, TAILLIGHT, flip=True, recessed=True)
 
     return local_width
+
+
+def cabin_blocker(m, glass_x_start, glass_x_end, local_width_fn, belt_z,
+                   cell=PLASTIC, inset_frac=0.82, drop_cm=8.0, n=6):
+    """2026-09-03 defect fix: a simple flat opaque dark-gray panel spanning
+    the full greenhouse x-range (glass_x_start..glass_x_end), sitting just
+    below the beltline/glass band, so the hollow chassis shell is no longer
+    visible straight through the glass from any angle (ScreenShot00245.png -
+    "toy" read). Reads as a cabin floor/dash even though it is a single flat
+    ribbon: it follows the plan-view taper (inset_frac narrows it slightly
+    inside the body sides so it doesn't clip the glass) and sits drop_cm
+    below belt_z. Material slot is PLASTIC (black plastic), matching a dark
+    interior trim color. Called once per preset, right after build_hull."""
+    z = belt_z - drop_cm
+    xs = np.linspace(glass_x_start, glass_x_end, n + 1)
+    for i in range(n):
+        x0, x1 = float(xs[i]), float(xs[i + 1])
+        w0 = local_width_fn(x0) * inset_frac
+        w1 = local_width_fn(x1) * inset_frac
+        m.quad((x0, -w0, z), (x1, -w1, z), (x1, w1, z), (x0, w0, z), cell)
 
 
 def mirrors(m, x, local_width_fn, z):
@@ -597,6 +640,7 @@ def build_muscle():
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
+    cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
     mirrors(m, 30.0, local_w, 58.0)
     lip_spoiler(m, -186.0, local_w(-186.0), 42.0)
     exhaust_tips(m, -206.0, half_track, 8.0)
@@ -640,6 +684,7 @@ def build_jdm():
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
+    cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
     mirrors(m, 60.0, local_w, 50.0)
     light_patch(m, 210.0, local_w, 18.0, HEADLIGHT, size=(11.0, 7.0))
     light_patch(m, 210.0, local_w, 29.0, HEADLIGHT, size=(11.0, 6.0))
@@ -688,6 +733,7 @@ def build_super():
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
+    cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
     mirrors(m, 48.0, local_w, 34.0)
     light_patch(m, -105.0, local_w, 4.0, PLASTIC, size=(20.0, 14.0))   # side intake, ahead of rear wheel
     rear_wing(m, deck_x=-198.0, deck_z=58.0, half_span=76.0, stanchion_h=26.0)
@@ -742,6 +788,7 @@ def build_pickup():
     # is a harmless no-op there (its gaussian falls off well before the cab).
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
+    cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
     mirrors(m, 108.0, local_w, 72.0)
 
     cab_tail_x = -2.0
@@ -793,6 +840,7 @@ def build_rally():
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
+    cabin_blocker(m, style["glass_x_start"], style["glass_x_end"], local_w, style["belt_z"])
     mirrors(m, 58.0, local_w, 50.0)
     light_patch(m, 194.0, local_w, 12.0, HEADLIGHT, size=(9.0, 9.0))
     lip_spoiler(m, -96.0, local_w(-96.0), 56.0, chord=8.0)

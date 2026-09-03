@@ -292,14 +292,25 @@ def make_atlas():
         # pine/spruce/fir: dense near-opaque bough mass (2026-09-03 fix -
         # see make_bough_cell's docstring). Darker overall than the old
         # sparse-strand cells per the "near-opaque, dark green" direction.
+        # 2026-09-03 brightness fix: the "near-opaque, dark green" direction
+        # from the earlier bough-mass pass (see make_bough_cell's docstring)
+        # overshot - combined with M_Foliage's two-sided masked shading
+        # (backfaces get zero N.L and render pure black, see
+        # unreal/build_flora_materials.py's MSM_TWO_SIDED_FOLIAGE fix), the
+        # crowns read near-black/navy in-game (ScreenShot00247.png) instead
+        # of sunlit mid forest-green. Brightened ~1.7-1.9x and pulled toward
+        # a cleaner green (real lodgepole/spruce stands read medium green in
+        # full sun, not near-black) while keeping each species' dark/light
+        # mottling range and per-species hue (spruce stays cooler/bluer, fir
+        # a touch yellower, matching real bark/needle color differences).
         "pine_needle": make_bough_cell(
-            "pine_needle", (26, 58, 30), (46, 88, 46), (58, 40, 24, 255),
+            "pine_needle", (48, 100, 54), (86, 148, 84), (58, 40, 24, 255),
             n_blobs=9, elong=(0.8, 1.5)),
         "spruce_needle": make_bough_cell(
-            "spruce_needle", (34, 68, 62), (58, 100, 92), (52, 36, 22, 255),
+            "spruce_needle", (58, 108, 98), (96, 156, 140), (52, 36, 22, 255),
             n_blobs=11, elong=(1.0, 1.15)),
         "fir_needle": make_bough_cell(
-            "fir_needle", (22, 50, 36), (40, 76, 56), (48, 34, 22, 255),
+            "fir_needle", (46, 94, 66), (80, 132, 94), (48, 34, 22, 255),
             n_blobs=11, elong=(1.1, 1.0)),
         "krummholz_needle": make_conifer_cell(
             "krummholz_needle", (60, 88, 60, 255), (66, 48, 30, 255),

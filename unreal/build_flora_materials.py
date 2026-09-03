@@ -131,13 +131,30 @@ rough = MEL.create_material_expression(
 rough.set_editor_property("r", 0.85)
 MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
+# 2026-09-03 dark-crown fix: plain "Two Sided" only disables backface
+# culling, it does NOT flip the backface normal for lighting - half of every
+# crossed foliage card (see make_tree_meshes.py) faces away from the sun by
+# construction, so those backfaces got N.L<=0 and rendered pure black,
+# reading as a near-black/navy crown in-game (ScreenShot00247.png) even
+# after brightening the atlas colors in build_flora_textures.py. The
+# Two-Sided Foliage shading model is the engine's purpose-built fix for
+# exactly this (leaf/needle cards lit from both sides): it adds a wrapped
+# subsurface-style transmission term so backfaces read as lit (tinted by
+# MP_SUBSURFACE_COLOR) instead of unlit-black.
+m_fol.set_editor_property(
+    "shading_model", unreal.MaterialShadingModel.MSM_TWO_SIDED_FOLIAGE)
+sss = MEL.create_material_expression(
+    m_fol, unreal.MaterialExpressionConstant3Vector, -400, 400)
+sss.set_editor_property("constant", unreal.LinearColor(0.10, 0.28, 0.08, 1.0))
+MEL.connect_material_property(sss, "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
+
 m_fol.set_editor_property("opacity_mask_clip_value", 0.35)
 m_fol.set_editor_property("two_sided", True)
 m_fol.set_editor_property("used_with_nanite", True)
 m_fol.set_editor_property("used_with_instanced_static_meshes", True)
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage", only_if_is_dirty=False)
-log("built M_Foliage (masked, two-sided, alpha-cutout from T_FoliageAtlas)")
+log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_FoliageAtlas)")
 
 unreal.EditorAssetLibrary.save_directory(MAT_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
