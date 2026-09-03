@@ -39,14 +39,29 @@ build_building_mesh.py+export_building_mesh_bin.py) end to end:
      documented scope limit, not a bug, same as build_building_mesh.py's
      identical single-tile-per-feature assumption.
 
-NOT handled (documented scope, not silently dropped): OSM multipolygon
-relations (an island/hole represented as a separate inner way tied to the
-outer by a `type=multipolygon` relation, not a tag on the outer way itself)
-- this script only fetches/uses `way["natural"="water"]`/
-`way["landuse"="reservoir"]` directly, so a real donut-shaped lake with an
-island would triangulate as if the island weren't there (solid water
-straight through it). None of green_valley's named lakes are multipolygons
-(checked against the fetched data - each is a single simple closed way).
+MULTIPOLYGON RELATIONS (added 2026-09-03, summit_county pass): Dillon
+Reservoir - summit_county's whole reason for this pass, see apply_water_
+material.py - turned out to be tagged as a `type=multipolygon` OSM
+RELATION (natural=water on the relation itself, 4 disconnected "outer" way
+segments + 28 "inner" ways for its islands/points), not a single closed way
+- the green_valley-era version of this script only ever fetched/used
+`way["natural"="water"]`/`way["landuse"="reservoir"]` directly, so Dillon
+Reservoir silently never got a tile at all (every real green_valley lake
+tested WAS a simple way, which is why this gap went unnoticed until now).
+fetch_water_polygons() now also fetches `relation["natural"="water"]`/
+`relation["landuse"="reservoir"]`, and assemble_outer_rings() chains a
+relation's "outer" member way segments end-to-end (matching shared node
+ids, same idea any multipolygon assembler uses) into one or more closed
+rings.
+
+STILL NOT handled (documented scope, not silently dropped): the 28 "inner"
+member ways (islands/points/exclusion zones) are NOT subtracted as holes -
+ear_clip/fan_triangulate below have no hole support, and adding that is a
+real triangulation feature, not a quick follow-on. Dillon Reservoir
+therefore triangulates as solid water straight through its small islands/
+points - a real, visible simplification up close at those specific spots,
+accepted for this pass the same way the old single-tile-per-feature/no-
+multipolygon-relation limits were accepted for the version before it.
 
 Elevation formula: SAME road_ue_z_m(elev_m, 0.0, ORIGIN_HEIGHT_M) shift
 every other elevation-consuming stage in this pipeline uses (road_mesh_
@@ -125,6 +140,46 @@ SURFACE_PERCENTILE = 10.0    # see module docstring - low percentile, not
                               # across the footprint
 
 
+def assemble_outer_rings(way_id_list, ways_by_id):
+    """Chains a multipolygon relation's "outer" member way segments
+    end-to-end into closed ring(s) of node ids - standard multipolygon-
+    assembler logic (match shared endpoint node ids, reversing a segment if
+    needed), no external dependency. A relation's outer boundary can be
+    split across several disconnected segments (Dillon Reservoir: 4) that
+    each individually fail the simple-way "already closed" check this
+    script's ways loop uses - this is what actually closes them. Returns a
+    list of node-id rings (each with the duplicate closing id already
+    dropped); a segment set that never closes (missing/truncated Overpass
+    data, or a genuinely broken relation) is dropped with a printed warning
+    rather than silently producing a wrong/open shape."""
+    segments = [list(ways_by_id[wid]) for wid in way_id_list if wid in ways_by_id]
+    segments = [s for s in segments if len(s) >= 2]
+    rings = []
+    unused = list(range(len(segments)))
+    while unused:
+        idx = unused.pop(0)
+        ring = list(segments[idx])
+        progress = True
+        while progress and ring[0] != ring[-1]:
+            progress = False
+            for j in list(unused):
+                seg = segments[j]
+                if seg[0] == ring[-1]:
+                    ring.extend(seg[1:]); unused.remove(j); progress = True; break
+                if seg[-1] == ring[-1]:
+                    ring.extend(list(reversed(seg))[1:]); unused.remove(j); progress = True; break
+                if seg[-1] == ring[0]:
+                    ring[0:0] = seg[:-1]; unused.remove(j); progress = True; break
+                if seg[0] == ring[0]:
+                    ring[0:0] = list(reversed(seg))[:-1]; unused.remove(j); progress = True; break
+        if len(ring) >= 4 and ring[0] == ring[-1]:
+            rings.append(ring[:-1])
+        else:
+            print(f"    WARNING: outer-ring assembly did not close ({len(ring)} node(s) "
+                  f"collected) - dropping this ring")
+    return rings
+
+
 def fetch_water_polygons():
     s, w, n_, e = BBOX_SNWE
     query = f"""
@@ -132,11 +187,18 @@ def fetch_water_polygons():
     (
       way["natural"="water"]({s},{w},{n_},{e});
       way["landuse"="reservoir"]({s},{w},{n_},{e});
+      relation["natural"="water"]({s},{w},{n_},{e});
+      relation["landuse"="reservoir"]({s},{w},{n_},{e});
     );
-    (._;>;);
+    (._;>>;);
     out body;
     """
-    print(f"Querying Overpass for water polygons in the {AREA_NAME} bbox "
+    # NB: >>  (recurse down, twice-transitive) not the single-level >  the
+    # green_valley-era query used - a relation needs TWO hops (relation ->
+    # member way -> way's nodes) to pull in the actual node coordinates;
+    # plain > only pulls the relation's direct members (the ways), leaving
+    # their nodes unfetched. See module docstring (MULTIPOLYGON RELATIONS).
+    print(f"Querying Overpass for water polygons/relations in the {AREA_NAME} bbox "
           f"({s:.3f},{w:.3f},{n_:.3f},{e:.3f}) ...")
     data = None
     for url in OVERPASS_URLS:
@@ -153,10 +215,25 @@ def fetch_water_polygons():
     nodes = {el["id"]: (el["lat"], el["lon"])
              for el in data["elements"] if el["type"] == "node"}
     ways = [el for el in data["elements"] if el["type"] == "way"]
+    relations = [el for el in data["elements"] if el["type"] == "relation"]
+    ways_by_id_raw = {w_el["id"]: w_el.get("nodes", []) for w_el in ways}
+    water_relations = [rel for rel in relations
+                        if rel.get("tags", {}).get("natural") == "water"
+                        or rel.get("tags", {}).get("landuse") == "reservoir"]
+
+    # A relation's "outer" member ways are usually untagged open segments
+    # that would fail the standalone-way closed-ring check below anyway,
+    # but track them so a relation whose outer boundary happens to be one
+    # single already-closed, independently-tagged way doesn't get counted
+    # twice (once here, once via assemble_outer_rings below).
+    used_way_ids = {m["ref"] for rel in water_relations for m in rel.get("members", [])
+                     if m.get("type") == "way" and m.get("role") == "outer"}
 
     polygons = []
     skipped_not_closed = skipped_too_few = 0
     for w_el in ways:
+        if w_el["id"] in used_way_ids:
+            continue
         nd_ids = w_el.get("nodes", [])
         if len(nd_ids) < 4 or nd_ids[0] != nd_ids[-1]:
             skipped_not_closed += 1
@@ -170,9 +247,32 @@ def fetch_water_polygons():
                           "name": tags.get("name", ""),
                           "water_tag": tags.get("water", tags.get("natural", "water"))})
 
+    n_relations_built = n_relation_rings = 0
+    for rel in water_relations:
+        tags = rel.get("tags", {})
+        outer_ids = [m["ref"] for m in rel.get("members", [])
+                     if m.get("type") == "way" and m.get("role") == "outer"]
+        n_inner = sum(1 for m in rel.get("members", []) if m.get("role") == "inner")
+        rings = assemble_outer_rings(outer_ids, ways_by_id_raw)
+        for ring_ids in rings:
+            ring = [nodes[n] for n in ring_ids if n in nodes]
+            if len(ring) < 3:
+                continue
+            polygons.append({"nodes": ring, "way_id": rel["id"],
+                              "name": tags.get("name", ""),
+                              "water_tag": tags.get("water", tags.get("natural", "water"))})
+            n_relation_rings += 1
+        if rings:
+            n_relations_built += 1
+            if n_inner:
+                print(f"  relation {rel['id']} \"{tags.get('name', '(unnamed)')}\": "
+                      f"{len(rings)} outer ring(s) from {len(outer_ids)} segment(s), "
+                      f"{n_inner} inner member(s) NOT subtracted (see module docstring)")
+
     (RAW_DIR / "osm_water.json").write_text(json.dumps(polygons))
     print(f"  got {len(polygons)} water polygon(s) ({skipped_not_closed} not closed rings, "
-          f"{skipped_too_few} too few nodes, skipped) -> {RAW_DIR / 'osm_water.json'}")
+          f"{skipped_too_few} too few nodes, skipped; {n_relations_built} multipolygon "
+          f"relation(s) contributed {n_relation_rings} outer ring(s)) -> {RAW_DIR / 'osm_water.json'}")
     return polygons
 
 

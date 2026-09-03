@@ -37,3 +37,13 @@ content_src/textures/ground/*/
 # pipeline/build_flora_textures.py
 content_src/textures/flora/*.jpg
 
+# Same convention, building PBR sets (ambientCG, Bricks074 etc.) -
+# download_building_textures.py + manifest.json are tracked, extracted
+# binaries are not.
+content_src/textures/building/*/
+
+# Same convention, procedurally-generated water ripple normal map
+# (generate_water_normal.py + manifest.json are tracked, the generated PNG
+# is not - deterministic re-run reproduces it, see manifest.json).
+content_src/textures/water/*.png
+

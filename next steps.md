@@ -2248,6 +2248,25 @@ What landed, in order:
   (`ScreenShot00268.png`/`00269.png`) both now read as a low-rise mountain
   town, sky visible over rooftops, occasional taller lodge/condo block, no
   canyon effect; car spawns fine, no new log errors.
+- **Water (2026-09-03):** rebuilt `M_Water` (`unreal/apply_water_material.py`)
+  as deep blue-green with fresnel sky-tint, dual panned procedural ripple
+  normal maps (`content_src/textures/water/generate_water_normal.py`,
+  imported via `unreal/import_water_textures.py`), opaque (no baked lake-bed
+  clearance data to risk translucent z-fighting against). Found and fixed a
+  real pipeline bug along the way: Dillon Reservoir is an OSM multipolygon
+  *relation*, not a simple way, so `build_water_tiles.py` was silently never
+  baking it at all — added outer-ring assembly for multipolygon relations
+  (inner/hole members still not subtracted, documented limitation). Could
+  **not** get an in-game screenshot of the reservoir itself: every vantage
+  tried sits on a `fidelity=Coarse` FAR terrain tile, and Coarse terrain has
+  no lake hole and appears to sit at/above the water's own baked elevation
+  there, burying the flat water mesh entirely (matches this file's own
+  `ODTerrainManager` FAR/NEAR DEM-zoom-mismatch warning elsewhere in this
+  doc) — a separate, pre-existing, out-of-scope terrain issue, not a
+  material bug. Material graph verified headless (all 4 shading-model pins
+  connected) but not eyeballed in-game; needs either a terrain-side fix
+  (lake holes, or matching FAR-tile DEM zoom to the water bake's) or a small
+  water-elevation upward bias before a real look pass is possible.
 
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar
