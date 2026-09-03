@@ -15,7 +15,7 @@ class UTexture2D;
 struct FParsedChunk
 {
 	TArray<float> Verts;    // flat x,y,z (cm, UE world frame)
-	TArray<float> Uvs;      // flat u,v
+	TArray<float> Uvs;      // flat u0,v0 (pavement-normalized lateral / meters along centerline)
 	TArray<uint32> Tris;    // flat i0,i1,i2
 
 	// ODR2 (2026-07-25): true for a one-way carriageway (e.g. a divided
@@ -24,6 +24,23 @@ struct FParsedChunk
 	// into RoadMat's texture only belongs on a genuine two-way road (see
 	// pipeline/build_road_stations.py's is_oneway_way()).
 	bool bOneway = false;
+
+	// ODR3 (2026-09-03, Phase 2a road-visual overhaul - see
+	// pipeline/export_road_mesh_bin_v2.py's docstring for the wire format).
+	// Empty/default when this chunk came from an ODR2 fallback file (no
+	// MasksV2 tile for this key) - CreateChunkMeshComponent treats that the
+	// same as "unknown road, use plain worn asphalt, no markings".
+	TArray<float> Uv1;         // flat u1,v1 - u1 = road HALF-width in meters
+	                            // (constant per chunk today), v1 reserved (0)
+	uint8 RoadClassId = 6;     // 0=motorway..6=service/unknown, see
+	                            // pipeline/road_mesh_common.py's ROAD_CLASS_ID
+	uint8 LaneCount = 2;
+	bool bHasV3Data = false;   // true only for chunks parsed from an actual
+	                            // ODR3 sidecar - gates the UV1 overlay/lane-
+	                            // marking vertex-color bake in
+	                            // CreateChunkMeshComponent so an ODR2 fallback
+	                            // chunk doesn't fabricate class/lane data it
+	                            // doesn't have.
 };
 
 /** One parsed tile file's worth of chunks - the off-thread output of
@@ -108,7 +125,19 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
-	 *  are "<prefix>_tile_<tx>_<ty>.bin". */
+	 *  are "<prefix>_tile_<tx>_<ty>.bin" (ODR2 format).
+	 *
+	 *  2026-09-03 (Phase 2a road-visual overhaul): RequestTileLoad ALSO
+	 *  probes Content/OpenDrive/MasksV2/roadv3_<suffix>_tile_<tx>_<ty>.bin
+	 *  first, where <suffix> is this prefix with a leading "road_" stripped
+	 *  (matching pipeline/export_road_mesh_bin_v2.py's AREA_NAME-based
+	 *  naming) - e.g. "road_summit_county_test" -> "roadv3_summit_county_test".
+	 *  ODR3 carries the worn-asphalt/lane-marking material's per-vertex
+	 *  half-width and per-chunk road_class_id/lane_count data; when that
+	 *  file exists it's preferred, otherwise this falls straight back to
+	 *  the plain ODR2 file at the path above (see ParseRoadTileFileV2/V3) -
+	 *  areas not yet re-baked through export_road_mesh_bin_v2.py just keep
+	 *  working with plain asphalt/no markings, nothing else changes. */
 	UPROPERTY(EditAnywhere, Category = "Road")
 	FString RoadTilePrefix = TEXT("road_oahu_test");
 
@@ -316,7 +345,16 @@ private:
 	static constexpr int32 ChunkStations = 150;
 	static constexpr float MaxChunkSpanCm = ChunkStations * StationSpacingCm;
 
-	static bool ParseRoadTileFile(const FString& Path, FParsedRoadTile& Out);
+	// ODR2 (Content/OpenDrive/Masks/) - original per-vertex position+UV0 layout,
+	// no class/lane metadata. Still the only format most areas have baked.
+	static bool ParseRoadTileFileV2(const FString& Path, FParsedRoadTile& Out);
+
+	// ODR3 (Content/OpenDrive/MasksV2/roadv3_*) - adds the UV1 (half-width)
+	// channel and per-chunk road_class_id/lane_count bytes consumed by the
+	// worn-asphalt/lane-marking material (2026-09-03, Phase 2a road-visual
+	// overhaul). See pipeline/export_road_mesh_bin_v2.py's docstring for the
+	// wire format this mirrors byte-for-byte.
+	static bool ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& Out);
 
 	void RequestTileLoad(const FIntPoint& Key);
 	void OnTileParsed(const FIntPoint& Key, bool bOk, FParsedRoadTile&& Parsed);

@@ -357,7 +357,7 @@ void AODRoadManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-bool AODRoadManager::ParseRoadTileFile(const FString& Path, FParsedRoadTile& Out)
+bool AODRoadManager::ParseRoadTileFileV2(const FString& Path, FParsedRoadTile& Out)
 {
 	// ODR2 magic+LE-header+payload sidecar convention (2026-07-25: was ODR1,
 	// bumped when the per-chunk oneway byte was added - reader/writer are
@@ -438,21 +438,133 @@ bool AODRoadManager::ParseRoadTileFile(const FString& Path, FParsedRoadTile& Out
 	return true;
 }
 
+bool AODRoadManager::ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& Out)
+{
+	// 'O','D','R','3' + generation id + chunk_count, then per chunk:
+	// vertex_count, tri_count, oneway, road_class_id, lane_count, verts
+	// (xyz), uv0 (u0,v0), uv1 (u1,v1), tris - see
+	// pipeline/export_road_mesh_bin_v2.py's module docstring for the
+	// authoritative byte-for-byte layout this mirrors. Same "bail out on any
+	// truncation/short read, never trust the declared counts blindly"
+	// convention as ParseRoadTileFileV2 above - pure data parse, safe off
+	// the game thread.
+	TArray<uint8> Bin;
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'R' || Bin[3] != '3')
+	{
+		return false;
+	}
+
+	const uint8* Cur = Bin.GetData() + 4;
+	const uint8* End = Bin.GetData() + Bin.Num();
+	auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+
+	if (Remaining() < GenerationIdBytes)
+	{
+		return false;
+	}
+	Out.GenerationId = ReadGenerationId(Cur);
+	Cur += GenerationIdBytes;
+
+	if (Remaining() < 4)
+	{
+		return false;
+	}
+	const uint32 ChunkCount = ReadU32LE(Cur);
+	Cur += 4;
+
+	Out.Chunks.Reserve(ChunkCount);
+	for (uint32 c = 0; c < ChunkCount; ++c)
+	{
+		if (Remaining() < 11)   // vertex_count(4) + tri_count(4) + oneway(1) + road_class_id(1) + lane_count(1)
+		{
+			return false;
+		}
+		const uint32 VCount = ReadU32LE(Cur); Cur += 4;
+		const uint32 TCount = ReadU32LE(Cur); Cur += 4;
+		const bool bOneway = *Cur != 0; Cur += 1;
+		const uint8 RoadClassId = *Cur; Cur += 1;
+		const uint8 LaneCount = *Cur; Cur += 1;
+		// xyz(12) + uv0(8) + uv1(8) per vertex, i0/i1/i2(12) per tri
+		const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)VCount * 8 + (int64)TCount * 12;
+		if (Remaining() < NeedBytes)
+		{
+			return false;
+		}
+
+		const uint8* VertsBase = Cur;
+		const uint8* Uv0Base = Cur + (int64)VCount * 12;
+		const uint8* Uv1Base = Uv0Base + (int64)VCount * 8;
+		const uint8* TrisBase = Uv1Base + (int64)VCount * 8;
+		Cur += NeedBytes;
+
+		FParsedChunk& Chunk = Out.Chunks.AddDefaulted_GetRef();
+		Chunk.bOneway = bOneway;
+		Chunk.RoadClassId = RoadClassId;
+		Chunk.LaneCount = LaneCount;
+		Chunk.bHasV3Data = true;
+		Chunk.Verts.SetNumUninitialized(VCount * 3);
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			Chunk.Verts[v * 3 + 0] = ReadF32LE(VertsBase + v * 12 + 0);
+			Chunk.Verts[v * 3 + 1] = ReadF32LE(VertsBase + v * 12 + 4);
+			Chunk.Verts[v * 3 + 2] = ReadF32LE(VertsBase + v * 12 + 8);
+		}
+		Chunk.Uvs.SetNumUninitialized(VCount * 2);
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			Chunk.Uvs[v * 2 + 0] = ReadF32LE(Uv0Base + v * 8 + 0);
+			Chunk.Uvs[v * 2 + 1] = ReadF32LE(Uv0Base + v * 8 + 4);
+		}
+		Chunk.Uv1.SetNumUninitialized(VCount * 2);
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			Chunk.Uv1[v * 2 + 0] = ReadF32LE(Uv1Base + v * 8 + 0);
+			Chunk.Uv1[v * 2 + 1] = ReadF32LE(Uv1Base + v * 8 + 4);
+		}
+		Chunk.Tris.SetNumUninitialized(TCount * 3);
+		for (uint32 t = 0; t < TCount; ++t)
+		{
+			Chunk.Tris[t * 3 + 0] = ReadU32LE(TrisBase + t * 12 + 0);
+			Chunk.Tris[t * 3 + 1] = ReadU32LE(TrisBase + t * 12 + 4);
+			Chunk.Tris[t * 3 + 2] = ReadU32LE(TrisBase + t * 12 + 8);
+		}
+	}
+	return true;
+}
+
 void AODRoadManager::RequestTileLoad(const FIntPoint& Key)
 {
 	PendingTiles.Add(Key);
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+	const FString PathV2 = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
 		/ FString::Printf(TEXT("%s_tile_%d_%d.bin"), *RoadTilePrefix, Key.X, Key.Y);
 
-	// worker-thread lambda captures ONLY plain copied-by-value inputs (path,
+	// ODR3 lives in a parallel MasksV2/ dir under a "roadv3_" + (RoadTilePrefix
+	// with any leading "road_" stripped) name - see RoadTilePrefix's header
+	// comment for why. Computed here (not cached) since it's cheap and this
+	// only runs per tile-load dispatch, not per frame.
+	FString V3Suffix = RoadTilePrefix;
+	V3Suffix.RemoveFromStart(TEXT("road_"));
+	const FString PathV3 = FPaths::ProjectContentDir() / TEXT("OpenDrive/MasksV2")
+		/ FString::Printf(TEXT("roadv3_%s_tile_%d_%d.bin"), *V3Suffix, Key.X, Key.Y);
+
+	// worker-thread lambda captures ONLY plain copied-by-value inputs (paths,
 	// key) and a weak ptr for the eventual game-thread hop - it must never
 	// touch Tiles/PendingTiles/MissingTiles or any other actor state, which
 	// isn't synchronized for cross-thread access.
 	TWeakObjectPtr<AODRoadManager> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, PathV2, PathV3]()
 	{
 		FParsedRoadTile Parsed;
-		const bool bOk = ParseRoadTileFile(Path, Parsed);
+		// ODR3 preferred when present (worn-asphalt/lane-marking data) -
+		// falls back to the plain ODR2 tile otherwise so nothing regresses
+		// on areas that haven't been re-baked through
+		// export_road_mesh_bin_v2.py yet (see RoadTilePrefix's comment).
+		bool bOk = ParseRoadTileFileV3(PathV3, Parsed);
+		if (!bOk)
+		{
+			bOk = ParseRoadTileFileV2(PathV2, Parsed);
+		}
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
 			{
@@ -628,13 +740,51 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	Comp->SetCollisionProfileName(TEXT("BlockAll"));
 	TCollisionSetup = Lap(Clock);
 
+	// ODR3 data available for this chunk (Chunk.bHasV3Data) - road_class_id/
+	// lane_count/oneway/a per-chunk wear-variety seed get baked into vertex
+	// COLOR (not a per-chunk MaterialInstanceDynamic - one road-mesh tile can
+	// be dozens of chunks, and a MID per chunk means a real material
+	// instance object + per-draw param binding for every one of them; a
+	// vertex-color channel is free bandwidth already flowing through the
+	// existing render path, same trick AODTerrainManager::ApplyBiomeTint
+	// already uses for its own per-vertex biome signal - see that class for
+	// precedent). The UV1 overlay carries the one value that's genuinely
+	// continuous/per-vertex today (pavement half-width, meters) so the
+	// material can convert u0's 0..1 pavement-normalized coordinate into a
+	// real world-space meters offset for constant-width lane markings
+	// regardless of road class.
+	const bool bHasV3 = Chunk.bHasV3Data && Chunk.Uv1.Num() == (int32)(VCount * 2);
+	// Stable per-chunk pseudo-random 0..1 (hash of the chunk's first vertex
+	// position) - purely a texture-variety seed for M_Road's wear-noise
+	// offset, not meant to be reproducible or cryptographic.
+	float ChunkSeed = 0.0f;
+	if (bHasV3 && VCount > 0)
+	{
+		const uint32 H = GetTypeHash(FVector(Chunk.Verts[0], Chunk.Verts[1], Chunk.Verts[2]));
+		ChunkSeed = (float)(H % 10000) / 10000.0f;
+	}
+
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
 	{
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
+		FDynamicMeshUVOverlay* UV1 = nullptr;
+		if (bHasV3)
+		{
+			Mesh.Attributes()->SetNumUVLayers(2);
+			UV1 = Mesh.Attributes()->GetUVLayer(1);
+		}
+		FDynamicMeshColorOverlay* Colors = nullptr;
+		if (bHasV3)
+		{
+			Mesh.Attributes()->EnablePrimaryColors();
+			Colors = Mesh.Attributes()->PrimaryColors();
+		}
 
 		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
 		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+		TArray<int32> Uv1Ids; if (UV1) { Uv1Ids.SetNumUninitialized(VCount); }
+		TArray<int32> ColorIds; if (Colors) { ColorIds.SetNumUninitialized(VCount); }
 
 		for (uint32 v = 0; v < VCount; ++v)
 		{
@@ -663,6 +813,29 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			UvIds[v] = UV->AppendElement(
 				FVector2f(Chunk.Uvs[v * 2 + 0], Chunk.Uvs[v * 2 + 1]));
 		}
+		if (UV1)
+		{
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				Uv1Ids[v] = UV1->AppendElement(
+					FVector2f(Chunk.Uv1[v * 2 + 0], Chunk.Uv1[v * 2 + 1]));
+			}
+		}
+		if (Colors)
+		{
+			// R = road_class_id/6, G = lane_count/8, B = oneway (0/1),
+			// A = per-chunk wear-variety seed - M_Road unpacks these back
+			// into integers via round(R*6)/round(G*8) (see
+			// unreal/apply_road_material.py's G.classify_from_vcolor()).
+			const float R = (float)Chunk.RoadClassId / 6.0f;
+			const float Gc = (float)Chunk.LaneCount / 8.0f;
+			const float B = Chunk.bOneway ? 1.0f : 0.0f;
+			const FVector4f VColor(R, Gc, B, ChunkSeed);
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				ColorIds[v] = Colors->AppendElement(VColor);
+			}
+		}
 		for (uint32 t = 0; t < TCount; ++t)
 		{
 			const uint32 I0 = Chunk.Tris[t * 3 + 0];
@@ -672,16 +845,28 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			if (Tid >= 0)
 			{
 				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+				if (UV1)
+				{
+					UV1->SetTriangle(Tid, FIndex3i(Uv1Ids[I0], Uv1Ids[I1], Uv1Ids[I2]));
+				}
+				if (Colors)
+				{
+					Colors->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
+				}
 			}
 		}
 	});
 	TMeshBuild = Lap(Clock);
 
-	// one-way carriageways (e.g. a divided highway's own direction) get
-	// the no-center-yellow variant - RoadMat's baked centerline only
-	// belongs on a genuine two-way road. Falls back to RoadMat if the
-	// one-way variant failed to load, rather than rendering nothing.
-	UMaterialInterface* ChunkMat = (Chunk.bOneway && RoadMatOneWay) ? RoadMatOneWay : RoadMat;
+	// 2026-09-03 (Phase 2a road-visual overhaul): a single M_Road material now
+	// covers both carriageway directions - the double-yellow-centerline-vs-
+	// not distinction that used to require a whole separate M_Road_OneWay
+	// asset is driven in-shader off the vertex-color oneway flag baked above
+	// instead (see unreal/apply_road_material.py). RoadMatOneWay stays loaded
+	// (unreal/apply_road_physmat.py still assigns it a physical material) but
+	// is no longer selected here; falls back to RoadMatOneWay only if RoadMat
+	// itself failed to load, rather than rendering nothing.
+	UMaterialInterface* ChunkMat = RoadMat ? RoadMat : RoadMatOneWay;
 	if (ChunkMat)
 	{
 		Comp->SetMaterial(0, ChunkMat);
