@@ -35,20 +35,28 @@ arches as GENUINE PARTS of the same continuous hull surface:
   3. CROSS-SECTION - a 5-point rounded-rectangle profile per station
      (bottom / round shoulder / sill / beltline crease / top), computed in
      build_hull() from the two curves above plus a roughly-constant BELT_Z
-     (beltline height). Wherever the authored roofline z_top(x) rises above
-     BELT_Z, the shoulder-to-top band is real GLASS material, inset ~4 cm
-     narrower than the beltline (tumblehome) - so the windshield/roof/rear
-     glass are literal parts of the swept hull, not a bolted-on quad, and
-     they vanish smoothly (zero-height band) wherever the roofline drops
-     back below the beltline (hood/decklid) - see weight() in build_hull().
+     (beltline height). Glass is gated by an explicit GREENHOUSE X-RANGE per
+     preset (glass_x_start at the cowl/A-pillar foot, glass_x_end at the
+     C-pillar/rear-glass foot, smoothly ramped over glass_transition_cm at
+     each edge) rather than "roofline above beltline" - the earlier height-
+     only rule turned the entire upper body into glass whenever the hood
+     itself sat above too low a beltline (Round-2 defect: Super read as a
+     glass canopy nose to tail). Inside the range the shoulder-to-top band
+     is real GLASS, inset to a narrow roof-ridge width (tumblehome); outside
+     it, forward is HOOD and aft is DECKLID/haunch, both body paint no
+     matter how high z_top(x) sits there - see weight() in build_hull().
   4. WHEEL ARCHES - the lower hull curve is CLIPPED by a real arc at each
      axle: local_bottom(x) = max(base_bottom(x), arch(x)), where arch(x) is
      a semicircle of radius wheel_r + ~10 cm centered at axle height
      (z=0, the OBJ pivot convention) - see the "wheel-arch clipping" block
      in build_hull(). This bites a genuine scalloped opening into the
      rocker/side silhouette (visible from pure side-on) so the wheel sits
-     INSIDE an opening instead of being half-hidden under a flat slab side;
-     arch_lip() then adds a thin proud flare-lip trim tracing that same arc.
+     INSIDE an opening instead of being half-hidden under a flat slab side.
+     Round-2 added a separate flare-lip trim tracing that same arc; it
+     rendered as a detached ring floating above the wheel (its width used
+     the plan-view half-width, not the actual - narrower - body surface at
+     that height), so Round-3 drops it: a clean cut arch with no trim reads
+     better than a floating one.
   5. A beltline crease falls out of the cross-section directly (the
      shoulder point sits at full plan-view width, sill/top both tuck in
      relative to it - true for both the glass band and the hood/deck band).
@@ -240,13 +248,23 @@ STYLE_DEFAULTS = dict(
     round_width_frac=0.80,
     sill_width_frac=0.94,
     hood_top_width_frac=0.90,   # top-band width when NOT glass (hood/deck)
-    glass_inset_cm=4.0,         # top-band width when glass: shoulder - this
+    glass_inset_cm=4.0,         # top-band width when glass: roof-ridge half-width
     round_offset_cm=9.0,        # z height of the "round" point above local bottom
     sill_height_cm=17.0,        # z height of the "sill" point above local bottom
     min_band_cm=14.0,           # safety clamp: bottom stays this far under top
     belt_z=48.0,                # beltline (shoulder) height - roughly constant
     arch_margin_cm=10.0,        # wheel-arch radius = wheel_r + this
     cap_trim_cell=None,         # None -> PLASTIC; some presets use CHROME
+    # Round-3 fix: glass is gated by an explicit GREENHOUSE X-RANGE, not by
+    # "roofline above beltline" (that rule turned the entire upper body -
+    # hood included - into glass whenever the hood itself sat above a too-
+    # low beltline). Every preset must set these two explicitly to the
+    # windshield-base (cowl/A-pillar foot) and rear-glass-base (C-pillar/
+    # decklid foot) x positions; forward of glass_x_start is hood, aft of
+    # glass_x_end is decklid/haunch, both body paint regardless of height.
+    glass_x_start=None,
+    glass_x_end=None,
+    glass_transition_cm=8.0,    # smooth ramp width at each glass edge
 )
 
 
@@ -308,15 +326,22 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
     local_bottom = np.maximum(base_bottom, arch)
     local_bottom = np.minimum(local_bottom, base_top - style["min_band_cm"])
 
-    # --- glass band (item 3): wherever the authored roofline rises above
-    # the (roughly constant) beltline, that band is glass, inset and
-    # narrower than the beltline; it vanishes smoothly (zero height)
-    # wherever the roofline drops back to hood/deck height.
+    # --- glass band (item 3, Round-3 fix): glass is gated purely by the
+    # explicit greenhouse X-RANGE (glass_x_start at the cowl/A-pillar foot
+    # down to glass_x_end at the C-pillar/rear-glass foot), smoothly ramped
+    # over glass_transition_cm at each edge so the A-/C-pillar rake (already
+    # baked into the authored z_top curve) reads as the material transition
+    # too. Forward of glass_x_start (hood) and aft of glass_x_end (decklid/
+    # haunch) are ALWAYS body paint, however high the roofline sits there -
+    # this is what stops the whole crown/deck from being swept into glass.
     belt = style["belt_z"]
     shoulder_z = np.minimum(belt, base_top)
-    glass_band = np.maximum(0.0, base_top - shoulder_z)
-    ref_h = max(1.0, float(base_top.max()) - belt)
-    weight = np.clip(glass_band / ref_h, 0.0, 1.0)
+    assert style["glass_x_start"] is not None and style["glass_x_end"] is not None, \
+        "every preset must set glass_x_start/glass_x_end explicitly"
+    trans = max(1e-3, style["glass_transition_cm"])
+    d_front = style["glass_x_start"] - xs   # >0 once past the cowl (going aft)
+    d_back = xs - style["glass_x_end"]      # >0 while still forward of the C-pillar foot
+    weight = np.clip(np.minimum(d_front, d_back) / trans, 0.0, 1.0)
 
     round_z = np.minimum(local_bottom + style["round_offset_cm"], shoulder_z - 2.0)
     sill_z = np.clip(local_bottom + style["sill_height_cm"], round_z + 1.0, shoulder_z - 1.0)
@@ -338,7 +363,7 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
 
     Zs = np.stack([local_bottom, round_z, sill_z, shoulder_z, base_top], axis=1)
     Ws = np.stack([bottom_w, round_w, sill_w, shoulder_w, top_w], axis=1)
-    band_glass = weight > 0.35
+    band_glass = weight > 0.5
 
     def local_width(x):
         return float(np.interp(x, xs[::-1], half_w[::-1]))
@@ -392,32 +417,6 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
     cap(-1, TAILLIGHT, flip=True)
 
     return local_width
-
-
-def arch_lip(m, axle_x, wheel_r, local_width_fn, margin, n=12, cell=PLASTIC):
-    """Thin proud flare-lip trim tracing the SAME arc build_hull() clipped
-    the lower hull with (item 4's "small flare lip") - sits just outboard
-    of the hull surface along the arch opening."""
-    r = wheel_r + margin
-    xs = np.linspace(axle_x - r * 0.92, axle_x + r * 0.92, n)
-    pts = []
-    for x in xs:
-        d2 = r * r - (x - axle_x) ** 2
-        z = math.sqrt(d2) if d2 > 0 else 0.0
-        y = local_width_fn(x) + 0.6
-        pts.append((x, y, z))
-    for i in range(len(pts) - 1):
-        x0, y0, z0 = pts[i]
-        x1, y1, z1 = pts[i + 1]
-        for side in (1, -1):
-            a = (x0, side * y0, z0 - 2.5)
-            b = (x1, side * y1, z1 - 2.5)
-            c = (x1, side * y1, z1 + 2.5)
-            d = (x0, side * y0, z0 + 2.5)
-            if side > 0:
-                m.quad(a, b, c, d, cell)
-            else:
-                m.quad(d, c, b, a, cell)
 
 
 def mirrors(m, x, local_width_fn, z):
@@ -565,35 +564,40 @@ def light_patch(m, x, local_width_fn, z_center, cell, size=(16.0, 9.0)):
 
 # ================================================================== presets
 def build_muscle():
-    """Long-hood/short-deck pony coupe. Hood 230->44 = 186 cm (~44% of the
-    420 cm body) with the cowl/A-pillar rising steeply at x=44->20 (52->118
-    cm), a low long roof peaking just behind center, then a fastback slope
-    from x=-40 down to a short squared decklid."""
+    """Long-hood/short-deck pony coupe. Round-3 re-proportion: hood 230->45
+    = 185 cm (44% of the 420 cm body) BEFORE glass starts at the cowl
+    (x=45), cabin/glass 45->-95 = 140 cm (one-third of the body), decklid
+    -95->-190 = 95 cm - hood+deck 280 cm is two-thirds of the body. The
+    A-pillar rakes steeply x=45->25 (54->76 cm), then a long LOW flat roof
+    25->-55 peaking only 18 cm above the (raised) beltline, a fastback
+    C-pillar slope -55->-95 back down to beltline height, then decklid."""
     body, dark = 0, 1
     profile = [
-        (230.0, 4.0, 32.0), (214.0, -2.0, 40.0), (170.0, -6.0, 48.0),
-        (44.0, -8.0, 52.0), (20.0, -8.0, 118.0), (-40.0, -8.0, 122.0),
-        (-90.0, -6.0, 112.0), (-150.0, -2.0, 62.0), (-190.0, 2.0, 40.0),
+        (230.0, 4.0, 30.0), (214.0, -2.0, 38.0), (170.0, -6.0, 46.0),
+        (100.0, -8.0, 52.0), (45.0, -8.0, 54.0),    # cowl / glass_x_start
+        (25.0, -8.0, 76.0),                          # A-pillar top / roof front
+        (-55.0, -8.0, 76.0),                         # long low flat roof
+        (-95.0, -6.0, 58.0),                         # C-pillar foot / glass_x_end
+        (-150.0, -2.0, 50.0), (-190.0, 2.0, 36.0),
     ]
     plan = [
-        (230.0, 54.0), (214.0, 66.0), (170.0, 78.0), (44.0, 79.0),
-        (-40.0, 79.0), (-90.0, 80.0), (-150.0, 84.0), (-190.0, 68.0),
+        (230.0, 54.0), (214.0, 66.0), (170.0, 78.0), (100.0, 79.0),
+        (45.0, 79.0), (-55.0, 79.0), (-95.0, 80.0), (-150.0, 84.0), (-190.0, 68.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 140.0, -150.0, 90.0, 36.0
     style = style_for(dict(
-        belt_z=48.0, bottom_width_frac=0.74, round_width_frac=0.82,
+        belt_z=58.0, bottom_width_frac=0.74, round_width_frac=0.82,
         sill_width_frac=0.95, hood_top_width_frac=0.90, glass_inset_cm=5.0,
         bulge_strength=0.15, bulge_sigma=56.0,
         front_bulge_mult=0.85, rear_bulge_mult=1.25,   # emphasize rear haunches
         arch_margin_cm=10.0, cap_trim_cell=CHROME,
+        glass_x_start=45.0, glass_x_end=-95.0,
     ))
 
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
     mirrors(m, 30.0, local_w, 58.0)
-    arch_lip(m, front_axle_x, wheel_r, local_w, style["arch_margin_cm"])
-    arch_lip(m, rear_axle_x, wheel_r, local_w, style["arch_margin_cm"])
     lip_spoiler(m, -186.0, local_w(-186.0), 42.0)
     exhaust_tips(m, -206.0, half_track, 8.0)
     tris = m.save("SM_Car_Muscle")
@@ -621,19 +625,22 @@ def build_jdm():
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 124.0, -114.0, 80.0, 32.0
     style = style_for(dict(
-        belt_z=46.0, bottom_width_frac=0.72, round_width_frac=0.80,
+        belt_z=50.0, bottom_width_frac=0.72, round_width_frac=0.80,
         sill_width_frac=0.92, hood_top_width_frac=0.86, glass_inset_cm=4.5,
         bulge_strength=0.09, bulge_sigma=46.0,
         front_bulge_mult=1.0, rear_bulge_mult=1.05,
         arch_margin_cm=9.0,
+        # Round-3 glass-band fix: cowl (windshield base) at x=64, rear glass/
+        # backlight base at x=-120 (most of the fastback taper stays glazed,
+        # matching this preset's liftback flavor); JDM's proportions were
+        # already the closest to reading right, kept otherwise unchanged.
+        glass_x_start=64.0, glass_x_end=-120.0,
     ))
 
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
     mirrors(m, 60.0, local_w, 50.0)
-    arch_lip(m, front_axle_x, wheel_r, local_w, style["arch_margin_cm"])
-    arch_lip(m, rear_axle_x, wheel_r, local_w, style["arch_margin_cm"])
     light_patch(m, 210.0, local_w, 18.0, HEADLIGHT, size=(11.0, 7.0))
     light_patch(m, 210.0, local_w, 29.0, HEADLIGHT, size=(11.0, 6.0))
     lip_spoiler(m, -150.0, local_w(-150.0), 30.0, chord=10.0)
@@ -647,37 +654,41 @@ def build_jdm():
 
 
 def build_super():
-    """Mid-engine wedge: short 102 cm cab-forward hood (206->104), a steep
-    18 cm windshield rise to a 114 cm roof peak (per spec), a short canopy,
-    then a long flat 130 cm engine deck/tail (x=-10 to -195, mostly flat
-    z 64->60)."""
+    """Mid-engine wedge, Round-3 re-proportion: a long LOW 151 cm nose
+    (206->55, z only 12->28) that is ALL body panel (glass starts at the
+    cowl, x=55, well aft of the nose tip) under a steeply raked 45 cm
+    windshield (55->10, 28->112), then a SHORT 40 cm roof bubble (10->-30)
+    peaking at 114 cm just aft of the car's midpoint (~-4 cm), a C-pillar/
+    backlight drop to -80, and a long flat 115 cm engine deck/tail."""
     body, dark = 4, 5
     profile = [
-        (206.0, -2.0, 14.0), (190.0, -6.0, 20.0), (150.0, -8.0, 26.0),
-        (104.0, -8.0, 30.0), (86.0, -8.0, 110.0), (40.0, -8.0, 114.0),
-        (-10.0, -8.0, 100.0), (-140.0, -6.0, 64.0), (-195.0, -4.0, 60.0),
+        (206.0, -2.0, 12.0), (190.0, -6.0, 16.0), (150.0, -8.0, 20.0),
+        (100.0, -8.0, 24.0), (55.0, -8.0, 28.0),    # cowl / glass_x_start
+        (10.0, -8.0, 112.0),                         # steep windshield rake
+        (-30.0, -8.0, 114.0),                        # short roof bubble peak
+        (-80.0, -8.0, 90.0),                          # backlight drop / glass_x_end
+        (-140.0, -6.0, 64.0), (-195.0, -4.0, 60.0),
         (-215.0, 0.0, 54.0),
     ]
     plan = [
-        (206.0, 48.0), (190.0, 62.0), (150.0, 76.0), (104.0, 78.0),
-        (40.0, 78.0), (-10.0, 80.0), (-80.0, 86.0), (-150.0, 94.0),
-        (-195.0, 90.0), (-215.0, 82.0),
+        (206.0, 48.0), (190.0, 62.0), (150.0, 76.0), (100.0, 78.0),
+        (55.0, 78.0), (10.0, 78.0), (-30.0, 80.0), (-80.0, 86.0),
+        (-140.0, 94.0), (-195.0, 90.0), (-215.0, 82.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 118.0, -150.0, 94.0, 36.0
     style = style_for(dict(
-        belt_z=28.0, bottom_width_frac=0.76, round_width_frac=0.84,
+        belt_z=32.0, bottom_width_frac=0.76, round_width_frac=0.84,
         sill_width_frac=0.96, hood_top_width_frac=0.84, glass_inset_cm=5.0,
         bulge_strength=0.13, bulge_sigma=44.0,
         front_bulge_mult=0.75, rear_bulge_mult=1.35,   # huge rear haunches
         arch_margin_cm=9.0,
+        glass_x_start=55.0, glass_x_end=-80.0,
     ))
 
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
-    mirrors(m, 92.0, local_w, 36.0)
-    arch_lip(m, front_axle_x, wheel_r, local_w, style["arch_margin_cm"])
-    arch_lip(m, rear_axle_x, wheel_r, local_w, style["arch_margin_cm"])
+    mirrors(m, 48.0, local_w, 34.0)
     light_patch(m, -105.0, local_w, 4.0, PLASTIC, size=(20.0, 14.0))   # side intake, ahead of rear wheel
     rear_wing(m, deck_x=-198.0, deck_z=58.0, half_span=76.0, stanchion_h=26.0)
     diffuser_stripe(m, tail_x=-210.0, half_width=80.0, z_bottom=0.0)
@@ -695,15 +706,21 @@ def build_pickup():
     """Upright crew cab (steep A-pillar to a flat 138 cm roof) then an
     UPRIGHT cab-back wall dropping straight to bed-rail height (x=8->-2,
     130->64 cm over just 10 cm - deliberately near-vertical, not a taper) -
-    the non-lofted bed (build_pickup_bed) picks up flush from there."""
+    the non-lofted bed (build_pickup_bed) picks up flush from there. Round-3
+    fix: the hood used to sit AT bed-rail height (68 vs. wall_top_z=58),
+    reading as one continuous slab from nose to tailgate - the hood is now a
+    long flat LOW panel at 44 cm, ~14 cm below the 58 cm bed rail, with a
+    shorter 43 cm front overhang (was 63 cm); the cab itself was fine and is
+    unchanged."""
     body, dark = 6, 7
     profile = [
-        (248.0, 16.0, 46.0), (230.0, 10.0, 54.0), (188.0, 8.0, 62.0),
-        (130.0, 8.0, 68.0), (112.0, 8.0, 136.0), (20.0, 8.0, 138.0),
-        (8.0, 8.0, 130.0), (-2.0, 8.0, 64.0),
+        (228.0, 14.0, 34.0), (210.0, 8.0, 40.0), (175.0, 6.0, 44.0),
+        (130.0, 6.0, 44.0),                          # long flat LOW hood
+        (112.0, 6.0, 136.0), (20.0, 6.0, 138.0),
+        (8.0, 6.0, 130.0), (-2.0, 6.0, 64.0),
     ]
     plan = [
-        (248.0, 56.0), (230.0, 66.0), (188.0, 74.0), (130.0, 76.0),
+        (228.0, 56.0), (210.0, 66.0), (175.0, 74.0), (130.0, 76.0),
         (112.0, 76.0), (20.0, 76.0), (8.0, 74.0), (-2.0, 72.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 185.0, -160.0, 98.0, 42.0
@@ -713,6 +730,10 @@ def build_pickup():
         bulge_strength=0.16, bulge_sigma=50.0,   # big flared arches
         front_bulge_mult=1.1, rear_bulge_mult=1.15,
         arch_margin_cm=12.0, cap_trim_cell=CHROME,
+        # cab-back window: windshield base ~x=120 (just ahead of the 112 cowl
+        # point), rear/back-glass base just past the roof-to-cab-wall corner
+        # at x=2 (before the steep drop into the bed-rail wall).
+        glass_x_start=120.0, glass_x_end=2.0,
     ))
 
     m = Mesh()
@@ -722,7 +743,6 @@ def build_pickup():
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
     mirrors(m, 108.0, local_w, 72.0)
-    arch_lip(m, front_axle_x, wheel_r, local_w, style["arch_margin_cm"])
 
     cab_tail_x = -2.0
     floor_z, wall_top_z = 8.0, 58.0
@@ -730,10 +750,6 @@ def build_pickup():
     tail_x = build_pickup_bed(m, cab_tail_x, floor_z, wall_top_z, bed_half_width,
                                bed_length=175.0, body_cell=body, dark_cell=dark)
     tailgate_lights(m, tail_x, bed_half_width, (floor_z + wall_top_z) / 2.0, TAILLIGHT)
-    # rear wheel sits under the welded bed, outside the hull loft's domain -
-    # local_w extrapolates by clamping to the cab-tail's width, close enough
-    # for this stylized flare-lip trim.
-    arch_lip(m, rear_axle_x, wheel_r, local_w, style["arch_margin_cm"])
     m.quad((90.0, -30.0, 139.0), (66.0, -30.0, 139.0), (66.0, 30.0, 139.0),
            (90.0, 30.0, 139.0), CHROME)   # roof light bar
     tris = m.save("SM_Car_Pickup")
@@ -763,19 +779,21 @@ def build_rally():
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 112.0, -118.0, 78.0, 32.0
     style = style_for(dict(
-        belt_z=44.0, bottom_width_frac=0.74, round_width_frac=0.82,
+        belt_z=48.0, bottom_width_frac=0.74, round_width_frac=0.82,
         sill_width_frac=0.94, hood_top_width_frac=0.88, glass_inset_cm=4.0,
         bulge_strength=0.18, bulge_sigma=42.0,   # flared arches both ends
         front_bulge_mult=1.15, rear_bulge_mult=1.15,
         arch_margin_cm=11.0,
+        # Round-3 glass-band fix: cowl at x=84 (windshield base), hatch
+        # glass runs through most of the steep drop down to x=-85 before
+        # giving way to the tailgate/bumper panel.
+        glass_x_start=84.0, glass_x_end=-85.0,
     ))
 
     m = Mesh()
     local_w = build_hull(m, profile, plan, body, dark, style,
                           front_axle_x, rear_axle_x, wheel_r)
     mirrors(m, 58.0, local_w, 50.0)
-    arch_lip(m, front_axle_x, wheel_r, local_w, style["arch_margin_cm"])
-    arch_lip(m, rear_axle_x, wheel_r, local_w, style["arch_margin_cm"])
     light_patch(m, 194.0, local_w, 12.0, HEADLIGHT, size=(9.0, 9.0))
     lip_spoiler(m, -96.0, local_w(-96.0), 56.0, chord=8.0)
     tris = m.save("SM_Car_Rally")
