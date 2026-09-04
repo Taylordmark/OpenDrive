@@ -2927,3 +2927,60 @@ any future spike, explicitly documented as *not* a fix for this specific
 (non-reproducing, non-GC) hitch. No C++ changes - no evidenced churn
 pattern existed to pool or fix. Doc's original verdict stands: fine, no
 blocker for Taylor's live drive-test.
+
+**Regression fix: spawned car appeared stuck at full throttle (2026-09-03/04,
+§7.15 follow-up, `ODVehicleMovement.cpp`):** urgent live-drive-test report -
+car floored itself with zero input right after spawn. NOT a throttle bug -
+`ThrottleIn`/`thr=` traced 0.00 the entire time in every repro. Root cause
+was a feedback loop between two of today's spawn-settle changes and the
+existing tire model:
+
+1. `82c97ed` (spawn parking hold) pins the body's world-space linear
+   velocity to zero every tick while `bParkHold` is engaged, and forces a
+   full `W.MaxBrakeNm` into every wheel's `BrakeNm` on top of the driver's
+   own pedal.
+2. `TickTires`' existing anti-jitter clamp on longitudinal tire force
+   (`FxStop`, "kills parking jitter without touching real slides") was
+   gated `W.BrakeNm < 1.0f` - meant to let a real hard brake at speed keep
+   full ABS/slip physics. ParkHold's forced brake torque made that guard
+   permanently false while parked, so the one state most in need of the
+   jitter clamp was exactly the state that disabled it.
+3. `TickComponent` computes `FwdSpeedCmS`/feeds `TickTires` its `Vx`/`Vy`
+   from the body's *current* velocity, which reflects last tick's force
+   integration - the park-hold velocity pin runs later in the same
+   function, after tire forces are already computed for this tick. So
+   each tick: the pin zeros velocity -> the (unclamped, thanks to #2)
+   tire model reads a residual pre-pin `Vx`/`Vy`, computes a large
+   corrective `Fx`/`Fy` off it, the physics solver integrates that force
+   before the *next* tick's pin catches it -> next tick reads a nonzero
+   velocity again -> repeat, forever. Confirmed headless with a completely
+   idle, un-driven car (`-odgo` only, no `-odrev`): `FxR` swinging
+   +/-3x10^6 N and `spd` oscillating +/-55 cm/s at t=35s, never damping,
+   with `thr=0.00` throughout - the wheels/chassis visibly straining in
+   place, reading exactly like "stuck at full throttle" even though no
+   throttle was ever involved.
+
+**Fix:** `TickTires`' stability-clamp block (`ODVehicleMovement.cpp`,
+around the `FyStop`/`FxStop` calculation) now special-cases `bParkHold`:
+while parked, both `Fx` and `Fy` are forced to `0.0f` outright instead of
+being sized by a clamp proportional to `Vx`/`Vy` - proportional clamping
+doesn't work here because the velocity being measured is itself corrupted
+by the same loop it's supposed to bound. Everything else (real coasting
+jitter clamp, real hard-brake ABS physics, the park-hold brake torque and
+velocity/angular-velocity pin themselves) is untouched. Root cause was in
+the tire model's interaction with `82c97ed`'s park hold, not in `82c97ed`,
+`7dc328f` ("tips over after Breckenridge spawn"), or `ffeaf96` (freelook
+invert, confirmed genuinely isolated to `UpdateFreeLook`'s pitch sign) -
+all three were audited and ruled out as the direct mechanism before this
+was found.
+
+**Verified headless, both required cases:**
+- No `-odrev` (idle car, zero input): by t=33.99s, `thr=0.00`, `spd=0`,
+  position frozen at (680251,-589678,-67870) to the cm, `FyF=FyR=FxR=0`
+  exactly, `fz` settled flat at ~383,200 (static corner load), `gnd=4` -
+  fully stationary, no residual force.
+- With `-odrev=5` (scripted drive): throttle ramps 0.09 -> 1.00 as
+  designed, speed reaches 1862 cm/s (~67 km/h), position moves ~44 m from
+  spawn - scripted-drive path unaffected by the fix.
+
+Committed locally only (`ODVehicleMovement.cpp`); not pushed.

@@ -821,16 +821,46 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			}
 
 			// stability clamps: never push the contact patch past zero in
-			// one frame (kills parking jitter without touching real slides)
-			const float FyStop =
-				QuarterMassKg * FMath::Abs(Vy) * 100.0f / Dt * 0.45f;
-			Fy = FMath::Clamp(Fy, -FyStop, FyStop);
-			if (FMath::Abs(Vx) < 1.5f && EffectiveThrottle < 0.05f
-				&& W.BrakeNm < 1.0f)
+			// one frame (kills parking jitter without touching real slides).
+			//
+			// bParkHold (see EngageParkHold) is a special case both clamps
+			// below get wrong: it pins the body's linear AND angular
+			// velocity to zero every tick, but that pin runs in
+			// TickComponent AFTER this tire pass, so Vx/Vy here can carry
+			// mid-tick leftovers from whatever force THIS SAME pass computed
+			// last frame - a proportional clamp (FyStop/FxStop scale with
+			// |Vy|/|Vx|) doesn't bound that, it rides along with it. Under
+			// full park-hold brake the old `W.BrakeNm < 1.0f` guard also
+			// disabled the Fx clamp entirely (ParkHold's forced
+			// W.MaxBrakeNm made it permanently false), so nothing capped
+			// either axis. Together that formed a genuine per-tick feedback
+			// loop that never settled - reproduced headless with zero
+			// player input (thr=0.00 throughout): FxR swinging +/-3e6 N and
+			// spd alternating +/-55 cm/s at t=35s before the fix, then (once
+			// Fx alone was gated in) the same loop just moved to Fy -
+			// FyF/FyR swinging +/-2-3e6 N with a 50+ deg "slip angle" on a
+			// stationary car. A parked car should feel zero net tire slip
+			// force at all - the brake torque is what holds it - so while
+			// held, skip tire force generation outright rather than trying
+			// to size a clamp against a measurement this same loop keeps
+			// perturbing.
+			if (bParkHold)
 			{
-				const float FxStop =
-					QuarterMassKg * FMath::Abs(Vx) * 100.0f / Dt * 0.45f;
-				Fx = FMath::Clamp(Fx, -FxStop, FxStop);
+				Fx = 0.0f;
+				Fy = 0.0f;
+			}
+			else
+			{
+				const float FyStop =
+					QuarterMassKg * FMath::Abs(Vy) * 100.0f / Dt * 0.45f;
+				Fy = FMath::Clamp(Fy, -FyStop, FyStop);
+				if (FMath::Abs(Vx) < 1.5f && EffectiveThrottle < 0.05f
+					&& W.BrakeNm < 1.0f)
+				{
+					const float FxStop =
+						QuarterMassKg * FMath::Abs(Vx) * 100.0f / Dt * 0.45f;
+					Fx = FMath::Clamp(Fx, -FxStop, FxStop);
+				}
 			}
 
 			// Fx at the true contact (brake dive / squat should feel real);
