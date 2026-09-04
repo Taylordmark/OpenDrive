@@ -2510,6 +2510,81 @@ What landed, in order:
     `dillon_r4_dam.png`, `dillon_r4_shore.png`, `dillon_r4_waterlevel.png`,
     `dillon_r4_inland.png`.
 
+  **RESOLVED (2026-09-03, fifth pass — cube-primitive rocks +
+  Breckenridge-valley scrub misclassification, both from a screenshot
+  review of `dillon_r4_dam.png`/`dillon_r4_inland.png`):**
+  - **Defect 1, rocks rendering as literal cubes/spheres (real, fixed):**
+    `AODForestManager`'s rock scatter had, since its introduction, reused
+    two `/Engine/BasicShapes` primitives (`Cube`, `Sphere`) with only
+    per-instance scale/rotation jitter — exactly as reported near Dillon
+    Dam Rd and Coyne Valley Rd: sharp-cornered cubes and perfect spheres,
+    not weathered boulders. New `pipeline/make_rock_meshes.py` generates 4
+    procedural boulder variants (icosphere base, deterministic sine "noise"
+    per-vertex radial displacement, flattened+squashed bottom so each rock
+    reads as resting on the ground, flat per-triangle normals for a
+    stylized low-poly facet look matching the game's existing art
+    direction — 20-80 tris each, base-pivoted like every other procedural
+    mesh in this pipeline) and `unreal/import_rock_meshes.py` imports them
+    headless as `SM_RockBoulder{A,B,C,D}` under `/Game/OpenDrive/Rocks/`
+    (Nanite explicitly disabled — tiny meshes, no benefit — and
+    `M_Rock030` assigned to slot 0, same material the old primitives used).
+    `ODForestManager.h`/`.cpp` rewired: `RockMeshes` now loads the 4 new
+    boulder assets instead of `Cube`/`Sphere`, `RockMeshBaseOffsetCm[2]` →
+    `[4]`, and `BuildTile()`'s batch-index math (`RockBatchBase`,
+    `ScrubBatchIdx`, `NumBatches`) updated for `NumRockVariants = 4`. Hit
+    one Interchange import gotcha along the way: `AssetImportTask` without
+    an explicit `destination_name` names the asset after the source OBJ
+    filename (`rock_boulder_a`) rather than the intended
+    `SM_RockBoulderA`, silently breaking every `LoadObject` path expecting
+    the latter — fixed by setting `t.destination_name` explicitly (now
+    documented in the script itself as the same class of "silently wrong
+    at runtime, no import-time error" pitfall as the
+    `used_with_instanced_static_meshes` material-flag gotcha).
+  - **Defect 2, Breckenridge valley misclassified as desert/scrub (real,
+    fixed) — same stale-region-constant bug class as the `fd7ed1f`
+    green_valley precedent:** `pipeline/classify_biomes.py`'s `pick_biome()`
+    used elevation/latitude thresholds tuned for a different (lower,
+    lower-latitude) region and applied them as *absolute* cutoffs, so a
+    real ~2900-3200 m Summit County alpine valley — which should be dense
+    lodgepole/spruce/aspen forest — fell on the wrong side of three
+    separate thresholds at once: (1) the alpine/canyon branch's elevation
+    floor was low enough that valley-floor elevations already read as bare
+    alpine rock instead of forest; (2) the desert branch had no elevation
+    ceiling at all, so any bare/rock-dominant pixel (exposed granite,
+    scree, ski-run dirt — all common at this elevation) could fall through
+    to `BIOME_DESERT` regardless of how high up it was; (3) the evergreen
+    branch's own latitude/elevation gate excluded exactly this band. Fixed
+    by making the thresholds **region-relative** instead of absolute: added
+    `MONTANE_CUTOFF_M` (2200 m) and `ALPINE_RISE_ABOVE_VALLEY_M` (900 m)
+    constants, changed `pick_biome()`'s signature to take the sampled
+    area's own valley-floor elevation (`area_elev_min_m`, computed once in
+    `main()` from `elev.min()` before subsampling) as a parameter, and
+    reworked all three branches off of it: the alpine floor is now
+    `max(1200 m, area_elev_min_m + 900 m)` instead of a fixed absolute
+    number, the desert branch gained an explicit `elev_m < MONTANE_CUTOFF_M`
+    guard, and the evergreen branch's gate now also passes at
+    `elev_m > MONTANE_CUTOFF_M` regardless of latitude. Re-running
+    `classify_biomes.py` on summit_county went from a Desert/Alpine/Canyon-
+    heavy split to Evergreen dominant (23,993 of 27,465 sample points,
+    ~87%); re-baked the runtime sidecar via `export_biome_bin.py`
+    (`biome_summit_county_test.bin`, 27,465 points). Verified in-game:
+    `ODForestManager` now logs `biome=EvergreenForest` (previously
+    Desert/Alpine/Canyon) across the Breckenridge/Coyne Valley Rd tile
+    grid, with real conifer instance counts once clear of downtown
+    building-exclusion tiles (e.g. tile `(1,-1)`: `conifer=1097`, tile
+    `(120,47)`: `conifer=11` and similar out toward the valley walls) —
+    confirmed this is `AODForestManager::TownForestDampen()`'s existing,
+    correct in-town density falloff near `BuildingCentroids` (not a new
+    bug) accounting for the handful of zero-count tiles immediately at the
+    in-town spawn point itself, not a forest regression. Alpine tundra
+    above treeline (~3500 m, e.g. near mountain passes) still classifies as
+    `Alpine`/bare as intended — the fix only changes the *relative*
+    elevation gate, it doesn't flatten the whole area to one biome.
+    Screenshots: `rocks_r1_breck.png`, `rocks_r1_dam.png`,
+    `rocks_r1_valley.png` (plus non-required diagnostic renders
+    `rocks_r1_alpine_check.png`/`_check2.png`, `rocks_r1_pass_check.png`,
+    `rocks_r1_dam_crop.png`).
+
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.

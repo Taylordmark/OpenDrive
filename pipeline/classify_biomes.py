@@ -167,7 +167,24 @@ def sample_bilinear(chan, bounds, lon, lat):
         + c10 * (1 - fx) * fy + c11 * fx * fy
 
 
-def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg, grade=1.0):
+# Montane-conifer/high-desert elevation cutoff (m), added 2026-09-03 (Summit
+# County/Breckenridge fix - see MONTANE_CUTOFF_M's uses below). Every area
+# baked before summit_county tops out well under this (Green Valley's real
+# sampled range is 317-1567 m, Skagit's foothills lower still, Oahu 0-1220 m)
+# so this is a no-op everywhere except summit_county, where valley floors
+# alone (Frisco/Dillon/Breckenridge, ~2600-2900 m real) sit well above it.
+MONTANE_CUTOFF_M = 2200.0
+
+# How far (m) a point must rise above ITS OWN AREA's real sampled valley
+# floor before "rocky + steep" imagery reads as true alpine/treeline terrain,
+# rather than an ordinary rocky roadcut through a forested valley. Replaces
+# the old flat `elev_m > 1200.0` absolute cutoff (see ALPINE_ELEV_BASELINE_M
+# below).
+ALPINE_RISE_ABOVE_VALLEY_M = 900.0
+
+
+def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
+                grade=1.0, area_elev_min_m=0.0):
     """Elevation/latitude bands tuned for the Skagit/Cascades loop specifically
     (see module docstring) - not a general-purpose elevation->biome model. A
     real per-region model is the ESA WorldCover + climate-raster work (7.3).
@@ -189,10 +206,35 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg, grad
     near-zero road grade. CanyonBadlands is now gated on actual ruggedness;
     flat "rock-colored" ground falls through to the w_bare check below and
     lands in Desert instead, while genuinely steep eroded terrain (high
-    grade) still commits to Canyon/Alpine same as before."""
+    grade) still commits to Canyon/Alpine same as before.
+
+    `area_elev_min_m` (2026-09-03 fix, Breckenridge/Coyne Valley Rd reviewer
+    defect): the calling area's own real minimum sampled road elevation (see
+    main()) - defaults to 0.0 for any caller without it, which reproduces the
+    pre-fix behavior exactly for low-baseline areas. Every absolute-meters
+    threshold in this function (1200 m alpine floor, 45 deg latitude for
+    Evergreen conifer, no floor at all on the Desert branch) was tuned only
+    against Skagit/Green Valley/Oahu, whose real elevation never exceeds
+    ~1600 m - the exact same "stale constant carried over from a low-baseline
+    area" bug class ODTerrainManager.cpp's ElevLowCm/ElevHighCm hit at the
+    C++ layer (fixed fd7ed1f) when ACTIVE_AREA flipped to summit_county
+    (valley floors ~2600-2900 m, origin 3435.3 m). Concretely, before this
+    fix: (1) any rocky roadcut anywhere in a Colorado valley immediately
+    qualified as BIOME_ALPINE (elev_m already > 1200 everywhere in the
+    bbox), instead of needing genuine relief above the valley floor; (2)
+    dense real conifer canopy could never reach BIOME_EVERGREEN at all since
+    Summit County's 39.5N latitude is below the 45.0 Pacific-NW-only gate,
+    landing in sparse Chaparral/Deciduous instead; (3) ordinary dry
+    ground/gravel/dormant grass at 2900 m (nowhere near a real desert
+    biome's actual elevation band) could still commit straight to
+    BIOME_DESERT via w_bare with no elevation check at all. All three
+    combined to read as "sparse tiny trees, bare gravel hillsides" over what
+    should be dense lodgepole/spruce forest."""
     abs_lat = abs(lat_deg)
+    alpine_floor_m = max(1200.0, area_elev_min_m + ALPINE_RISE_ABOVE_VALLEY_M)
     if w_rock > 0.35 and grade > CANYON_GRADE_MIN:
-        if elev_m > 1200.0 or (elev_m > 500.0 and abs_lat > 35.0):
+        if elev_m > alpine_floor_m or (elev_m > 500.0 and abs_lat > 35.0
+                                        and elev_m - area_elev_min_m > 500.0):
             return BIOME_ALPINE
         return BIOME_CANYON
     if elev_m < 5.0 and 0.1 < w_water <= 0.4:
@@ -211,13 +253,25 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg, grad
     # forest painted over what should read as sparse high-desert scrub. A
     # strong bare-ground signal (see classify_rgb's w_bare) now commits to
     # Desert before the forest-vs-grass split gets a chance to eat it.
-    if w_bare > 0.35 and w_forest < 0.6:
+    #
+    # elev_m < MONTANE_CUTOFF_M added 2026-09-03: real SW high-desert scrub
+    # (the biome this branch models) tops out well under 2200 m - bare/dry-
+    # looking ground above that, in a genuinely montane region, is far more
+    # likely dormant alpine meadow grass, dry scree, or a sunlit forest gap
+    # than true desert, and the branches below (forest/grass split, Alpine
+    # gate above) already handle those correctly once this stops eating them.
+    if w_bare > 0.35 and w_forest < 0.6 and elev_m < MONTANE_CUTOFF_M:
         return BIOME_DESERT
     if w_forest >= w_grass:
         if abs_lat < 23.5:
             return BIOME_RAINFOREST
-        if abs_lat > 45.0:
-            return BIOME_EVERGREEN   # Pacific NW default for forest cover
+        # elev_m > MONTANE_CUTOFF_M added 2026-09-03: real conifer forest
+        # isn't exclusive to high latitude - Rocky Mountain montane/subalpine
+        # forest is driven by ELEVATION and was otherwise unreachable at
+        # Summit County's 39.5N (< the old 45.0-only gate), forcing real
+        # lodgepole/spruce canopy into Chaparral/Deciduous instead.
+        if abs_lat > 45.0 or elev_m > MONTANE_CUTOFF_M:
+            return BIOME_EVERGREEN   # Pacific NW default / real montane conifer
         # BIOME_CHAPARRAL/BIOME_DESERT were unreachable here (2026-08-23 fix:
         # every mid-latitude "forest-leaning" pixel fell straight to
         # Deciduous, even w_forest's leftover-bucket definition - 1 minus
@@ -257,6 +311,14 @@ def main():
     # +X=east, +Y=south (road_mesh_common.py), so Y_cm = -north_m * 100.
     east_m = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north_m = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
+    # Real minimum sampled elevation for THIS area's own road network (full
+    # 5 m station spacing, before SAMPLE_STRIDE below) - see pick_biome()'s
+    # area_elev_min_m docstring. Using the actual data instead of another
+    # area's hand-tuned constant is what keeps the Alpine/Evergreen/Desert
+    # bands correct across areas with wildly different elevation baselines
+    # (Skagit near sea level vs. summit_county's 2364-4053 m span) without
+    # per-area special-casing.
+    area_elev_min_m = float(elev.min())
     lon, lat, elev = lon[::SAMPLE_STRIDE], lat[::SAMPLE_STRIDE], elev[::SAMPLE_STRIDE]
     grade = grade[::SAMPLE_STRIDE]
     east_m, north_m = east_m[::SAMPLE_STRIDE], north_m[::SAMPLE_STRIDE]
@@ -278,7 +340,8 @@ def main():
     sb = sample_bilinear(w_bare, bounds, lon, lat)
 
     biomes = [pick_biome(float(sf[i]), float(sg[i]), float(sr[i]), float(sw[i]),
-                          float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]))
+                          float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]),
+                          area_elev_min_m)
               for i in range(len(lon))]
     forest_weight = np.clip(sf + 0.3 * sg, 0, 1)   # density signal, not just the forest channel
 

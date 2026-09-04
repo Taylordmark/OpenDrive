@@ -502,15 +502,18 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<UStaticMesh>> ShrubMeshes;
 
-	// Ground cover meshes (2026-08-26). No rock mesh exists anywhere in
-	// Content/ (only T_DetailRock, a ground-material texture, not geometry) -
-	// generating+importing a new mesh asset headlessly has no established
-	// pipeline in this project (make_tree_meshes.py's .obj output has always
-	// been imported by hand in-editor, not via a script). Rather than add a
-	// new manual-import step, RockMeshes reuses two /Engine/BasicShapes
-	// meshes (Cube, Sphere) with aggressive per-instance nonuniform scale +
-	// random rotation (see BuildTile()) - reads fine as low-poly stylized
-	// rock/boulder clusters at driving speed and needs zero new content.
+	// Ground cover meshes. Originally (2026-08-26) two /Engine/BasicShapes
+	// primitives (Cube, Sphere) with aggressive per-instance nonuniform scale
+	// - cheap, but read exactly as reported: literal sharp-cornered cubes and
+	// perfect spheres littering hillsides, not weathered boulders. Replaced
+	// 2026-09-03 (reviewer defect fix) with 4 real procedural boulder meshes
+	// (pipeline/make_rock_meshes.py: icosphere base + per-vertex noise
+	// displacement + flattened bottom, imported by
+	// unreal/import_rock_meshes.py as SM_RockBoulder{A,B,C,D}) - still
+	// low-poly/stylized (20-80 tris each) to match the game's existing art
+	// direction, just no longer literal engine primitives. RockMeshes.Num()
+	// (4) now drives ScrubBatchIdx's offset in BuildTile() - see that
+	// constant's own comment.
 	// ScrubMesh reuses grass_tuft, an existing tree-set mesh that was never
 	// actually wired up to any scatter pass before this.
 	UPROPERTY()
@@ -548,7 +551,7 @@ private:
 	// Computed once in BeginPlay() from each mesh's own bounding box (cheap,
 	// one-time) and applied per-instance in BuildTile() so a rock/scrub's
 	// GEOMETRY BASE - not its pivot - sits on the traced ground point.
-	float RockMeshBaseOffsetCm[2] = {0.0f, 0.0f};
+	float RockMeshBaseOffsetCm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 	float ScrubMeshBaseOffsetCm = 0.0f;
 	// Throttled visibility into the base-offset correction above (temporary
 	// QA instrumentation, same 5 s cadence convention as the other counters

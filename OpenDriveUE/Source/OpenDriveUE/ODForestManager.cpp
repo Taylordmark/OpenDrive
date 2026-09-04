@@ -135,13 +135,21 @@ void AODForestManager::BeginPlay()
 		ShrubMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
 	}
 
-	// Ground cover (2026-08-26) - see the RockMeshes/ScrubMesh declarations
-	// in ODForestManager.h for why these two engine basic shapes stand in
-	// for a dedicated rock mesh.
-	RockMeshes.Add(LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
-	RockMeshes.Add(LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")));
+	// Ground cover (2026-09-03) - see the RockMeshes declaration in
+	// ODForestManager.h: 4 real procedural boulder meshes
+	// (pipeline/make_rock_meshes.py, imported by
+	// unreal/import_rock_meshes.py), replacing the old 2 engine BasicShapes
+	// primitives (Cube, Sphere).
+	static const TCHAR* RockMeshPaths[] = {
+		TEXT("/Game/OpenDrive/Rocks/SM_RockBoulderA.SM_RockBoulderA"),
+		TEXT("/Game/OpenDrive/Rocks/SM_RockBoulderB.SM_RockBoulderB"),
+		TEXT("/Game/OpenDrive/Rocks/SM_RockBoulderC.SM_RockBoulderC"),
+		TEXT("/Game/OpenDrive/Rocks/SM_RockBoulderD.SM_RockBoulderD"),
+	};
+	for (const TCHAR* Path : RockMeshPaths)
+	{
+		RockMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
+	}
 	ScrubMesh = LoadObject<UStaticMesh>(
 		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"));
 
@@ -1487,13 +1495,15 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		FMath::RoundToInt(TileSqM * BushesPerSqM * Recipe.BushDensityScale);
 
 	// one transform batch per mesh: NumTreeSpecies trees + NumShrubSpecies
-	// shrubs (bush, sagebrush) + 2 rock variants (cube, sphere - see
-	// RockMeshes' declaration for why) + scrub (grass_tuft). Extended
-	// 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock + scrub)
-	// alongside FBiomeRecipe's species-mix extension.
+	// shrubs (bush, sagebrush) + RockMeshes.Num() rock variants (4 procedural
+	// boulder meshes, see RockMeshes' declaration) + scrub (grass_tuft).
+	// Extended 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock
+	// + scrub) alongside FBiomeRecipe's species-mix extension; rock count
+	// bumped 2 -> 4 (2026-09-03, see RockMeshes' header comment).
 	constexpr int32 BushBatchBase = NumTreeSpecies;                 // shrub batches start here
 	constexpr int32 RockBatchBase = BushBatchBase + NumShrubSpecies; // then rock variants
-	constexpr int32 ScrubBatchIdx = RockBatchBase + 2;              // then ground scrub
+	constexpr int32 NumRockVariants = 4;
+	constexpr int32 ScrubBatchIdx = RockBatchBase + NumRockVariants; // then ground scrub
 	constexpr int32 NumBatches = ScrubBatchIdx + 1;
 	TArray<FTransform> Batches[NumBatches];
 
@@ -1631,7 +1641,10 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 			// and floats the rest above the surface - shift the placement Z
 			// so the mesh's own base (not its pivot) lands on Ground instead.
 			FVector PlacementLoc = Ground;
-			const int32 RockVariantIdx = (VariantPick < 0.5f ? 0 : 1);
+			// 4 boulder variants now (2026-09-03, was 2) - see RockMeshes'
+			// header comment.
+			const int32 RockVariantIdx = FMath::Min(
+				FMath::FloorToInt(VariantPick * NumRockVariants), NumRockVariants - 1);
 			const float ScaleZ = bRock ? ScaleBase * JitterZ : ScaleBase;
 			const float BaseOffsetCm = bRock
 				? RockMeshBaseOffsetCm[RockVariantIdx]
