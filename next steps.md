@@ -2893,3 +2893,37 @@ game thread is the most likely mechanism — worth checking there first.
 
 The menu/garage/map-texture work (§ 4.0b, § 4.3, § 7.5) is done and verified
 live.
+
+**Periodic frame-hitch diagnosis (2026-09-03, §7.15 follow-up,
+`docs/perf_after_art_overhaul.md` addendum):** dug into the ~25s-cadence
+≥75ms hitch that doc's measurement pass had flagged but not chased (out of
+scope that pass, hypothesis was "probably GC"). Added `LogGarbage=Verbose`
+and correlated it against the existing `-odtrace`-based frame-timing
+parser on the same `abslog`. **GC hypothesis disproven directly:** full
+collects fire on the vanilla ~61s `gc.TimeBetweenPurgingPendingKillObjects`
+cadence (not ~25s) and cost only ~18-20ms each end to end - a quarter of
+the 75ms hitch threshold - and none of their timestamps land near an
+observed hitch. Also ruled out this project's own tile-streaming managers:
+the original hitches occur even on a fully static scene where all 8
+managers (`ODTerrainManager`/`ODBuildingManager`/`ODWallManager`/
+`ODBarrierManager`/`ODRoadManager`/`ODForestManager`/`ODWaterManager`/
+`ODParkingManager`) report zero pending work, so there's no load/unload
+churn to blame. Found one real, if narrow, cause along the way: the QA
+`-odshot` screenshot flag itself produces a hitch that lines up exactly
+with its own capture log line every time it's present - an artifact of
+the tooling, not a real player-facing stall, and it should be excluded
+from future hitch tallies. The remainder of the originally-measured hitch
+turned out **not reproducible**: two fresh same-day control runs (before
+and after the config change below, no `-odshot`) both came back
+completely hitch-free (0 hitches ≥75ms, median 14.9-15.3ms/~65-66 fps),
+and the original hitch timestamps weren't even a clean 25s multiple
+run-to-run once checked precisely. Most likely explanation: transient
+OS/driver/hardware jitter on the dev laptop at original capture time, not
+an engine or game-code mechanism. Added
+`gc.AllowIncrementalReachability=1` / `gc.IncrementalReachabilityTimeLimit=
+0.002` / `gc.NumRetriesBeforeForcingGC=10` / `s.ForceGCAfterLevelStreamedOut=0`
+to `DefaultEngine.ini` as free, zero-downside GC amortization hardening for
+any future spike, explicitly documented as *not* a fix for this specific
+(non-reproducing, non-GC) hitch. No C++ changes - no evidenced churn
+pattern existed to pool or fix. Doc's original verdict stands: fine, no
+blocker for Taylor's live drive-test.

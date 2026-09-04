@@ -121,3 +121,92 @@ budget, not evidence of a current problem:
    road, buildings only populate the town scenes at a fixed density), but
    worth watching once a scenario has many buildings AND many cars on
    screen simultaneously — this pass didn't stress that combination.
+
+## Addendum (2026-09-03): the periodic hitch, actually investigated
+
+The body of this doc flagged a "striking pattern" — a near-25s-cadence
+≥75ms hitch, present in every run above and in the pre-overhaul baseline
+too — and guessed GC without digging further, since it was out of scope
+that pass. This follow-up (§7.15, "Diagnose and fix the periodic frame
+hitch") went and checked. Short version: **the GC hypothesis is wrong**,
+and the hitch itself turned out not to be a reproducible engine mechanism
+at all.
+
+**Method:** added `[Core.Log] LogGarbage=Verbose` to `DefaultEngine.ini`
+temporarily and re-ran the same `-odtrace`-based headless methodology
+(Frisco, `-odrev=20`, ~180-195s) so every `LogGarbage: Collecting garbage`
+/ `GC purged N objects` line and every `ODDrivetrain` frame-timing sample
+land in the same `abslog`, directly comparable on the same wall clock.
+
+**GC ruled out:**
+- Full GC collect cycles fire on the vanilla
+  `gc.TimeBetweenPurgingPendingKillObjects=61.1` cadence — observed at
+  wallclock 05:04:45, 05:05:47, 05:06:48, 05:07:50 (~61-62s apart), not
+  ~25s apart.
+- Each collect costs ~18-20ms end to end (`GC Reachability Analysis total
+  time: ... ms`, `GC purged N objects ... in X ms`) — roughly a quarter of
+  the 75ms hitch threshold, nowhere near able to produce an 800ms+ stall by
+  itself.
+- None of the GC event timestamps land anywhere near an observed ≥75ms
+  frame-time hitch in the same log (e.g. the one hitch found in that run,
+  t=90.6s, sits almost exactly between the t=60s and t=121s GC events, not
+  on top of either).
+
+**Tile-streaming managers ruled out too:** the original baseline hitches
+(4 of them, `perf_frisco_static.log`) occur in a fully **static** scene
+where every one of the 8 tile managers (`ODTerrainManager`,
+`ODBuildingManager`, `ODWallManager`, `ODBarrierManager`, `ODRoadManager`,
+`ODForestManager`, `ODWaterManager`, `ODParkingManager`) reports
+`pending=0` and effectively zero new work — there is no tile load/unload
+churn happening for a per-tile-destroy-and-GC pattern to blame. Their own
+5s diagnostic-dump ticks (`ODTerrainManager::Tick`'s `LastDiagTime` timer)
+were checked too: one hitch happened to land on a dump tick, the rest
+didn't, ruling that out as a systematic cause as well.
+
+**Partial measurement artifact found along the way:** re-running with
+`-odshot=90` reproduced a hitch that lines up exactly with the QA
+screenshot's own `LogCore: Tracing Screenshot ... taken` log line every
+time it was present (this run, and `summit_frisco_test6.log`'s t=32.4s
+hitch against its `-odshot=32`). `-odshot`'s synchronous high-res capture +
+readback is expected to cost a frame; it isn't a hitch a real player would
+ever see, and it should be excluded from future hitch tallies (or the flag
+dropped when hitch-hunting specifically).
+
+**The rest of the hitch doesn't reproduce.** Two fresh, otherwise-identical
+control runs today (Frisco `-odrev=20`, no `-odshot`) — one before, one
+after the config change below — both came back **completely hitch-free**:
+0 hitches ≥75ms in either, median frame time 14.9-15.3ms (~65-66 fps),
+matching the rest of this doc's numbers. The originally-recorded ~25s
+pattern, on closer inspection, wasn't even at a clean 25s multiple run to
+run (static: 125.5/144.2/175.1/193.7s, i.e. 18.7/30.9/18.6s gaps; Vail:
+71.3/95.1/188.1/190.3s) and has no corresponding line in any engine log
+category checked (no `LogStreaming`, no shader-compile, no memory
+warnings, no GC, no manager diagnostic). The likeliest explanation is
+transient OS/driver/hardware jitter on the dev laptop at original capture
+time (background process, disk I/O, GPU power-state transition) rather
+than anything in engine or game code — consistent with it not reproducing
+today under the same test conditions.
+
+**Action taken:** added `gc.AllowIncrementalReachability=1` +
+`gc.IncrementalReachabilityTimeLimit=0.002` +
+`gc.NumRetriesBeforeForcingGC=10` + `s.ForceGCAfterLevelStreamedOut=0` to
+`DefaultEngine.ini` (`[/Script/Engine.GarbageCollectionSettings]`) as
+free, standard-practice GC amortization — it costs nothing measurable and
+is UE's own recommended setup for spreading reachability analysis across
+frames instead of one blocking pass — but this is hardening for a
+hypothetical future GC spike, **not** a fix for this specific hitch, since
+GC was directly shown not to be its cause. No C++ changes were made:
+there was no evidenced churn pattern in the streaming managers to pool or
+fix.
+
+| Run | Duration | Avg frame | Median | Hitches ≥75ms | Hitch total |
+|---|---|---|---|---|---|
+| Before (no GC config, no -odshot) | 185.9s | 15.26 ms | 15.29 ms | 0 | 0 ms |
+| After (GC config added, no -odshot) | 173.5s | 15.48 ms | 14.86 ms | 0 | 0 ms |
+| After, with `-odshot=90` (artifact check) | 186.4s | 11.94 ms | 11.67 ms | 2 (both at the odshot capture) | 922 ms |
+
+Median frame time is unregressed (in fact both same-day runs beat the
+original doc's 14.55-15.07ms baseline range, most likely normal
+run-to-run variance/warm-cache effects rather than anything caused by
+this change). **Verdict stands: fine.** No blocker for Taylor's live
+drive-test.
