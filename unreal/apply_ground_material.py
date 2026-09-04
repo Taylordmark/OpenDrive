@@ -411,6 +411,22 @@ forest = sample_layer("forest")
 dirt = sample_layer("dirt")
 scree = sample_layer("scree")
 
+# 2026-09-04 (§7.15 pale-background-hills follow-up): Gravel030's raw albedo
+# measures mean RGB (140,138,138)/255 ~= (0.55,0.54,0.54) - a near-neutral
+# pale grey, confirmed (content_src/textures/ground sampled directly) to be
+# the actual color painting the pale background hills the task set out to
+# fix, not a slope/tint bug: those hills are real background ridges at/near
+# real treeline elevation, so bare_amount/treeline_t are legitimately
+# non-zero there and this IS the correct layer choice - it just reads as an
+# unrealistically flat, washed-out grey next to The Crew 2's warmer alpine
+# talus. A subtle warm/dark multiply (not a texture swap - every other layer
+# already uses this same CC0 set, see manifest.json) keeps it visibly paler
+# than the vegetated/rock layers (still reads as "bare rock", still lighter
+# than Rock030's own mean (79,77,70)/255) while losing the flat neutral-grey
+# cast; ~22-35% per-channel darkening, biased warmer (less blue) so it leans
+# buff/tan (iron-stained talus) rather than cool concrete-grey.
+scree_albedo_tinted = g.mul(scree["albedo"], g.const3(0.78, 0.72, 0.62), a_out="RGB")
+
 grass_tinted = hue_from_tint(grass["albedo"])
 forest_tinted = hue_from_tint(forest["albedo"])
 
@@ -443,13 +459,13 @@ veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), dirt_amount)
 treeline_t = g.clamp01(
     g.div(g.sub(world_z, g.const(TREELINE_LOW_CM)), g.const(TREELINE_HIGH_CM - TREELINE_LOW_CM)))
 bare_amount = g.mul(treeline_t, g.const(ALPINE_BARE_MAX_BLEND))
-veg_albedo = g.lerp(veg_albedo, scree["albedo"], bare_amount, b_out="RGB")
+veg_albedo = g.lerp(veg_albedo, scree_albedo_tinted, bare_amount, b_out="")
 veg_normal = g.lerp(veg_normal, scree["normal"], bare_amount, b_out="RGB")
 veg_rough = g.lerp(veg_rough, rough_scalar(scree["rough"]), bare_amount)
 
 # ---------------------------------------------------------------- steep (slope) layer
 rock = sample_triplanar("rock")
-steep_albedo = g.lerp(rock["albedo"], scree["albedo"], treeline_t, b_out="RGB")
+steep_albedo = g.lerp(rock["albedo"], scree_albedo_tinted, treeline_t, b_out="")
 steep_normal = g.lerp(rock["normal"], scree["normal"], treeline_t, b_out="RGB")
 steep_rough = g.lerp(rock["rough"], rough_scalar(scree["rough"]), treeline_t)
 

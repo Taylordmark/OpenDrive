@@ -93,8 +93,26 @@ static constexpr float ConflictMinGapCm = 100.0f;   // CONFLICT_MIN_GAP_M (1 m)
 // picks). A different AREA_NAME would want these re-tuned again, same as
 // every other area-specific constant in this file (e.g. SEA_LEVEL_Z_CM in
 // unreal/apply_ground_material.py, itself already ORIGIN_HEIGHT_M-derived).
-static constexpr float ElevLowCm = -70000.0f;   // ~2735 m - at/below: full "rich/dark low green" bias
-// 2026-09-04 RETUNE (§7.15 background-slope follow-up): was 40000 (~3835 m),
+// 2026-09-04 RETUNE #2 (§7.15 pale-background-hills follow-up): the first
+// retune (below) fixed where full grey LANDS but left ElevLowCm untouched at
+// -70000 (~2735 m) - essentially valley-floor level for summit_county (Frisco/
+// Dillon/Silverthorne all sit ~2700-2800 m). That meant the ElevT/ElevS
+// smoothstep started climbing from the moment terrain rose above the valley
+// floor at all, long before real treeline: at 3268 m (a measured Silverthorne
+// background-hill sample, well below apply_ground_material.py's own
+// TREELINE_LOW_M=3350) the old band already gave ElevS~=0.33, i.e. already a
+// third of the way toward HighBias's flat neutral grey (0.40,0.40,0.40) -
+// a diagnostic render (flat_w(R)/treeline_t(G) wired straight to base color)
+// confirmed a pale/grey hillside pixel at flat_w~=1 (fully flat, vegetated
+// branch) and treeline_t~=0 (nowhere near the MATERIAL's own treeline gate),
+// proving this vertex-tint elevation bias - not the material's slope/treeline
+// texture layer - was the one painting it grey. Raised to match
+// TREELINE_LOW_M exactly so this cosmetic gradient can't out-run the
+// material's own below-treeline look: full "rich/dark low green" bias now
+// holds everywhere below real treeline, only starting to greigh out right
+// where the material itself starts blending toward scree.
+static constexpr float ElevLowCm = -8530.0f;   // ~3350 m (=TREELINE_LOW_M) - at/below: full "rich/dark low green" bias
+// 2026-09-04 RETUNE #1 (§7.15 background-slope follow-up): was 40000 (~3835 m),
 // which put FULL grey bias well BELOW unreal/apply_ground_material.py's own
 // TREELINE_HIGH_M=3650 - i.e. this vertex-tint elevation gradient was already
 // greying out real below-treeline forest slopes (target look: warm green/

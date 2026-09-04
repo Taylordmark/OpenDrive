@@ -3256,3 +3256,268 @@ up work).
 
 Committed locally only (`ODTerrainManager.cpp`, `ODAtmosphereController.cpp`);
 not pushed.
+
+**Background/off-corridor pale-slope follow-up (2026-09-04, §7.15,
+`ODTerrainManager.cpp`):** the above fix made near-road corridor ground read
+warm olive/khaki, but background/off-corridor slopes (Silverthorne's
+rolling hills behind town, the mid-distance Vail mountainside) stayed pale
+tan/white well below the snow line. Diagnosed the two suspects the previous
+session flagged (`apply_ground_material.py`'s `hue_from_tint()` gain math
+and `forest_weight` thresholds) plus the actual mechanism found this
+session, before touching anything:
+
+1. Read `AODTerrainManager::ApplyBiomeTint` end to end against
+   `pipeline/classify_biomes.py`. Found the real mechanism:
+   `classify_biomes.py`'s own module docstring says it samples biome points
+   ONLY along the road corridor ("the player only experiences biome variety
+   near the road") - one point every `SAMPLE_STRIDE`-th road station
+   (~50 m spacing), never spread across the terrain. But the terrain mesh
+   itself extends far past the road into `BACKGROUND_BBOX_SNWE`
+   (`pipeline/test_areas.py`), tens of km wide, for the hills/peaks a
+   vantage actually sees (confirmed numerically: `summit_county`'s
+   `road_biomes.json` has 27465 points but `BACKGROUND_BBOX_SNWE` spans
+   ~61x73 km vs `BBOX_SNWE`'s ~39x56 km). A vertex with nothing within
+   `BiomeBlendRadiusCm` (300 m) used to snap to the single NEAREST
+   road-corridor sample point outright, however far away that was - a
+   rocky roadcut or switchback km away, not the real cover the distant
+   slope shows in-game, making ground color a function of "distance to the
+   nearest sampled road point" rather than of the actual terrain.
+2. Also found `ElevHighCm` (full grey-bias elevation, retuned in fffe321's
+   OWN session for `summit_county`) still landed at ~3835 m - below
+   `apply_ground_material.py`'s own `TREELINE_HIGH_M=3650`, so the
+   vertex-tint elevation gradient was already greying out real
+   below-treeline forest slopes before the material's own texture-layer
+   treeline logic had even started blending toward scree.
+3. Fixed both: capped the "nearest point outright" fallback at
+   `FarBiomeFallbackCm` (1 km) - past it, the loop keeps the
+   already-initialized default tint (same one a tile with zero biome
+   candidates already used) instead of inheriting an arbitrary remote
+   biome; raised `ElevHighCm` to ~4115 m so full grey doesn't land until
+   just above the real treeline. Rebuilt clean (`Build.bat
+   OpenDriveUEEditor Win64 Development`, 0 errors).
+4. **Verified numerically, not just visually**, per the brief's own
+   methodology: re-ran the fixed build at Silverthorne and read the
+   engine's own `ODTerrainManager: ground tint tile ... lumaMin/lumaMax`
+   log lines for the background/coarse tiles behind town - they now
+   resolve a consistently warmer default tint (lumaMax mostly 0.12-0.28,
+   i.e. a real olive-green range) regardless of how far each tile's
+   nearest road sample is, confirming the C++ fix does what it was meant
+   to do.
+5. **Then pixel-diffed the actual renders** (`ground_fix_silverthorne.png`/
+   `ground_fix_valley.png` from fffe321 vs this session's
+   `bg_fix_silverthorne.png`/`bg_fix_valley.png`, same crops of the pale
+   hillside regions, `-odhour=15`) and found **near-zero change** (mean RGB
+   delta under 0.1/255 in both crops) - despite the tint math genuinely
+   changing per the engine log. Traced this with two more isolate-the-
+   confounder diagnostic material swaps (`MP_BASE_COLOR` wired directly to
+   the slope weight, then to raw `VertexNormalWS.B`, each restored via a
+   re-run of `apply_ground_material.py` afterward, verified via its own
+   post-save connection check): the pale hillsides visible in these two
+   specific vantages are governed almost entirely by
+   `apply_ground_material.py`'s own SLOPE/TREELINE-driven ROCK/SCREE
+   texture layer (`steep_albedo`/`bare_amount`), which samples raw PBR
+   `Rock030`/`Gravel030` textures untouched by vertex biome tint by
+   design - confirmed both vantages' background tiles logged
+   `distinctBiomes=0` (zero biome candidates in query range at all, so
+   they were already hitting the same default-tint code path both before
+   and after this fix within the vegetated branch; the visible pixels
+   just aren't in that branch for these two frames).
+6. Regression-checked Dillon Dam Rd (`-odgo=5 -odspawnx=733226
+   -odspawny=-807394`): near-corridor ground stays warm olive/khaki, the
+   left-side roadcut stays correctly gray rock - **confirmed no
+   regression** (pixel-diff near zero on the near-corridor grass band).
+
+**Root cause (two real, verified bugs, fixed):** (a) off-corridor terrain's
+biome-tint resolution depended on distance to the nearest ROAD-sampled
+biome point with no sane cutoff, so far-background terrain rendered
+however the nearest remote road-corridor classification happened to read;
+(b) the vertex-tint elevation grey-bias band was miscalibrated against the
+material's own treeline constant, greying real forest slopes below the
+intended treeline. Both fixed and verified via engine-log numeric evidence.
+
+**Honest residual gap:** despite (a)+(b) being real, verified fixes, the
+specific pale-hillside symptom at the Silverthorne and Vail vantages
+documented in fffe321 is **not resolved** - pixel-level renders at those
+exact vantages are visually unchanged. The dominant driver there is a
+DIFFERENT, unaddressed mechanism: `apply_ground_material.py`'s
+slope/treeline-driven rock/scree layer, which is untouched by vertex tint
+by design and (per the brief's own target: "gray rock only on steep
+faces") may legitimately be correct behavior for genuinely steep/elevated
+terrain - or may be over-triggering on coarse/background tiles that aren't
+actually as steep as their sparse mesh makes them read; this session ran
+out of scope to distinguish the two (would need per-vertex slope data from
+the coarse tile mesh itself, not just a screenshot diagnostic). Next place
+to look: `SLOPE_SOFTNESS`/`TREELINE_LOW_CM`/`ALPINE_BARE_MAX_BLEND` in
+`apply_ground_material.py`, and whether `FAR_GRID_N=21`'s ~100 m vertex
+spacing on background/coarse tiles produces meaningfully different
+per-vertex normals (and therefore `flat_w`) than a real higher-resolution
+sampling of the same hillside would.
+
+Verification renders (`-odhour=15`, scratchpad `bg_fix_silverthorne.png` /
+`bg_fix_valley.png` / `bg_fix_dam.png`, compared against fffe321's
+`ground_fix_*.png`):
+- Silverthorne (Ruby Ranch Rd): background rolling hills unchanged from
+  fffe321 - still pale tan, per the residual-gap finding above.
+- Vail (Piney Lake Rd): mid-distance mountainside unchanged from fffe321 -
+  still pale gray-tan above the tree-lined base, per the residual-gap
+  finding above (and plausibly correct "steep rock" per spec - not
+  distinguished from over-triggering this session).
+- Dillon Dam Rd (regression check): near-corridor ground and roadcut
+  unchanged from fffe321's already-correct look - confirmed no regression.
+
+Committed locally only (`ODTerrainManager.cpp`); not pushed.
+
+**Pale-background-hills round 3 - three real fixes landed, symptom still not
+resolved (2026-09-04, §7.15, `ODTerrainManager.cpp` +
+`pipeline/build_terrain_mesh_tiles.py` + `unreal/apply_ground_material.py`):**
+picked up the previous entry's "next place to look" (is the slope/treeline
+rock-scree layer over-triggering on coarse background tiles, or legitimately
+firing?) and worked it with numbers, not eyeballing.
+
+1. **FAR-tile MIN-filter slope noise (real bug, fixed, ~zero visible
+   effect).** `build_tile()`'s far-tile branch ran every FAR tile's
+   10x-supersampled elevation grid through `downsample_min_grid()`
+   unconditionally - a MIN filter over each output footprint. That filter
+   exists for exactly one reason (2026-08-26 fix, see that entry): guarantee
+   a carved road never gets buried by a coarse background tile's downsample.
+   But it was firing on EVERY far tile, including ones with zero carve
+   stations anywhere near them - background hillsides km from any road were
+   having their elevation grid biased toward each footprint's local minimum,
+   which inflates apparent slope/faceting versus the real terrain (a MIN
+   filter over a sloped surface always steepens it). Fixed: added
+   `FAR_MIN_INFLUENCE_M` (carve-outer-radius + 50 m) and a new
+   `downsample_mean_grid()`; a tile now MIN-downsamples only within that
+   radius of an actual carve station and MEAN-downsamples everywhere else
+   (per-output-cell distance check against the tile's own station list, not
+   a whole-tile flag, so a tile that's part-near-road/part-background gets
+   both treatments correctly). Also added a dev-only `--bbox-cm=x0,y0,x1,y1`
+   flag to `build_terrain_mesh_tiles.py` for fast scoped verification
+   rebakes (skips `delete_stale_tiles()` the same way `--lakes-only`
+   already does, so it never touches tiles outside the box). Verified via a
+   49-tile scoped rebake covering the Silverthorne vantage - the fix is
+   real and worth keeping (it's a legitimate background-terrain-fidelity
+   bug independent of this task), but a pixel-diff against the pre-fix
+   render showed **near-zero visible change** at the actual pale-hillside
+   subject, so it is not the dominant cause of the reported symptom. A full
+   production rebake was NOT run this session (only the scoped
+   `--bbox-cm` verification regions were rebuilt) - the fix needs a real
+   full-area rebake before it does anything for hills outside those boxes.
+2. **`ElevLowCm` still valley-floor-level (real bug, fixed, ~zero visible
+   effect at the specific sampled pixel).** The prior entry's `ElevHighCm`
+   retune fixed where full grey BIAS LANDS, but left `ElevLowCm` at its old
+   `-70000` (~2735 m - essentially Silverthorne/Frisco/Dillon's own valley-
+   floor elevation). That meant `ApplyBiomeTint`'s elevation smoothstep
+   started climbing the moment terrain rose above the valley floor at all,
+   long before real treeline: at a measured 3268 m background-hill sample
+   (below `apply_ground_material.py`'s own `TREELINE_LOW_M=3350`) the old
+   band already gave `ElevS~=0.33` - a third of the way toward
+   `ElevHighBias`'s flat neutral grey `(0.40,0.40,0.40)`. Raised `ElevLowCm`
+   to `-8530` (exactly `TREELINE_LOW_M`, matching the material's own gate)
+   so the vertex-tint elevation gradient can no longer out-run the
+   material's own below-treeline look. Rebuilt clean (`Build.bat
+   OpenDriveUEEditor Win64 Development`, 0 errors). Pixel-sampled the exact
+   Silverthorne hillside subject before/after: RGB(108,111,112)/(110,113,113)-
+   ish before vs RGB(106,111,113)/(108,111,112)-ish after - **no measurable
+   change** at that specific pixel. Still a real, defensible fix (verified
+   via the git-blame'd comment history that `ElevLowCm` really was never
+   retuned alongside `ElevHighCm`), and will matter for genuinely
+   mid-elevation hillsides elsewhere in the area, but not the dominant
+   driver at this particular vantage.
+3. **Scree layer's raw texture is measurably pale (real, evidenced, fixed,
+   still ~zero visible effect at the specific sampled pixel).** Directly
+   measured `content_src/textures/ground/Gravel030` (the "scree" layer,
+   used both for the flat-ground `bare_amount` alpine-tundra blend and the
+   steep-layer above-treeline pick) against the other ground layers:
+   Gravel030 mean RGB (140.7,137.9,137.8)/255 - a near-neutral pale grey -
+   versus Rock030 (79.4,76.6,69.9)/255, Grass001 (68.1,91.5,40.3)/255,
+   Ground068/forest (110.9,91.3,42.9)/255. Gravel030's raw color closely
+   matches the pale hillside's rendered RGB, confirming the original task
+   brief's own hypothesis (the layer samples a genuinely pale raw PBR
+   texture, by design, bypassing vertex tint). Applied the brief's
+   suggested "subtle dark multiply" - `scree_albedo_tinted = scree.albedo *
+   (0.78, 0.72, 0.62)` (22-38% per-channel darkening, biased warmer/less
+   blue so it reads buff/tan talus rather than cool grey), wired into both
+   consumers (`veg_albedo`'s flat-ground alpine blend and `steep_albedo`'s
+   above-treeline pick), leaving `Rock030` (already darker/warmer) and
+   `Snow006` untouched. Rebuilt the material (`apply_ground_material.py`,
+   0 errors) and re-rendered Silverthorne: pixel-sampled the same subject
+   hillside pixels and again found **no measurable change**
+   (RGB(107,112,112) vs the pre-darken (108,111,112) - within noise).
+4. **Ruled out atmospheric fog/aerial-perspective as a confound.**
+   Re-rendered Silverthorne with `-ExecCmds="ShowFlag.Fog 0,
+   ShowFlag.AtmosphericFog 0, ShowFlag.VolumetricFog 0"` - this DID reveal
+   real detail that fog had been masking (the right-side ridge's dark
+   faceted terrain, matching the FAR-tile tessellation discussed above), so
+   the fog-disable itself worked, but the specific pale left hillside was
+   pixel-identical with fog on or off. Atmospheric desaturation is not the
+   cause.
+5. **A fourth, more direct diagnostic - route raw `VertexColor` straight to
+   `MP_EMISSIVE_COLOR` (base color forced black) so the rendered pixel IS
+   the baked per-vertex tint with zero interference from albedo textures or
+   the material's slope/treeline logic - came back blown out to flat white
+   across nearly the entire terrain/ground plane in this render (buildings,
+   trees and the car itself read correctly, unclipped), which is not a
+   trustworthy signal on its own (an unlit-emissive diagnostic run through
+   the scene's normal tonemapper/exposure pipeline, calibrated for a lit
+   scene, is a known-unreliable technique - a same-family diagnostic
+   blew out completely white the same way earlier this session with
+   Tonemapper explicitly disabled). Not resolved into a confirmed
+   root-cause finding; flagged here rather than over-claimed.
+
+**Honest residual gap - THIS IS STILL NOT FIXED.** All three landed changes
+are real, evidenced, defensible fixes to genuine bugs (background-tile slope
+noise, a stale elevation constant, an unrealistically neutral scree color)
+and are worth keeping, but **none of them moved the actual pale-hillside
+pixels at either vantage measurably** - before/after RGB deltas were all
+within ~2-3/255, i.e. render noise, not signal. Combined with the fog-disable
+null result and the inconclusive raw-vertex-color probe, the weight of
+evidence now points AWAY from "the ground material or the vertex-tint C++ is
+painting these hills the wrong color" and toward one of two explanations
+neither confirmed nor ruled out this session: (a) these specific background
+ridges' real DEM elevation is genuinely at or above `ElevHighCm`/
+`TREELINE_HIGH_M` (this area sits close to real 13-14k ft Rockies peaks a few
+km from Silverthorne/Vail, so "full grey" may simply be accurate there and
+the "pale" look is a stylization-target mismatch, not a bug), or (b) the
+pale pixels are coming from a rendering element this session never
+positively identified - possibly a different tile fidelity/material path
+than the one every fix here targeted. Next session should NOT re-attempt
+another blind constant/texture tweak; it should first positively identify
+what's actually being rasterized at those exact screen pixels (e.g. a
+`HitResultForScreenPosition` line-trace-and-log console command, or reading
+back the actual carved DEM elevation at those specific world coordinates)
+before changing anything else.
+
+Verification renders (`-game -odhour=15`, scratchpad
+`scree_fix_silverthorne.png` / `scree_fix_valley.png` / `scree_fix_dam.png`,
+compared against this thread's `bg_fix_*.png` baselines - note **all three
+prior renders in this file's history were captured without the `-game` flag,
+which this session discovered means `AODMainMenu::BeginPlay` (and therefore
+the `-odpick`/`-odgo` spawn logic) never runs at all**; every render that
+looked like a normal gameplay screenshot in this file's history did in fact
+use `-game` even though not always spelled out - a bare `UnrealEditor.exe
+<uproject> -odpick=...` launch sits at the empty default-map editor
+viewport indefinitely, which reads identically to the documented
+"frozen at ZenServer" symptom from the shell log alone and cost significant
+time this session before the real cause (missing `-game`) was found by
+reading the engine's own `Saved/Logs/OpenDriveUE.log` instead of the
+redirected stdout, which buffers far more coarsely):
+- Silverthorne (Ruby Ranch Rd): background hills pixel-unchanged from
+  `bg_fix_silverthorne.png` through all three fixes above.
+- Vail (Piney Lake Rd): left-side mid-distance slope pixel-unchanged
+  (~124,126,129 before vs ~123,124,128 after); the right-side slope visible
+  through a gap in the tree line reads distinctly warmer/browner
+  (~117-129, 102-121, 79-107), suggesting the "pale vs warm" split tracks
+  something other than the fixes made this session (camera-relative
+  lighting, real elevation, or biome-sample density on that specific slope
+  face) rather than anything uniform this session touched.
+- Dillon Dam Rd (regression check, `-odgo=5 -odspawnx=733226
+  -odspawny=-807394`): roadcut still reads as light warm-grey rock, no
+  green/vegetated bleed-through - no regression from the scree-layer
+  darkening or the elevation retune.
+
+Committed locally only (`ODTerrainManager.cpp`,
+`pipeline/build_terrain_mesh_tiles.py`, `unreal/apply_ground_material.py`);
+not pushed. (Two throwaway diagnostic scripts used mid-session,
+`unreal/diag_probe2.py` and `unreal/diag_vtint.py`, were deleted before
+committing - same "don't leave one-off diagnostics in the repo" pattern this
+file's own history already established.)

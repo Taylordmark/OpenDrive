@@ -258,6 +258,37 @@ TERRAIN_CARVE_CUT_OUTER_M = 75.0
 # TERRAIN_CARVE_CUT_INNER_M's own comment already used for near tiles.
 FAR_SUPERSAMPLE = 10
 
+# Background-hillside facet-noise bug (2026-09-04, §7.15 follow-up to the
+# FAR-tile-burying fix above): downsample_min_grid's per-footprint MIN was
+# built ONLY to guarantee the coarse surface never buries a carved road
+# (see FAR-tile-burying bug comment) - but it was applied unconditionally to
+# EVERY far-tile vertex, including the vast majority that sit nowhere near
+# any road station at all (real background/off-corridor hillsides, which is
+# most of a FAR tile's area even on tiles a road does cross). A per-footprint
+# MIN over real, un-carved DEM relief is not "coarse/averaged terrain" - it's
+# a systematic downward bias that differs independently between neighboring
+# 100 m output vertices (each footprint's own local minimum, uncorrelated
+# with its neighbor's), which manually verified (scratchpad
+# diagnose_far_slope.py + in-game flat_w/normal.Z base-color diagnostics,
+# 2026-09-04) inflates apparent per-vertex slope well past the DEM's real
+# gradient and produces visibly faceted, low-poly-looking dark patches on
+# background ridgelines that read as much steeper than the actual terrain -
+# exactly the "coarse tessellation over-triggers the rock/scree layer"
+# mechanism the previous session's residual-gap note flagged but didn't
+# confirm. Fix: only take the safety-guaranteeing MIN within
+# FAR_MIN_INFLUENCE_M of the nearest station that actually carved this tile
+# (TERRAIN_CARVE_OUTER_M's own taper already means carve_grid_m has zero
+# effect beyond that radius, so nothing beyond it needs the MIN's
+# never-poke-through guarantee); every vertex nowhere near a carved road -
+# which includes 100% of tiles with no nearby road at all - gets a plain
+# MEAN downsample instead, which preserves the true DEM macro-gradient
+# without inventing per-vertex noise. FAR_SUPERSAMPLE's own fine spacing
+# (2000/((21-1)*10) = 10 m) sets the MIN footprint half-width (5 fine
+# cells = 50 m); padding the cutoff by that much keeps the guarantee intact
+# for any output vertex whose footprint could still reach into carved
+# ground.
+FAR_MIN_INFLUENCE_M = TERRAIN_CARVE_OUTER_M + 50.0
+
 # Elevation-conflict detection (station pairs close in XY, too far apart in
 # Z to be the same piece of ground - e.g. a switchback doubling back on
 # itself, or two different chains crossing) used to be reimplemented here
@@ -792,6 +823,28 @@ def downsample_min_grid(fine, n, factor):
     return out
 
 
+def downsample_mean_grid(fine, n, factor):
+    """Same footprint geometry as downsample_min_grid (see FAR_MIN_INFLUENCE_M's
+    comment for why this exists alongside it) but averages instead of taking
+    the minimum - preserves the true DEM macro-gradient across neighboring
+    output vertices instead of independently biasing each one toward its own
+    footprint's local low point."""
+    sample_n = fine.shape[0]
+    half = factor // 2
+    bounds = []
+    for i in range(n):
+        c = i * factor
+        lo = max(0, c - half)
+        hi = min(sample_n, c + half + 1)
+        bounds.append((lo, hi))
+    out = np.empty((n, n), dtype=fine.dtype)
+    for oi, (ylo, yhi) in enumerate(bounds):
+        row_block = fine[ylo:yhi, :]
+        for oj, (xlo, xhi) in enumerate(bounds):
+            out[oi, oj] = row_block[:, xlo:xhi].mean()
+    return out
+
+
 _MARTINI_CACHE = {}
 
 
@@ -939,7 +992,25 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
         gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
     else:
         gx_cm, gy_cm = np.meshgrid(np.linspace(x0_cm, x1_cm, n), np.linspace(y0_cm, y1_cm, n))
-        elev = downsample_min_grid(elev, n, FAR_SUPERSAMPLE)
+        # See FAR_MIN_INFLUENCE_M's comment: MIN only where a station's carve
+        # could actually still reach (guarantees the road-burying fix stays
+        # intact), MEAN everywhere else on this tile (avoids inventing
+        # per-vertex slope noise on real background hillside area, which is
+        # most of a far tile's footprint even on ones a road crosses at all).
+        if keep.any():
+            min_grid = downsample_min_grid(elev, n, FAR_SUPERSAMPLE)
+            mean_grid = downsample_mean_grid(elev, n, FAR_SUPERSAMPLE)
+            out_east_m = gx_cm / 100.0
+            out_north_m = -gy_cm / 100.0
+            st_east_m = st_x_cm[keep] / 100.0
+            st_north_m = -st_y_cm[keep] / 100.0
+            dist_m = np.full(out_east_m.shape, np.inf, dtype=np.float64)
+            for sx, sy in zip(st_east_m, st_north_m):
+                dist_m = np.minimum(dist_m, np.hypot(out_east_m - sx, out_north_m - sy))
+            near_carve = dist_m <= FAR_MIN_INFLUENCE_M
+            elev = np.where(near_carve, min_grid, mean_grid)
+        else:
+            elev = downsample_mean_grid(elev, n, FAR_SUPERSAMPLE)
 
     z_cm = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) * 100.0
 
@@ -1080,12 +1151,31 @@ def main():
     # skipped in this mode - it would otherwise treat every un-rebuilt tile
     # as stale and delete it).
     lakes_only = "--lakes-only" in sys.argv
+    # Dev-only scoping for fast iteration on a localized fix (2026-09-04,
+    # FAR_MIN_INFLUENCE_M's own fix) - verify a handful of tiles around one
+    # or more vantages in seconds instead of a ~55 min full-area rebake.
+    # Never used by the default/production path (no flag = full area, same
+    # as always). --bbox-cm=x0,y0,x1,y1 in world cm.
+    bbox_cm = None
+    for arg in sys.argv:
+        if arg.startswith("--bbox-cm="):
+            bbox_cm = tuple(float(v) for v in arg.split("=", 1)[1].split(","))
 
     lat0, lon0, east, north, elev, exclude, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
     station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude)
 
     tiles = classify_tiles(station_data)
+
+    if bbox_cm is not None:
+        bx0, by0, bx1, by1 = bbox_cm
+        tile_cm = TERRAIN_TILE_SIZE_CM
+        tiles = {
+            (tx, ty): is_near for (tx, ty), is_near in tiles.items()
+            if not (tx * tile_cm > bx1 or (tx + 1) * tile_cm < bx0
+                     or ty * tile_cm > by1 or (ty + 1) * tile_cm < by0)
+        }
+        print(f"--bbox-cm={bbox_cm}: {len(tiles)} tile(s) in scope")
 
     if lakes_only:
         lakes = _get_lake_beds()
@@ -1145,9 +1235,9 @@ def main():
         if (i + 1) % 10 == 0 or i + 1 == len(tiles):
             print(f"  {i + 1}/{len(tiles)} tile(s) built")
 
-    if lakes_only:
-        print(f"--lakes-only: skipping delete_stale_tiles (only a subset of tiles was rebuilt, "
-              f"the rest are intentionally left as-is)")
+    if lakes_only or bbox_cm is not None:
+        print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "
+              f"rebuilt, the rest are intentionally left as-is)")
     else:
         n_stale = delete_stale_tiles(OUT_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin", written_paths)
         print(f"deleted {n_stale} stale terrain tile(s) from a previous run")
