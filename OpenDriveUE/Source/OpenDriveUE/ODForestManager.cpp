@@ -8,6 +8,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "LandscapeProxy.h"
 #include "Materials/MaterialInterface.h"
+#include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -193,6 +194,7 @@ void AODForestManager::BeginPlay()
 	bUseCenterlineExclusion = LoadCenterline();
 	bUseBuildingExclusion = LoadBuildingCentroids();
 	bUseStationExclusion = LoadRoadStations();
+	bUseWaterExclusion = LoadWaterLakes();
 
 	// point-classified biome data (open-world/streamed-terrain, no Landscape needed)
 	// tried first; empty BiomeFilePrefix (Tail of the Dragon's actor
@@ -499,6 +501,245 @@ bool AODForestManager::LoadRoadStations()
 		     "road-exclusion %.1f m"),
 		NumStations, *BinPath, *GenId, RoadStationExclusionCm / 100.0);
 	return true;
+}
+
+bool AODForestManager::LoadWaterLakes()
+{
+	if (WaterTilePrefix.IsEmpty())
+	{
+		return false;   // no baked water for this area/actor instance - unaffected
+	}
+	// Same ODL1 tile sidecars AODWaterManager streams
+	// (Content/OpenDrive/Masks/<WaterTilePrefix>_tile_<tx>_<ty>.bin,
+	// pipeline/build_water_tiles.py) - read back ALL of them up front here
+	// (this manager has no tile-streaming machinery of its own for water,
+	// and there are only ever a handful of lakes on a map) rather than
+	// gating behind SpawnRadius/player position the way the point-cloud
+	// sidecars above are - see WaterTilePrefix's header comment.
+	const FString Dir = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks");
+	TArray<FString> AllBin;
+	IFileManager::Get().FindFiles(AllBin, *Dir, TEXT(".bin"));
+	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
+
+	int32 TileFileCount = 0;
+	for (const FString& FileName : AllBin)
+	{
+		if (!FileName.StartsWith(TileMatch))
+		{
+			continue;
+		}
+		const FString Path = Dir / FileName;
+		TArray<uint8> Bin;
+		if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
+			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'L' || Bin[3] != '1')
+		{
+			continue;
+		}
+		++TileFileCount;
+
+		const uint8* Cur = Bin.GetData() + 4 + GenerationIdBytes;   // skip magic + gen id (not needed here)
+		const uint8* End = Bin.GetData() + Bin.Num();
+		auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+		if (Remaining() < 4)
+		{
+			continue;
+		}
+		const uint32 LakeCount = ReadU32LE(Cur); Cur += 4;
+
+		for (uint32 l = 0; l < LakeCount; ++l)
+		{
+			if (Remaining() < 8)
+			{
+				break;
+			}
+			const uint32 VCount = ReadU32LE(Cur); Cur += 4;
+			const uint32 TCount = ReadU32LE(Cur); Cur += 4;
+			const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)TCount * 12;
+			if (Remaining() < NeedBytes)
+			{
+				break;
+			}
+			const uint8* VertsBase = Cur;
+			const uint8* TrisBase = Cur + (int64)VCount * 12 + (int64)VCount * 8;
+			Cur += NeedBytes;
+
+			if (VCount == 0 || TCount == 0)
+			{
+				continue;
+			}
+
+			// Boundary-ring extraction - mirrors
+			// build_terrain_mesh_tiles.py's _extract_boundary_rings(): any
+			// edge shared by exactly one triangle is a mesh boundary edge,
+			// chained via shared vertex ids into closed ring(s). Works
+			// regardless of ear-clip/fan-fallback triangulation and a
+			// multipolygon-relation lake's several disjoint outer loops
+			// (e.g. Dillon Reservoir's 4 outer segments).
+			auto EdgeKey = [](uint32 A, uint32 B) -> uint64
+			{
+				const uint32 Lo = FMath::Min(A, B), Hi = FMath::Max(A, B);
+				return ((uint64)Lo << 32) | (uint64)Hi;
+			};
+			TMap<uint64, int32> EdgeCount;
+			TArray<TPair<uint32, uint32>> TriEdges;
+			TriEdges.Reserve((int32)TCount * 3);
+			for (uint32 t = 0; t < TCount; ++t)
+			{
+				const uint32 A = ReadU32LE(TrisBase + t * 12 + 0);
+				const uint32 B = ReadU32LE(TrisBase + t * 12 + 4);
+				const uint32 C = ReadU32LE(TrisBase + t * 12 + 8);
+				const TPair<uint32, uint32> E[3] = {
+					TPair<uint32, uint32>(A, B), TPair<uint32, uint32>(B, C), TPair<uint32, uint32>(C, A) };
+				for (const TPair<uint32, uint32>& E1 : E)
+				{
+					TriEdges.Add(E1);
+					EdgeCount.FindOrAdd(EdgeKey(E1.Key, E1.Value))++;
+				}
+			}
+
+			TMap<uint32, TArray<uint32>> Adj;
+			TArray<TPair<uint32, uint32>> BoundaryEdges;
+			for (const TPair<uint32, uint32>& E1 : TriEdges)
+			{
+				if (EdgeCount[EdgeKey(E1.Key, E1.Value)] == 1)
+				{
+					BoundaryEdges.Add(E1);
+					Adj.FindOrAdd(E1.Key).Add(E1.Value);
+					Adj.FindOrAdd(E1.Value).Add(E1.Key);
+				}
+			}
+
+			auto DirKey = [](uint32 U, uint32 V) -> uint64
+			{
+				return ((uint64)U << 32) | (uint64)V;
+			};
+			TSet<uint64> VisitedDirected;
+			for (const TPair<uint32, uint32>& StartEdge : BoundaryEdges)
+			{
+				if (VisitedDirected.Contains(DirKey(StartEdge.Key, StartEdge.Value)))
+				{
+					continue;
+				}
+				TArray<uint32> RingIdx;
+				RingIdx.Add(StartEdge.Key);
+				uint32 Prev = StartEdge.Key, CurV = StartEdge.Value;
+				VisitedDirected.Add(DirKey(StartEdge.Key, StartEdge.Value));
+				VisitedDirected.Add(DirKey(StartEdge.Value, StartEdge.Key));
+				while (CurV != RingIdx[0])
+				{
+					RingIdx.Add(CurV);
+					const TArray<uint32>* Neighbors = Adj.Find(CurV);
+					uint32 Next = 0;
+					bool bFound = false;
+					if (Neighbors)
+					{
+						for (uint32 N : *Neighbors)
+						{
+							if (N != Prev && !VisitedDirected.Contains(DirKey(CurV, N)))
+							{
+								Next = N;
+								bFound = true;
+								break;
+							}
+						}
+					}
+					if (!bFound)
+					{
+						break;
+					}
+					VisitedDirected.Add(DirKey(CurV, Next));
+					VisitedDirected.Add(DirKey(Next, CurV));
+					Prev = CurV;
+					CurV = Next;
+				}
+				if (CurV == RingIdx[0] && RingIdx.Num() >= 3)
+				{
+					FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
+					LR.Ring.Reserve(RingIdx.Num());
+					LR.MinX = LR.MinY = TNumericLimits<double>::Max();
+					LR.MaxX = LR.MaxY = TNumericLimits<double>::Lowest();
+					for (uint32 Idx : RingIdx)
+					{
+						const float X = ReadF32LE(VertsBase + (int64)Idx * 12 + 0);
+						const float Y = ReadF32LE(VertsBase + (int64)Idx * 12 + 4);
+						LR.Ring.Add(FVector2D(X, Y));
+						LR.MinX = FMath::Min(LR.MinX, (double)X);
+						LR.MaxX = FMath::Max(LR.MaxX, (double)X);
+						LR.MinY = FMath::Min(LR.MinY, (double)Y);
+						LR.MaxY = FMath::Max(LR.MaxY, (double)Y);
+					}
+				}
+			}
+		}
+	}
+
+	if (LakeRings.Num() == 0)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("ODForestManager: no baked lake tiles found for WaterTilePrefix='%s' "
+			     "(%d tile file(s) scanned) - no water exclusion"),
+			*WaterTilePrefix, TileFileCount);
+		return false;
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("ODForestManager: loaded %d lake boundary ring(s) from %d water tile file(s) "
+		     "(WaterTilePrefix='%s') - trees/bushes/rocks/scrub excluded from open water"),
+		LakeRings.Num(), TileFileCount, *WaterTilePrefix);
+	return true;
+}
+
+// Matches pipeline/build_terrain_mesh_tiles.py's WATER_SHORE_BLEND_M (12 m,
+// the exterior band the terrain bake blends smoothly DOWN toward the lake's
+// shore height) plus a few meters of safety margin. Added 2026-09-03
+// (reviewer defect, second pass at the Swan Mountain Rd cove): a strict
+// inside-the-ring test alone left trees/bushes standing just OUTSIDE the
+// baked lake polygon but still inside that shore-blend band, where the
+// ground sits only centimeters above the water plane - at a low, near-water
+// camera angle that reads as "standing in open water" even though the
+// terrain there is technically (barely) above the waterline. Excluding this
+// same band keeps scatter off the shallow shelf entirely, not just off the
+// strictly-flooded interior.
+static constexpr double LakeShoreExclusionMarginCm = 1500.0;
+
+static double DistPointToSegment2D(double Px, double Py, double Ax, double Ay, double Bx, double By)
+{
+	const double DX = Bx - Ax, DY = By - Ay;
+	const double LenSq = DX * DX + DY * DY;
+	double T = LenSq > 0.0 ? ((Px - Ax) * DX + (Py - Ay) * DY) / LenSq : 0.0;
+	T = FMath::Clamp(T, 0.0, 1.0);
+	const double CX = Ax + T * DX, CY = Ay + T * DY;
+	return FMath::Sqrt((Px - CX) * (Px - CX) + (Py - CY) * (Py - CY));
+}
+
+bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
+{
+	for (const FLakeRing& LR : LakeRings)
+	{
+		if (WorldX < LR.MinX - LakeShoreExclusionMarginCm || WorldX > LR.MaxX + LakeShoreExclusionMarginCm ||
+			WorldY < LR.MinY - LakeShoreExclusionMarginCm || WorldY > LR.MaxY + LakeShoreExclusionMarginCm)
+		{
+			continue;
+		}
+		bool bInside = false;
+		const int32 N = LR.Ring.Num();
+		double MinDist = TNumericLimits<double>::Max();
+		for (int32 i = 0, j = N - 1; i < N; j = i++)
+		{
+			const FVector2D& Pi = LR.Ring[i];
+			const FVector2D& Pj = LR.Ring[j];
+			if (((Pi.Y > WorldY) != (Pj.Y > WorldY)) &&
+				(WorldX < (Pj.X - Pi.X) * (WorldY - Pi.Y) / (Pj.Y - Pi.Y) + Pi.X))
+			{
+				bInside = !bInside;
+			}
+			MinDist = FMath::Min(MinDist, DistPointToSegment2D(WorldX, WorldY, Pi.X, Pi.Y, Pj.X, Pj.Y));
+		}
+		if (bInside || MinDist <= LakeShoreExclusionMarginCm)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const
@@ -864,6 +1105,16 @@ bool AODForestManager::GroundAt(double WorldX, double WorldY,
 	if (bOutDeferred)
 	{
 		*bOutDeferred = false;
+	}
+	// Water/lake exclusion (2026-09-03) - checked first and unconditionally
+	// (both the elevation-grid and raycast branches below), same convention
+	// as the road-station check just under it: nothing (tree, bush, rock,
+	// scrub) should ever plant inside a baked lake's boundary ring, whether
+	// or not this area has an elevation grid baked yet. See
+	// WaterTilePrefix's header comment.
+	if (bUseWaterExclusion && IsInsideLake(WorldX, WorldY))
+	{
+		return false;
 	}
 	// Open-world/streamed-terrain path (2026-07-20): fully data-driven, no physics
 	// query at all. GroundAt() used to trust a raycast against whatever

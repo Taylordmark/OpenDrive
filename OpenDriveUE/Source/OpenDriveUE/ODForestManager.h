@@ -391,6 +391,22 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float TownDampenMinFactor = 0.08f;
 
+	/** Content/OpenDrive/Masks/<prefix>_tile_<tx>_<ty>.bin - the SAME baked
+	 *  lake sidecar tiles AODWaterManager streams (ODL1 format,
+	 *  pipeline/build_water_tiles.py) - reused read-only here purely for
+	 *  their polygon geometry, no water rendering. Added 2026-09-03
+	 *  (reviewer defect: a whole stand of trees/bushes found standing in
+	 *  open water at Dillon Reservoir) - this manager's ForestWeightAt()
+	 *  gate is an imagery-classified canopy signal (classify_biomes.py) with
+	 *  no concept of a lake baked in afterward, so a reservoir added later
+	 *  than the classifier's training imagery scatters straight through it
+	 *  exactly like BuildingCentroidFilePrefix's town gap did before that
+	 *  exclusion existed. Empty (default) means "no lake data, no
+	 *  exclusion" - unaffected areas/actor instances with no baked water are
+	 *  unaffected. See LoadWaterLakes()/IsInsideLake(). */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	FString WaterTilePrefix;
+
 	// --- trunk collision (moved from the retired ODForestCollisionManager) ---
 	UPROPERTY(EditAnywhere, Category = "Collision")
 	int32 PoolSize = 48;
@@ -418,6 +434,8 @@ private:
 	bool LoadCenterline();
 	bool LoadBuildingCentroids();
 	bool LoadRoadStations();
+	bool LoadWaterLakes();
+	bool IsInsideLake(double WorldX, double WorldY) const;
 	float ForestWeightAt(double WorldX, double WorldY) const;
 	void BlendAt(double WorldX, double WorldY, FBiomeRecipe& OutRecipe,
 	             float& OutForestWeight, EODBiome& OutNearestBiome) const;
@@ -592,6 +610,24 @@ private:
 	TMap<FIntPoint, TArray<int32>> BuildingBuckets;
 	bool bUseBuildingExclusion = false;
 	static constexpr float BuildingCellCm = 3000.0f;   // 30 m, similar reasoning to CenterlineCellCm
+
+	// Baked lake polygons (2026-09-03) - see WaterTilePrefix's header comment.
+	// One entry per lake OUTER boundary ring, recovered from the water bake's
+	// triangle soup the same way build_terrain_mesh_tiles.py's
+	// _extract_boundary_rings() does (any edge shared by exactly one
+	// triangle is a boundary edge, chained into a closed ring) - works
+	// regardless of ear-clip/fan-fallback triangulation and naturally
+	// ignores interior island vertices. Small array (a handful of lakes per
+	// map), checked with a cheap bbox test before the exact point-in-polygon
+	// ray-cast, so no spatial hash needed unlike the point-cloud sidecars
+	// above.
+	struct FLakeRing
+	{
+		TArray<FVector2D> Ring;   // world cm, closed (last point != first, IsInsideLake wraps)
+		double MinX = 0.0, MaxX = 0.0, MinY = 0.0, MaxY = 0.0;
+	};
+	TArray<FLakeRing> LakeRings;
+	bool bUseWaterExclusion = false;
 
 	// Road-station exclusion (2026-08-26) - see RoadStationFilePrefix's
 	// comment for why this exists alongside RoadCenterline/CenterlineBuckets

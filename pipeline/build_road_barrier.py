@@ -52,6 +52,26 @@ import numpy as np
 
 from road_mesh_common import road_ue_z_m
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+# Lake exclusion (2026-09-03, reviewer defect: a barrier/scenery wall run - and
+# its dressed tree/bush points - could land squarely in open water anywhere a
+# road's BARRIER_OFFSET_M lateral offset happens to cross a lake polygon (seen
+# at Dillon Reservoir along Swan Mountain Rd). Reuses
+# build_terrain_mesh_tiles.py's own lake-bed reader/point-in-polygon test
+# (the water bake's OWN baked output, same "don't re-derive" reasoning that
+# module's lake-bed-depression comment already documents) rather than
+# re-fetching OSM/DEM here - build_water_tiles.py must have already run for
+# this to have any effect; load_lake_beds() returns [] (no exclusion, same as
+# today) if it hasn't.
+from build_terrain_mesh_tiles import load_lake_beds, _point_in_polygon, _dist_to_ring, WATER_SHORE_BLEND_M
+
+# Lake shore-blend margin (2026-09-03, second pass, same reviewer defect):
+# matches AODForestManager::LakeShoreExclusionMarginCm and the reasoning in
+# its comment - a strict point-in-polygon test alone left wall runs/scenery
+# points standing just outside the lake ring but inside the terrain bake's
+# own WATER_SHORE_BLEND_M exterior blend band, where the ground is only
+# centimeters above the water plane and reads as "in the lake" from a low
+# shore-level camera. A few meters over WATER_SHORE_BLEND_M for safety.
+LAKE_SHORE_EXCLUSION_MARGIN_M = WATER_SHORE_BLEND_M + 3.0
 
 BARRIER_SPACING_M = 2.5      # tree/bush visual placement spacing
 BARRIER_OFFSET_M = 13.0      # just outside PavementExclusionCm (11.5 m)
@@ -106,10 +126,14 @@ def main():
     populated_tiles = load_settlement_tiles()
     if populated_tiles:
         print(f"{len(populated_tiles)} populated tile(s) will be left open (no barrier)")
+    lakes = load_lake_beds()
+    if lakes:
+        print(f"{len(lakes)} lake bed(s) loaded - barrier wall/scenery points over "
+              f"open water will be skipped")
 
     points = []
     wall_runs = []
-    n_skipped_bridge = n_skipped_town = 0
+    n_skipped_bridge = n_skipped_town = n_skipped_lake = 0
     for seg in data["segments"]:
         east = np.array(seg["east_m"])
         north = np.array(seg["north_m"])
@@ -150,7 +174,24 @@ def main():
             tile_ty = (oy // TERRAIN_TILE_SIZE_CM).astype(int)
             in_town = np.array([(tx, ty) in populated_tiles
                                  for tx, ty in zip(tile_tx, tile_ty)])
-            open_mask = bridge_f | in_town
+            # Lake exclusion (2026-09-03): same treatment as bridge/town -
+            # open water gets no wall run and no dressed tree/bush point.
+            # Checked against every baked lake's bbox first (cheap) before
+            # paying for the exact ray-cast polygon test.
+            in_lake = np.zeros(n, dtype=bool)
+            margin_cm = LAKE_SHORE_EXCLUSION_MARGIN_M * 100.0
+            for lake in lakes:
+                bx0, bx1, by0, by1 = lake["bbox"]
+                bb = ((ox >= bx0 - margin_cm) & (ox <= bx1 + margin_cm) &
+                      (oy >= by0 - margin_cm) & (oy <= by1 + margin_cm))
+                if not bb.any():
+                    continue
+                idx = np.where(bb)[0]
+                inside = _point_in_polygon(ox[idx], oy[idx], lake["ring_x"], lake["ring_y"])
+                dist_cm = _dist_to_ring(ox[idx], oy[idx], lake["ring_x"], lake["ring_y"])
+                in_lake[idx] |= inside | (dist_cm <= margin_cm)
+
+            open_mask = bridge_f | in_town | in_lake
             keep_mask = ~open_mask
 
             for run_start, run_end in contiguous_runs(keep_mask):
@@ -163,6 +204,8 @@ def main():
                 if open_mask[i]:
                     if bridge_f[i]:
                         n_skipped_bridge += 1
+                    elif in_lake[i]:
+                        n_skipped_lake += 1
                     else:
                         n_skipped_town += 1
                     continue
@@ -181,7 +224,8 @@ def main():
     print(f"{len(points)} tree/bush point(s), {len(wall_runs)} wall run(s) "
           f"({total_stations} station(s)) "
           f"({n_skipped_bridge} station-sides skipped near bridges/tunnels, "
-          f"{n_skipped_town} skipped inside populated tiles) -> {OUT_PATH}")
+          f"{n_skipped_town} skipped inside populated tiles, "
+          f"{n_skipped_lake} skipped over open water) -> {OUT_PATH}")
 
 
 if __name__ == "__main__":

@@ -59,7 +59,12 @@ TEX_PATH = "/Game/OpenDrive/Textures/Water/T_WaterRipple_N"
 # mountain reservoir (glacial-fed, some algae/sediment) reads closer to
 # blue-green than open-ocean blue; stylized enough to read as "obviously
 # water" at a glance but no longer the flat placeholder desaturated blue.
-WATER_COLOR = (0.015, 0.07, 0.075)
+# 2026-09-03 tuning round 3 (reviewer defect: "flat, oversaturated
+# swimming-pool cyan... reads as painted plastic, not open water" - target
+# The Crew 2's deep, slightly desaturated blue-green): darkened and pulled
+# the green channel down relative to blue so the hue reads as a genuine deep
+# reservoir rather than a bright pool tile.
+WATER_COLOR = (0.010, 0.042, 0.055)
 
 # Grazing-angle color stand-in for a sky reflection - this project has no
 # reflection captures/SSR guarantee wired up for this pass, so a fixed
@@ -83,16 +88,69 @@ WATER_COLOR = (0.015, 0.07, 0.075)
 # clamped below 1.0, so even at the shallowest visible angle the deep-water
 # color always keeps a real minority share of the blend instead of the sky
 # tint ever going 100%.
-SKY_TINT_COLOR = (0.05, 0.22, 0.42)
-BASE_COLOR_FRESNEL_CAP = 0.72   # clamp ceiling for the base-color fresnel blend (specular still uses raw fresnel)
+# 2026-09-03 tuning round 3: round 2's sky tint (0.05, 0.22, 0.42) was picked
+# to fix a washed-out-white/no-water look, but overshot the other direction -
+# combined with a 0.72 fresnel cap that lets it cover most of a grazing-angle
+# shore view, it read as a bright, fully-saturated cyan/blue "pool" rather
+# than a believable sky reflection. A real sky reflection off water is
+# desaturated and dimmer than the sky itself (it's reflectance, not the sky
+# color directly) - darkened and desaturated toward a cool grey-blue, and the
+# cap pulled down so the deep water color keeps a much larger share of the
+# blend even at the shallowest visible angles.
+SKY_TINT_COLOR = (0.09, 0.15, 0.21)
+BASE_COLOR_FRESNEL_CAP = 0.55   # clamp ceiling for the base-color fresnel blend (specular still uses raw fresnel)
+                                 # bumped from round 3's 0.50 - see the shore-cove gray-slab CORRECTION note below.
 
-ROUGHNESS = 0.35
+# Roughness lowered from 0.35 (round 2) - at 0.35 the ripple normal's
+# perturbation barely dents specular response, so the surface reads as a
+# uniform flat fill with no sparkle/glint variation regardless of how much
+# ripple-normal detail is baked in. 0.12 (round 3) kept a believable (not
+# mirror-flat) open-water response while letting individual highlights
+# actually pick out the ripple pattern - see NORMAL_STRENGTH below for the
+# matching normal-map amplification this needed to be visible at gameplay
+# (driving-speed, mid camera distance) scale.
+#
+# CORRECTION (round 4, same day): 0.12 was too low for the Swan Mountain Rd
+# shoreline cove - at the near-grazing, tree-canopy-shadowed viewing angle
+# used there, a roughness this low turns the surface into a near-mirror.
+# Diagnosed by temporarily swapping WATER_COLOR to pure red and
+# re-rendering: the "gray slab" DID tint red in the portion of the surface
+# viewed at a shallower angle, but stayed near-white right at the
+# near-grazing foreground - proving this is UE's own built-in grazing-angle
+# specular Fresnel (Schlick's F0 + (1-F0)(1-cosTheta)^5 - goes to ~1.0
+# reflectance at any grazing angle regardless of Specular/F0) reflecting the
+# bright gap-of-sky-through-canopy above it, layered ON TOP of - and
+# independent from - the manual BaseColor fresnel blend/cap graph below.
+# That built-in term only responds to Roughness (spreads/dims the mirror
+# highlight) and Specular (only moves the near-normal F0, barely touches the
+# grazing asymptote), so BASE_COLOR_FRESNEL_CAP alone can't fix this - it
+# was never the thing producing the wash. 0.22 (the first correction attempt)
+# wasn't enough; 0.4 - close to round 2's original flat value - actually
+# knocks the mirror-hotspot down to where the cove reads as shaded water
+# again, and NORMAL_STRENGTH=1.7 (added this same round) keeps the ripple
+# sparkle visible on top of it that round 2 lacked, so this isn't a return
+# to the original flatness complaint. SPECULAR_GRAZING pulled back with it
+# to further tame the same near-mirror response.
+ROUGHNESS = 0.4
 SPECULAR_BASE = 0.35
-SPECULAR_GRAZING = 0.55   # boosted further at grazing angles, on top of Fresnel's own base_reflect_fraction
+SPECULAR_GRAZING = 0.4
 
-FRESNEL_EXPONENT = 4.2    # steeper falloff than 3.2 - needs a shallower angle before sky-tint dominates,
-                           # so more of a normally-viewed lake surface reads as the deep water color
+FRESNEL_EXPONENT = 4.6    # steeper still than round 2's 4.2 - together with the lower BASE_COLOR_FRESNEL_CAP,
+                           # keeps more of a normally-viewed lake surface reading as the deep water color
 FRESNEL_BASE_REFLECT = 0.04   # ~real water's normal-incidence reflectance (Schlick F0 for water is ~0.02-0.04)
+
+# Visual amplification of the sampled ripple normal's X/Y (tangent-plane)
+# components before lighting - added 2026-09-03 (reviewer defect: "ensure
+# the panned dual normals actually contribute visible surface variation").
+# T_WaterRipple_N's baked perturbation is subtle by design (a seamless-tiling
+# procedural normal, see content_src/textures/water/generate_water_normal.py)
+# and at ROUGHNESS 0.35 it was invisible; even at the lowered 0.12 roughness
+# above, scaling the tangent XY channels before the lighting pass (same
+# unnormalized-amplify trick apply_ground_material.py's normal blend already
+# uses in this codebase - visually fine at this material's scale even though
+# it isn't a true renormalized strength blend) makes the pan/tile pattern
+# genuinely visible instead of a barely-perceptible shimmer.
+NORMAL_STRENGTH = 1.7
 
 # Ripple normal: two samples of the SAME texture (see module docstring),
 # different world-space tile size + pan direction/speed so they don't read
@@ -281,10 +339,16 @@ uv_b_panned = g.panner(uv_b, RIPPLE_B_SPEED[0], RIPPLE_B_SPEED[1])
 ripple_b = g.sample(water_normal_tex, uv_b_panned, is_normal=True)
 
 ripple_normal_raw = g.lerp(ripple_a, ripple_b, g.const(NORMAL_BLEND_ALPHA), a_out="RGB", b_out="RGB")
+# Amplify the tangent-plane (X/Y) perturbation before anything else touches
+# it - see NORMAL_STRENGTH's own comment for why (ROUGHNESS alone wasn't
+# enough to make the ripple pattern read at gameplay scale/distance). Z
+# deliberately left at 1x - only X/Y encode the actual ripple direction/
+# steepness, scaling Z would just dim the overall normal length.
+ripple_normal_amplified = g.mul(ripple_normal_raw, g.const3(NORMAL_STRENGTH, NORMAL_STRENGTH, 1.0))
 # flip Z on backfaces (see two_sided_sign_vec() docstring) - fixes the
 # unlit-black backface wedge a two-sided flat water plane otherwise shows
 # from below/behind its shoreline edge.
-ripple_normal = g.mul(ripple_normal_raw, g.two_sided_sign_vec())
+ripple_normal = g.mul(ripple_normal_amplified, g.two_sided_sign_vec())
 
 # ---------------------------------------------------------------- fresnel-driven color/specular
 fresnel = g.fresnel(FRESNEL_EXPONENT, FRESNEL_BASE_REFLECT)
@@ -336,6 +400,7 @@ if not all_ok:
         "of bug apply_ground_material.py's Clamp/VertexColor notes document)")
 
 log(f"built + saved {MAT_NAME} (color={WATER_COLOR}, sky_tint={SKY_TINT_COLOR}, "
-    f"roughness={ROUGHNESS}, specular={SPECULAR_BASE}-{SPECULAR_GRAZING}, "
-    f"fresnel_exp={FRESNEL_EXPONENT}, two_sided=True+TwoSidedSign normal fix, blend=Opaque, "
-    f"ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm)")
+    f"fresnel_cap={BASE_COLOR_FRESNEL_CAP}, roughness={ROUGHNESS}, "
+    f"specular={SPECULAR_BASE}-{SPECULAR_GRAZING}, fresnel_exp={FRESNEL_EXPONENT}, "
+    f"normal_strength={NORMAL_STRENGTH}, two_sided=True+TwoSidedSign normal fix, "
+    f"blend=Opaque, ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm)")

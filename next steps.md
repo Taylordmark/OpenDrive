@@ -2365,7 +2365,97 @@ What landed, in order:
     shoreline cleanly with no terrain visible through it. Screenshots:
     `dillon_fix_dam.png`, `dillon_fix_shore.png`, `dillon_fix_waterlevel.png`.
 
+  **CORRECTION (2026-09-03, third pass — reviewer defect list):** a fresh
+  reviewer pass on Dillon Reservoir named three concrete defects: (1)
+  trees/bushes/utility poles spawning inside open water off-road, (2) a
+  large flat gray slab with a hard cliff edge at the Swan Mountain Rd/
+  Keystone shore vantage, and (3) water reading as flat, oversaturated
+  swimming-pool cyan instead of a deep, slightly desaturated blue-green with
+  visible normal-map sparkle.
+  - **Defect 3 + half of Defect 2 (material):** `M_Water` tuning alone
+    (`unreal/apply_water_material.py`) — `WATER_COLOR`/`SKY_TINT_COLOR`
+    darkened and desaturated, `BASE_COLOR_FRESNEL_CAP` raised 0.50→0.55,
+    `NORMAL_STRENGTH` added at 1.7 for visible ripple sparkle. `ROUGHNESS`
+    needed two correction rounds: an initial 0.12 (from the prior pass) read
+    as a near-mirror at the near-grazing, tree-shadowed Swan Mountain Rd
+    cove; 0.22 was still not enough (confirmed via before/after pixel
+    sampling — near-zero change); a red-tinted `WATER_COLOR` diagnostic
+    render proved the pale "gray slab" was genuinely `M_Water` reflecting
+    sky through the canopy gap via UE's own built-in grazing-angle specular
+    Fresnel (`F0 + (1-F0)(1-cosθ)^5`, approaches ~1.0 reflectance at any
+    grazing angle independent of the material's Specular/F0 or the manual
+    BaseColor fresnel blend graph) — only Roughness meaningfully tames that
+    term. Settled on `ROUGHNESS=0.4`, `SPECULAR_BASE=0.35`,
+    `SPECULAR_GRAZING=0.4`. Verified: the shore-cove "gray slab" now reads
+    as dark muted teal/blue-gray with visible sparkle texture, a clear
+    improvement over both the prior pass and the original cyan-slab report.
+  - **Defect 1 (trees/props in open water) — real root cause was a runtime
+    wiring bug, not the exclusion logic itself:** `AODForestManager::
+    IsInsideLake()`'s point-in-polygon test was first widened to a
+    margin-aware version (`LakeShoreExclusionMarginCm`, matching
+    `WATER_SHORE_BLEND_M`+margin) and `pipeline/build_road_barrier.py` got
+    the same margin treatment for its wall-run/scenery-point lake check —
+    both rebuilt/rebaked successfully (barrier skip count went 1080→5656),
+    but a fresh render showed **zero visible change** in tree placement at
+    the shore cove. Root cause found by first fixing a `-game` logging gap
+    (headless `-game -windowed` runs were writing NO log file at all,
+    neither the `-abslog=` target nor the default `OpenDriveUE.log` — adding
+    a plain `-log` flag fixed this and is now required on every future
+    `-game` QA render) and then finding the fresh log had **zero**
+    `"ODForestManager: loaded N lake boundary ring(s)..."` or `"no baked
+    lake tiles found..."` line anywhere, and no `"ODGameMode: spawned
+    AODForestManager..."` confirmation either (unlike `AODWaterManager`,
+    which does log one). Traced to `unreal/build_openworld_test_level.py`:
+    `OpenWorldTest.umap` bakes its `ODForestManager` instance directly into
+    the level at build time (`FOREST_ENABLED=True`), and
+    `ODGameMode.cpp::EnsureForestManager()` has an early-return guard that
+    skips its own *runtime* spawn (the one that sets `WaterTilePrefix`/
+    `RoadStationFilePrefix`) whenever a forest manager already exists in the
+    level — so the baked-in instance was the ONLY one ever present at
+    runtime, and it never had `WaterTilePrefix` (or, it turns out,
+    `RoadStationFilePrefix`) set at all, since the level-builder script
+    predates both properties and was never backfilled. `LoadWaterLakes()`/
+    `LoadRoadStations()` both no-op `false` on an empty prefix with **no log
+    line on that early-return path**, which is exactly why two rounds of
+    exclusion-logic tuning had no visible effect — the exclusion path was
+    never engaging regardless of margin value. Fixed by adding
+    `forest_mgr.set_editor_property("road_station_file_prefix", ...)` and
+    `forest_mgr.set_editor_property("water_tile_prefix", ...)` to
+    `build_openworld_test_level.py`'s forest-manager spawn block (matching
+    `ODGameMode.cpp`'s own derivation exactly), deleting and rebuilding
+    `OpenDriveUE/Content/OpenWorldTest.umap` via the same script. Verified
+    in the next fresh `-game -log` render's `OpenDriveUE.log`:
+    `"ODForestManager: loaded 273548 road station(s)..."` and
+    `"ODForestManager: loaded 1185 lake boundary ring(s) from 312 water tile
+    file(s) (WaterTilePrefix='water_summit_county_test') - trees/bushes/
+    rocks/scrub excluded from open water"` — both now fire. The margin-aware
+    `IsInsideLake()`/`build_road_barrier.py` changes from earlier in this
+    pass were correct and are now actually exercised, not dead code.
+  - **Verified** (`-odpick=Dillon`, `-odhour=15`, `-log`) at all three
+    named vantages: Dillon Dam Rd/Frisco overlook (`-odspawnx=733226
+    -odspawny=-807394`) — deep muted blue water, no vegetation in the water,
+    matches reference framing. Swan Mountain Rd/Keystone shoreline
+    (`-odspawnx=1374341 -odspawny=-846975`) — trees/bushes now sit well back
+    on the far shore near town, none standing in or at the water's edge;
+    water reads as dark teal-gray with visible ripple sparkle, no more pale
+    slab. One **residual, honestly-reported** cosmetic issue at this same
+    vantage: the depressed lake-bed's shore drop-off (`apply_water_
+    depression()`'s exterior blend band) renders as a hard-edged, near-solid
+    black band between the beach and the water line — reads as an unlit
+    steep bank rather than a natural shallow shelf. This is a geometry/
+    shading artifact distinct from the original "gray slab" material defect
+    (which is fixed) and was not chased further this pass; flagged as a
+    follow-up, not blocking. Water-level vantage, spawned inside the lake
+    polygon (`-odspawnx=1371343 -odspawny=-846921`) — solid blue-gray water
+    surface at car height, no terrain visible through it, no props standing
+    in it. Screenshots: `dillon_r3_dam.png`, `dillon_r3_shore.png`,
+    `dillon_r3_waterlevel.png`.
+
 **Known leftovers (not addressed this pass):**
+- Residual hard-edged dark shore-bank band at the Swan Mountain Rd/Keystone
+  vantage (see the third-pass water CORRECTION above) — cosmetic, not
+  blocking; likely needs either a softer/wider `WATER_SHORE_BLEND_M` falloff
+  or an ambient-occlusion/lighting tweak on the depressed bank geometry.
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.
 - `-odrev` scripted drives still veer off-road at some towns (pre-existing,

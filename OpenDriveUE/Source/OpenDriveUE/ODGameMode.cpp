@@ -116,6 +116,12 @@ void AODGameMode::EnsureForestManager()
 	// data-driven road exclusion was added alongside CenterlineFilePrefix
 	// above (2026-08-26, Taylor's live-drive "trees on the road" report).
 	Forest->RoadStationFilePrefix = FString::Printf(TEXT("roadstations_%s"), *Area);
+	// water_{area}_test_tile_*.bin - the SAME baked lake tiles
+	// EnsureWaterManager() below points AODWaterManager at, reused here
+	// purely for polygon geometry (2026-09-03, reviewer defect: trees/bushes
+	// found standing in open water at Dillon Reservoir). See
+	// AODForestManager::WaterTilePrefix's header comment.
+	Forest->WaterTilePrefix = FString::Printf(TEXT("water_%s_test"), *Area);
 	Forest->FinishSpawning(FTransform::Identity);
 	UE_LOG(LogTemp, Display,
 		TEXT("ODGameMode: spawned AODForestManager for open-world area '%s' "

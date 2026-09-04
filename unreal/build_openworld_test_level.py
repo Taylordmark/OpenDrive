@@ -342,9 +342,33 @@ if FOREST_ENABLED:
     # this trees were scattering at max density straight through Mount Vernon's
     # buildings. Same optional-prefix convention as everything else here.
     forest_mgr.set_editor_property("building_centroid_file_prefix", f"building_centroids_{AREA_NAME}_test")
-    log(f"spawned ForestManager (biome/elevation/centerline/building-centroid file "
-        f"prefixes: biome_{AREA_NAME}_test / elev_{AREA_NAME}_test / "
-        f"centerline_{AREA_NAME}_test / building_centroids_{AREA_NAME}_test)")
+    # Road-station exclusion (2026-08-26, Taylor's live-drive "trees on the
+    # road" report) and lake exclusion (2026-09-03, reviewer defect: trees/
+    # bushes standing in open water at Dillon Reservoir) - both prefixes were
+    # added to ODForestManager/set by ODGameMode.cpp's own *runtime* spawn
+    # path (EnsureForestManager()) well after this script's bake-into-the-
+    # umap spawn above was first written, and never got backfilled here.
+    # EnsureForestManager() itself never runs for a level like this one
+    # because of its own "a forest manager already exists in the level, leave
+    # it alone" early-return guard - so this pipeline-baked instance was the
+    # ONLY ForestManager actually present at runtime, silently missing both
+    # exclusions (LoadRoadStations()/LoadWaterLakes() both no-op false on an
+    # empty prefix, with no log line on that path either) even though the
+    # underlying sidecars (roadstations_<area>.bin, water_<area>_test_tile_*
+    # .bin) were being baked and read by everything else. Found via a fresh
+    # -game -log render showing zero "ODForestManager: loaded N lake boundary
+    # ring(s)..." log line anywhere despite two rounds of C++-side
+    # exclusion-margin fixes that (correctly, but pointlessly) never had any
+    # effect. Matches ODGameMode.cpp::EnsureForestManager()'s own derivation
+    # exactly (no "_test" suffix on the road-station prefix, matching
+    # AODTerrainManager::LoadRoadStationSidecar's convention).
+    forest_mgr.set_editor_property("road_station_file_prefix", f"roadstations_{AREA_NAME}")
+    forest_mgr.set_editor_property("water_tile_prefix", f"water_{AREA_NAME}_test")
+    log(f"spawned ForestManager (biome/elevation/centerline/building-centroid/"
+        f"road-station/water-tile file prefixes: biome_{AREA_NAME}_test / "
+        f"elev_{AREA_NAME}_test / centerline_{AREA_NAME}_test / "
+        f"building_centroids_{AREA_NAME}_test / roadstations_{AREA_NAME} / "
+        f"water_{AREA_NAME}_test)")
 
 # ---------------------------------------------------------------- gameplay managers
 # These previously only existed on Tail of the Dragon, placed by one-off
