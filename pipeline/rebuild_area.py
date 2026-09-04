@@ -120,6 +120,14 @@ STAGES = [
     ("export_road_centerline_bin.py", "export centerline_*.bin / centerline_map_*.bin"),
     ("build_road_barrier.py", "build road_barrier.json"),
     ("export_road_barrier_bin.py", "export barrier tiles -> Content/OpenDrive/Masks/barrier_*.bin"),
+    # GUARDRAILS (2026-09-04): road-above-terrain drop detection (dam
+    # causeways, mountain switchback outer edges) - needs road_stations.json
+    # + settlement_tiles.json (town exclusion, like build_road_barrier.py)
+    # + the terrain tiles' own DEM sampling helper (build_terrain_mesh_tiles.
+    # sample_dem), so it sits after terrain but has no other ordering
+    # constraint against barrier/buildings.
+    ("build_road_guardrails.py", "build road_guardrails.json (road-vs-terrain drop detection)"),
+    ("export_road_guardrails_bin.py", "export guardrail tiles -> Content/OpenDrive/Masks/guardrail_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),

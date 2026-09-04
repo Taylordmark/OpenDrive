@@ -55,4 +55,12 @@ private:
 	 *  ExponentialHeightFog/VolumetricCloud/PostProcessVolume) - see that
 	 *  class for why. */
 	void EnsureAtmosphereController();
+
+	/** Visible guardrails (2026-09-04) - same "find or spawn" shape as
+	 *  EnsureParkingManager above, deriving AODGuardrailManager's tile
+	 *  prefix from the level's own AODRoadManager the same way. Streams
+	 *  runtime-extruded W-beam/Jersey-barrier ribbons wherever the road
+	 *  rides high above the surrounding terrain - see
+	 *  pipeline/build_road_guardrails.py. */
+	void EnsureGuardrailManager();
 };

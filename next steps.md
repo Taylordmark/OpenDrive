@@ -3521,3 +3521,107 @@ not pushed. (Two throwaway diagnostic scripts used mid-session,
 `unreal/diag_probe2.py` and `unreal/diag_vtint.py`, were deleted before
 committing - same "don't leave one-off diagnostics in the repo" pattern this
 file's own history already established.)
+
+### 7.16 Visible guardrails (2026-09-03/04)
+
+**What this is:** a new safety-rail feature, same "pipeline ships points
+only, C++ builds mesh at runtime" split as `build_road_barrier.py` /
+`AODBarrierManager`. `pipeline/build_road_guardrails.py` walks every road's
+stations, samples terrain a few meters laterally beyond the pavement edge
+(reusing `build_terrain_mesh_tiles.sample_dem()`), and flags a run wherever
+`road_z - terrain_z > 2.5m` sustained for >=10m (gaps bridged). Runs are
+tagged with a road-class-derived profile: **Jersey barrier** (concrete,
+`class_id` 0/1 - motorway/trunk) or **W-beam** (galvanized rail on HISM
+posts, everything else). `export_road_guardrails_bin.py` packs the runs into
+the same binary-sidecar tile format as every other streamed layer
+(`guardrail_<area>_tile_X_Y.bin`). At runtime, the new `AODGuardrailManager`
+(mirrors `AODBarrierManager`'s tile-streaming/extrusion pattern exactly)
+extrudes each run into a `UDynamicMeshComponent` thin-sheet ribbon with real
+`BlockAll` collision on `PM_GuardrailSlick` (a deliberately low-friction
+physmat for the "deflect, don't grab" Crew 2 feel Taylor asked for), and
+spawns posts on a `UHierarchicalInstancedStaticMeshComponent` along W-beam
+runs. Wired into `AODGameMode::BeginPlay()` via `EnsureGuardrailManager()`,
+same precedent as `EnsureParkingManager()`.
+
+**Three exclusion bugs found and fixed by live-testing against Dillon Dam
+Road (the feature's own primary use case — a real causeway with a genuine
+sustained drop to the reservoir), each one discovered only because the
+previous fix still left the dam causeway with zero guardrail data:**
+
+1. **Blind `is_bridge` exclusion.** First draft copied
+   `build_road_barrier.py`'s `is_bridge` skip verbatim. Dillon Dam Road is
+   itself tagged `is_bridge=True` (a causeway, not a "there's a separate
+   bridge-railing system for this" case — there is no separate system in
+   this project), so the exclusion silently killed the whole test case.
+   Removed `is_bridge` from `open_mask` entirely; `is_bridge` already
+   despikes upstream in `road_mesh_common`, so nothing legitimate depends on
+   this skip.
+2. **Lake shore-margin over-exclusion.** `build_road_barrier.py`'s lake
+   check dilates by `WATER_SHORE_BLEND_M + 3m` (right call for an opaque
+   wall's aesthetics). The dam causeway runs directly along the shoreline,
+   so every station in its real 530m/107-station drop run fell inside that
+   margin and got skipped anyway. Narrowed the guardrail's own lake check to
+   strict point-in-polygon only (the margin is kept solely as a bbox
+   pre-filter for the candidate search, not the actual inclusion test) — a
+   safety rail belongs at the literal shoreline, not 20m back from it.
+3. **Blanket settlement-tile exclusion.** Even after fixes 1-2, the dam
+   causeway sits inside the same coarse 2km settlement tile as
+   Dillon/Frisco's real town streets, so a blanket "skip runs inside
+   populated tiles" check ate the whole run a third time. The original task
+   brief itself preferred junction-breaking over blanket settlement
+   exclusion ("break runs where another road connects" rather than "skip
+   the whole tile"), and flat town streets never trigger `drop_mask` in the
+   first place — there's no drop to guard against. Removed the
+   settlement-tile check entirely; final `open_mask = in_lake |
+   seg_junction` (junction-proximity breaking is the only other exclusion,
+   reusing `reconcile_junction_elevations()`'s `touched` mask so rails don't
+   run straight through intersections).
+
+**Final pipeline run (`summit_county`):** 1629 guardrail run(s), 71575
+station(s) -> `road_guardrails.json` -> 194 tile(s). ~342.82 km W-beam,
+~6.91 km Jersey barrier. Skipped near drop: 118 station(s) lake-interior,
+15447 station(s) junction-proximity (bridge/culvert spans and settlement
+tiles are deliberately NOT skipped — see the module's own docstring for the
+full reasoning above).
+
+**Verification (`-game -odhour=15`, scratchpad `rails_*.png`):**
+- `rails_dam.png` (Dillon Dam Road, `-odgo=5 -odspawnx=900213
+  -odspawny=-937209`, ~8m from a known rail station): a clean galvanized
+  W-beam guardrail correctly seated at the pavement edge with visible posts,
+  running along the causeway shoulder exactly where the sustained
+  road/terrain drop from fixes 1-3 lives. This is the shot that proves all
+  three exclusion bugs above are actually fixed, not just that the pipeline
+  printed a bigger number.
+- `rails_switchback.png` (Swan Mountain Road, Frisco): a correctly-profiled
+  W-beam rail curving along the outer edge of a switchback, seated on real
+  terrain (not floating/buried). Individual posts weren't visually
+  distinguishable at this camera distance/angle despite the manager log
+  confirming 1217 posts built in-tile — noted honestly rather than claimed
+  as verified.
+- `rails_i70.png` (I-70 near Frisco, `-odgo=5 -odspawnx=458943
+  -odspawny=-477571`): a light-gray Jersey concrete barrier along the
+  highway shoulder, correct profile for a motorway-class road.
+- `rails_town_negative.png` (`-odpick=Frisco`, North 6th Avenue): flat town
+  street, buildings, no rails anywhere in frame — confirms the feature
+  doesn't fire where there's no real drop, and that removing the blanket
+  settlement exclusion (fix 3) didn't cause false positives on ordinary flat
+  streets.
+
+**Getting a good `rails_dam.png` took 6 spawn-point attempts** (documented
+here so a future session doesn't repeat the trial-and-error): the naive
+approach of spawning directly at a rail run's own offset coordinates
+embeds the car in the barrier mesh; spawning at the nearest *road centerline*
+station instead avoids that, but `AODMainMenu::StartAt()` only computes a
+fresh heading from a town-node snap or the level's `PlayerStart` — when
+`-odspawnx`/`-odspawny` override the position, the yaw is NOT recomputed
+from the new location, so the camera can end up facing away from the very
+rail you spawned next to. There's no shortcut around this other than
+picking a spawn point close enough to the target rail (station-level
+lookup against `road_stations.json`, cross-referenced with
+`road_guardrails.json`'s own station coordinates) that whatever fixed yaw
+you get still points roughly down the road toward it.
+
+Committed locally only (`ODGuardrailManager.cpp`, `ODGuardrailManager.h`,
+`ODGameMode.cpp`, `ODGameMode.h`, `pipeline/build_road_guardrails.py`,
+`pipeline/export_road_guardrails_bin.py`, `pipeline/rebuild_area.py`,
+`unreal/apply_guardrail_assets.py`); not pushed.

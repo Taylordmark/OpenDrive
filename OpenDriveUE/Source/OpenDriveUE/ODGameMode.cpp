@@ -3,6 +3,7 @@
 #include "EngineUtils.h"
 #include "ODAtmosphereController.h"
 #include "ODForestManager.h"
+#include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
 #include "ODVehiclePawn.h"
@@ -21,6 +22,7 @@ void AODGameMode::BeginPlay()
 	EnsureForestManager();
 	EnsureWaterManager();
 	EnsureParkingManager();
+	EnsureGuardrailManager();
 	EnsureAtmosphereController();
 }
 
@@ -236,6 +238,54 @@ void AODGameMode::EnsureParkingManager()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODGameMode: spawned AODParkingManager for open-world area '%s' "
 		     "(ParkingTilePrefix='%s')"), *Area, *Parking->ParkingTilePrefix);
+}
+
+void AODGameMode::EnsureGuardrailManager()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Same "already hand-placed, leave it alone" guard as EnsureParkingManager.
+	for (TActorIterator<AODGuardrailManager> It(World); It; ++It)
+	{
+		return;
+	}
+
+	// Same AODRoadManager-derived area-name convention as EnsureParkingManager.
+	AODRoadManager* Road = nullptr;
+	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	{
+		Road = *It;
+		break;
+	}
+	if (!Road)
+	{
+		return;
+	}
+
+	FString Area = Road->RoadTilePrefix;
+	Area.RemoveFromStart(TEXT("road_"));
+	Area.RemoveFromEnd(TEXT("_test"));
+	if (Area.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
+			     "'%s' - skipping guardrail manager spawn"), *Road->RoadTilePrefix);
+		return;
+	}
+
+	AODGuardrailManager* Guardrail = World->SpawnActor<AODGuardrailManager>();
+	if (!Guardrail)
+	{
+		return;
+	}
+	Guardrail->GuardrailTilePrefix = FString::Printf(TEXT("guardrail_%s_test"), *Area);
+	UE_LOG(LogTemp, Display,
+		TEXT("ODGameMode: spawned AODGuardrailManager for open-world area '%s' "
+		     "(GuardrailTilePrefix='%s')"), *Area, *Guardrail->GuardrailTilePrefix);
 }
 
 void AODGameMode::EnsureAtmosphereController()
