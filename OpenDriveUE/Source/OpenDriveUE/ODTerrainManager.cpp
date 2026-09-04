@@ -94,7 +94,15 @@ static constexpr float ConflictMinGapCm = 100.0f;   // CONFLICT_MIN_GAP_M (1 m)
 // every other area-specific constant in this file (e.g. SEA_LEVEL_Z_CM in
 // unreal/apply_ground_material.py, itself already ORIGIN_HEIGHT_M-derived).
 static constexpr float ElevLowCm = -70000.0f;   // ~2735 m - at/below: full "rich/dark low green" bias
-static constexpr float ElevHighCm = 40000.0f;   // ~3835 m - at/above: full "grey/rocky" bias
+// 2026-09-04 RETUNE (§7.15 background-slope follow-up): was 40000 (~3835 m),
+// which put FULL grey bias well BELOW unreal/apply_ground_material.py's own
+// TREELINE_HIGH_M=3650 - i.e. this vertex-tint elevation gradient was already
+// greying out real below-treeline forest slopes (target look: warm green/
+// brown below ~3400 m) before the material's own texture-layer treeline
+// logic had even started blending toward scree. Raised so full grey doesn't
+// land until just above the real treeline instead of a third of the way up
+// the valley wall.
+static constexpr float ElevHighCm = 68000.0f;   // ~4115 m - at/above: full "grey/rocky" bias
 static const FLinearColor ElevLowBias(0.02f, 0.10f, 0.02f);
 static const FLinearColor ElevHighBias(0.40f, 0.40f, 0.40f);
 
@@ -125,6 +133,27 @@ static const FLinearColor DryVariantMul(1.25f, 1.05f, 0.75f); // pushes warmer/d
 // from FBiomeSpatialHash::CellSizeCm rather than a second independent magic
 // number.
 static constexpr float BiomeBlendRadiusCm = FBiomeSpatialHash::CellSizeCm * 1.5f; // 300 m
+
+// 2026-09-04 (§7.15 background-slope follow-up): classify_biomes.py only
+// samples points ALONG the road corridor (every SAMPLE_STRIDE-th road
+// station, see that script's module docstring: "the player only experiences
+// biome variety near the road, so only that imagery needs fetching/
+// classifying") - but the terrain mesh itself extends far past the road,
+// out to BACKGROUND_BBOX_SNWE (pipeline/test_areas.py), tens of km wide, for
+// the background hills/peaks a vantage actually sees. A vertex out there has
+// no biome sample anywhere near it, so the "nothing within
+// BiomeBlendRadiusCm" branch below used to fall back to the single nearest
+// road-corridor sample point OUTRIGHT, however far away that was - often a
+// rocky roadcut or switchback km away, not the real forest cover the distant
+// slope shows in-game. That made ground color a function of "distance to the
+// nearest sampled road point" rather than of the actual terrain, i.e. the
+// exact "pale far from the road, correct near it" symptom. Past this cap,
+// a real-but-remote sample is no longer trusted as representative and the
+// loop instead keeps the (already-initialized, warm) default GroundTint -
+// same default a tile with literally zero biome candidates already used -
+// so distant background terrain reads as consistent forest-floor green
+// instead of inheriting whatever's nearest along a road that may be km away.
+static constexpr float FarBiomeFallbackCm = 100000.0f; // 1 km
 
 namespace
 {
@@ -1016,13 +1045,20 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 			{
 				GroundTint = Acc / WeightSum;
 			}
-			else
+			else if (BestD2 <= FarBiomeFallbackCm * FarBiomeFallbackCm)
 			{
-				// nothing within BiomeBlendRadiusCm - use the nearest point
-				// outright, same fallback BlendAt() uses rather than
-				// silently reverting to a fixed default biome.
+				// nothing within BiomeBlendRadiusCm, but the nearest sample
+				// is still close enough (within FarBiomeFallbackCm) to trust
+				// as representative of this location - use it outright, same
+				// fallback BlendAt() uses rather than silently reverting to a
+				// fixed default biome.
 				GroundTint = BiomeGroundTintTable[NearestBiome].Tint;
 			}
+			// else: nearest sample is beyond FarBiomeFallbackCm (this vertex
+			// is background terrain far from any road) - keep the
+			// already-initialized default GroundTint rather than inheriting
+			// an arbitrary, possibly unrepresentative remote road-corridor
+			// biome (see FarBiomeFallbackCm's comment above).
 			SeenBiomes.Add(NearestBiome);
 		}
 
