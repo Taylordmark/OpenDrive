@@ -535,34 +535,65 @@ def exhaust_tips(m, x, half_track, z, cell=CHROME, r=4.0, length=10.0):
 
 
 def build_pickup_bed(m, cab_tail_x, floor_z, wall_top_z, half_width, bed_length,
-                      body_cell, dark_cell):
+                      body_cell, dark_cell, rear_axle_x=None, wheel_r=0.0,
+                      arch_margin_cm=12.0, n_seg=18):
     """Non-lofted structure welded on directly behind the cab - a truck bed
     doesn't taper into a canoe stern, it is an open box: floor + two side
-    rails + a flat tailgate cap."""
+    rails + a flat tailgate cap.
+
+    2026-09-03 arch/track fix: rear_axle_x sits under this bed, outside the
+    cab's own lofted profile, so build_hull()'s wheel-arch clip never
+    touched it - the rail used to be one flat quad from floor_z straight up
+    to wall_top_z, so the rear wheel had zero arch relief and read as fully
+    exposed beside a flat wall. The rail's bottom edge is now segmented and
+    arc-clipped exactly like build_hull's lower hull curve (local_floor(x) =
+    max(floor_z, arch(x)), arch = a semicircle of radius wheel_r+margin
+    centered on rear_axle_x at axle height z=0) so a real wheel-arch scallop
+    opens up over the rear tire instead of a solid slab. half_width is now
+    passed in already sized to the physics half-track (see build_pickup())
+    rather than derived from the narrow cab-tail plan width, so the bed
+    rails actually reach out to the tire's outer edge."""
     tail_x = cab_tail_x - bed_length
     rail_w = half_width
     m.quad((cab_tail_x, -rail_w, floor_z), (tail_x, -rail_w, floor_z),
            (tail_x, rail_w, floor_z), (cab_tail_x, rail_w, floor_z), dark_cell)
     cap_h = 3.0
+    r = wheel_r + arch_margin_cm
+
+    def local_floor(x):
+        if rear_axle_x is None:
+            return floor_z
+        d2 = r * r - (x - rear_axle_x) ** 2
+        if d2 <= 0.0:
+            return floor_z
+        return max(floor_z, math.sqrt(d2))
+
+    xs = np.linspace(cab_tail_x, tail_x, n_seg + 1)
     for side in (1, -1):
         y = side * rail_w
-        a = (cab_tail_x, y, floor_z)
-        b = (tail_x, y, floor_z)
-        c = (tail_x, y, wall_top_z - cap_h)
-        d = (cab_tail_x, y, wall_top_z - cap_h)
-        if side > 0:
-            m.quad(a, b, c, d, body_cell)
-            m.quad(d, c, (tail_x, y, wall_top_z), (cab_tail_x, y, wall_top_z), dark_cell)
-        else:
-            m.quad(d, c, b, a, body_cell)
-            m.quad((cab_tail_x, y, wall_top_z), (tail_x, y, wall_top_z), c, d, dark_cell)
         yi = y * 0.94
-        ai, bi = (cab_tail_x, yi, floor_z), (tail_x, yi, floor_z)
-        ci, di = (tail_x, yi, wall_top_z), (cab_tail_x, yi, wall_top_z)
+        for i in range(n_seg):
+            x0, x1 = float(xs[i]), float(xs[i + 1])
+            zb0, zb1 = local_floor(x0), local_floor(x1)
+            a, b = (x0, y, zb0), (x1, y, zb1)
+            c, d = (x1, y, wall_top_z - cap_h), (x0, y, wall_top_z - cap_h)
+            ai, bi = (x0, yi, zb0), (x1, yi, zb1)
+            ci, di = (x1, yi, wall_top_z), (x0, yi, wall_top_z)
+            if side > 0:
+                m.quad(a, b, c, d, body_cell)
+                m.quad(bi, ai, di, ci, dark_cell)
+            else:
+                m.quad(d, c, b, a, body_cell)
+                m.quad(ai, bi, ci, di, dark_cell)
+        # trim cap strip along the rail top (unaffected by the arch cut)
+        c0 = (cab_tail_x, y, wall_top_z - cap_h)
+        c1 = (tail_x, y, wall_top_z - cap_h)
+        c2 = (tail_x, y, wall_top_z)
+        c3 = (cab_tail_x, y, wall_top_z)
         if side > 0:
-            m.quad(bi, ai, di, ci, dark_cell)
+            m.quad(c0, c1, c2, c3, dark_cell)
         else:
-            m.quad(ai, bi, ci, di, dark_cell)
+            m.quad(c3, c2, c1, c0, dark_cell)
     handle_z = floor_z + (wall_top_z - floor_z) * 0.85
     m.quad((tail_x, -rail_w, floor_z), (tail_x, -rail_w, handle_z - 1.5),
            (tail_x, rail_w, handle_z - 1.5), (tail_x, rail_w, floor_z), body_cell)
@@ -774,16 +805,38 @@ def build_pickup():
     reading as one continuous slab from nose to tailgate - the hood is now a
     long flat LOW panel at 44 cm, ~14 cm below the 58 cm bed rail, with a
     shorter 43 cm front overhang (was 63 cm); the cab itself was fine and is
-    unchanged."""
+    unchanged.
+
+    2026-09-03 arch/track audit (matching the Super dune-buggy-class fix):
+    the front axle (x=185) sits directly under that long flat 40-44 cm-tall
+    hood section, ~24 cm under the min_band-clamped ceiling the arch needed
+    (base_top - 14 = ~29 cm vs the intended wheel_r+margin peak of 54 cm) -
+    the wheel-arch cut was silently squashed flat, so the front wheel read
+    as floating under a solid slab with no arch at all. Fixed with a small
+    raised fender-flare bump in the profile right at x=185 (78 cm, tapering
+    back down to the flat hood on both sides) - an off-road flare stacks up
+    above the hoodline anyway, so this reads as a Raptor-style flare, not a
+    style break. Plan half-width at that same station widened 72->88 cm
+    (shoulder was 26 cm narrower than the tire's outer edge). The REAR axle
+    (x=-160) is even worse: it sits entirely outside the cab's own profile
+    domain (x=[-2,228]) under the separately-welded bed, which had NO arch
+    cut and a bed half-width (68 cm, derived from the narrow cab-tail width)
+    39 cm short of the tire's outer edge - rear wheels were fully exposed
+    with a flat rail beside them. Fixed in build_pickup_bed() below: the bed
+    is now sized off the physics half-track instead of the cab-tail width,
+    and its side rails carry the same arc-clipped wheel-arch cut as the main
+    hull, centered on rear_axle_x."""
     body, dark = 6, 7
     profile = [
-        (228.0, 14.0, 34.0), (210.0, 8.0, 40.0), (175.0, 6.0, 44.0),
-        (130.0, 6.0, 44.0),                          # long flat LOW hood
+        (228.0, 14.0, 34.0), (210.0, 8.0, 40.0), (198.0, 7.0, 42.0),
+        (185.0, 6.0, 78.0),                          # front-axle arch flare
+        (172.0, 6.0, 48.0), (130.0, 6.0, 44.0),       # long flat LOW hood
         (112.0, 6.0, 136.0), (20.0, 6.0, 138.0),
         (8.0, 6.0, 130.0), (-2.0, 6.0, 64.0),
     ]
     plan = [
-        (228.0, 56.0), (210.0, 66.0), (175.0, 74.0), (130.0, 76.0),
+        (228.0, 56.0), (210.0, 66.0), (196.0, 74.0), (185.0, 88.0),
+        (172.0, 78.0), (130.0, 76.0),
         (112.0, 76.0), (20.0, 76.0), (8.0, 74.0), (-2.0, 72.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 185.0, -160.0, 98.0, 42.0
@@ -810,9 +863,15 @@ def build_pickup():
 
     cab_tail_x = -2.0
     floor_z, wall_top_z = 8.0, 58.0
-    bed_half_width = local_w(cab_tail_x) * 0.94
+    # 2026-09-03 fix: was local_w(cab_tail_x)*0.94 = ~68 cm, 39 cm short of
+    # the tire's outer edge (half_track + tire half-width = 111) - the bed
+    # is sized off the physics half-track instead so it actually reaches
+    # out to the rear tires (a couple cm of stance poke-out is fine).
+    bed_half_width = max(local_w(cab_tail_x) * 0.94, half_track + 14.0)
     tail_x = build_pickup_bed(m, cab_tail_x, floor_z, wall_top_z, bed_half_width,
-                               bed_length=175.0, body_cell=body, dark_cell=dark)
+                               bed_length=175.0, body_cell=body, dark_cell=dark,
+                               rear_axle_x=rear_axle_x, wheel_r=wheel_r,
+                               arch_margin_cm=style["arch_margin_cm"])
     tailgate_lights(m, tail_x, bed_half_width, (floor_z + wall_top_z) / 2.0, TAILLIGHT)
     m.quad((90.0, -30.0, 139.0), (66.0, -30.0, 139.0), (66.0, 30.0, 139.0),
            (90.0, 30.0, 139.0), CHROME)   # roof light bar
@@ -830,24 +889,43 @@ def build_rally():
     """Compact hatch: short 90 cm front overhang (nose 204 to axle 112),
     tall-for-its-length 114 cm greenhouse (72 to -60), a STEEP 40 cm hatch
     drop (-60 to -100, 104->54 cm), short 32 cm rear overhang (axle -118 to
-    tail -150)."""
+    tail -150).
+
+    2026-09-03 arch/track audit (matching the Super dune-buggy-class fix):
+    the ORIGINAL hood (44->48 cm across x=150->88) and rear hatch skirt
+    (54->34 cm across x=-100->-150) both sat well under belt_z at the axle
+    x-positions themselves, so build_hull()'s min_band clamp (local_bottom
+    <= base_top - 14) silently chopped the wheel-arch peak down to a few cm
+    above the wheel instead of the intended wheel_r+margin - the body read
+    as a flat slab with no arch cut at all, floating over the tires (10.6-
+    11.0 cm of clamp loss at both axles). Fix: authored small raised fender-
+    flare bumps in the side PROFILE right at each axle x (112 and -118,
+    62-66 cm) - this is literally this car's "flared arches" identity
+    feature, just previously undersized to actually clear the arch. Also
+    widened the PLAN half-width at both axles (69->76 front, 58->80 rear)
+    since the shoulder was 7-22 cm narrower than the tire's outer edge
+    (half-track + tire half-width); belt_z raised 48->50 and arch_margin_cm
+    trimmed 11->9 to land the arch-to-belt spare at 9 cm, matching the
+    9-12 cm convention every other preset already keeps."""
     body, dark = 8, 9
     profile = [
         (204.0, 4.0, 28.0), (190.0, 0.0, 36.0), (150.0, -2.0, 44.0),
-        (88.0, -4.0, 48.0), (72.0, -4.0, 116.0), (6.0, -4.0, 120.0),
-        (-60.0, -2.0, 104.0), (-100.0, 0.0, 54.0), (-150.0, 4.0, 34.0),
+        (130.0, -3.0, 48.0), (112.0, -4.0, 64.0),      # front-axle arch flare
+        (94.0, -4.0, 50.0), (72.0, -4.0, 116.0), (6.0, -4.0, 120.0),
+        (-60.0, -2.0, 104.0), (-94.0, 0.0, 58.0), (-118.0, 0.0, 66.0),  # rear-axle arch flare
+        (-136.0, 2.0, 50.0), (-150.0, 4.0, 34.0),
     ]
     plan = [
-        (204.0, 50.0), (190.0, 60.0), (150.0, 68.0), (88.0, 70.0),
-        (6.0, 70.0), (-60.0, 66.0), (-100.0, 62.0), (-150.0, 50.0),
+        (204.0, 50.0), (190.0, 62.0), (150.0, 70.0), (112.0, 76.0),
+        (72.0, 72.0), (6.0, 72.0), (-60.0, 70.0), (-118.0, 80.0), (-150.0, 52.0),
     ]
     front_axle_x, rear_axle_x, half_track, wheel_r = 112.0, -118.0, 78.0, 32.0
     style = style_for(dict(
-        belt_z=48.0, bottom_width_frac=0.74, round_width_frac=0.82,
+        belt_z=50.0, bottom_width_frac=0.74, round_width_frac=0.82,
         sill_width_frac=0.94, hood_top_width_frac=0.88, glass_inset_cm=4.0,
         bulge_strength=0.18, bulge_sigma=42.0,   # flared arches both ends
-        front_bulge_mult=1.15, rear_bulge_mult=1.15,
-        arch_margin_cm=11.0,
+        front_bulge_mult=1.15, rear_bulge_mult=1.2,
+        arch_margin_cm=9.0,
         # Round-3 glass-band fix: cowl at x=84 (windshield base), hatch
         # glass runs through most of the steep drop down to x=-85 before
         # giving way to the tailgate/bumper panel.

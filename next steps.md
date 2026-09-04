@@ -2842,6 +2842,63 @@ reimport. Verified now.
 Screenshots: `super_check_day.png`, `super_check_dusk.png`, `others_JDM.png`,
 `others_Pickup.png`, `others_Rally.png` (scratchpad).
 
+**Pickup + Rally arch-vs-track audit (2026-09-03, §7.15 follow-up):** did
+the arch-vs-track-width audit flagged above (same class of defect the
+Super's Round-2/3 "dune-buggy" fix addressed), against `cars_manifest.json`.
+Both cars had the SAME root cause as Super's original bug — `build_hull()`'s
+`min_band_cm=14` clamp (`local_bottom <= base_top - 14`) silently chops the
+wheel-arch peak down whenever the authored side-profile's `z_top` sits too
+close to (or under) the arch's intended height near an axle x — plus,
+independently, plan-view half-width narrower than the tire's outer edge
+(half-track + tire half-width, 13 cm) at the axle station.
+
+- **Rally:** both axles' hood/hatch profile dipped to 44-54 cm right where
+  the wheel arch needed to peak at ~43 cm (wheel_r 32 + margin 11) under
+  belt_z 48 — clamp chopped the arch down by 10.6 cm (front) / 11.0 cm
+  (rear), leaving the body a flat slab with no visible arch cut at all.
+  Plan half-width was also 7.6/22.0 cm short of the tire's outer edge at
+  front/rear. Fixed in `build_rally()`: added small raised fender-flare
+  bumps in the side PROFILE right at each axle x (112→64 cm, -118→66 cm,
+  tapering back to the original low hood/hatch height either side — this is
+  literally the "flared arches" identity trait already named in this car's
+  docstring, just previously undersized to actually clear the arch), widened
+  the PLAN half-width at both axles (69→76 front, 58→80 rear), and bumped
+  `belt_z` 48→50 / trimmed `arch_margin_cm` 11→9 to land the arch-to-belt
+  spare at 9 cm (matching the 9-12 cm convention every other preset keeps).
+  Post-fix: 0 cm clamp loss at either axle, shoulder width now flush with
+  (front) or 4 cm proud of (rear) the tire's outer edge.
+- **Pickup:** the FRONT axle (x=185) sits directly under the long flat
+  40-44 cm hood — clamp chopped the arch peak by 24.9 cm (intended 54 cm,
+  chopped to 29.1), same collapsed-slab symptom. Fixed with a raised
+  fender-flare profile bump at x=185 (78 cm, an off-road flare stacking
+  above the hoodline reads as Raptor-style, not a style break) and a widened
+  plan half-width at that station (72→88 cm). The REAR axle (x=-160) was
+  worse in a different way: it sits entirely outside the cab's own lofted
+  profile domain (x=[-2,228]), under the separately-welded, non-lofted bed
+  (`build_pickup_bed()`) — which had NO wheel-arch cut at all (flat side
+  rails) and a bed half-width derived from the narrow cab-tail plan width
+  (68 cm), 39 cm short of the tire's outer edge (111 cm). Rear wheels were
+  fully exposed beside a flat black tray. Fixed in `build_pickup_bed()`:
+  the bed is now sized off `half_track` directly (`half_track + 14`, 112 cm)
+  instead of the cab-tail width, and the side rails are segmented (18
+  stations) with the same arc-clipped wheel-arch cut `build_hull()` uses on
+  the main hull, centered on `rear_axle_x` — a genuine scalloped opening
+  over the rear tire instead of a solid slab.
+- `cars_manifest.json` verified **byte-identical** before/after regen (the
+  physics contract — axle x, half-track, wheel radius — never changed, only
+  mesh geometry did).
+- Regenerated via `pipeline/make_car_meshes.py`, reimported via
+  `unreal/import_car_meshes.py` (0 errors, only the pre-existing benign
+  "Interchange Obj translator: Cannot find texture" warnings — the script's
+  own separate texture-import task handles that, as before), verified live
+  with the `-odcar=Pickup` / `-odcar=Rally` QA flag at Frisco
+  (`-odhour=15`, default chase cam, `-odshot=15`): `pickup_fixed.png` and
+  `rally_fixed.png` (scratchpad) both show wheels seated against a visibly
+  widened, arch-flared body with no daylight band at the tire-to-fender
+  line, matching Super's already-verified read; each car's identity is
+  intact (Pickup keeps its ride height and cab+bed shape, Rally keeps its
+  compact-hatch stance). No C++ changes.
+
 ---
 
 ## Cross-cutting (release engineering)
