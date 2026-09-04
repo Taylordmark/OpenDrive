@@ -945,8 +945,10 @@ void AODVehiclePawn::UpdateFreeLook(float DeltaSeconds)
 	{
 		LastLookInputTime = GetWorld()->GetTimeSeconds();
 		LookYawDeg = FMath::UnwindDegrees(LookYawDeg + MouseX * MouseLookSensitivity);
+		// vertical freelook is inverted vs. the classic LookUp convention noted
+		// above: pushing the mouse/stick up now pans the freelook view down.
 		LookPitchDeg = FMath::Clamp(
-			LookPitchDeg - MouseY * MouseLookSensitivity, LookPitchMinDeg, LookPitchMaxDeg);
+			LookPitchDeg + MouseY * MouseLookSensitivity, LookPitchMinDeg, LookPitchMaxDeg);
 	}
 	else if (GetWorld()->GetTimeSeconds() - LastLookInputTime > LookRecenterDelaySec)
 	{
