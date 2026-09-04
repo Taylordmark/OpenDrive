@@ -1067,14 +1067,22 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 		OutMinLuma = FMath::Min(OutMinLuma, Luma);
 		OutMaxLuma = FMath::Max(OutMaxLuma, Luma);
 
-		// ToFColor(true) quantizes to sRGB bytes, matching
-		// UBaseDynamicMeshComponent's own documented convention ("UStaticMesh
-		// assumes Source Mesh colors are Linear and always converts to
-		// SRGB") - BuildTile decodes this same FColor back to linear when
-		// feeding the color overlay, then sets the component's ColorSpaceMode
-		// to LinearToSRGB so the render buffer re-applies the sRGB encoding
-		// at draw time.
-		Tile.VertColors[v] = Final.ToFColor(true);
+		// 2026-09-04 FIX: QuantizeRound() is a direct linear->byte mapping
+		// (no gamma), pairing with FColor::ReinterpretAsLinear() in BuildTile
+		// (just /255) and ColorSpaceMode=NoTransform on the component. The
+		// previous ToFColor(true)/FLinearColor(FColor) pairing assumed the
+		// UStaticMesh convention - painted vertex colors go through the GPU's
+		// hardware sRGB *texture sampler* decode - but UDynamicMeshComponent's
+		// color overlay is an ordinary per-vertex attribute, not a sampled
+		// texture, so nothing on the GPU side ever un-does the sRGB encode:
+		// a dark biome tint like DeciduousForest (0.06,0.16,0.05) got
+		// brightened on the way in and never brightened back down, rendering
+		// as a washed pale mint instead of the intended dark green - proven
+		// by a diagnostic render with MP_BASE_COLOR wired straight to raw
+		// VertexColor (bypassing every texture/blend node in M_GroundStylized)
+		// still showing pale ground. QuantizeRound/ReinterpretAsLinear/
+		// NoTransform is a lossless round trip (8-bit quantization only).
+		Tile.VertColors[v] = Final.QuantizeRound();
 	}
 
 	OutVertsTinted = (int32)VCount;
@@ -1421,11 +1429,11 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 		{
 			for (uint32 v = 0; v < VCount; ++v)
 			{
-				// FColor -> FLinearColor decodes sRGB -> linear (the standard
-				// engine conversion for a byte-packed painted color) - stored
-				// in the overlay as linear, matching UBaseDynamicMeshComponent's
-				// own LinearToSRGB convention set on Comp below.
-				const FLinearColor Lin(Parsed.VertColors[v]);
+				// ReinterpretAsLinear() is a direct /255 unpack (no sRGB
+				// decode) - pairs with ApplyBiomeTint's QuantizeRound() and
+				// ColorSpaceMode=NoTransform below (2026-09-04 fix, see
+				// ApplyBiomeTint's own comment on the encode side for why).
+				const FLinearColor Lin = Parsed.VertColors[v].ReinterpretAsLinear();
 				ColorIds[v] = Color->AppendElement(FVector4f(Lin.R, Lin.G, Lin.B, Lin.A));
 			}
 		}
@@ -1459,11 +1467,13 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 
 	if (bHasTint)
 	{
-		// See the comment above the color-overlay population loop: the
-		// overlay holds LINEAR color, this tells the render-buffer
-		// conversion to re-encode it to sRGB bytes for the GPU vertex
-		// stream, the same convention UStaticMesh vertex painting uses.
-		Comp->SetVertexColorSpaceTransformMode(EDynamicMeshVertexColorTransformMode::LinearToSRGB);
+		// 2026-09-04 fix: NoTransform - see the comment above the
+		// color-overlay population loop. LinearToSRGB re-encoded the overlay
+		// on the way to the GPU with nothing on the other end to decode it
+		// back (a dynamic mesh color overlay is a plain vertex attribute,
+		// not a sampled sRGB texture), so every baked tint rendered
+		// noticeably brighter/paler than ApplyBiomeTint actually computed.
+		Comp->SetVertexColorSpaceTransformMode(EDynamicMeshVertexColorTransformMode::NoTransform);
 	}
 
 	// Fidelity, not the file's own baked bHasCollision byte, decides

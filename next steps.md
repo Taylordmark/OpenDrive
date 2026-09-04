@@ -3148,3 +3148,111 @@ implies `Omega` indirectly.
   the park-hold pin doesn't leak into normal driving.
 
 Committed locally only (`ODVehicleMovement.cpp`); not pushed.
+
+**Bleached-white ground fix (2026-09-04, §7.15 follow-up,
+`ODTerrainManager.cpp` + `ODAtmosphereController.cpp`):** user-reported
+most daytime hillsides render bone-white/pale instead of warm green/brown,
+even valley floors well below the ~3500 m snow band. Investigated 5
+candidate causes numerically before touching anything, per brief: material
+texture/albedo, snow-band unit mismatch, slope-threshold permissiveness,
+FAR/NEAR material mismatch, fog/atmosphere over-lightening.
+
+**Diagnostic methodology (isolate-and-verify, one confounder removed per
+step, each step confirmed with an actual in-game render, not just static
+code reading):**
+1. Wired `M_GroundStylized`'s `MaterialExpressionVertexColor` node directly
+   to `MP_BASE_COLOR`, bypassing every texture/blend node - still rendered
+   pale/sandy. Ruled out the texture/blend graph as the sole cause.
+2. Found a real bug in the baked-vertex-color round trip:
+   `ApplyBiomeTint()` wrote `Final.ToFColor(true)` (assumes sRGB, gamma-
+   encodes) but `BuildTile()` read it back via `FLinearColor(FColor)`
+   (assumes sRGB, gamma-*decodes*) while `UDynamicMeshComponent`'s
+   `ColorSpaceTransformMode` was `LinearToSRGB` (a THIRD gamma pass at
+   render time) - three gamma operations where zero or one was correct,
+   net brightening a dark tint like EvergreenForest (0.04,0.14,0.07) well
+   past its intended value. Fixed to a lossless byte round trip:
+   `QuantizeRound()` (encode) / `ReinterpretAsLinear()` (decode) /
+   `NoTransform` (component mode) - all three are plain `/255` or `*255`,
+   no gamma, matching the GPU's own UNORM<->float convention for a
+   per-vertex attribute (not a sampled sRGB texture). Rebuilt and
+   re-verified with the same vtint-direct-to-BaseColor render: **result
+   was unchanged** - proved this fix, while a genuine correctness
+   improvement (kept), was not the dominant visible cause by itself.
+3. Hardcoded `MP_BASE_COLOR` to a flat, very dark green constant
+   (0.05,0.15,0.05), bypassing vertex color AND every texture node
+   entirely - still rendered as a bright, saturated mint/lime green.
+   Since the SAME-frame car body and tree trunks (different materials,
+   same lighting) rendered correctly dark/saturated, this pointed at
+   exposure/post-process amplification specific to a large, near-
+   horizontal, sky-facing ground plane, not the material graph.
+4. Found `AODAtmosphereController::SpawnGradeVolume()` spawns a
+   `PostProcessVolume` with `Priority=100` (wins over any other unbound
+   volume for fields it overrides) that set `AutoExposureBias = 0.0f`
+   (neutral) - silently cancelling a documented `-1.0` EV fix for the
+   textually identical "roads/terrain look whitewashed" symptom already
+   applied to an earlier, lower-priority (`Priority=0`) Grade volume in
+   `build_openworld_test_level.py` (itself carried over from the Tail of
+   the Dragon map's own whitewash fix, `apply_light_wet_fix.py`). Restored
+   `AutoExposureBias = -1.0f` in the winning-priority volume, rebuilt, and
+   confirmed numerically via pixel sampling on the same hardcoded-constant
+   diagnostic (not just eyeballing, which was initially misleading since
+   the visible change is subtle): ground-shoulder sample point went from
+   RGB (158,203,146) pre-fix to (100,156,92) post-fix at the same vantage/
+   hour - a real ~35-40% reduction in rendered brightness, consistent with
+   -1 EV.
+5. Sanity-checked whether eye-adaptation convergence or the tonemapper/
+   bloom pipeline was still masking the fix by disabling
+   `ShowFlag.EyeAdaptation`, `ShowFlag.Bloom`, and `ShowFlag.Tonemapper`
+   via `-ExecCmds` on top of the exposure fix - pixel values were
+   unchanged from the exposure-fix-only render, so eye adaptation/bloom/
+   tonemapper are not separately contributing beyond the exposure bias
+   itself.
+6. Restored the real `M_GroundStylized` graph (`apply_ground_material.py`)
+   and re-rendered all three vantages with both fixes in place.
+
+**Root cause:** two independent, compounding bugs - (a) a broken vertex-
+color gamma round trip that silently brightened every baked biome tint
+before it ever reached the GPU (real, fixed, but not the dominant visible
+effect), and (b) a higher-priority runtime `PostProcessVolume` silently
+re-neutralizing an existing, documented `-1.0` EV whitewash fix that a
+lower-priority level-authored volume already had in place (the dominant
+effect - PostProcessVolume priority/override semantics mean only the
+highest-priority volume overriding a given field wins for that field,
+regardless of whether a lower-priority volume "already" set it).
+
+**Verification renders** (`-odhour=15`, both fixes + real material,
+scratchpad `ground_fix_dam.png` / `ground_fix_silverthorne.png` /
+`ground_fix_valley.png`):
+- Dillon Dam Road (Frisco): right-side embankment now reads as clearly
+  olive/khaki-green grass with visible texture detail (previously pale
+  gray-white); the left-side cut slope stays pale gray, which reads as an
+  actual exposed-rock roadcut face, consistent with the target look's
+  "gray granite only on steep faces."
+- Ruby Ranch Road (Silverthorne): flat prairie ground reads as a muted
+  khaki-green, a real improvement over "pale sandy" pre-fix, though still
+  more desaturated/pale than target reference (The Crew 2's saturated
+  greens) - background rolling hills stay tan/tawny rather than green.
+  Distant snow-capped peaks correctly read white only above the snow line.
+- Piney Lake Road (Vail): near-road grass verges read olive/khaki-brown
+  (improved from bleached white); the mid-distance mountainside in the
+  background (upper-left/right of frame) still reads pale gray-tan rather
+  than warm green, even though it's tree-lined at its base - the weakest
+  of the three vantages.
+
+**Honest residual gap:** the fixes materially reduce the bleaching
+(numerically verified, not just visually) at all three vantages, but do
+not fully reach the target "vivid Crew-2 green" look, particularly on
+flat background terrain and mid-distance slopes away from the road
+corridor. A follow-up render/pixel-sample comparison during this session
+(comparing the raw-vertex-tint-only diagnostic against the real material
+graph at the same vantage) points at `apply_ground_material.py`'s
+`hue_from_tint()` helper (desaturates the detail texture to luma, gains it
+by a flat `2.0`, then multiplies by the vertex tint) and/or the
+`forest_weight` luma-threshold blend between grass/forest detail layers as
+the next place to look if a punchier, less-desaturated green is wanted -
+not investigated further this session due to scope (the reported "bleached
+white" defect is resolved; a stylistic saturation pass is separate follow-
+up work).
+
+Committed locally only (`ODTerrainManager.cpp`, `ODAtmosphereController.cpp`);
+not pushed.

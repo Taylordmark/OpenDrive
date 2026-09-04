@@ -257,8 +257,24 @@ void AODAtmosphereController::SpawnGradeVolume()
 	S.AutoExposureMinBrightness = -4.0f;
 	S.bOverride_AutoExposureMaxBrightness = true;
 	S.AutoExposureMaxBrightness = 12.0f;
+	// 2026-09-04 FIX: this volume's higher Priority (100) means its
+	// AutoExposureBias wins over build_openworld_test_level.py's own Grade
+	// volume for this field - and this had been silently set back to 0.0
+	// (neutral), un-doing that other volume's documented -1.0 EV fix for the
+	// exact "roads/terrain look whitewashed" symptom this comment block
+	// already describes (same root problem this session's ground-material
+	// bleaching bug turned out to be: a wide-open, near-horizontal, mostly
+	// sky-visible ground plane meters disproportionately bright next to
+	// smaller/more self-occluded geometry like the car or tree trunks, so
+	// auto-exposure alone needs a real negative bias to compensate - a
+	// diagnostic render with M_GroundStylized's BaseColor hardcoded to a
+	// flat dark green (0.05,0.15,0.05), well below any texture/vertex-tint
+	// path, still rendered as a bright saturated mint green, proving this
+	// is an exposure/grade issue, not a material-graph or vertex-color one).
+	// Restored to match that proven value rather than re-derived from
+	// scratch, then confirmed by re-render at all three §7.15 vantages.
 	S.bOverride_AutoExposureBias = true;
-	S.AutoExposureBias = 0.0f;
+	S.AutoExposureBias = -1.0f;
 	S.bOverride_AutoExposureSpeedUp = true;
 	S.AutoExposureSpeedUp = 3.0f;
 	S.bOverride_AutoExposureSpeedDown = true;
