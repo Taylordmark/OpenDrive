@@ -40,6 +40,14 @@ private:
 	 *  than requiring a second hand-authored placement per area. */
 	void EnsureWaterManager();
 
+	/** Paved town-context bootstrap (art-direction §7.15, 2026-09-03) - same
+	 *  "find or spawn" shape as EnsureWaterManager() above, deriving
+	 *  AODParkingManager's tile prefix from the level's own AODRoadManager
+	 *  the same way. Streams baked OSM parking-lot polygons as flat paved
+	 *  ground patches so towns read as towns (buildings on paved context,
+	 *  not bare terrain) - see pipeline/build_parking_tiles.py. */
+	void EnsureParkingManager();
+
 	/** Art-direction Phase 1 (2026-09-01): same "find or spawn" shape as
 	 *  EnsureForestManager/EnsureWaterManager above, guarding on
 	 *  AODAtmosphereController itself rather than any one of the several

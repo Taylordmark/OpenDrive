@@ -2641,6 +2641,90 @@ unchanged in character (a pre-existing ~25 s periodic hitch, present before
 this overhaul too, dominates all three runs); safe to proceed to Taylor's
 live drive-test without a tuning pass first.
 
+- **Paved town context / parking lots (2026-09-03):** towns previously read
+  as buildings dropped on bare natural terrain - The Crew 2's towns read as
+  towns because buildings sit on paved context (parking lots, driveways,
+  sidewalk aprons). Scoped this pass to parking lots only (task explicitly
+  deferred sidewalks; driveways/service-way pavement investigated and
+  deliberately skipped, see below).
+  - **Data check:** `pipeline/build_road_network.py`/`fetch_osm_network.py`
+    already exclude `highway=service` entirely (`HIGHWAY_CLASS_REGEX` has no
+    `service` alternative) - adding it would mean threading a new road class
+    through the whole ODR3 classification/tile-budget pipeline for an
+    unbounded, numerous way type (every driveway in the bbox), not a cheap
+    add - out of scope for this pass per the task's own perf-risk guidance.
+    OSM DOES have rich `amenity=parking` polygon coverage for Summit County
+    (520 polygons fetched: real named lots - "Bank of the West Lot",
+    "Courthouse Lot", "Parkway Center", "Frisco Nordic Center Parking" -
+    plus many unnamed street-side lots along Frisco's Main St and
+    Silverthorne's commercial strip, alongside the expected ski-resort lots
+    at Keystone/Breckenridge/Copper).
+  - **Approach chosen: (a) parking-lot polygons, terrain-conforming, NOT
+    terrain-depressing** - new `pipeline/build_parking_tiles.py` reuses
+    `pipeline/build_water_tiles.py`'s already-established "OSM polygon ->
+    ear-clip/fan triangulate -> flat baked mesh -> ODL1 tile sidecar" shape
+    wholesale (imports `assemble_outer_rings`/`build_lake_mesh`/
+    `polygon_area_m2`/`write_tile` directly - literally the same wire
+    format, new magic not needed). The one real design decision was ground
+    elevation: reused `pipeline/build_building_mesh.py`'s exact "nearest
+    baked road station's own elevation" approach (task's own suggested
+    "sample terrain heights like buildings do") rather than water's DEM-
+    percentile read - a parking lot is always near a road by construction,
+    so this is a better-grounded height source than a fresh DEM sample would
+    be. A small `PARKING_Z_BIAS_CM` (3 cm) lifts the baked plane above that
+    reference height to avoid z-fighting flicker against the independently-
+    sampled runtime terrain mesh. No road-adjacency exclusion (unlike
+    buildings' `ROAD_EXCLUSION_M` gate) - a lot legitimately touches the
+    road it serves. Excludes `parking=multi-storey/underground/rooftop`
+    (not ground-level pavement). 520 OSM polygons -> 520 lots built (0
+    skipped - every polygon cleared `MIN_AREA_M2`=30 and found a nearby
+    road station), 99 tiles, 5081 verts/4041 tris total - a trivially cheap
+    addition to the tile budget.
+  - **Runtime:** new `AODParkingManager` (`ODParkingManager.h/.cpp`) is a
+    near-verbatim copy of `AODWaterManager` (same ODL1 parse, same off-
+    thread-parse/game-thread-finalize shape, same ring-search Tick()
+    streaming) - visual-only, explicitly NO collision (the terrain mesh
+    underneath already carries real drivable collision; a second BlockAll
+    plane a few cm away risks physics-settle ambiguity for no benefit on a
+    purely cosmetic layer). Wired into `AODGameMode::EnsureParkingManager()`
+    exactly like `EnsureWaterManager()` - runtime-spawned, tile prefix
+    derived from the level's own `AODRoadManager::RoadTilePrefix`, no level
+    rebuild needed.
+  - **Material:** `unreal/apply_parking_material.py` builds `M_Parking`,
+    reusing the ALREADY-IMPORTED Asphalt032 CC0 set (`unreal/
+    apply_road_material.py`'s own "patchier" residential/service road
+    variant - no new texture download) sampled at the pipeline-baked
+    world-position UV (`UV_TILE_M`=8 m), plus a faint (`STRIPE_OPACITY`=
+    0.18) periodic stripe overlay for a hint of parking-line texture - an
+    honestly-documented simplification (fixed world-axis period, not each
+    lot's own row orientation, since the baked UV carries no per-lot
+    heading the way ODR3 road chunks carry real lane data).
+  - **Verified** (`-odgo=5 -odhour=15 -odspawnx/-odspawny` at real lot
+    centroids computed from `osm_parking.json` + `road_stations.json`'s
+    origin, since none of Frisco/Breckenridge/Silverthorne's `-odpick`
+    default spawns happened to land on a lot): East Main Street/Frisco
+    (`parking_r1_frisco.png`) - a paved patch directly beside the road,
+    clearly distinct in tone/texture from the grass verge and adjacent to
+    real facade-textured buildings, no floating/buried geometry, no z-fight
+    flicker against the road pavement it sits beside. Lincoln Avenue/
+    Breckenridge (`parking_r1_breck.png`) - a large lot flush against a
+    building's own footprint, asphalt texture reads clearly (lighter/
+    sun-bleached tone - an honest note, not a blocking defect: Asphalt032 +
+    the tint constant reads more "aged/light" than a fresh dark-asphalt
+    look; tunable if Taylor's live drive-test flags it). Rainbow Drive/
+    Silverthorne (`parking_r1_silverthorne.png`) - a large lot merging
+    cleanly up to the road's own pavement with commercial buildings visible
+    across the street, no visible seam artifact between lot and road despite
+    both being similarly-toned pavement. `ODParkingManager` log lines
+    (`tiles=7 lots=50-131`) confirm real streaming, no generation-id
+    mismatches, only the expected "missing tile" warnings for the vast
+    majority of tiles with no lot data (same benign pattern every other
+    tile-streamed manager here has). One unrelated observation, NOT chased
+    this pass (no parking-collision code exists to have caused it): the car
+    tipped onto its side after the Breckenridge spawn's initial physics
+    settle - flagged for the next physics/spawn pass, not re-investigated
+    here since it's off this pass's own scope.
+
 ---
 
 ## Cross-cutting (release engineering)

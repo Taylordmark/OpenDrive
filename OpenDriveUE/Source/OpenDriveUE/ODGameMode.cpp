@@ -6,6 +6,7 @@
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
 #include "ODVehiclePawn.h"
+#include "ODParkingManager.h"
 #include "ODWaterManager.h"
 
 AODGameMode::AODGameMode()
@@ -19,6 +20,7 @@ void AODGameMode::BeginPlay()
 	Super::BeginPlay();
 	EnsureForestManager();
 	EnsureWaterManager();
+	EnsureParkingManager();
 	EnsureAtmosphereController();
 }
 
@@ -182,6 +184,58 @@ void AODGameMode::EnsureWaterManager()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODGameMode: spawned AODWaterManager for open-world area '%s' "
 		     "(WaterTilePrefix='%s')"), *Area, *Water->WaterTilePrefix);
+}
+
+void AODGameMode::EnsureParkingManager()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Same "already hand-placed, leave it alone" guard as EnsureWaterManager.
+	for (TActorIterator<AODParkingManager> It(World); It; ++It)
+	{
+		return;
+	}
+
+	// Same AODRoadManager-derived area-name convention as EnsureWaterManager
+	// above.
+	AODRoadManager* Road = nullptr;
+	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	{
+		Road = *It;
+		break;
+	}
+	if (!Road)
+	{
+		return;
+	}
+
+	FString Area = Road->RoadTilePrefix;
+	Area.RemoveFromStart(TEXT("road_"));
+	Area.RemoveFromEnd(TEXT("_test"));
+	if (Area.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
+			     "'%s' - skipping parking manager spawn"), *Road->RoadTilePrefix);
+		return;
+	}
+
+	// Plain SpawnActor is fine here - same reasoning as EnsureWaterManager's
+	// AODWaterManager spawn (BeginPlay only loads a fixed-path material, the
+	// tile prefix is only read later from Tick()'s streaming loop).
+	AODParkingManager* Parking = World->SpawnActor<AODParkingManager>();
+	if (!Parking)
+	{
+		return;
+	}
+	Parking->ParkingTilePrefix = FString::Printf(TEXT("parking_%s_test"), *Area);
+	UE_LOG(LogTemp, Display,
+		TEXT("ODGameMode: spawned AODParkingManager for open-world area '%s' "
+		     "(ParkingTilePrefix='%s')"), *Area, *Parking->ParkingTilePrefix);
 }
 
 void AODGameMode::EnsureAtmosphereController()
