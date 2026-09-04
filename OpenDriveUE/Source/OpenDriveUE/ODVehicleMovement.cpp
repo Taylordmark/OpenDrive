@@ -203,6 +203,20 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 		Vel.X = 0.0f;
 		Vel.Y = 0.0f;
 		Body->SetPhysicsLinearVelocity(Vel);
+
+		// 2026-09-03 fix ("tips over on flat pavement right after settle",
+		// Breckenridge/Lincoln Ave): this pin only ever killed horizontal
+		// TRANSLATION. A settle that releases with an uneven per-wheel spring
+		// load (curb edge, camber, or the ground-snap's off-asphalt fallback -
+		// see AODVehiclePawn::TrySnapToGround's timeout branch) puts a real
+		// net TORQUE on the body the instant physics goes live, and nothing
+		// here was damping that - the car could spin/roll right out from
+		// under itself before the first pedal input ever arrived, sliding in
+		// place (translation pinned) while rotating onto its roof. Angular
+		// velocity isn't load-bearing for anything while parked (the whole
+		// point is the car ISN'T moving yet), so zero it outright, same as
+		// the linear pin above.
+		Body->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 	}
 
 	// airborne attitude damping - see AirborneRollDampPerSec's comment. Only
@@ -318,6 +332,54 @@ void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
 			W.SpringLen =
 				FMath::FInterpConstantTo(W.SpringLen, RestLen, Dt, 80.0f);
 			W.FzSm += (0.0f - W.FzSm) * FMath::Min(Dt * 25.0f, 1.0f);
+		}
+	}
+}
+
+void UODVehicleMovement::PrimeSuspension()
+{
+	UPrimitiveComponent* Body = GetBody();
+	if (!Body || Wheels.IsEmpty())
+	{
+		return;
+	}
+
+	const FTransform Xf = Body->GetComponentTransform();
+	const FVector Up = Xf.GetUnitAxis(EAxis::Z);
+	const float RestLen = FMath::Max(RestLengthCm + RideHeightDelta, 5.0f);
+
+	FCollisionQueryParams Query(SCENE_QUERY_STAT(ODSuspensionPrime), true, GetOwner());
+	Query.bReturnPhysicalMaterial = true;
+
+	for (FODWheel& W : Wheels)
+	{
+		const FVector Start = Xf.TransformPosition(W.Attach);
+		FHitResult Hit;
+		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start,
+			Start - Up * (RestLen + W.Radius), ECC_Visibility, Query);
+		if (bHit)
+		{
+			// set the length directly - no ComprRate derived from this, so
+			// there's nothing here for a stale prior value to corrupt
+			W.SpringLen = FMath::Clamp(Hit.Distance - W.Radius, 0.0f, RestLen);
+			W.bInContact = true;
+			W.ContactPoint = Hit.ImpactPoint;
+			W.Surface = Hit.PhysMaterial;
+			// prime the smoothed load to the STATIC spring force this length
+			// implies, not 0 - starting FzSm at 0 would itself read as a
+			// momentary wheel-lift to anything sampling it before the first
+			// real TickSuspension tick smooths it back up
+			const float K = SpringRate * SpringRateScale;
+			const float CornerW = Body->GetMass() * 980.0f * 0.25f;
+			W.FzSm = FMath::Clamp(
+				K * (RestLen - W.SpringLen), 0.0f, 6.0f * CornerW);
+		}
+		else
+		{
+			W.SpringLen = RestLen;
+			W.bInContact = false;
+			W.Surface = nullptr;
+			W.FzSm = 0.0f;
 		}
 	}
 }

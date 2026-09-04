@@ -343,6 +343,14 @@ public:
 	}
 	float GetWheelSteerDeg(int32 i) const { return Wheels[i].SteerDeg; }
 	float GetWheelOmega(int32 i) const { return Wheels[i].Omega; }
+	/** Body-local XY of wheel i's strut attach point (Z deliberately omitted -
+	 *  callers doing a ground-level probe pair this with their own downward
+	 *  raycast at that world XY rather than trusting a pre-settle Z). Wheel
+	 *  order is FL,FR,RL,RR (see SetupWheels' comment). */
+	FVector2D GetWheelAttachXY(int32 i) const
+	{
+		return FVector2D(Wheels[i].Attach.X, Wheels[i].Attach.Y);
+	}
 
 	/** Nominal (unloaded) wheel-to-ground clearance below the body pivot, cm -
 	 *  RestLengthCm + RideHeightDelta (strut extension from the pivot) + wheel
@@ -369,6 +377,33 @@ public:
 	 *  DrivenCount is recomputed from those flags every tick, so flipping them
 	 *  is the whole change. Keeps wheel geometry + sim state intact. */
 	void SetDriveLayout(EODDriveLayout Layout);
+
+	/** Prime every wheel's SpringLen (and reset FzSm) from a fresh raycast at
+	 *  the body's CURRENT transform, without going through the normal
+	 *  ComprRate math. Call this once, immediately before
+	 *  Body->SetSimulatePhysics(true), while the pawn is still kinematic.
+	 *
+	 *  Why this exists: TickComponent early-outs whenever
+	 *  !Body->IsSimulatingPhysics(), so TickSuspension() never runs during the
+	 *  BeginPlay lift + ground-snap raycast wait + settle hold - every
+	 *  FODWheel::SpringLen sits frozen at its default construction value
+	 *  (20.0f) for the whole multi-second kinematic phase, no matter how far
+	 *  above/below that the wheel actually ends up. The instant physics goes
+	 *  live, TickSuspension's very first call computes
+	 *  ComprRate = (W.SpringLen - NewLen) / Dt using that stale 20.0f against
+	 *  the real first-hit distance - e.g. a 6cm real gap against a stale 20cm
+	 *  reads as the spring closing 14cm in a single ~16ms tick, an
+	 *  ~875 cm/s "velocity" that never existed. The damper term
+	 *  (C * ComprRate) turns that phantom velocity into a real force spike,
+	 *  and because each corner's true ground distance differs slightly, the
+	 *  four spikes land unevenly - enough net torque to flip the car before
+	 *  the first real tick even settles (reproduced at the Breckenridge
+	 *  Lincoln Ave spawn, where ground-snap's asphalt-search timeout means
+	 *  the release pose is least likely to already match true ground
+	 *  contact). Priming SpringLen to the real distance here makes that first
+	 *  tick's ComprRate ~0, same as if suspension had been ticking normally
+	 *  the whole time. */
+	void PrimeSuspension();
 
 private:
 	// (re)build the 4-wheel array for a wheelbase/track/radius + drive layout;

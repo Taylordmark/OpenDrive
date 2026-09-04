@@ -340,6 +340,14 @@ private:
 	static constexpr double SnapQuietSec = 0.75;
 	double LastHitchTime = 0.0;
 
+	// 2026-09-03: one-shot nearby-asphalt nudge, tried once a spawn point has
+	// spent a couple of seconds NOT finding PM_Asphalt directly below it (see
+	// TrySnapToGround's off-road search block for why this exists - the
+	// Breckenridge/Lincoln Ave spawn XY simply isn't above any road collision
+	// at all, off in space over a DynamicMeshComponent instead, so no amount
+	// of waiting out the 20s timeout was ever going to fix it).
+	bool bTriedOffRoadNudge = false;
+
 	// scripted-drive hooks (-odrev/-odlift/-odsteer/-odbrake), parsed at
 	// BeginPlay; -odthr=0.45 caps the scripted (and key) throttle for
 	// controlled tests

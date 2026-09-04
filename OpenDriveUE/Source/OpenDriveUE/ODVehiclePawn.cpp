@@ -512,6 +512,68 @@ void AODVehiclePawn::TrySnapToGround()
 	const double Now = GetWorld()->GetTimeSeconds();
 	const bool bTimedOut = (Now - SpawnTime) > GroundSnapTimeoutSec;
 
+	// One-shot nudge to nearby real pavement (2026-09-03 fix, "car tips over
+	// after Breckenridge Lincoln Ave settle"): the 20s timeout/fallback below
+	// exists for a slow-loading road tile that eventually resolves - it was
+	// never meant for a spawn XY that has NO road collision anywhere below it
+	// at all, which is what Lincoln Ave turned out to be (confirmed via
+	// -odtrace: the trace hit the same off-road DynamicMeshComponent, stable,
+	// for the entire 20s wait). Waiting longer never finds pavement that
+	// isn't there, and accepting whatever off-road surface IS there releases
+	// the car onto ground with no flatness guarantee - which is exactly what
+	// flipped it, even after leveling+priming the suspension for that surface
+	// (both correctly matched a genuinely bad contact patch instead of fixing
+	// it). Once 2s have passed without ever finding asphalt underneath - long
+	// enough that this isn't just a not-yet-streamed-in tile - search a small
+	// ring of nearby offsets for one that DOES hit real pavement directly,
+	// and re-center the spawn XY there before falling through to the normal
+	// wait/settle logic. Try only once so a genuinely isolated off-road spawn
+	// still degrades to the old timeout/fallback rather than searching
+	// forever.
+	if (!bOnRoad && !bTriedOffRoadNudge && (Now - SpawnTime) > 2.0)
+	{
+		bTriedOffRoadNudge = true;
+		bool bFoundNearbyRoad = false;
+		FVector2D BestXY(Loc.X, Loc.Y);
+		static const float Rings[] = { 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f };
+		for (int32 RingIdx = 0; RingIdx < UE_ARRAY_COUNT(Rings) && !bFoundNearbyRoad; ++RingIdx)
+		{
+			for (int32 Dir = 0; Dir < 8; ++Dir)
+			{
+				const float AngRad = FMath::DegreesToRadians(Dir * 45.0f);
+				const FVector2D Offset(FMath::Cos(AngRad) * Rings[RingIdx],
+					FMath::Sin(AngRad) * Rings[RingIdx]);
+				const FVector ProbeStart(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z + 10000.0f);
+				const FVector ProbeEnd(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z - 500000.0f);
+				FHitResult ProbeHit;
+				if (GetWorld()->LineTraceSingleByChannel(ProbeHit, ProbeStart, ProbeEnd,
+						ECC_Visibility, Params)
+					&& ProbeHit.PhysMaterial.IsValid()
+					&& ProbeHit.PhysMaterial->GetName().Contains(TEXT("Asphalt")))
+				{
+					BestXY = FVector2D(Loc.X + Offset.X, Loc.Y + Offset.Y);
+					bFoundNearbyRoad = true;
+					break;
+				}
+			}
+		}
+		if (bFoundNearbyRoad)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ODVehiclePawn: spawn (%.0f,%.0f) never found asphalt directly below "
+				     "after %.1fs - nudging to nearby pavement at (%.0f,%.0f)"),
+				Loc.X, Loc.Y, Now - SpawnTime, BestXY.X, BestXY.Y);
+			SetActorLocation(FVector(BestXY.X, BestXY.Y, Loc.Z),
+				false, nullptr, ETeleportType::TeleportPhysics);
+			return;   // re-run next tick from the nudged XY
+		}
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODVehiclePawn: spawn (%.0f,%.0f) never found asphalt directly below after "
+			     "%.1fs, and none found within an 80m ring search either - falling through to "
+			     "the normal %.1fs timeout"),
+			Loc.X, Loc.Y, Now - SpawnTime, GroundSnapTimeoutSec);
+	}
+
 	// periodic visibility into what we're actually hitting while waiting -
 	// without this there's no way to tell "correctly waiting on non-asphalt"
 	// from "finding nothing" from "some other silent failure"
@@ -624,6 +686,103 @@ void AODVehiclePawn::TrySnapToGround()
 				Now - LastHitchTime, SnapQuietSec);
 		}
 		return;
+	}
+
+	// Level the pose to the ground actually under all 4 wheels before handing
+	// off to physics (2026-09-03 fix, "car tips over on flat pavement right
+	// after settle" - reproduced at Breckenridge/Lincoln Ave). Everything
+	// above this point only ever sampled ONE point (the body's own pivot)
+	// and always released dead flat (0 pitch/roll). That single sample is a
+	// fine approximation on an ordinary road, but it can be nowhere near
+	// representative of what's under the four wheels on a curb edge, camber,
+	// or - worse - the off-asphalt fallback surface above (ground-snap timed
+	// out waiting for PM_Asphalt and settled for whatever it found instead,
+	// which is exactly what happened at the Lincoln Ave repro: the trace hit
+	// a DefaultPhysicalMaterial surface, not the road). Releasing flat onto
+	// an uneven contact patch loads two wheels hard and leaves two hanging,
+	// and that asymmetric spring force was enough to flip the car before the
+	// player ever touched a pedal. Re-cast straight down at each wheel's XY,
+	// fit a plane through the 4 hit points, and rotate/re-height the body to
+	// sit flush on that plane instead of assuming dead-flat.
+	if (Movement && Movement->NumWheels() == 4)
+	{
+		const FVector CenterLoc = GetActorLocation();
+		const FQuat FlatQuat = FRotator(0.0f, GetActorRotation().Yaw, 0.0f).Quaternion();
+
+		FVector WheelGroundPts[4];
+		bool bAllWheelsHit = true;
+		for (int32 i = 0; i < 4; ++i)
+		{
+			const FVector2D LocalXY = Movement->GetWheelAttachXY(i);
+			const FVector WorldXY = CenterLoc
+				+ FlatQuat.RotateVector(FVector(LocalXY.X, LocalXY.Y, 0.0f));
+			FHitResult WHit;
+			FCollisionQueryParams WParams;
+			WParams.AddIgnoredActor(this);
+			const bool bWHit = GetWorld()->LineTraceSingleByChannel(WHit,
+				FVector(WorldXY.X, WorldXY.Y, CenterLoc.Z + 2000.0f),
+				FVector(WorldXY.X, WorldXY.Y, CenterLoc.Z - 2000.0f),
+				ECC_Visibility, WParams);
+			if (bWHit)
+			{
+				WheelGroundPts[i] = WHit.ImpactPoint;
+			}
+			else
+			{
+				bAllWheelsHit = false;
+				break;
+			}
+		}
+
+		if (bAllWheelsHit)
+		{
+			// wheel order is FL,FR,RL,RR (ODVehicleMovement::SetupWheels)
+			const FVector FrontMid = (WheelGroundPts[0] + WheelGroundPts[1]) * 0.5f;
+			const FVector RearMid = (WheelGroundPts[2] + WheelGroundPts[3]) * 0.5f;
+			const FVector RightMid = (WheelGroundPts[1] + WheelGroundPts[3]) * 0.5f;
+			const FVector LeftMid = (WheelGroundPts[0] + WheelGroundPts[2]) * 0.5f;
+
+			const FVector FwdVec = (FrontMid - RearMid).GetSafeNormal();
+			const FVector RightVec = (RightMid - LeftMid).GetSafeNormal();
+			FVector UpVec = FVector::CrossProduct(RightVec, FwdVec).GetSafeNormal();
+			if (UpVec.Z < 0.0f)
+			{
+				UpVec = -UpVec;
+			}
+
+			// Never trust a near-vertical "ground" normal - that's a wall/curb
+			// FACE the corner raycasts grazed, not a drivable surface, and
+			// pitching the body to match it would be worse than the flat pose
+			// this is replacing. Only re-level within ~60 deg of upright.
+			if (!UpVec.ContainsNaN() && UpVec.Z > 0.5f)
+			{
+				const FQuat LevelQuat = FQuat::FindBetweenNormals(FVector::UpVector, UpVec) * FlatQuat;
+				const FVector PlaneCenter = (FrontMid + RearMid) * 0.5f;
+				SetActorLocation(
+					FVector(CenterLoc.X, CenterLoc.Y, PlaneCenter.Z + GroundClearanceCm),
+					false, nullptr, ETeleportType::TeleportPhysics);
+				SetActorRotation(LevelQuat.Rotator());
+			}
+		}
+	}
+
+	// Prime the suspension's per-wheel spring state from the FINAL pose above
+	// (leveled or not) before physics goes live. TickSuspension only ever
+	// runs while the body is already simulating physics, so every wheel's
+	// SpringLen has sat frozen at its default (20.0f, i.e. "no compression")
+	// for the whole kinematic lift+snap+settle sequence regardless of where
+	// the car actually ended up - the very first real tick after
+	// SetSimulatePhysics(true) would otherwise read that stale default
+	// against the true first-hit distance as a huge one-tick "spring
+	// velocity" and fire a real damper-force spike from it. Four corners
+	// rarely have identical true gaps, so those spikes land unevenly and
+	// that was enough net torque to flip the car before the settle pose
+	// (leveled or the plain-flat fallback) ever got a fair test - this is
+	// what was still tipping the car at the Breckenridge Lincoln Ave repro
+	// even after the leveling pass above started producing a correct plane.
+	if (Movement)
+	{
+		Movement->PrimeSuspension();
 	}
 
 	Body->SetSimulatePhysics(true);

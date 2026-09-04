@@ -2725,6 +2725,66 @@ live drive-test without a tuning pass first.
     settle - flagged for the next physics/spawn pass, not re-investigated
     here since it's off this pass's own scope.
 
+    **RESOLVED (2026-09-03, Breckenridge spawn tip-over):** root cause,
+    confirmed via `-odtrace` on the exact repro spawn (Lincoln Avenue,
+    `X=1126119 Y=471996`), was two independent bugs stacking:
+    1. That spawn XY has NO road collision anywhere below it at all - it
+       sits over open ground where only a `DynamicMeshComponent` (terrain,
+       tagged `DefaultPhysicalMaterial`) exists, so `TrySnapToGround()`'s
+       20s wait for `PM_Asphalt` always timed out and fell back to
+       whatever's below, per-tick, stably reproducing the same off-road
+       hit every time (`ground-snap timed out after 20.0s ... settling for
+       whatever's below (DefaultPhysicalMaterial)`). Likely fallout from
+       the same-day lake-depression terrain work nearby (`1d2677f`,
+       `27e730f`) reshaping ground under/near this road point.
+    2. Separately, `TickComponent`'s suspension tick early-outs whenever
+       `!Body->IsSimulatingPhysics()`, so every wheel's `SpringLen` sits
+       frozen at its 20.0f default for the entire kinematic
+       lift+snap+settle sequence, no matter the real gap. The instant
+       physics went live, `TickSuspension`'s first call computed a
+       `ComprRate` from that stale default against the real first-hit
+       distance - a phantom multi-hundred-cm/s "spring velocity" - and the
+       damper term turned it into an uneven, per-corner force spike large
+       enough to flip the car even on ordinary pavement.
+       Confirmed via trace: `susp=20.0` (fully "uncompressed" per the
+       stale default) on the very first post-release tick, snapping open
+       over the next few ticks - a violent, asymmetric release, not a
+       gentle settle.
+
+    Fix (`ODVehiclePawn.cpp`, `ODVehicleMovement.cpp/.h`):
+    - `TrySnapToGround()` now tries a one-shot nearby-pavement nudge once
+      2s have passed with no direct asphalt hit: searches a ring of
+      offsets (5m-80m, 8 directions) for one that hits `PM_Asphalt`
+      directly, and re-centers the spawn XY there before falling through
+      to the old timeout/fallback. At Breckenridge this found real
+      pavement 40m away and resolved ground-snap in 2.0s instead of 20s
+      onto bad terrain.
+    - New `UODVehicleMovement::PrimeSuspension()`, called once right
+      before `SetSimulatePhysics(true)`: raycasts each wheel at the final
+      release pose and sets `SpringLen`/`FzSm` directly from that hit
+      (no `ComprRate` involved), so the first real physics tick starts
+      from equilibrium instead of computing a bogus compression spike.
+    - `TrySnapToGround()` also levels the release pose to a plane fit
+      through all 4 wheels' ground hits (previously always released
+      perfectly flat, sampled from one point only), and park-hold
+      (`UODVehicleMovement::TickComponent`) now zeroes angular velocity
+      alongside the existing linear-velocity pin, so a settle that still
+      lands with a torque doesn't spin the car before the first pedal
+      input. Both are defense-in-depth - the nudge fix is what actually
+      resolved the reported bug; these two prevent a *similar* class of
+      issue (isolated uneven contact, not "no road at all") from doing
+      the same thing elsewhere.
+    - Physics contract (mass/axle geometry in `cars_manifest.json`)
+      untouched.
+
+    Verified with post-fix `-odtrace` renders at all three towns, car
+    upright and stationary ~20-38s after settle in every case: Breckenridge
+    (deterministic repro coords, nudge fired and relocated 40m to real
+    pavement), Frisco and Dillon (both resolved onto `PM_Asphalt` directly,
+    no nudge needed - confirming this wasn't a general suspension-priming
+    regression, just the one bad spawn XY plus the latent stale-SpringLen
+    bug it exposed).
+
 ---
 
 ## Cross-cutting (release engineering)
