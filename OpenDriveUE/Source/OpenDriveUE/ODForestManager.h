@@ -706,6 +706,13 @@ private:
 	mutable double LastGroundSummaryLogTime = 0.0;
 	mutable int32 PhysMatRejectCount = 0;
 	mutable int32 GroundAcceptCount = 0;
+	// Diagnostic-only (2026-09-03, "nearly all vegetation vanished" regression
+	// investigation): how many scatter candidates GroundAt() rejected via
+	// IsInsideLake() specifically, folded into the same throttled summary line
+	// - lets a headless run directly show whether water exclusion is the
+	// dominant rejection source (vs. road-station exclusion/physmat) instead
+	// of only being inferable from a total absence of downstream log activity.
+	mutable int32 WaterExclusionRejectCount = 0;
 
 	// Throttled visibility into the elevation-grid runtime-correction step
 	// (2026-08-27, levitating-vegetation fix - see RaycastRuntimeGround's

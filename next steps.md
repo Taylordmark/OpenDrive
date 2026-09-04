@@ -2451,11 +2451,66 @@ What landed, in order:
     in it. Screenshots: `dillon_r3_dam.png`, `dillon_r3_shore.png`,
     `dillon_r3_waterlevel.png`.
 
+  **RESOLVED (2026-09-03, fourth pass — shore-bank softening +
+  vegetation-regression re-diagnosis):** two items carried over from the
+  third pass, one real fix and one false alarm caught before any code
+  changed.
+  - **Defect 2, shore cliff-lip (real, fixed):** `WATER_SHORE_BLEND_M`
+    (`pipeline/build_terrain_mesh_tiles.py`) widened 12 m → 35 m and its
+    exterior falloff switched from linear to smoothstep, so the raw-DEM-to-
+    shore-target transition reads as a beach-like slope over a much longer,
+    gentler run instead of snapping to the shore-target height in 12 m.
+    Rebaked with the existing `--lakes-only` mode (368/1221 tiles touch a
+    lake; ~8 min vs. the full ~55 min summit_county bake). Verified in-game
+    at the Swan Mountain Rd/Keystone vantage post-rebake
+    (`dillon_r4_shore.png`): the shoreline now reads as a smooth graded bank
+    into the water, no hard dark band; a companion close-up crop
+    (`dillon_r4_waterlevel.png`) confirms the same at the water's edge
+    itself.
+  - **"Nearly all vegetation vanished" report — re-investigated, found to be
+    a headless-tooling artifact, NOT a code regression:** commit `48adb7a`
+    (wiring `WaterTilePrefix`/`RoadStationFilePrefix` onto the baked
+    `ODForestManager`, closing the Defect-1 gap from the third pass above)
+    was suspected of a new regression: dense forest allegedly gone at both
+    Swan Mountain Rd and Dillon Dam Rd. Root-caused instead to the QA
+    render commands themselves (used throughout this whole `next steps.md`
+    §7.15 history, this entry's own vantage renders included) missing
+    `-odgo=<seconds>`: `-odspawnx`/`-odspawny` are only ever applied inside
+    `AODMainMenu::StartAt()`, and `StartAt()` only auto-runs off the
+    `-odgo=` (or `-odpick=`) core-ticker — without either flag the spawn
+    override is silently ignored and the pawn sits at the menu/PlayerStart
+    default instead, which is what made forest look totally absent (wrong
+    location, not zero trees). Corrected renders (`-odgo=5 -odshot=35`,
+    confirmed via the `"ODMainMenu: odspawn override -> (...)"` log line
+    that was never present in the broken runs) show substantial,
+    biome-appropriate forest at every vantage: Swan Mountain Rd (5,747
+    instances), Dillon Dam Rd (9,927 instances), and a fresh inland control
+    at Coyne Valley Rd/Breckenridge (15,528 instances, `dillon_r4_
+    inland.png`) — none anywhere near zero. Also chased and definitively
+    disproved a second suspect along the way: a 1918-vertex/7 km×6.7 km
+    Dillon Reservoir boundary ring that an earlier in-code comment had
+    called a "confirmed" corrupt self-intersecting splice from the ring-walk
+    algorithm — shapely (`Polygon(...).is_valid` → `True`) and a shoelace
+    area check (13.28 km², matching Dillon's real ~13.08 km² surface area)
+    both confirm it's the real, valid, whole-lake outline (this module
+    bakes each lake's full polygon into every tile it touches, not a
+    per-tile clip, so a large ring size alone isn't evidence of a bug); the
+    misleading comments in both `ODForestManager.cpp::LoadWaterLakes()` and
+    `build_terrain_mesh_tiles.py::_extract_boundary_rings()` were corrected
+    to reflect this. The non-manifold-junction guard and
+    `LakeRingMaxExtentCm`/`LAKE_RING_MAX_EXTENT_CM` (30 km) extent cap added
+    while chasing this stay in place as legitimate defense-in-depth
+    (confirmed a no-op on current data — 0 rings ever flagged corrupt) in
+    case a real river-confluence non-manifold bake shows up later; a new
+    throttled `WaterExclusionRejectCount` counter was also added to
+    `ODForestManager`'s existing 5 s scatter-candidate summary log so a
+    future report like this one can be checked directly against
+    water-exclusion rejection rate instead of only being inferable from a
+    total absence of downstream log activity. Screenshots:
+    `dillon_r4_dam.png`, `dillon_r4_shore.png`, `dillon_r4_waterlevel.png`,
+    `dillon_r4_inland.png`.
+
 **Known leftovers (not addressed this pass):**
-- Residual hard-edged dark shore-bank band at the Swan Mountain Rd/Keystone
-  vantage (see the third-pass water CORRECTION above) — cosmetic, not
-  blocking; likely needs either a softer/wider `WATER_SHORE_BLEND_M` falloff
-  or an ambient-occlusion/lighting tweak on the depressed bank geometry.
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.
 - `-odrev` scripted drives still veer off-road at some towns (pre-existing,

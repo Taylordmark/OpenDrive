@@ -312,7 +312,21 @@ WATER_BED_FALLOFF_M = 40.0      # shoreline->interior depth ramp distance
 # over WATER_SHORE_BLEND_M outward from the ring, so the two meet with zero
 # discontinuity and the water plane can be seen lapping the bank instead of
 # stopping at a cliff edge.
-WATER_SHORE_BLEND_M = 12.0      # exterior rim->shore blend distance
+#
+# 2026-09-03 follow-up (reviewer defect: a hard-edged dark band/cliff lip
+# still visible right at the shoreline in dillon_r3_shore.png/
+# dillon_r3_waterlevel.png): 12 m was too short a run for a 2 m
+# (WATER_BED_MIN_DEPTH_M) drop - a ~17% average grade, and worse, the
+# original LINEAR blend_t ramp put its full slope right at dist_m==0 (a
+# linear ramp's derivative doesn't ease in), so the exterior terrain was
+# steepest exactly AT the shoreline, which is precisely where the "cliff"
+# read as visible. Two changes below: widen the run so the same 2 m drop
+# reads as a gentle beach instead of a bank, and switch the ramp from
+# linear to a smoothstep (3t^2-2t^3, see apply_water_depression()) - zero
+# slope at BOTH ends means the terrain eases into the drop gently right at
+# the shoreline and eases back to natural grade at the outer edge, instead
+# of kinking at either seam.
+WATER_SHORE_BLEND_M = 35.0      # exterior rim->shore blend distance
 
 
 def _read_lake_bin_tile(path):
@@ -344,7 +358,31 @@ def _extract_boundary_rings(tris):
     indices. Works for any flat triangulated disk regardless of
     ear-clip/fan-fallback method or how many disjoint outer loops a
     multipolygon-relation lake (e.g. Dillon Reservoir's 4 outer segments)
-    produced."""
+    produced.
+
+    Non-manifold-junction guard (2026-09-03, mirrors AODForestManager::
+    LoadWaterLakes()'s identical fix - see its comment for the full
+    writeup, including a correction): a stream/river confluence baked into
+    the same lake mesh entry puts a vertex on 3+ boundary edges, which the
+    greedy "first unvisited neighbor" walk below can't correctly resolve
+    into separate loops - it could in principle silently splice two
+    unrelated shoreline loops into one huge self-intersecting "ring". A
+    1918-vertex ring spanning 7 km x 6.7 km was found in Summit County's
+    data and initially suspected to be exactly this, but was re-verified
+    with shapely (Polygon(...).is_valid == True) and by shoelace area
+    (13.28 km², matching real Dillon Reservoir's ~13.08 km² surface area):
+    it is the real, valid, single reservoir outline, baked large because
+    this module bakes each lake's FULL unclipped polygon into every 2 km
+    tile it touches rather than clipping per-tile - not an artifact of this
+    bug. On today's data this guard is confirmed to be a no-op (0 rings
+    ever flagged corrupt); it is kept as defense-in-depth against a genuine
+    future river-confluence/non-manifold bake. A genuine simple closed loop
+    never revisits a vertex before closing back to its own start, so any
+    walk that does is discarded as corrupt rather than kept - under-
+    excluding a few meters of shoreline near a confluence beats fabricating
+    a multi-km phantom lake that (via load_lake_beds()'s downstream
+    point-in-polygon test) would carve a bogus depression across a huge
+    swath of unrelated terrain."""
     edge_count = defaultdict(int)
     for a, b, c in tris:
         for u, v in ((a, b), (b, c), (c, a)):
@@ -356,21 +394,34 @@ def _extract_boundary_rings(tris):
         adj[v].append(u)
     visited = set()
     rings = []
+    n_rejected = 0
     for u, v in boundary:
         if (u, v) in visited:
             continue
         ring = [u]
+        in_ring = {u}
+        corrupt = False
         prev, cur = u, v
         visited.add((u, v)); visited.add((v, u))
         while cur != ring[0]:
+            if cur in in_ring:
+                corrupt = True
+                break
             ring.append(cur)
+            in_ring.add(cur)
             nxt = next((n for n in adj[cur] if n != prev and (cur, n) not in visited), None)
             if nxt is None:
                 break
             visited.add((cur, nxt)); visited.add((nxt, cur))
             prev, cur = cur, nxt
+        if corrupt:
+            n_rejected += 1
+            continue
         if cur == ring[0] and len(ring) >= 3:
             rings.append(ring)
+    if n_rejected:
+        print(f"  _extract_boundary_rings: discarded {n_rejected} corrupt ring(s) "
+              f"(river-confluence junction artifacts, not real shorelines)")
     return rings
 
 
@@ -390,13 +441,30 @@ def load_lake_beds():
                 continue
             for ring_idx in _extract_boundary_rings(tris):
                 ring_xy = verts[ring_idx][:, :2]
+                bbox = (float(ring_xy[:, 0].min()), float(ring_xy[:, 0].max()),
+                        float(ring_xy[:, 1].min()), float(ring_xy[:, 1].max()))
+                # Defense-in-depth sanity cap, mirrors AODForestManager::
+                # LoadWaterLakes()'s LakeRingMaxExtentCm - measured live (2026-09-03):
+                # Dillon Reservoir's own real, valid boundary ring spans up to ~7 km
+                # on its long axis (each lake's full unclipped polygon is baked into
+                # every 2 km tile it touches, not clipped per-tile), so this cap needs
+                # real headroom above that, not a tight guess. 30 km is generous for
+                # any single lake this project will plausibly bake, while still
+                # catching a genuinely pathological artifact.
+                LAKE_RING_MAX_EXTENT_CM = 3_000_000.0   # 30 km
+                if (bbox[1] - bbox[0] > LAKE_RING_MAX_EXTENT_CM
+                        or bbox[3] - bbox[2] > LAKE_RING_MAX_EXTENT_CM):
+                    print(f"  load_lake_beds: rejected an oversized lake ring "
+                          f"({len(ring_idx)} verts, {(bbox[1]-bbox[0])/100:.0f} x "
+                          f"{(bbox[3]-bbox[2])/100:.0f} m bbox) from {path.name} - "
+                          f"likely a river-confluence junction artifact")
+                    continue
                 z_cm = float(verts[ring_idx[0], 2])
                 lakes.append({
                     "ring_x": ring_xy[:, 0].astype(np.float64),
                     "ring_y": ring_xy[:, 1].astype(np.float64),
                     "z_cm": z_cm,
-                    "bbox": (float(ring_xy[:, 0].min()), float(ring_xy[:, 0].max()),
-                             float(ring_xy[:, 1].min()), float(ring_xy[:, 1].max())),
+                    "bbox": bbox,
                 })
     if lakes:
         print(f"  loaded {len(lakes)} lake bed(s) from {len(paths)} water tile(s) for "
@@ -494,7 +562,13 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
             continue
         out_idx = out_idx[near]
         dist_m = _dist_to_ring(flat_x[out_idx], flat_y[out_idx], lake["ring_x"], lake["ring_y"]) / 100.0
-        blend_t = np.clip(1.0 - dist_m / WATER_SHORE_BLEND_M, 0.0, 1.0)  # 1 at ring, 0 at blend edge
+        lin_t = np.clip(1.0 - dist_m / WATER_SHORE_BLEND_M, 0.0, 1.0)  # 1 at ring, 0 at blend edge
+        # Smoothstep, not linear (2026-09-03 shore-cliff fix - see
+        # WATER_SHORE_BLEND_M's comment): zero slope at both dist_m==0 (the
+        # shoreline) and dist_m==WATER_SHORE_BLEND_M (natural grade) instead
+        # of a constant-slope ramp that kinks the terrain normal at both
+        # seams and reads steepest exactly at the waterline.
+        blend_t = lin_t * lin_t * (3.0 - 2.0 * lin_t)
         rim_idx = out_idx[blend_t > 0.0]
         if len(rim_idx) == 0:
             continue

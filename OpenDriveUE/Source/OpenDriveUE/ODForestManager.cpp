@@ -622,12 +622,66 @@ bool AODForestManager::LoadWaterLakes()
 				}
 				TArray<uint32> RingIdx;
 				RingIdx.Add(StartEdge.Key);
+				// Non-manifold-junction guard (2026-09-03, added while investigating
+				// a "nearly all vegetation vanished" report): a real lake shoreline's
+				// boundary graph is a disjoint union of simple closed loops (each
+				// vertex touched by exactly 2 boundary edges), but a stream/river
+				// confluence baked into the SAME lake mesh entry (two tributaries
+				// meeting a main channel) puts a vertex on 3+ boundary edges - the
+				// water bake's triangle soup is a valid single connected mesh there,
+				// but its boundary is NOT a simple loop through that vertex. The
+				// greedy "first unvisited neighbor" walk below has no way to know
+				// which of the 3+ choices is geometrically correct, so at a junction
+				// it could in principle silently splice two unrelated shoreline loops
+				// together into one gigantic self-intersecting ring, which would make
+				// IsInsideLake()'s even-odd point-in-polygon test return "inside" for
+				// large, essentially arbitrary swaths of terrain far from any real
+				// water.
+				//
+				// IMPORTANT CORRECTION (2026-09-03, same investigation): the
+				// suspicious-looking 1918-vertex/7 km x 6.7 km ring found in Summit
+				// County's data is NOT this bug - re-verified offline with shapely
+				// (Polygon(...).is_valid == True) and by shoelace area (13.28 km²,
+				// matching real Dillon Reservoir's actual ~13.08 km² surface area):
+				// it is the real, single, non-self-intersecting reservoir outline,
+				// baked large because build_water_tiles.py bakes each lake's FULL
+				// unclipped polygon into every 2 km tile it touches rather than
+				// clipping per-tile. The actual vegetation-loss report turned out to
+				// be a headless-verification artifact (the QA command line was
+				// missing -odgo=, so -odspawnx/-odspawny never took effect and every
+				// "proof" screenshot was silently taken at the menu/world-origin
+				// spawn instead of the intended vantage - see AODMainMenu::StartAt).
+				// With a corrected command line, water/road exclusion near Dillon
+				// Reservoir behaves exactly as intended (dense forest right up to
+				// the exclusion band, 5,000-15,000+ scatter instances per test
+				// vantage). This guard is kept anyway as legitimate defense-in-depth
+				// against a genuine future river-confluence/non-manifold bake - on
+				// today's data it is confirmed to be a no-op (0 rings ever flagged
+				// corrupt). Detect a spliced ring the same way any simple-polygon
+				// walk can: a genuine closed loop never revisits a vertex before
+				// closing back to its own start. InRing tracks vertices already
+				// placed in THIS ring attempt; if the walk reaches one again (other
+				// than the legitimate close back to RingIdx[0]), the walk has crossed
+				// back through a junction and the whole ring is discarded as corrupt
+				// - trying to keep just the "good" prefix would still leave an
+				// arbitrary, unverified partial loop, so the safe choice is to drop
+				// it entirely (better to under-exclude a few meters of real shoreline
+				// near a confluence than to fabricate a multi-km phantom lake).
+				TSet<uint32> InRing;
+				InRing.Add(StartEdge.Key);
+				bool bCorruptJunction = false;
 				uint32 Prev = StartEdge.Key, CurV = StartEdge.Value;
 				VisitedDirected.Add(DirKey(StartEdge.Key, StartEdge.Value));
 				VisitedDirected.Add(DirKey(StartEdge.Value, StartEdge.Key));
 				while (CurV != RingIdx[0])
 				{
+					if (InRing.Contains(CurV))
+					{
+						bCorruptJunction = true;
+						break;
+					}
 					RingIdx.Add(CurV);
+					InRing.Add(CurV);
 					const TArray<uint32>* Neighbors = Adj.Find(CurV);
 					uint32 Next = 0;
 					bool bFound = false;
@@ -652,21 +706,49 @@ bool AODForestManager::LoadWaterLakes()
 					Prev = CurV;
 					CurV = Next;
 				}
-				if (CurV == RingIdx[0] && RingIdx.Num() >= 3)
+				// Defense-in-depth sanity cap alongside the junction guard above -
+				// measured live (2026-09-03): Dillon Reservoir's own real, VALID
+				// (non-self-intersecting - the InRing guard above passes it cleanly)
+				// boundary ring spans up to ~7 km on its long axis, since
+				// build_water_tiles.py bakes each lake's FULL unclipped polygon into
+				// every 2 km tile it touches rather than clipping per-tile - so this
+				// cap must clear that with real headroom, not the ~3 km a quick
+				// eyeball of the reservoir's shorter axis would suggest (that number
+				// was wrong and nearly caused this exact cap to reject the real lake).
+				// 30 km is generous for any single lake this project will plausibly
+				// ever bake, while still catching a genuinely pathological artifact
+				// spanning a meaningful fraction of the whole map.
+				static constexpr double LakeRingMaxExtentCm = 3000000.0;   // 30 km
+				if (!bCorruptJunction && CurV == RingIdx[0] && RingIdx.Num() >= 3)
 				{
-					FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
-					LR.Ring.Reserve(RingIdx.Num());
-					LR.MinX = LR.MinY = TNumericLimits<double>::Max();
-					LR.MaxX = LR.MaxY = TNumericLimits<double>::Lowest();
+					double MinX = TNumericLimits<double>::Max(), MaxX = TNumericLimits<double>::Lowest();
+					double MinY = TNumericLimits<double>::Max(), MaxY = TNumericLimits<double>::Lowest();
 					for (uint32 Idx : RingIdx)
 					{
 						const float X = ReadF32LE(VertsBase + (int64)Idx * 12 + 0);
 						const float Y = ReadF32LE(VertsBase + (int64)Idx * 12 + 4);
-						LR.Ring.Add(FVector2D(X, Y));
-						LR.MinX = FMath::Min(LR.MinX, (double)X);
-						LR.MaxX = FMath::Max(LR.MaxX, (double)X);
-						LR.MinY = FMath::Min(LR.MinY, (double)Y);
-						LR.MaxY = FMath::Max(LR.MaxY, (double)Y);
+						MinX = FMath::Min(MinX, (double)X); MaxX = FMath::Max(MaxX, (double)X);
+						MinY = FMath::Min(MinY, (double)Y); MaxY = FMath::Max(MaxY, (double)Y);
+					}
+					if (MaxX - MinX > LakeRingMaxExtentCm || MaxY - MinY > LakeRingMaxExtentCm)
+					{
+						UE_LOG(LogTemp, Warning,
+							TEXT("ODForestManager: rejected an oversized lake boundary ring "
+							     "(%d verts, %.0f x %.0f m bbox) from %s - likely a river-"
+							     "confluence junction artifact, not a real shoreline"),
+							RingIdx.Num(), (MaxX - MinX) / 100.0, (MaxY - MinY) / 100.0, *FileName);
+					}
+					else
+					{
+						FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
+						LR.Ring.Reserve(RingIdx.Num());
+						LR.MinX = MinX; LR.MaxX = MaxX; LR.MinY = MinY; LR.MaxY = MaxY;
+						for (uint32 Idx : RingIdx)
+						{
+							const float X = ReadF32LE(VertsBase + (int64)Idx * 12 + 0);
+							const float Y = ReadF32LE(VertsBase + (int64)Idx * 12 + 4);
+							LR.Ring.Add(FVector2D(X, Y));
+						}
 					}
 				}
 			}
@@ -1114,6 +1196,8 @@ bool AODForestManager::GroundAt(double WorldX, double WorldY,
 	// WaterTilePrefix's header comment.
 	if (bUseWaterExclusion && IsInsideLake(WorldX, WorldY))
 	{
+		++WaterExclusionRejectCount;
+		MaybeLogGroundSummary();
 		return false;
 	}
 	// Open-world/streamed-terrain path (2026-07-20): fully data-driven, no physics
@@ -1317,13 +1401,15 @@ void AODForestManager::MaybeLogGroundSummary() const
 		UE_LOG(LogTemp, Display,
 			TEXT("ODForestManager: scatter candidate summary (last 5s) - accepted=%d, "
 			     "rejected by physmat=%d, rejected by station exclusion=%d "
-			     "(of which junction-cluster widened-radius=%d)"),
+			     "(of which junction-cluster widened-radius=%d), rejected by water "
+			     "exclusion=%d"),
 			GroundAcceptCount, PhysMatRejectCount, RoadExclusionRejectCount,
-			JunctionClusterRejectCount);
+			JunctionClusterRejectCount, WaterExclusionRejectCount);
 		GroundAcceptCount = 0;
 		PhysMatRejectCount = 0;
 		RoadExclusionRejectCount = 0;
 		JunctionClusterRejectCount = 0;
+		WaterExclusionRejectCount = 0;
 	}
 }
 
