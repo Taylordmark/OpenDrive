@@ -2984,3 +2984,53 @@ was found.
   spawn - scripted-drive path unaffected by the fix.
 
 Committed locally only (`ODVehicleMovement.cpp`); not pushed.
+
+**Regression fix: wheels visibly spin while parked (2026-09-03/04, §7.15
+follow-up, `ODVehicleMovement.cpp`):** user-reported after `b3f3cf0`
+(the `Fx`/`Fy`-zeroing fix above) - car sits still but its wheels visibly
+rotate with zero input. Mechanism confirmed headless: `TickDriveline`
+computes `WheelTq` from the coupled clutch torque
+(`NetTq = DriveTq - (CoupledRpm > IdleRpm ? BrakeTq : 0)`) unconditionally
+- it doesn't check `bParkHold` - and near-idle standstill still carries a
+partially-coupled clutch (traces show rpm~900, `coupled=` in the low
+hundreds), so `W.DriveNm` stays nonzero every tick even while parked. In
+`TickTires`' wheel-spin integration
+(`W.Omega += (W.DriveNm - ReactionNm) / EffInertia * Dt`), `ReactionNm` is
+derived from `Fx`, which `b3f3cf0` now forces to `0.0f` during park-hold -
+so the one thing that used to react against `DriveNm` and hold the wheel's
+spin-rate near equilibrium was removed, leaving `DriveNm` to integrate
+`W.Omega` upward unopposed. The brake pass right below
+(`EffBrakeNm = W.BrakeNm * AbsFactor[i]`, which does include
+`bParkHold`'s forced `W.MaxBrakeNm`) only trims a fixed
+`EffBrakeNm/EffInertia*Dt` off `|W.Omega|` per tick rather than clamping
+it outright, so it isn't guaranteed to outrun a steady `DriveNm` feed -
+the net result was a slow, steady spin-up read as "wheels spinning while
+parked." `ODVehiclePawn.cpp`'s visual wheel-mesh rotation reads
+`Movement->GetWheelOmega(i)`, which is `Wheels[i].Omega` directly, so the
+spin was not cosmetic-only drift - it was the same state driving the
+physics.
+
+**Fix:** in `TickTires`, `W.Omega`'s drive/reaction integration is now
+gated on `bParkHold`: while parked, `W.Omega` is set to `0.0f` outright
+instead of integrating `(DriveNm - ReactionNm)/EffInertia*Dt` - a parked
+wheel is physically locked, so it's pinned rather than clamped down over
+multiple ticks. `Fx`/`Fy` stay zeroed during park-hold exactly as
+`b3f3cf0` left them (no reintroduction of that oscillation); only the
+wheel-spin state gained an explicit park case. Also added `omega=`
+(driven rear wheel) and `park=` fields to the existing 10 Hz
+`ODDrivetrain:` trace line for direct proof, since `slip=` alone only
+implies `Omega` indirectly.
+
+**Verified headless, both required cases:**
+- Zero input (`-odgo=5` only): 4993 trace samples from spawn through
+  t=530s, every one reading `omega=0.00 park=1 slip=0.00 spd=0`, `rpm=900`
+  (idle) with `coupled=0` - no wheel spin at any point, matching the
+  fix's intent exactly (`grep -c` for any nonzero `omega=`/`slip=` across
+  the full run: 0 matches).
+- Drive-off (`-odrev=5`): park-hold releases on first pedal input as
+  designed (`park=0`), throttle ramps to `thr=1.00`, `omega` climbs
+  normally (0.62 -> 5.34 rad/s by t=9.27s) alongside `spd` (0 -> 136 cm/s
+  in the same window) - the car drives off exactly as before, confirming
+  the park-hold pin doesn't leak into normal driving.
+
+Committed locally only (`ODVehicleMovement.cpp`); not pushed.

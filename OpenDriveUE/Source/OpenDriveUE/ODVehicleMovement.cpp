@@ -260,7 +260,7 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 				TEXT("ODDrivetrain: t=%.2f pos=(%.0f,%.0f,%.0f) rpm=%.0f gear=%d thr=%.2f cut=%d "
 				     "coupled=%.0f spd=%.0f slip=%.2f fz=%.0f aF=%.1f FyF=%.0f "
 				     "FyR=%.0f FxR=%.0f yaw=%.0f susp=%.1f gnd=%d surf=%s "
-				     "tc=%.2f esc=%.0f abs=%d relax=%d"),
+				     "tc=%.2f esc=%.0f abs=%d relax=%d omega=%.2f park=%d"),
 				Now, Body->GetComponentLocation().X, Body->GetComponentLocation().Y,
 				Body->GetComponentLocation().Z,
 				EngineRpm, Gear, EffectiveThrottle, bTraceCut ? 1 : 0,
@@ -269,7 +269,8 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 				Body->GetPhysicsAngularVelocityInDegrees().Z,
 				RestLengthCm + RideHeightDelta - Wheels[0].SpringLen, Grounded,
 				Surf ? *Surf->GetName() : TEXT("none"), TcScale, EscBrakeNm,
-				bAbsActiveThisTick ? 1 : 0, bRelaxedShift ? 1 : 0);
+				bAbsActiveThisTick ? 1 : 0, bRelaxedShift ? 1 : 0,
+				Wheels[2].Omega, bParkHold ? 1 : 0);
 		}
 	}
 }
@@ -901,7 +902,25 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			? EngineInertia * FMath::Square(CurTotalRatio) * Efficiency
 				/ DrivenCount
 			: 0.0f);
-		W.Omega += (W.DriveNm - ReactionNm) / EffInertia * Dt;
+		if (bParkHold)
+		{
+			// The tire-force clamp above already zeroes Fx/Fy while parked
+			// (no ground reaction to fight), but W.DriveNm still carries
+			// whatever torque the driveline has coupled through at idle
+			// (near-idle standstill traces show ~370-600 Nm coupled). With
+			// ReactionNm zeroed alongside Fx there was nothing left to
+			// balance that torque, so this same integration
+			// (W.Omega += DriveNm/EffInertia*Dt) spun the wheel up every
+			// tick; the brake pass below only trims a fixed Nm-scaled delta
+			// per tick, not a hard clamp, so it couldn't reliably outrun a
+			// steady DriveNm feed. Parked wheels are physically locked -
+			// pin Omega at zero directly instead of integrating anything.
+			W.Omega = 0.0f;
+		}
+		else
+		{
+			W.Omega += (W.DriveNm - ReactionNm) / EffInertia * Dt;
+		}
 
 		SlipRatios[i] = WheelSlipRatio;
 		EffInertias[i] = EffInertia;
