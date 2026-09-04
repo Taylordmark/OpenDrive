@@ -2585,6 +2585,44 @@ What landed, in order:
     `rocks_r1_alpine_check.png`/`_check2.png`, `rocks_r1_pass_check.png`,
     `rocks_r1_dam_crop.png`).
 
+  **CORRECTED (2026-09-03, same day, reviewer catch — Defect 1's "fix" was
+  placing invisible rocks, not visible boulders):** the first pass above
+  replaced the cube/sphere primitives with real boulder meshes and the
+  groundcover log confirmed instances were being placed (`rocks=20` etc.,
+  nonzero `RockDensityScale`), but none of the three required screenshots
+  showed a single visible rock, and one diagnostic render
+  (`rocks_r1_alpine_check.png`) was unusable (camera clipped inside another
+  car). Root cause: `pipeline/make_rock_meshes.py`'s `VARIANTS` table wrote
+  each boulder's `scale_xyz` as small dimensionless numbers (~0.4-1.55),
+  copying the *shape* convention from other procedural meshes without their
+  *unit* convention — every other procedural-mesh exporter in this pipeline
+  (`make_tree_meshes.py`'s `total_h = 1650` for a 16.5 m conifer, etc.)
+  writes raw OBJ units directly as UE centimeters, since the OBJ importer
+  here applies no meter-to-cm conversion. The boulders were therefore
+  imported at ~0.4-1.55 **cm** — pebble-sized — then further scaled down by
+  `RockMinScale`/`RockMaxScale` (0.35-2.2x) at placement time, landing
+  around 0.1-3 cm: invisible from driving distance, exactly matching what
+  the screenshots showed. Fixed by multiplying every variant's `scale_xyz`
+  by 100 (so the base mesh is genuinely ~50-310 cm across, matching the
+  size range the old 100 cm `/Engine/BasicShapes` primitives had before
+  their own `RockMinScale`/`RockMaxScale` multiply); regenerated the 4 OBJs
+  and re-ran `unreal/import_rock_meshes.py` (0 errors/warnings). Re-rendered
+  the Dillon Dam Rd vantage (`-odspawnx=733226 -odspawny=-807394 -odgo=5`):
+  the groundcover log now reads `tile (76,-86) ... rocks=20 scrub=8
+  rockDensity=0.29`, and the screenshot itself shows a dozen-plus dark,
+  irregularly-lobed rock silhouettes scattered across the roadside
+  hillside among the trees — rounded/oblong/faceted shapes, no cube or
+  sphere outlines anywhere. `rocks_r1_dam.png` was replaced with this
+  corrected render; a tight crop of the same frame was saved as
+  `rocks_r1_boulders_close.png` specifically to make individual rock
+  silhouettes unambiguous at full resolution. `rocks_r1_breck.png` and
+  `rocks_r1_valley.png` are unchanged from the first pass (both are in-town
+  vantages where `TownForestDampen()`-style building proximity keeps
+  ground-cover density low/zero, same as trees — not evidence of a mesh
+  problem, just not a useful rock vantage). Lesson generalized into the
+  script's own header comment so it isn't repeated by the next procedural
+  mesh added to this pipeline.
+
 **Known leftovers (not addressed this pass):**
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.

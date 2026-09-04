@@ -192,12 +192,26 @@ def save_obj(name, verts, uvs, faces):
     print(f"wrote {name}.obj ({len(faces)} tris)")
 
 
+# scale_xyz is in UE CENTIMETERS, same convention as pipeline/make_tree_
+# meshes.py's total_h/trunk_r0 (e.g. build_lodgepole_pine's total_h = 1650 =
+# 16.5 m) - the OBJ importer here applies NO meter->cm conversion, it takes
+# raw OBJ units as centimeters 1:1. The first version of this script wrote
+# scale_xyz as bare "meters-ish" numbers (~0.4-1.55), which imported as
+# ~0.4-1.55 CM boulders - pebble-sized, invisible from driving distance.
+# That's why the very first in-game verification of this fix (reviewer
+# screenshots, 2026-09-03) showed zero visible rocks even though the
+# groundcover log confirmed instances were being placed: they were being
+# placed, just at ~1/100th the intended size. Fixed by scaling every
+# variant's footprint up 100x so the base mesh is genuinely ~50-310 cm
+# across before AODForestManager's own RockMinScale/RockMaxScale
+# (0.35-2.2x) per-instance randomization on top - matching the size range
+# the old /Engine/BasicShapes primitives had at their native 100 cm scale.
 VARIANTS = [
-    # name, subdiv, noise_amp, seed, scale_xyz, flatten_z, flatten_squash
-    ("rock_boulder_a", 0, 0.10, 3.1, (0.55, 0.50, 0.42), -0.25, 0.22),
-    ("rock_boulder_b", 1, 0.14, 7.7, (1.00, 0.92, 0.80), -0.35, 0.18),
-    ("rock_boulder_c", 1, 0.20, 12.3, (1.55, 1.15, 0.95), -0.30, 0.16),
-    ("rock_boulder_d", 0, 0.08, 19.9, (1.35, 1.05, 0.42), -0.05, 0.30),
+    # name, subdiv, noise_amp, seed, scale_xyz (cm), flatten_z, flatten_squash
+    ("rock_boulder_a", 0, 0.10, 3.1, (55, 50, 42), -0.25, 0.22),
+    ("rock_boulder_b", 1, 0.14, 7.7, (100, 92, 80), -0.35, 0.18),
+    ("rock_boulder_c", 1, 0.20, 12.3, (155, 115, 95), -0.30, 0.16),
+    ("rock_boulder_d", 0, 0.08, 19.9, (135, 105, 42), -0.05, 0.30),
 ]
 
 
