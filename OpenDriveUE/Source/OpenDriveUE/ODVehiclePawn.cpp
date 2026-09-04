@@ -468,6 +468,29 @@ void AODVehiclePawn::BeginPlay()
 		SetVehicleByIndex(VehIdx);
 	}
 
+	// -odcar=<DisplayName>: same idea as -odvehidx= but by name, so a QA
+	// script doesn't need to know (or hardcode) the current alphabetical/
+	// Muscle-bubbled index of a given preset (2026-09-03, Super car
+	// in-game verification pass, §7.15). Case-insensitive exact match on
+	// UODVehicleDef::DisplayName; no-op (falls back to the default spawn
+	// car) if not found.
+	FString CarName;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odcar="), CarName))
+	{
+		const int32 CarIdx = Vehicles.IndexOfByPredicate(
+			[&CarName](const UODVehicleDef* Def)
+			{ return Def && Def->DisplayName.Equals(CarName, ESearchCase::IgnoreCase); });
+		if (Vehicles.IsValidIndex(CarIdx))
+		{
+			SetVehicleByIndex(CarIdx);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODVehiclePawn: -odcar=%s not found among %d vehicle def(s)"),
+				*CarName, Vehicles.Num());
+		}
+	}
+
 	// held kinematic until TrySnapToGround confirms real ground beneath us -
 	// see the declaration comment for why (PlayerStart's baked height can
 	// disagree with actual streamed terrain by tens of meters - measured as

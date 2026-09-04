@@ -2785,6 +2785,63 @@ live drive-test without a tuning pass first.
     regression, just the one bad spawn XY plus the latent stale-SpringLen
     bug it exposed).
 
+**Super car in-game verification (2026-09-03/04, §7.15 follow-up):** the
+Super preset's structural fix (`bc34028`: belt_z 53, continuous nose rise,
+arch radius under beltline) had never actually been looked at in-game since
+reimport. Verified now.
+
+- **QA tooling added:** `-odcar=<DisplayName>` launch arg on `AODVehiclePawn`
+  (`ODVehiclePawn.cpp`, `BeginPlay`) — case-insensitive lookup by
+  `UODVehicleDef::DisplayName` against the already-discovered `Vehicles`
+  array, then delegates to the existing `SetVehicleByIndex()`. Sits right
+  next to the pre-existing `-odvehidx=N` (index-based) flag; `-odcar=` means
+  a QA script doesn't need to know a preset's current alphabetical/
+  Muscle-bubbled index. No-ops with a `LogTemp` warning if the name isn't
+  found.
+- **Super, day (`-odhour=15`) and dusk (`-odhour=20`), Frisco spawn, default
+  chase cam:** body reads correctly as "supercar yellow" (palette cell 4,
+  `M_CarBody`), glass is genuinely translucent (not hollow-see-through -
+  the cabin_blocker panel is doing its job), wheels sit correctly in their
+  arches with no floating/sinking/gap at the tire-to-fender line, no
+  dune-buggy read, no z-fighting. Dusk shot: headlights and taillights read
+  correctly, no stray emissive.
+- **False alarm chased down and cleared:** the rear wing
+  (`rear_wing()`, `deck_x=-198, deck_z=68, stanchion_h=26`) looked
+  suspiciously body-colored (yellow-green) rather than the expected dark
+  `ACCENT`/plastic grey in the first zoomed screenshot crop — looked exactly
+  like the "slot mismatch after reimport" failure mode this pass was
+  watching for. Dumped `SM_Car_Super`'s actual material slots via a
+  throwaway headless Python script (`unreal.load_asset` +
+  `static_materials`): all 4 slots present on this mesh (body, plastic,
+  glass, lights) are correctly bound to `M_CarBody`/`M_CarPlastic`/
+  `M_CarGlass`/`M_CarLights`, and the source `T_CarPalette2.png`'s ACCENT
+  cell (16) is genuinely mid-grey `(110,110,116)`, not green. Pixel-sampled
+  the suspect screenshot region and its color ratios matched the shaded
+  *body* palette cell, not accent — it's the trunk deck surface in shadow,
+  with the wing itself (correctly colored, just thin and mostly self-
+  shadowed at this camera distance) barely legible from the rear 3/4 chase
+  cam. Not a material bug; a genuinely weak but not broken read. No pipeline
+  or import changes made for Super — verification only.
+- **Quick checks of the other three non-Muscle presets (day, same vantage),
+  triage only, not fixed this pass:**
+  - **JDM:** clean. Blue body, glass roof, flared arches visibly wrap the
+    wheels, no gap at the tire line.
+  - **Pickup:** wheels read as detached from the body — a visible gap of
+    daylight between tire and bodywork on all four corners, no arch flare
+    reaching the tire; comes across as oversized wheels bolted under a
+    narrow black tray rather than integrated fenders. Worth a look; possibly
+    the same family of arch-margin/track-width mismatch the Super's
+    Round-2/3 dune-buggy defect was.
+  - **Rally:** same symptom as Pickup — wheels sit outside the body
+    silhouette with a visible gap to the flared-arch bulge, most noticeable
+    at the rear corners.
+  - Both Pickup and Rally are candidates for the same arch-vs-track-width
+    audit that fixed Super; deliberately not touched in this pass (scope was
+    Super verification + light triage of the others).
+
+Screenshots: `super_check_day.png`, `super_check_dusk.png`, `others_JDM.png`,
+`others_Pickup.png`, `others_Rally.png` (scratchpad).
+
 ---
 
 ## Cross-cutting (release engineering)
