@@ -85,7 +85,8 @@ import build_terrain_mesh_tiles as btmt
 from build_road_network import split_excluding_tunnels, write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
-                               STATION_SPACING, build_road_chunks, road_ue_z_m)
+                               STATION_SPACING, build_road_chunks, road_ue_z_m,
+                               sample_mesh_height)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -1198,6 +1199,93 @@ def _polygon_area(pts):
     return abs(a) / 2.0
 
 
+# How far (m, box radius) from a junction/connector center an original
+# station coordinate can plausibly be left uncovered by the XY snap /
+# inside-pad ribbon omission - sized from the first summit_county run's
+# measured misses (all within ~70m: TRANSITION_LEN_M of bend plus pad
+# reach), with slack. Only stations inside this box get the (relatively
+# expensive) per-station coverage sample in add_gate_coverage_fills().
+GATE_COVER_SEARCH_M = 120.0
+
+
+def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_exclude):
+    """verify_road_fit.py checks that every non-excluded ORIGINAL station
+    coordinate (road_stations.json, which this script never edits) still has
+    road surface directly above it. The XY snap + inside-pad ribbon omission
+    can strand an original coordinate just off the rebuilt ribbon and outside
+    every pad (measured on summit_county's first pad run, 2026-09-05: 520 of
+    137,141 in-scope stations, every one within ~70m of a junction or
+    connector weld). Physically the road is fine - the driver is on the
+    snapped geometry - but that coverage gate is exactly what catches
+    genuinely missing/stale tiles, so rather than teaching the verifier
+    about pads (weakening it for everything else), guarantee its invariant
+    from this side: sample every near-junction station's original XY against
+    the geometry just built, and cap each uncovered one with a small fill
+    disc at that station's own regraded elevation, fused into its nearest
+    ribbon chunk (same build_pad_chunk/merge_chunk_into machinery the
+    prox-overlap fill pads already use, same collision-island reasoning).
+
+    The sampling mirrors verify_road_fit._sample_with_neighbors exactly:
+    chunks bucketed by centroid into ROAD_TILE_SIZE_CM tiles, station's own
+    tile plus 2 rings of neighbors (a chunk spans up to 750m, more than one
+    500m tile)."""
+    if not junctions:
+        return 0
+    near = np.zeros(len(east), dtype=bool)
+    for j in junctions:
+        jx, jy = j["xy"]
+        near |= ((np.abs(east - jx) <= GATE_COVER_SEARCH_M)
+                 & (np.abs(north - jy) <= GATE_COVER_SEARCH_M))
+    cand = np.where(near & ~gate_exclude)[0]
+
+    tile_chunks = defaultdict(list)
+    for chunk in all_chunks:
+        cx, cy = chunk_centroid(chunk)
+        tile_chunks[(int(cx // ROAD_TILE_SIZE_CM), int(cy // ROAD_TILE_SIZE_CM))].append(chunk)
+    flat = {}
+    for key, chunks in tile_chunks.items():
+        pos, tris, base = [], [], 0
+        for c in chunks:
+            v = np.asarray(c["vertices"], dtype=np.float64).reshape(-1, 3)
+            t = np.asarray(c["triangles"], dtype=np.int64).reshape(-1, 3)
+            if len(v) == 0:
+                continue
+            pos.append(v)
+            tris.append(t + base)
+            base += len(v)
+        if pos:
+            flat[key] = (np.concatenate(pos), np.concatenate(tris))
+
+    misses = []
+    for i in cand:
+        x_cm, y_cm = east[i] * 100.0, -north[i] * 100.0
+        tx0, ty0 = int(x_cm // ROAD_TILE_SIZE_CM), int(y_cm // ROAD_TILE_SIZE_CM)
+        covered = False
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                geo = flat.get((tx0 + dx, ty0 + dy))
+                if geo is not None and sample_mesh_height(geo[0], geo[1], x_cm, y_cm) is not None:
+                    covered = True
+                    break
+            if covered:
+                break
+        if not covered:
+            misses.append(int(i))
+
+    for k, i in enumerate(misses):
+        xy = (float(east[i]), float(north[i]))
+        pad = build_pad_chunk(f"gatecover_{k:04d}", xy, float(regraded[i]),
+                              ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M)
+        host = nearest_chunk(all_chunks, xy)
+        if host is not None:
+            merge_chunk_into(host, pad)
+        else:
+            all_chunks.append(pad)
+    print(f"gate-coverage pass: {len(cand)} near-junction station(s) sampled, "
+          f"{len(misses)} uncovered original coordinate(s) capped with a fill disc")
+    return len(misses)
+
+
 # ------------------------------------------------------------------ main
 def restore():
     if not BACKUP_DIR.exists():
@@ -1977,6 +2065,9 @@ def main():
             all_chunks.append(pad)
             n_standalone += 1
 
+    n_gate_fills = add_gate_coverage_fills(all_chunks, junctions, east, north,
+                                            regraded, terrain_exclude)
+
     buckets = defaultdict(list)
     for chunk in all_chunks:
         cx, cy = chunk_centroid(chunk)
@@ -2008,7 +2099,8 @@ def main():
         print(f"  junction @ ({j['xy'][0]:.0f},{j['xy'][1]:.0f}): {j['n_roads']} road(s) "
               f"radius={j['radius_m']:.1f}m elev={j['elev']:.1f}m flat_seg={j['flat_seg']}")
     print(f"{total_km:.2f} km of road rebuilt, {len(all_chunks)} chunk(s) "
-          f"({len(junctions)} junction pad(s) + {len(fill_pads)} fill pad(s), "
+          f"({len(junctions)} junction pad(s) + {len(fill_pads)} fill pad(s) "
+          f"+ {n_gate_fills} gate-coverage fill(s), "
           f"{n_merged} fused into a host ribbon chunk, {n_standalone} standalone) -> "
           f"{len(written)} tile(s), {n_stale} stale tile(s) removed")
 
