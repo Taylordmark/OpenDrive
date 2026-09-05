@@ -1001,6 +1001,17 @@ def merge_same_intersection(junctions, east, north, elev, bounds, structural):
     return junctions
 
 
+OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
+                                         # pairs are shrunk until their drawn
+                                         # outlines sit at least this far
+                                         # apart, not merely tangent - two
+                                         # kissing ellipses still read as one
+                                         # mashed double-blob (2026-09-05,
+                                         # Taylor: "the images you showed me
+                                         # still have overlapping junctions").
+                                         # ~a lane width of visible road
+                                         # between them makes them read as two
+                                         # distinct junctions on a climb.
 OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max pinned-
                                          # elevation spread a fused group may
                                          # span - a pad is a single flat
@@ -1009,6 +1020,51 @@ OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max pinned-
                                          # approach re-blend can absorb would
                                          # trade visible overlap for a
                                          # visible step at the pad edge.
+
+
+def _segments_intersect(p1, p2, p3, p4):
+    """True when segment p1-p2 properly intersects segment p3-p4."""
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    d1 = cross(p3, p4, p1)
+    d2 = cross(p3, p4, p2)
+    d3 = cross(p1, p2, p3)
+    d4 = cross(p1, p2, p4)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def _ellipses_overlap_precise(e1, e2, margin, sides=96):
+    """Exact-enough overlap test for the FINAL overlap-resolution pass.
+    _ellipses_overlap()'s 24-point sampling is fine for merge decisions
+    (its docstring accepts a graze as a false negative) but not here: two
+    long thin ellipses crossing at a shallow angle make a narrow lens
+    whose boundary arc falls between samples, so the shrink-to-touch
+    bisection stopped while the Keystone US 6 pads still visibly crossed
+    (2026-09-05, Taylor: "the images you showed me still have overlapping
+    junctions"). Dense polygons + proper edge-edge intersection tests
+    can't miss a crossing regardless of angle; containment (one ellipse
+    entirely inside the other) is caught by the center tests."""
+    c1x, c1y, a1, b1, _t1 = e1
+    c2x, c2y, a2, b2, _t2 = e2
+    if math.hypot(c1x - c2x, c1y - c2y) > (max(a1, b1) + max(a2, b2) + 2.0 * margin):
+        return False
+    if _point_in_ellipse(c2x, c2y, e1, margin) or _point_in_ellipse(c1x, c1y, e2, margin):
+        return True
+    poly1 = _ellipse_polygon(e1, margin, sides=sides)
+    poly2 = _ellipse_polygon(e2, margin, sides=sides)
+    for px, py in poly1:
+        if _point_in_ellipse(px, py, e2, margin):
+            return True
+    for px, py in poly2:
+        if _point_in_ellipse(px, py, e1, margin):
+            return True
+    n1, n2 = len(poly1), len(poly2)
+    for i in range(n1):
+        p1, p2 = poly1[i], poly1[(i + 1) % n1]
+        for k in range(n2):
+            if _segments_intersect(p1, p2, poly2[k], poly2[(k + 1) % n2]):
+                return True
+    return False
 
 
 def merge_drawn_overlaps(junctions):
@@ -1031,6 +1087,12 @@ def merge_drawn_overlaps(junctions):
     the union of the member outlines, so it is only as big as what is
     already drawn. Blocked (elevation-split) overlaps are reported.
     Iterated so a fused pad that now overlaps a third is re-tested."""
+    # One visual-closeness definition for the whole pass: two pads closer
+    # than OVERLAP_SPLIT_CLEAR_M read as a single mashed shape whether they
+    # interpenetrate or merely kiss, so FUSION also detects at this widened
+    # margin (elevation-compatible near-touchers become one pad) and the
+    # shrink fallback separates to the same clearance.
+    margin_sep = PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_SPLIT_CLEAR_M
     total_folded = 0
     for _round in range(3):
         n = len(junctions)
@@ -1051,8 +1113,8 @@ def merge_drawn_overlaps(junctions):
                 ri, rk = find(i), find(k)
                 if ri == rk:
                     continue
-                if not _ellipses_overlap(ei_, junctions[k]["ellipse"],
-                                          PAD_OVERLAP_MARGIN_M):
+                if not _ellipses_overlap_precise(ei_, junctions[k]["ellipse"],
+                                                  margin_sep):
                     continue
                 if (max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
                         > OVERLAP_MERGE_MAX_ELEV_SPREAD_M):
@@ -1112,13 +1174,13 @@ def merge_drawn_overlaps(junctions):
     for i in range(len(junctions)):
         for k in range(i + 1, len(junctions)):
             ei_, ek_ = junctions[i]["ellipse"], junctions[k]["ellipse"]
-            if not _ellipses_overlap(ei_, ek_, PAD_OVERLAP_MARGIN_M):
+            if not _ellipses_overlap_precise(ei_, ek_, margin_sep):
                 continue
             s_floor = max(PAD_RADIUS_MIN_M / min(ei_[2], ei_[3]),
                           PAD_RADIUS_MIN_M / min(ek_[2], ek_[3]), 0.5)
             s_floor = min(s_floor, 1.0)
-            if _ellipses_overlap(_scaled(ei_, s_floor), _scaled(ek_, s_floor),
-                                  PAD_OVERLAP_MARGIN_M):
+            if _ellipses_overlap_precise(_scaled(ei_, s_floor), _scaled(ek_, s_floor),
+                                          margin_sep):
                 n_irreducible += 1
                 print(f"  irreducible overlap (floor {s_floor:.2f} still "
                       f"overlaps) @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
@@ -1128,8 +1190,8 @@ def merge_drawn_overlaps(junctions):
             lo, hi = s_floor, 1.0   # lo separates, hi overlaps
             for _ in range(24):
                 mid = 0.5 * (lo + hi)
-                if _ellipses_overlap(_scaled(ei_, mid), _scaled(ek_, mid),
-                                      PAD_OVERLAP_MARGIN_M):
+                if _ellipses_overlap_precise(_scaled(ei_, mid), _scaled(ek_, mid),
+                                              margin_sep):
                     hi = mid
                 else:
                     lo = mid
@@ -1143,10 +1205,11 @@ def merge_drawn_overlaps(junctions):
                   f"{junctions[i]['elev']:.1f}m vs ({ek_[0]:.0f},{ek_[1]:.0f}) "
                   f"elev {junctions[k]['elev']:.1f}m "
                   f"(d_elev={abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m) "
-                  f"-> both shrunk x{s:.3f} to touch")
+                  f"-> both shrunk x{s:.3f} to a {OVERLAP_SPLIT_CLEAR_M:.0f}m gap")
 
     print(f"merge_drawn_overlaps: {total_folded} overlapping pad(s) fused, "
-          f"{n_shrunk_pairs} elevation-split pair(s) shrunk to touch, "
+          f"{n_shrunk_pairs} elevation-split pair(s) shrunk to a "
+          f"{OVERLAP_SPLIT_CLEAR_M:.0f}m gap, "
           f"{n_irreducible} irreducible -> {len(junctions)} pad(s)")
     return junctions
 
