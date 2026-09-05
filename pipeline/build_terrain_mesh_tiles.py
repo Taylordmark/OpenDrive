@@ -541,7 +541,8 @@ def _dist_to_ring(px, py, ring_x, ring_y):
     return min_d
 
 
-def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
+def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
+                            st_east_m=None, st_north_m=None):
     """For every grid point inside a baked lake polygon, override z_cm with
     a bed elevation comfortably below that lake's own baked water-plane Z
     (WATER_BED_MIN_DEPTH_M at the shore, ramping to WATER_BED_MAX_DEPTH_M
@@ -549,9 +550,45 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
     place - see this module's lake-bed-depression comment. Applied to the
     tile's FINAL grid (post road-carve, post FAR downsample), so it covers
     both the NEAR and FAR tile paths identically - build_tile() calls this
-    once, after z_cm is computed, before either triangulation branch."""
+    once, after z_cm is computed, before either triangulation branch.
+
+    Road-carve protection (2026-09-04, Homestake Creek Road -32m failure):
+    this function runs AFTER carve_grid_m, so an unconditional override
+    DESTROYS carved road ground wherever a road runs within
+    WATER_SHORE_BLEND_M of a water ring (or through a polygon). The exterior
+    rim blend was designed to soften a ~2m bank step at a real shoreline,
+    but next to a creek-side pond sitting 30-60m below a hillside road it
+    dragged the roadbed that entire way toward the water plane
+    (verify_terrain_fit max dev 32.05m at seg10 'Homestake Creek Road',
+    d=22m outside lake ring z=2773 vs road elev=2832). Fix: pass the same
+    kept (carved-toward) station positions the carve itself used; any point
+    this function wants to modify keeps its carved height within
+    TERRAIN_CARVE_CUT_INNER_M of a station, fading to full water behavior by
+    TERRAIN_CARVE_CUT_OUTER_M - the carve's own cut taper, so road
+    protection ends exactly where the carve's own influence does."""
     if not lakes:
         return z_cm
+
+    def road_protect_w(idx_flat, fx, fy):
+        """Smoothstep protection weight in [0,1] for the given flat indices:
+        1 = keep carved z untouched, 0 = full water depression. Chunked over
+        stations like carve_grid_m (idx sets here are small - lake interiors
+        and rim bands only - but station counts can be thousands)."""
+        if st_east_m is None or len(st_east_m) == 0:
+            return np.zeros(len(idx_flat))
+        px = fx[idx_flat] / 100.0
+        py = -fy[idx_flat] / 100.0
+        best_d = np.full(len(idx_flat), np.inf)
+        for c0 in range(0, len(st_east_m), CARVE_STATION_CHUNK):
+            sx = st_east_m[c0:c0 + CARVE_STATION_CHUNK]
+            sy = st_north_m[c0:c0 + CARVE_STATION_CHUNK]
+            d = np.hypot(px.reshape(-1, 1) - sx.reshape(1, -1),
+                         py.reshape(-1, 1) - sy.reshape(1, -1))
+            best_d = np.minimum(best_d, d.min(axis=1))
+        w = np.clip((TERRAIN_CARVE_CUT_OUTER_M - best_d)
+                    / (TERRAIN_CARVE_CUT_OUTER_M - TERRAIN_CARVE_CUT_INNER_M),
+                    0.0, 1.0)
+        return w * w * (3 - 2 * w)
     tile_x0, tile_x1 = float(gx_cm.min()), float(gx_cm.max())
     tile_y0, tile_y1 = float(gy_cm.min()), float(gy_cm.max())
     blend_cm = WATER_SHORE_BLEND_M * 100.0
@@ -575,7 +612,9 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
             dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
             depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
                 np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
-            flat_z[idx] = lake["z_cm"] - depth_m * 100.0
+            bed_z = lake["z_cm"] - depth_m * 100.0
+            pw = road_protect_w(idx, flat_x, flat_y)
+            flat_z[idx] = pw * flat_z[idx] + (1.0 - pw) * bed_z
 
         # Exterior rim band: blend raw terrain height down to shore_z_cm (the
         # SAME height the interior side starts at, at dist_m==0) as points
@@ -604,7 +643,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes):
         if len(rim_idx) == 0:
             continue
         touched = True
-        t = blend_t[blend_t > 0.0]
+        t = blend_t[blend_t > 0.0] * (1.0 - road_protect_w(rim_idx, flat_x, flat_y))
         flat_z[rim_idx] = flat_z[rim_idx] * (1.0 - t) + shore_z_cm * t
     return flat_z.reshape(z_cm.shape) if touched else z_cm
 
@@ -1018,7 +1057,10 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # WATER_BED_MIN_DEPTH_M. Applied here (after road carve/downsample, on
     # the tile's FINAL grid) so it covers NEAR and FAR tiles identically,
     # before either triangulation branch below sees z_cm.
-    z_cm = apply_water_depression(gx_cm, gy_cm, z_cm, _get_lake_beds())
+    z_cm = apply_water_depression(
+        gx_cm, gy_cm, z_cm, _get_lake_beds(),
+        st_east_m=st_x_cm[keep] / 100.0 if keep.any() else None,
+        st_north_m=-st_y_cm[keep] / 100.0 if keep.any() else None)
 
     if is_near:
         # AUDIT.md item 1: adaptive martini triangulation instead of a

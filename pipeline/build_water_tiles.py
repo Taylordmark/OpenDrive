@@ -8,9 +8,18 @@ build_building_mesh.py+export_building_mesh_bin.py) end to end:
   1. Fetch OSM water polygons (natural=water, landuse=reservoir - the OSM
      tags real lakes/reservoirs use) via the same Overpass/mirror/retry
      pattern fetch_osm_buildings.py already uses. LAKES ONLY, same as the
-     task scope: linear waterways (natural=water is a closed ring; a river/
-     stream is `waterway=*`, an entirely different tag this script never
-     queries) are out of scope for this pass.
+     task scope. NB (2026-09-04): "rivers are waterway=*, never queried"
+     turned out to be only half true - riverbank AREAS are closed
+     natural=water rings with water=river/stream, so they DO come back from
+     the natural=water query and must be filtered by tag (see
+     FLOWING_WATER_TAGS). Before that filter existed, Blue River's 6 x 15.5
+     km riverbank polygon (relation 214368) was baked as one flat "lake" at
+     its 10th-percentile elevation (~2548 m - the river falls ~115 m through
+     that span, so no single flat plane is ever right for it), and
+     build_terrain_mesh_tiles.py's lake-bed depression then stamped that
+     bogus plane's bed into the terrain, burying the road near Silverthorne
+     ~108 m below grade at the Blue River Parkway / 6th Street junction
+     (verify_terrain_fit.py's 2026-09-04 max-dev=108.91m failure).
   2. Project each closed way's ring into the SAME local east/north meter
      frame every other pipeline stage uses (road_stations.json's own
      origin_latlon - keeps water in registration with roads/terrain/
@@ -138,6 +147,16 @@ SURFACE_PERCENTILE = 10.0    # see module docstring - low percentile, not
                               # median/mean, since a flat lake's true level
                               # sits near the DEM's lowest plausible reading
                               # across the footprint
+
+# Flowing-water polygon tags (2026-09-04, Silverthorne terrain-burial fix -
+# see module docstring): a closed natural=water ring whose water=* tag says
+# the water MOVES has no single surface elevation, so the flat-plane model
+# this whole script is built on (one percentile -> one Z for the whole
+# polygon) is structurally wrong for it - and worse than cosmetic, because
+# build_terrain_mesh_tiles.py reads the baked planes back as lake beds and
+# depresses terrain to them. Skip these entirely; proper sloped rivers are
+# their own future feature.
+FLOWING_WATER_TAGS = {"river", "stream", "canal", "drain", "ditch", "rapids"}
 
 
 def assemble_outer_rings(way_id_list, ways_by_id):
@@ -491,10 +510,13 @@ def main():
     dem_cache = {}
 
     buckets = defaultdict(list)
-    n_too_small = n_fallback_elev = n_fan_fallback = 0
+    n_too_small = n_fallback_elev = n_fan_fallback = n_flowing = 0
     lake_summaries = []
 
     for poly in polygons:
+        if poly.get("water_tag") in FLOWING_WATER_TAGS:
+            n_flowing += 1
+            continue
         ring_ll = poly["nodes"]
         east_m = np.array([(lon - lon0) * m_per_deg_lon for _, lon in ring_ll])
         north_m = np.array([(lat - lat0) * M_PER_DEG_LAT for lat, _ in ring_ll])
@@ -555,7 +577,9 @@ def main():
     print(f"deleted {n_stale} stale water tile(s) from a previous run")
 
     print(f"\n{len(polygons)} OSM water polygon(s) fetched -> {len(lake_summaries)} lake(s) built "
-          f"({n_too_small} too small/sliver, skipped; {n_fallback_elev} used the ring-vertex "
+          f"({n_flowing} flowing-water [river/stream/canal] polygon(s) skipped - flat-plane "
+          f"model doesn't apply, see FLOWING_WATER_TAGS; {n_too_small} too small/sliver, "
+          f"skipped; {n_fallback_elev} used the ring-vertex "
           f"elevation fallback [interior raster found nothing]; {n_fan_fallback} used the "
           f"fan-triangulation fallback [ear-clip stalled]) -> {len(buckets)} tile(s), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
