@@ -1001,6 +1001,156 @@ def merge_same_intersection(junctions, east, north, elev, bounds, structural):
     return junctions
 
 
+OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max pinned-
+                                         # elevation spread a fused group may
+                                         # span - a pad is a single flat
+                                         # surface, so fusing pads whose
+                                         # elevations disagree more than the
+                                         # approach re-blend can absorb would
+                                         # trade visible overlap for a
+                                         # visible step at the pad edge.
+
+
+def merge_drawn_overlaps(junctions):
+    """FINAL overlap-resolution pass, run after EVERY pad exists (crossing
+    pads, corridor-split runs, connector welds - which the pre-connector
+    merge_same_intersection pass never sees). 2026-09-05, Taylor, on the
+    footprint-ellipse rebake: "junctions are getting better but I see
+    overlapping junctions clearly" - two drawn pad footprints stacked on
+    each other must always read as ONE shape, whatever machinery produced
+    them (a crossing pad + the connector weld capping the same corner,
+    duplicate welds at one point, corridor-split neighbors that still
+    graze).
+
+    Any two pads whose drawn footprints overlap are fused - EXCEPT when the
+    fused group's pinned elevations span more than
+    OVERLAP_MERGE_MAX_ELEV_SPREAD_M (each pad is a flat surface at one
+    elevation: fusing across a bigger disagreement trades the overlap for
+    an abrupt step at the fused pad's edge, e.g. the Keystone US 6 row
+    climbs 3m over 140m). No size cap here: the fused ellipse is fitted to
+    the union of the member outlines, so it is only as big as what is
+    already drawn. Blocked (elevation-split) overlaps are reported.
+    Iterated so a fused pad that now overlaps a third is re-tested."""
+    total_folded = 0
+    for _round in range(3):
+        n = len(junctions)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        elo = [j["elev"] for j in junctions]
+        ehi = [j["elev"] for j in junctions]
+        n_unions = 0
+        for i in range(n):
+            ei_ = junctions[i]["ellipse"]
+            for k in range(i + 1, n):
+                ri, rk = find(i), find(k)
+                if ri == rk:
+                    continue
+                if not _ellipses_overlap(ei_, junctions[k]["ellipse"],
+                                          PAD_OVERLAP_MARGIN_M):
+                    continue
+                if (max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
+                        > OVERLAP_MERGE_MAX_ELEV_SPREAD_M):
+                    continue
+                parent[ri] = rk
+                elo[rk] = min(elo[rk], elo[ri])
+                ehi[rk] = max(ehi[rk], ehi[ri])
+                n_unions += 1
+        if n_unions == 0:
+            break
+
+        groups = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
+        new_junctions = []
+        for idxs in groups.values():
+            if len(idxs) == 1:
+                new_junctions.append(junctions[idxs[0]])
+                continue
+            members = [junctions[x] for x in idxs]
+            pts = [p for m in members
+                   for p in _ellipse_polygon(m["ellipse"], 0.0, sides=24)]
+            ell = _fit_ellipse_to_points(pts, PAD_RADIUS_MIN_M)
+            flattest = min(members, key=lambda m: m.get("flat_grade", 0.0))
+            combined_reps = {}
+            for m in members:
+                for sgg, e in m.get("reps", {}).items():
+                    combined_reps.setdefault(sgg, e)
+            new_junctions.append({
+                "xy": (ell[0], ell[1]), "elev": flattest["elev"],
+                "radius_m": max(ell[2], ell[3]), "shape": "ellipse",
+                "ellipse": ell, "merged": True, "merged2": True,
+                "flat_seg": flattest["flat_seg"],
+                "flat_grade": flattest.get("flat_grade", 0.0),
+                "snap_xy": flattest.get("snap_xy", flattest["xy"]),
+                "reps": combined_reps,
+                "n_roads": max(len(combined_reps),
+                               max(m["n_roads"] for m in members)),
+                "segs": set().union(*(m["segs"] for m in members)),
+            })
+            total_folded += len(members)
+        junctions = new_junctions
+
+    # Elevation-split fallback: the pairs the gate above refused to fuse
+    # still DRAW as two stacked shapes (e.g. the Keystone US 6 climb row) -
+    # shrink both ellipses about their own centers by the smallest common
+    # factor that separates the drawn (margin-grown) footprints, floored so
+    # neither drops below PAD_RADIUS_MIN_M on its short axis. A slightly
+    # smaller pad still covers its crossing (the fit carried coverage slack
+    # + margin); two overlapping pads at different elevations are exactly
+    # what Taylor flagged.
+    def _scaled(e, s):
+        return (e[0], e[1], e[2] * s, e[3] * s, e[4])
+
+    n_shrunk_pairs = 0
+    n_irreducible = 0
+    for i in range(len(junctions)):
+        for k in range(i + 1, len(junctions)):
+            ei_, ek_ = junctions[i]["ellipse"], junctions[k]["ellipse"]
+            if not _ellipses_overlap(ei_, ek_, PAD_OVERLAP_MARGIN_M):
+                continue
+            s_floor = max(PAD_RADIUS_MIN_M / min(ei_[2], ei_[3]),
+                          PAD_RADIUS_MIN_M / min(ek_[2], ek_[3]), 0.5)
+            s_floor = min(s_floor, 1.0)
+            if _ellipses_overlap(_scaled(ei_, s_floor), _scaled(ek_, s_floor),
+                                  PAD_OVERLAP_MARGIN_M):
+                n_irreducible += 1
+                print(f"  irreducible overlap (floor {s_floor:.2f} still "
+                      f"overlaps) @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
+                      f"({ek_[0]:.0f},{ek_[1]:.0f}), d_elev="
+                      f"{abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m")
+                continue
+            lo, hi = s_floor, 1.0   # lo separates, hi overlaps
+            for _ in range(24):
+                mid = 0.5 * (lo + hi)
+                if _ellipses_overlap(_scaled(ei_, mid), _scaled(ek_, mid),
+                                      PAD_OVERLAP_MARGIN_M):
+                    hi = mid
+                else:
+                    lo = mid
+            s = lo * 0.995
+            for j, e in ((junctions[i], ei_), (junctions[k], ek_)):
+                e2 = _scaled(e, s)
+                j["ellipse"] = e2
+                j["radius_m"] = max(e2[2], e2[3])
+            n_shrunk_pairs += 1
+            print(f"  elevation-split overlap @ ({ei_[0]:.0f},{ei_[1]:.0f}) elev "
+                  f"{junctions[i]['elev']:.1f}m vs ({ek_[0]:.0f},{ek_[1]:.0f}) "
+                  f"elev {junctions[k]['elev']:.1f}m "
+                  f"(d_elev={abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m) "
+                  f"-> both shrunk x{s:.3f} to touch")
+
+    print(f"merge_drawn_overlaps: {total_folded} overlapping pad(s) fused, "
+          f"{n_shrunk_pairs} elevation-split pair(s) shrunk to touch, "
+          f"{n_irreducible} irreducible -> {len(junctions)} pad(s)")
+    return junctions
+
+
 def cluster_crossings(crossings):
     """Groups crossings whose xy falls within CLUSTER_MERGE_M of each other.
 
@@ -2257,24 +2407,6 @@ def main():
               f"toward their single merged elevation ({n_regraded_after} station(s) "
               f"regraded total, was {n_regraded} before merge)")
 
-    # Preview hook for the footprint-ellipse redesign: dump every proposed
-    # pad footprint (post-merge, pre-bake) as JSON and stop - nothing on
-    # disk is touched, so diagnose_junctions.py can draw the proposed
-    # ellipses over the map for eyeballing BEFORE committing to a bake.
-    for arg in sys.argv:
-        if arg.startswith("--dump-pads="):
-            out = Path(arg[len("--dump-pads="):])
-            out.write_text(json.dumps([{
-                "xy": [float(j["xy"][0]), float(j["xy"][1])],
-                "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
-                "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
-                "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
-                "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
-            } for j in junctions], indent=1))
-            print(f"--dump-pads: wrote {len(junctions)} proposed pad footprint(s) -> {out} "
-                  f"(no tiles/sidecar touched, exiting before bake)")
-            return
-
     # Separate problem from crossing detection: roads whose endpoint was
     # simply never topologically connected to anything (see
     # find_dangling_endpoints' docstring). Weld each one shut with a
@@ -2313,10 +2445,64 @@ def main():
             name_prefix=f"connector_{k:04d}", spacing=STATION_SPACING,
             skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP)
         connector_chunks.extend(chunks)
+        conn_r = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
         junctions.append({"xy": (east[tgi], north[tgi]), "elev": pin_elev,
-                           "radius_m": ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M,
+                           "radius_m": conn_r,
+                           # circle expressed as a degenerate ellipse + the
+                           # reps/snap_xy fields merge_drawn_overlaps and its
+                           # re-blend need - connector welds are appended
+                           # AFTER merge_same_intersection, so that final
+                           # pass is the only thing that can fuse a weld
+                           # with the crossing pad it lands on (or with a
+                           # duplicate weld at the same endpoint).
+                           "ellipse": (float(east[tgi]), float(north[tgi]),
+                                        conn_r, conn_r, 0.0),
+                           "reps": {}, "snap_xy": (east[tgi], north[tgi]),
                            "flat_seg": tseg, "flat_grade": min(grade_a, grade_b),
                            "n_roads": 2, "segs": {seg, tseg}, "shape": "circle"})
+
+    # FINAL overlap resolution: now that every pad exists (crossing pads,
+    # corridor-split runs, connector welds), fuse any whose drawn footprints
+    # still overlap - the connector welds above bypass merge_same_intersection
+    # entirely, so a weld stacked on a crossing pad (or a duplicate weld)
+    # otherwise ships as two visibly overlapping shapes (2026-09-05, Taylor:
+    # "I see overlapping junctions clearly in the show displays").
+    junctions = merge_drawn_overlaps(junctions)
+
+    # Same downstream consistency fix as after merge_same_intersection: a
+    # pass-2 merged pad picked one elevation, so re-blend every member road
+    # approach toward it (reps can be empty for weld-only groups - the weld
+    # transition blend above already pinned those approaches).
+    n_reblended2 = 0
+    for j in junctions:
+        if not j.get("merged2") or not j.get("reps"):
+            continue
+        n_reblended2 += 1
+        _blend_approaches_to_junction(j["reps"], j["flat_seg"], j["elev"], j["snap_xy"],
+                                       bounds, structural, s_m, elev, east, north,
+                                       regraded, regraded_east, regraded_north)
+    if n_reblended2:
+        print(f"re-blended approaches for {n_reblended2} overlap-fused junction(s)")
+
+    # Preview hook for the footprint-ellipse redesign: dump every proposed
+    # pad footprint (post-merge, post-connector-weld, post-overlap-fuse -
+    # i.e. exactly what a bake would draw) as JSON and stop - nothing on
+    # disk is touched, so diagnose_junctions.py can draw the proposed
+    # ellipses over the map for eyeballing BEFORE committing to a bake.
+    for arg in sys.argv:
+        if arg.startswith("--dump-pads="):
+            out = Path(arg[len("--dump-pads="):])
+            out.write_text(json.dumps([{
+                "xy": [float(j["xy"][0]), float(j["xy"][1])],
+                "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
+                "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
+                "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
+                "merged2": bool(j.get("merged2")),
+                "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
+            } for j in junctions], indent=1))
+            print(f"--dump-pads: wrote {len(junctions)} proposed pad footprint(s) -> {out} "
+                  f"(no tiles/sidecar touched, exiting before bake)")
+            return
 
     # write regraded elevation/XY back into per-segment lists for build_road_chunks
     off = 0
