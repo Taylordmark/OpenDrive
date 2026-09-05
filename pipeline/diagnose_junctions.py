@@ -31,6 +31,10 @@ triangles colored by height - a virtual screenshot from the .bin files.
 Usage:
   python diagnose_junctions.py                       whole map
   python diagnose_junctions.py <cx> <cy> [half_m]    bbox only (east/north m)
+  ... --pads=<pads.json>   overlay proposed pad footprints (the JSON that
+                           experimental_junction_pads.py --dump-pads=... writes)
+                           as outlines on the map and closeups - eyeball the
+                           footprint-ellipse fit/merge BEFORE baking anything
 
 Writes  data/road_tiles/<AREA>_test/junction_audit.png
 """
@@ -163,7 +167,35 @@ class RoadTileCache:
         return found
 
 
+def _pad_outline_xy(pad, sides=64):
+    """Boundary polyline of one proposed pad footprint from the
+    --dump-pads JSON (drawn-size: fitted ellipse grown by the same
+    PAD_OVERLAP_MARGIN_M the bake itself draws with; plain circle of
+    radius_m + margin when no ellipse was fitted)."""
+    from experimental_junction_pads import PAD_OVERLAP_MARGIN_M, _ellipse_polygon
+    if pad.get("ellipse"):
+        pts = _ellipse_polygon(tuple(pad["ellipse"]), PAD_OVERLAP_MARGIN_M, sides=sides)
+    else:
+        cx, cy = pad["xy"]
+        r = pad["radius_m"] + PAD_OVERLAP_MARGIN_M
+        pts = [(cx + r * math.cos(2 * math.pi * k / sides),
+                cy + r * math.sin(2 * math.pi * k / sides)) for k in range(sides)]
+    pts.append(pts[0])
+    return [p[0] for p in pts], [p[1] for p in pts]
+
+
 def main():
+    pads = None
+    argv = []
+    for a in sys.argv:
+        if a.startswith("--pads="):
+            pads = json.loads(Path(a[len("--pads="):]).read_text())
+            print(f"--pads: {len(pads)} proposed pad footprint(s) loaded "
+                  f"({sum(1 for p in pads if p.get('merged'))} merged)")
+        else:
+            argv.append(a)
+    sys.argv = argv
+
     cx = cy = half = None
     if len(sys.argv) >= 3:
         cx, cy = float(sys.argv[1]), float(sys.argv[2])
@@ -241,9 +273,29 @@ def main():
     for site in sep_sites:
         ax.plot(float(np.mean(east[site])), float(np.mean(north[site])), "x",
                 color="0.7", ms=4)
+    if pads is not None:
+        # context: thin road centerlines when zoomed to a bbox (an ellipse
+        # outline means nothing without the roads it's supposed to cap)
+        if cx is not None:
+            for s in data["segments"]:
+                se, sn = np.array(s["east_m"]), np.array(s["north_m"])
+                m2 = ((se > cx - half) & (se < cx + half) &
+                      (sn > cy - half) & (sn < cy + half))
+                if m2.any():
+                    ax.plot(se[m2], sn[m2], "-", color="0.75", lw=0.6, zorder=0)
+        for pad in pads:
+            px, py = pad["xy"]
+            if cx is not None and not (abs(px - cx) <= half and abs(py - cy) <= half):
+                continue
+            ox, oy = _pad_outline_xy(pad)
+            ax.plot(ox, oy, "-", lw=1.0, zorder=3,
+                    color=("tab:blue" if pad.get("merged") else "tab:green"))
     ax.set_aspect("equal")
-    ax.set_title(f"at-grade junction steps ({len(flat_sites)} sites; gray x = "
-                 f"grade-separated, step expected)")
+    title = (f"at-grade junction steps ({len(flat_sites)} sites; gray x = "
+             f"grade-separated, step expected)")
+    if pads is not None:
+        title += "\nproposed pad footprints: green = single, blue = merged"
+    ax.set_title(title)
 
     for k, r in enumerate(rows[:3]):
         axc = fig.add_subplot(2, 3, 4 + k)
@@ -259,6 +311,14 @@ def main():
                           pos[:, 2] / 100.0 + ORIGIN_HEIGHT_M,
                           vmin=zmin, vmax=zmax, cmap="viridis",
                           edgecolors="k", linewidth=0.1)
+        if pads is not None:
+            for pad in pads:
+                px, py = pad["xy"]
+                if (abs(px - r["e"]) <= CLOSEUP_HALF_M + pad["radius_m"]
+                        and abs(py - r["n"]) <= CLOSEUP_HALF_M + pad["radius_m"]):
+                    ox, oy = _pad_outline_xy(pad)
+                    axc.plot(ox, oy, "-", lw=1.2,
+                             color=("tab:blue" if pad.get("merged") else "lime"))
         axc.plot(r["e"], r["n"], "r+", ms=12, mew=2)
         axc.set_xlim(r["e"] - CLOSEUP_HALF_M, r["e"] + CLOSEUP_HALF_M)
         axc.set_ylim(r["n"] - CLOSEUP_HALF_M, r["n"] + CLOSEUP_HALF_M)

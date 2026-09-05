@@ -588,6 +588,419 @@ CLUSTER_MERGE_M = PAD_RADIUS_MAX_M * 1.5
 PAD_MERGE_NEAR_MARGIN_M = 8.0
 
 
+# --------------------------------------------------- footprint-derived pads
+# 2026-09-05, Taylor ("many junction things spawning for a single
+# intersection but they aren't merging properly into a single larger
+# ellipse. let's talk about how we should be determining ellipse size and
+# shape"): the first summit_county run splintered real intersections into
+# several pads (nine along ~300m of US 6 at Keystone) because pads were
+# circles sized only by crossing angle, and merging required two DRAWN
+# circles' edges to come within PAD_MERGE_NEAR_MARGIN_M (8m) - small
+# perpendicular-T circles 25m apart at the same real intersection never
+# merged. Redesign per the discussion:
+#   1. SIZE/SHAPE: every pad's ellipse is fitted to the actual
+#      pavement-overlap POINT CLOUD (stations of member roads that sit
+#      within pavement-overlap distance of another member road, pushed out
+#      to their +-ROAD_HALF_WIDTH pavement-edge corners) instead of being
+#      derived from angle-formula circles - a perpendicular T self-sizes to
+#      a small near-circle, a shallow Y to a long thin ellipse exactly as
+#      long as the real convergence, with no angle formula doing the work.
+#   2. MERGE: "same intersection" is decided by participation and road
+#      topology, not euclidean disc gap - see merge_same_intersection().
+#   3. CAP: a merged footprint whose fitted semi-major axis exceeds
+#      PAD_MERGE_MAX_SEMI_AXIS_M is NOT one intersection but a corridor
+#      (parallel roads braiding, e.g. CO 9's two carriageways
+#      cross-connecting 5 times along 114m, which run 1 fitted as a 93.5m
+#      ellipse - a paved oval over a divided highway); the group is split
+#      into consecutive under-cap sub-runs along the corridor axis instead.
+ALONG_ROAD_MERGE_M = 22.0          # two junctions sharing ONE segment merge
+                                    # when the distance ALONG that shared road
+                                    # between them is under this - "offset
+                                    # stop lines / slip lane", below the
+                                    # natural 20-40m spacing of genuinely
+                                    # separate subdivision T's (which also
+                                    # involve DIFFERENT cross streets).
+SAME_ROADS_MERGE_MAX_M = 60.0      # two junctions sharing TWO+ segments (the
+                                    # same two roads crossing repeatedly)
+                                    # merge out to this center distance.
+PAD_MERGE_MAX_SEMI_AXIS_M = 25.0   # cap (semi-major, so 50m end to end) -
+                                    # see CAP note above.
+SINGLE_PAD_MAX_SEMI_AXIS_M = 15.0  # tighter cap for a SINGLE crossing
+                                    # cluster's own pad: one real crossing of
+                                    # 9m-wide roads never needs more than
+                                    # ~30m end to end, and along a parallel-
+                                    # road braid (continuous pavement
+                                    # overlap) every crossing's cloud
+                                    # otherwise fills the whole search box
+                                    # and hits the merged cap - drawing a
+                                    # row of giant overlapping ellipses.
+                                    # Only a MERGED footprint may grow to
+                                    # PAD_MERGE_MAX_SEMI_AXIS_M.
+FOOTPRINT_SEARCH_M = 22.0          # box radius around a junction center for
+                                    # collecting its members' overlap cloud.
+                                    # Deliberately LOCAL (was 45 in the first
+                                    # cut): along a parallel-road braid (CO 9's
+                                    # two carriageways sit within pavement-
+                                    # overlap distance for 114m straight) every
+                                    # crossing's own cloud otherwise inhales
+                                    # the whole braid, so each of its 5 pads
+                                    # independently hit the 25m cap and drew a
+                                    # row of giant overlapping ellipses. A pad
+                                    # should cover ITS intersection; joining
+                                    # neighbors is the merge rules' job, where
+                                    # the corridor cap can actually veto.
+
+
+def _fit_ellipse_to_points(pts, min_axis):
+    """PCA-oriented minimal-ish covering ellipse of a plain point cloud -
+    the zero-radius analogue of _fit_ellipse_to_circles (same center/
+    orientation/axis-extent recipe, same uniform-inflation bisection for
+    true containment, but testing the points themselves instead of 64
+    boundary samples per member circle). Returns (cx, cy, a, b, theta)
+    with margin=0 baked in; both semi-axes floored at min_axis."""
+    n = len(pts)
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
+    cxx = cxy = cyy = 0.0
+    for px, py in pts:
+        dx, dy = px - cx, py - cy
+        cxx += dx * dx
+        cxy += dx * dy
+        cyy += dy * dy
+    cxx /= n
+    cxy /= n
+    cyy /= n
+    if abs(cxx - cyy) < 1e-9 and abs(cxy) < 1e-9:
+        theta = 0.0
+    else:
+        theta = 0.5 * math.atan2(2.0 * cxy, cxx - cyy)
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -math.sin(theta), math.cos(theta)
+
+    dus, dvs = [], []
+    a = b = max(min_axis, 1e-6)
+    for px, py in pts:
+        dx, dy = px - cx, py - cy
+        du = dx * ux + dy * uy
+        dv = dx * vx + dy * vy
+        dus.append(du)
+        dvs.append(dv)
+        a = max(a, abs(du))
+        b = max(b, abs(dv))
+
+    def covers(k):
+        aa, bb = a * k, b * k
+        return all((du * du) / (aa * aa) + (dv * dv) / (bb * bb) <= 1.0
+                   for du, dv in zip(dus, dvs))
+
+    if not covers(1.0):
+        hi = 1.0
+        while not covers(hi):
+            hi *= 2.0
+        lo = hi / 2.0
+        for _ in range(40):
+            mid = (lo + hi) / 2.0
+            if covers(mid):
+                hi = mid
+            else:
+                lo = mid
+        a, b = a * hi * 1.001, b * hi * 1.001
+    return cx, cy, a, b, theta
+
+
+def _junction_footprint_points(segs, center_xy, east, north, elev, bounds, structural,
+                                search_m=FOOTPRINT_SEARCH_M):
+    """The pavement-overlap point cloud for a junction: every station of a
+    member segment (within search_m of the center) that sits within
+    JUNCTION_OVERLAP_M of a DIFFERENT member segment's station at-grade,
+    plus that station's two +-ROAD_HALF_WIDTH pavement-edge corners - the
+    literal footprint where member roads' asphalt coexists."""
+    cx, cy = center_xy
+    members = {}
+    for sgg in segs:
+        lo, hi = bounds[sgg]
+        idxs = np.arange(lo, hi + 1)
+        sel = idxs[(np.abs(east[idxs] - cx) <= search_m)
+                   & (np.abs(north[idxs] - cy) <= search_m)
+                   & ~structural[idxs]]
+        members[sgg] = sel
+
+    pts = []
+    ov2 = JUNCTION_OVERLAP_M ** 2
+    for sgg, sel in members.items():
+        other_list = [members[o] for o in segs if o != sgg and len(members[o])]
+        if not other_list or len(sel) == 0:
+            continue
+        others = np.concatenate(other_list)
+        ox, oy, oe = east[others], north[others], elev[others]
+        lo, hi = bounds[sgg]
+        for i in sel:
+            d2 = (ox - east[i]) ** 2 + (oy - north[i]) ** 2
+            hit = (d2 <= ov2) & (np.abs(oe - elev[i]) <= JUNCTION_MAX_ELEV_DIFF_M)
+            if not hit.any():
+                continue
+            j0 = i - 1 if i - 1 >= lo else i
+            j1 = i + 1 if i + 1 <= hi else i
+            tx, ty = east[j1] - east[j0], north[j1] - north[j0]
+            length = math.hypot(tx, ty) or 1.0
+            nx, ny = -ty / length, tx / length
+            pts.append((float(east[i]), float(north[i])))
+            pts.append((float(east[i] + nx * ROAD_HALF_WIDTH),
+                        float(north[i] + ny * ROAD_HALF_WIDTH)))
+            pts.append((float(east[i] - nx * ROAD_HALF_WIDTH),
+                        float(north[i] - ny * ROAD_HALF_WIDTH)))
+    return pts
+
+
+def footprint_ellipse(segs, center_xy, fallback_r, east, north, elev, bounds, structural,
+                       search_m=FOOTPRINT_SEARCH_M, clamp=True):
+    """Fit a pad ellipse to the junction's pavement-overlap cloud (see
+    _junction_footprint_points). Falls back to a circle of fallback_r at
+    center_xy when the cloud is degenerate (an endpoint-T whose strips
+    barely overlap yields <3 points). clamp=False returns the raw fit so
+    merge_same_intersection can test the cap before deciding to merge."""
+    pts = _junction_footprint_points(segs, center_xy, east, north, elev, bounds,
+                                      structural, search_m)
+    if len(pts) < 3:
+        r = max(fallback_r, PAD_RADIUS_MIN_M)
+        return (center_xy[0], center_xy[1], r, r, 0.0)
+    cx, cy, a, b, theta = _fit_ellipse_to_points(pts, PAD_RADIUS_MIN_M)
+    if clamp:
+        a = min(a, SINGLE_PAD_MAX_SEMI_AXIS_M)
+        b = min(b, SINGLE_PAD_MAX_SEMI_AXIS_M)
+        # Clamping shrinks the fit around the CLOUD centroid, which along a
+        # corridor-shaped cloud can drift off the actual crossing anchor the
+        # approaches are bent onto (snap_xy == center_xy) - the one point
+        # the pad absolutely must cover, or the crossing region ships with
+        # overlapping un-cut ribbons and no pad over them. Slide the center
+        # toward the anchor just far enough that the anchor sits well
+        # inside (>= PAD_RADIUS_MIN_M from the edge along that direction).
+        ax_, ay_ = center_xy
+        if not _point_in_ellipse(ax_, ay_, (cx, cy, a, b, theta),
+                                  -PAD_RADIUS_MIN_M):
+            dx, dy = ax_ - cx, ay_ - cy
+            dist = math.hypot(dx, dy)
+            # conservative: required containment radius along (dx,dy) is at
+            # least min(a,b) - PAD_RADIUS_MIN_M; move so the anchor lands
+            # within that of the new center
+            keep = max(min(a, b) - PAD_RADIUS_MIN_M, 0.5)
+            if dist > keep:
+                t = (dist - keep) / dist
+                cx += dx * t
+                cy += dy * t
+    return (cx, cy, a, b, theta)
+
+
+def _ellipses_overlap(e1, e2, margin):
+    """Approximate overlap test between two (cx, cy, a, b, theta) ellipses,
+    each grown by margin: cheap center-distance reject, then mutual center
+    containment, then 24 boundary samples of each tested against the other.
+    Good enough for a merge decision (a false negative on a graze merely
+    leaves two pads that visibly touch; the bake is still watertight since
+    ribbons are cut against the SAME footprints that are drawn)."""
+    c1x, c1y, a1, b1, _t1 = e1
+    c2x, c2y, a2, b2, _t2 = e2
+    if math.hypot(c1x - c2x, c1y - c2y) > (max(a1, b1) + max(a2, b2) + 2.0 * margin):
+        return False
+    if _point_in_ellipse(c2x, c2y, e1, margin) or _point_in_ellipse(c1x, c1y, e2, margin):
+        return True
+    for px, py in _ellipse_polygon(e1, margin, sides=24):
+        if _point_in_ellipse(px, py, e2, margin):
+            return True
+    for px, py in _ellipse_polygon(e2, margin, sides=24):
+        if _point_in_ellipse(px, py, e1, margin):
+            return True
+    return False
+
+
+def merge_same_intersection(junctions, east, north, elev, bounds, structural):
+    """Replaces merge_overlapping_pads (kept above for history). "Same real
+    intersection" is decided by participation/topology, iterated to a
+    fixpoint, instead of by euclidean gap between drawn circles:
+
+      RULE 1 (same participants): two junctions whose road sets share 2+
+        segments within SAME_ROADS_MERGE_MAX_M are the same two roads
+        crossing repeatedly - dual carriageway cross-connects, loop mouths.
+      RULE 2 (along-road distance): junctions sharing ONE segment merge when
+        their separation ALONG that shared road is <= ALONG_ROAD_MERGE_M -
+        offset stop lines / slip lanes, not two T's down the block (those
+        involve different cross streets and sit 20-40m+ apart).
+      RULE 3 (drawn overlap): two pads whose drawn footprints physically
+        overlap merge regardless - two overlapping fans at two elevations is
+        the original double-blob bug, never acceptable.
+
+    Each merged group's ellipse is REFIT from the combined pavement-overlap
+    cloud (not from the member ellipses), so the merged shape is the real
+    footprint. A group whose raw refit exceeds PAD_MERGE_MAX_SEMI_AXIS_M is
+    a corridor, not one intersection - it is SPLIT into consecutive sub-runs
+    along the corridor's principal axis, each merged as large as the cap
+    allows (see the CORRIDOR SPLIT comment in the body).
+
+    Runs up to 4 rounds so a newly merged footprint that now overlaps or
+    newly qualifies against a neighbor gets re-tested (the old single pass
+    never re-checked)."""
+    n_rounds = 0
+    n_members_merged = 0
+    n_split = 0
+    for _round in range(4):
+        n = len(junctions)
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        n_unions = 0
+        for i in range(n):
+            ji = junctions[i]
+            xi, yi = ji["xy"]
+            for k in range(i + 1, n):
+                jk = junctions[k]
+                if ji.get("corridor") and jk.get("corridor"):
+                    # both emitted by an over-cap corridor split - regrouping
+                    # them just recreates the over-cap group every round
+                    continue
+                xk, yk = jk["xy"]
+                dc = math.hypot(xi - xk, yi - yk)
+                reach = (max(ji["ellipse"][2], ji["ellipse"][3])
+                         + max(jk["ellipse"][2], jk["ellipse"][3])
+                         + 2.0 * PAD_OVERLAP_MARGIN_M)
+                if dc > max(SAME_ROADS_MERGE_MAX_M, reach):
+                    continue
+                shared = ji["segs"] & jk["segs"]
+                rule = None
+                if len(shared) >= 2 and dc <= SAME_ROADS_MERGE_MAX_M:
+                    rule = 1
+                if rule is None:
+                    for sgg in shared:
+                        ei, ek = ji["reps"].get(sgg), jk["reps"].get(sgg)
+                        if (ei is not None and ek is not None
+                                and abs(ei["s"] - ek["s"]) <= ALONG_ROAD_MERGE_M):
+                            rule = 2
+                            break
+                if rule is None and _ellipses_overlap(ji["ellipse"], jk["ellipse"],
+                                                       PAD_OVERLAP_MARGIN_M):
+                    rule = 3
+                if rule is not None:
+                    if find(i) != find(k):
+                        union(i, k)
+                        n_unions += 1
+        if n_unions == 0:
+            break
+        n_rounds += 1
+
+        groups = defaultdict(list)
+        for i in range(n):
+            groups[find(i)].append(i)
+
+        def build_merged(members, segs=None):
+            """One merged junction dict from `members`, its ellipse REFIT
+            from the UNION of each member's own locally-bounded pavement-
+            overlap cloud (each member's points come from ITS OWN
+            FOOTPRINT_SEARCH_M box around ITS OWN center - one big box
+            around the group would inhale an entire parallel-road braid and
+            over-cap ANY merge along it, even of two directly adjacent
+            pads, defeating the corridor split entirely). Returns
+            (junction, over_cap_raw) - the returned dict's ellipse is
+            already clamped to the merged cap."""
+            if segs is None:
+                segs = set().union(*(m["segs"] for m in members))
+            pts = []
+            for m in members:
+                pts.extend(_junction_footprint_points(
+                    m["segs"], m["xy"], east, north, elev, bounds, structural))
+            if len(pts) < 3:
+                pts.extend((m["xy"][0], m["xy"][1]) for m in members)
+            ell = _fit_ellipse_to_points(pts, PAD_RADIUS_MIN_M)
+            over_cap = max(ell[2], ell[3]) > PAD_MERGE_MAX_SEMI_AXIS_M
+            if over_cap:
+                ell = (ell[0], ell[1], min(ell[2], PAD_MERGE_MAX_SEMI_AXIS_M),
+                       min(ell[3], PAD_MERGE_MAX_SEMI_AXIS_M), ell[4])
+            flattest = min(members, key=lambda m: m.get("flat_grade", 0.0))
+            combined_reps = {}
+            for m in members:
+                for sgg, e in m["reps"].items():
+                    combined_reps.setdefault(sgg, e)
+            return ({
+                "xy": (ell[0], ell[1]), "elev": flattest["elev"],
+                "radius_m": max(ell[2], ell[3]), "shape": "ellipse",
+                "ellipse": ell, "merged": True,
+                "flat_seg": flattest["flat_seg"],
+                "flat_grade": flattest.get("flat_grade", 0.0),
+                "snap_xy": flattest["snap_xy"], "reps": combined_reps,
+                "n_roads": len(combined_reps), "segs": segs,
+            }, over_cap)
+
+        new_junctions = []
+        for root, idxs in groups.items():
+            if len(idxs) == 1:
+                new_junctions.append(junctions[idxs[0]])
+                continue
+            members = [junctions[x] for x in idxs]
+            merged_j, over_cap = build_merged(members)
+            if not over_cap:
+                new_junctions.append(merged_j)
+                n_members_merged += len(members)
+                continue
+
+            # CORRIDOR SPLIT: the whole group's footprint is longer than one
+            # intersection can be, but leaving the members as-is keeps the
+            # exact fragmented look this redesign exists to fix (a chain of
+            # overlapping pads down a dual carriageway). Instead, order the
+            # members along the corridor's own principal axis and greedily
+            # merge consecutive RUNS, each as long as the refit stays under
+            # the cap - a 300m braid becomes a few clean <=50m ovals instead
+            # of nine overlapping blobs. Emitted pads (merged runs AND
+            # leftover singles) are flagged "corridor" so later rounds don't
+            # regroup them into the same over-cap group forever.
+            mcx = sum(m["xy"][0] for m in members) / len(members)
+            mcy = sum(m["xy"][1] for m in members) / len(members)
+            cxx = cxy = cyy = 0.0
+            for m in members:
+                dx, dy = m["xy"][0] - mcx, m["xy"][1] - mcy
+                cxx += dx * dx
+                cxy += dx * dy
+                cyy += dy * dy
+            axis = 0.5 * math.atan2(2.0 * cxy, cxx - cyy) \
+                if (abs(cxx - cyy) > 1e-9 or abs(cxy) > 1e-9) else 0.0
+            axv = (math.cos(axis), math.sin(axis))
+            ordered = sorted(members, key=lambda m: m["xy"][0] * axv[0] + m["xy"][1] * axv[1])
+
+            run = [ordered[0]]
+            emitted = []
+            for m in ordered[1:]:
+                cand_j, cand_over = build_merged(run + [m])
+                if cand_over:
+                    emitted.append(run)
+                    run = [m]
+                else:
+                    run = run + [m]
+            emitted.append(run)
+            for r in emitted:
+                if len(r) == 1:
+                    r[0]["corridor"] = True
+                    new_junctions.append(r[0])
+                else:
+                    sub_j, _ = build_merged(r)
+                    sub_j["corridor"] = True
+                    new_junctions.append(sub_j)
+                    n_members_merged += len(r)
+            n_split += 1
+        junctions = new_junctions
+
+    print(f"merge_same_intersection: {n_members_merged} pad(s) folded into merged "
+          f"footprint ellipses over {n_rounds} round(s), {n_split} over-cap corridor "
+          f"group(s) split into consecutive sub-runs -> {len(junctions)} junction(s)")
+    return junctions
+
+
 def cluster_crossings(crossings):
     """Groups crossings whose xy falls within CLUSTER_MERGE_M of each other.
 
@@ -1787,10 +2200,20 @@ def main():
         cx, cy = snap_xy
         radius_m = pad_radius_m(min(c["angle_deg"] for c in cl))
 
-        junctions.append({"xy": (cx, cy), "elev": junction_elev, "radius_m": radius_m,
+        # Footprint-derived ellipse from the very start (see the redesign
+        # note above merge_same_intersection): the pad's shape comes from
+        # where member roads' pavement actually coexists, not from the
+        # crossing-angle circle formula - radius_m (angle formula) survives
+        # only as the degenerate-cloud fallback radius and the generic
+        # scalar "reach" floor for circle-only callers.
+        ell = footprint_ellipse(set(reps.keys()), snap_xy, radius_m,
+                                 east, north, elev, bounds, structural)
+        junctions.append({"xy": (ell[0], ell[1]), "elev": junction_elev,
+                           "radius_m": max(ell[2], ell[3]), "shape": "ellipse",
+                           "ellipse": ell,
                            "flat_seg": flat_seg, "flat_grade": grades[flat_seg],
                            "snap_xy": snap_xy, "reps": reps,
-                           "n_roads": len(reps), "segs": set(reps.keys()), "shape": "circle"})
+                           "n_roads": len(reps), "segs": set(reps.keys())})
 
         _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy,
                                        bounds, structural, s_m, elev, east, north,
@@ -1806,7 +2229,7 @@ def main():
     # fold those into single fitted-ellipse pads now, before
     # find_dangling_endpoints() runs, so its covered_by_real_junction() guard
     # sees the merged footprint (see merge_overlapping_pads' docstring).
-    junctions = merge_overlapping_pads(junctions)
+    junctions = merge_same_intersection(junctions, east, north, elev, bounds, structural)
     print(f"junction pad count: {n_junctions_before_merge} before merge -> {len(junctions)} after merge "
           f"(crossing-derived pads only, before dangling-endpoint connector spurs are added below)")
 
@@ -1822,7 +2245,7 @@ def main():
     # surface, same as a single cluster always has.
     n_reblended_junctions = 0
     for j in junctions:
-        if j.get("shape") != "ellipse":
+        if not j.get("merged"):
             continue
         n_reblended_junctions += 1
         _blend_approaches_to_junction(j["reps"], j["flat_seg"], j["elev"], j["snap_xy"],
@@ -1833,6 +2256,24 @@ def main():
         print(f"re-blended approaches for {n_reblended_junctions} merged junction(s) "
               f"toward their single merged elevation ({n_regraded_after} station(s) "
               f"regraded total, was {n_regraded} before merge)")
+
+    # Preview hook for the footprint-ellipse redesign: dump every proposed
+    # pad footprint (post-merge, pre-bake) as JSON and stop - nothing on
+    # disk is touched, so diagnose_junctions.py can draw the proposed
+    # ellipses over the map for eyeballing BEFORE committing to a bake.
+    for arg in sys.argv:
+        if arg.startswith("--dump-pads="):
+            out = Path(arg[len("--dump-pads="):])
+            out.write_text(json.dumps([{
+                "xy": [float(j["xy"][0]), float(j["xy"][1])],
+                "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
+                "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
+                "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
+                "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
+            } for j in junctions], indent=1))
+            print(f"--dump-pads: wrote {len(junctions)} proposed pad footprint(s) -> {out} "
+                  f"(no tiles/sidecar touched, exiting before bake)")
+            return
 
     # Separate problem from crossing detection: roads whose endpoint was
     # simply never topologically connected to anything (see
