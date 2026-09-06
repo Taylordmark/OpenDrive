@@ -31,14 +31,19 @@ struct FParsedBuildingTile
 	FString GenerationId;
 };
 
-/** Live building components for one loaded tile - ONE UDynamicMeshComponent
- *  PER BUILDING (unlike AODTerrainManager's single grid mesh per tile):
- *  buildings need independent per-building collision/culling, and a tile
- *  can hold thousands of them (dense downtown blocks), so each gets its
- *  own component the same way AODRoadManager's per-chunk components do. */
+/** Live building geometry for one loaded tile - TWO merged components, not
+ *  one per building (2026-09-06, AUDIT.md rec. 2 "merge per tile": a dense
+ *  downtown tile used to spawn THOUSANDS of one-building components, the
+ *  audit's measured ~25,000 draw calls; all buildings share
+ *  M_BuildingFacade and per-building variation already travels in vertex
+ *  color, so merging costs nothing visually). Split near/far by distance
+ *  from the road corridor so collision cooking only pays for buildings the
+ *  car can physically reach (see AODBuildingManager::CollisionBandCm). */
 struct FBuildingTile
 {
-	TArray<TObjectPtr<UDynamicMeshComponent>> Buildings;
+	TObjectPtr<UDynamicMeshComponent> NearMesh;   // within CollisionBandCm of a road - full collision
+	TObjectPtr<UDynamicMeshComponent> FarMesh;    // out of driving reach - visual only, no collision
+	int32 NumBuildings = 0;
 };
 
 /**
@@ -51,9 +56,10 @@ struct FBuildingTile
  * in populated tiles (pipeline/classify_settlements.py) - a tile with no
  * buildings.bin file is just an ordinary, unpopulated tile, same
  * "no hole, just a missing file" semantics every other tile-streamed
- * system here already relies on. Buildings always have full collision -
- * there's no far/no-collision tier the way terrain has, since a building
- * only ever exists near the route.
+ * system here already relies on. 2026-09-06: buildings within
+ * CollisionBandCm of the road centerline get full collision; the rest are
+ * visual-only (the car can't reach them - the out-of-bounds reset turns it
+ * around long before), mirroring terrain's own near/far collision split.
  */
 UCLASS()
 class OPENDRIVEUE_API AODBuildingManager : public AActor
@@ -104,6 +110,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Buildings")
 	int32 MaxNewLoadsPerTick = 1;
 
+	/** Buildings whose footprint centroid is within this distance (cm) of
+	 *  the road centerline go into the tile's NearMesh (full complex
+	 *  collision); everything further goes into FarMesh (visual only).
+	 *  2026-09-06, AUDIT.md rec. 2: collision cooking is the expensive half
+	 *  of a merged tile mesh, and the car can only reach buildings near the
+	 *  corridor - AODVehiclePawn's out-of-bounds reset turns it around at
+	 *  OobDistCm (60 m), so 120 m is a 2x safety margin over the furthest
+	 *  legally reachable point. If no AODRoadManager/centerline exists the
+	 *  split fails OPEN (everything collides - old behavior). */
+	UPROPERTY(EditAnywhere, Category = "Buildings")
+	float CollisionBandCm = 12000.0f;
+
 private:
 	/** Clamps SpawnRadius down to (AODTerrainManager::CollisionRadius - a
 	 *  small safety margin) if it's currently set higher - see SpawnRadius's
@@ -153,12 +171,24 @@ private:
 	 *  time, which the ground-snap gate in Tick() is meant to prevent). */
 	bool ComputeBuildingZOffset(const FParsedBuilding& B, const AActor* Ignore, float& OutOffsetCm) const;
 
-	/** Builds the actual UDynamicMeshComponent for one already-ground-resolved
-	 *  building and appends it to Tile - the shared tail end of both
-	 *  FinalizeTile() (first attempt) and ProcessPendingBuildings() (retried
-	 *  buildings), factored out so both paths build the exact same geometry/
-	 *  collision/material setup. */
-	void CreateBuildingComponent(FBuildingTile& Tile, const FParsedBuilding& B, float ZOffsetCm);
+	/** Appends a batch of already-ground-resolved buildings into ONE of the
+	 *  tile's two merged mesh components (2026-09-06, AUDIT.md rec. 2 -
+	 *  replaces the old one-component-per-building CreateBuildingComponent).
+	 *  Creates the component lazily on first use (bNear picks NearMesh with
+	 *  full collision vs FarMesh visual-only); the per-building Z offset is
+	 *  baked into the vertices since a merged mesh can't carry a
+	 *  per-building component translation. One EditMesh per batch, so
+	 *  FinalizeTile pays a single mesh update/collision cook per tile, not
+	 *  one per building - retried pendings arrive as single-entry batches. */
+	void AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNear,
+		const TArray<TPair<const FParsedBuilding*, float>>& Batch);
+
+	/** True if (WorldX, WorldY) lies within CollisionBandCm of the road
+	 *  centerline. Lazily copies AODRoadManager's already-loaded
+	 *  RoadCenterline into a bucketed spatial hash on first call (same
+	 *  pattern as AODForestManager's CenterlineBuckets). Fails OPEN (true)
+	 *  when no centerline is available. */
+	bool IsNearRoadCorridor(double WorldX, double WorldY);
 
 	/** One building whose ground trace failed at FinalizeTile time and is
 	 *  waiting to be retried - see ProcessPendingBuildings()'s comment for why
@@ -213,6 +243,13 @@ private:
 	TMap<FIntPoint, FBuildingTile> Tiles;
 	TSet<FIntPoint> PendingTiles;
 	TSet<FIntPoint> MissingTiles;
+
+	// Corridor-distance spatial hash for IsNearRoadCorridor() (2026-09-06) -
+	// a copy of AODRoadManager::RoadCenterline bucketed once on first query.
+	TArray<FVector2D> CorridorCenterline;
+	TMap<FIntPoint, TArray<int32>> CorridorBuckets;
+	bool bCorridorSearched = false;
+	static constexpr float CorridorCellCm = 12000.0f;   // = default CollisionBandCm
 
 	// Player's last-known settled world Z (2026-08-27, mirrors
 	// AODForestManager::PlayerZHint - see that header's comment for the

@@ -1,6 +1,7 @@
 #include "ODBuildingManager.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODRoadManager.h"
 #include "ODTerrainManager.h"
 #include "ODVehiclePawn.h"
 #include "Async/Async.h"
@@ -376,102 +377,182 @@ bool AODBuildingManager::ComputeBuildingZOffset(const FParsedBuilding& B, const 
 	return true;
 }
 
-void AODBuildingManager::CreateBuildingComponent(FBuildingTile& Tile, const FParsedBuilding& B, float ZOffsetCm)
+bool AODBuildingManager::IsNearRoadCorridor(double WorldX, double WorldY)
 {
-	const uint32 VCount = B.Verts.Num() / 3;
-	const uint32 TCount = B.Tris.Num() / 3;
+	if (!bCorridorSearched)
+	{
+		bCorridorSearched = true;
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+		{
+			CorridorCenterline = It->RoadCenterline;   // world cm, already loaded
+			break;
+		}
+		for (int32 i = 0; i < CorridorCenterline.Num(); ++i)
+		{
+			const int32 CellX = FMath::FloorToInt(CorridorCenterline[i].X / CorridorCellCm);
+			const int32 CellY = FMath::FloorToInt(CorridorCenterline[i].Y / CorridorCellCm);
+			CorridorBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(i);
+		}
+	}
+	if (CorridorCenterline.Num() == 0)
+	{
+		return true;   // no centerline data - fail open, everything collides
+	}
 
-	auto* Comp = NewObject<UDynamicMeshComponent>(this);
-	Comp->SetupAttachment(RootComponent);
-	Comp->RegisterComponent();
-	// Pure vertical translation only - never a rotation - so the building
-	// stays upright regardless of local terrain slope/normal (task spec:
-	// "no tilt from terrain normal").
-	Comp->SetRelativeLocation(FVector(0.0, 0.0, ZOffsetCm));
+	const double BandSq = (double)CollisionBandCm * CollisionBandCm;
+	const int32 CellX = FMath::FloorToInt(WorldX / CorridorCellCm);
+	const int32 CellY = FMath::FloorToInt(WorldY / CorridorCellCm);
+	// CollisionBandCm can exceed CorridorCellCm if a level tunes it up -
+	// widen the ring accordingly instead of silently under-searching.
+	const int32 Reach = FMath::Max(1, FMath::CeilToInt(CollisionBandCm / CorridorCellCm));
+	for (int32 dy = -Reach; dy <= Reach; ++dy)
+	{
+		for (int32 dx = -Reach; dx <= Reach; ++dx)
+		{
+			const TArray<int32>* Bucket = CorridorBuckets.Find(FIntPoint(CellX + dx, CellY + dy));
+			if (!Bucket)
+			{
+				continue;
+			}
+			for (const int32 i : *Bucket)
+			{
+				const double Dx = CorridorCenterline[i].X - WorldX;
+				const double Dy = CorridorCenterline[i].Y - WorldY;
+				if (Dx * Dx + Dy * Dy <= BandSq)
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
 
-	// Same per-building facade selectors on every vertex (see
-	// BuildingVertexColorForFacade()'s comment for why vertex color, not a
-	// per-building MID, is this streaming architecture's instancing-safe
-	// variation channel).
-	const FVector4f FacadeColor = BuildingVertexColorForFacade(B);
+void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNear,
+	const TArray<TPair<const FParsedBuilding*, float>>& Batch)
+{
+	if (Batch.Num() == 0)
+	{
+		return;
+	}
 
-	Comp->EditMesh([&](FDynamicMesh3& Mesh)
+	TObjectPtr<UDynamicMeshComponent>& CompSlot = bNear ? Tile.NearMesh : Tile.FarMesh;
+	if (!CompSlot)
+	{
+		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetupAttachment(RootComponent);
+		Comp->RegisterComponent();
+		if (bNear)
+		{
+			Comp->EnableComplexAsSimpleCollision();
+			Comp->SetCollisionProfileName(TEXT("BlockAll"));
+		}
+		else
+		{
+			// out of driving reach - collision cooking is the expensive half
+			// of a merged tile mesh, and it would never be touched
+			Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+		if (FacadeMat)
+		{
+			Comp->SetMaterial(0, FacadeMat);
+		}
+		CompSlot = Comp;
+	}
+
+	CompSlot->EditMesh([&](FDynamicMesh3& Mesh)
 	{
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 		Mesh.Attributes()->EnablePrimaryColors();
 		FDynamicMeshColorOverlay* Color = Mesh.Attributes()->PrimaryColors();
 
-		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
-		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
-		TArray<int32> ColorIds; ColorIds.SetNumUninitialized(VCount);
+		for (const auto& Entry : Batch)
+		{
+			const FParsedBuilding& B = *Entry.Key;
+			// Pure vertical translation only - never a rotation - so the
+			// building stays upright regardless of local terrain slope
+			// (task spec: "no tilt from terrain normal"). Baked into the
+			// vertices now: a merged mesh has no per-building transform.
+			const float ZOffsetCm = Entry.Value;
+			const uint32 VCount = B.Verts.Num() / 3;
+			const uint32 TCount = B.Tris.Num() / 3;
 
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			VertIds[v] = Mesh.AppendVertex(FVector3d(
-				B.Verts[v * 3 + 0], B.Verts[v * 3 + 1], B.Verts[v * 3 + 2]));
-		}
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			UvIds[v] = UV->AppendElement(
-				FVector2f(B.Uvs[v * 2 + 0], B.Uvs[v * 2 + 1]));
-		}
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			// Vertex color here is NOT sRGB display color - see
-			// BuildingVertexColorForFacade()'s comment, these are raw
-			// [0,1) selector/seed values the material reads back directly,
-			// so the component below deliberately does NOT set
-			// SetVertexColorSpaceTransformMode (leaves it at the default
-			// linear-in/linear-out None, unlike AODTerrainManager's tint
-			// overlay which IS perceptual color).
-			ColorIds[v] = Color->AppendElement(FacadeColor);
-		}
-		for (uint32 t = 0; t < TCount; ++t)
-		{
-			const uint32 I0 = B.Tris[t * 3 + 0];
-			const uint32 I1 = B.Tris[t * 3 + 1];
-			const uint32 I2 = B.Tris[t * 3 + 2];
-			const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
-			if (Tid >= 0)
+			// Same per-building facade selectors on every vertex (see
+			// BuildingVertexColorForFacade()'s comment for why vertex
+			// color, not a per-building MID, is this streaming
+			// architecture's instancing-safe variation channel - and why
+			// merging costs nothing: the variation already travels
+			// per-vertex, not per-component).
+			const FVector4f FacadeColor = BuildingVertexColorForFacade(B);
+
+			TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
+			TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+			TArray<int32> ColorIds; ColorIds.SetNumUninitialized(VCount);
+
+			for (uint32 v = 0; v < VCount; ++v)
 			{
-				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
-				Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
+				VertIds[v] = Mesh.AppendVertex(FVector3d(
+					B.Verts[v * 3 + 0], B.Verts[v * 3 + 1],
+					B.Verts[v * 3 + 2] + ZOffsetCm));
+			}
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				UvIds[v] = UV->AppendElement(
+					FVector2f(B.Uvs[v * 2 + 0], B.Uvs[v * 2 + 1]));
+			}
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				// Vertex color here is NOT sRGB display color - see
+				// BuildingVertexColorForFacade()'s comment, these are raw
+				// [0,1) selector/seed values the material reads back
+				// directly (default linear-in/linear-out, no
+				// SetVertexColorSpaceTransformMode).
+				ColorIds[v] = Color->AppendElement(FacadeColor);
+			}
+			for (uint32 t = 0; t < TCount; ++t)
+			{
+				const uint32 I0 = B.Tris[t * 3 + 0];
+				const uint32 I1 = B.Tris[t * 3 + 1];
+				const uint32 I2 = B.Tris[t * 3 + 2];
+				const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
+				if (Tid >= 0)
+				{
+					UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+					Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
+				}
 			}
 		}
 
 		// Per-vertex normals, averaged only over triangles sharing the same
-		// vertex ID - since extrude_footprint() never shares a vertex
-		// between two different wall quads (or between a wall's top ring
-		// and the roof fan's own ring, despite being at the same position),
-		// this yields clean flat-per-quad wall normals and a flat roof
-		// normal, NOT a smoothed edge between them - exactly what the
-		// facade material's wall-vs-roof mask (M_BuildingFacade, keyed off
-		// vertex normal Z) needs to read a crisp roofline. Same call
-		// AODTerrainManager::BuildTile uses for its own mesh.
+		// vertex ID - extrude_footprint() never shares a vertex between two
+		// wall quads (or between wall top ring and roof fan), and the merge
+		// never welds vertices between buildings, so this still yields
+		// crisp flat-per-quad walls and flat roofs across the whole merged
+		// mesh (M_BuildingFacade's wall-vs-roof mask keys off normal Z).
+		// Recomputing over already-appended buildings on a retry batch is
+		// redundant but yields identical values, so it's only a little
+		// wasted work on the rare deferred-retry path.
 		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 
-	// buildings always collide - unlike terrain's near/far split, a
-	// building only ever exists close to the route at all
-	Comp->EnableComplexAsSimpleCollision();
-	Comp->SetCollisionProfileName(TEXT("BlockAll"));
-	if (FacadeMat)
-	{
-		Comp->SetMaterial(0, FacadeMat);
-	}
-
-	Tile.Buildings.Add(Comp);
+	Tile.NumBuildings += Batch.Num();
 }
 
 void AODBuildingManager::FinalizeTile(const FIntPoint& Key, FParsedBuildingTile&& Parsed)
 {
 	FBuildingTile& Tile = Tiles.Add(Key);
-	Tile.Buildings.Reserve(Parsed.Buildings.Num());
 
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	const double Now = GetWorld()->GetTimeSeconds();
 	int32 NumDeferred = 0;
+
+	// 2026-09-06 (AUDIT.md rec. 2): partition into the tile's two merged
+	// meshes - near-corridor (collision) vs far (visual only) - and append
+	// each side as ONE batch, so the whole tile costs two mesh builds and
+	// at most one collision cook instead of one per building.
+	TArray<TPair<const FParsedBuilding*, float>> NearBatch, FarBatch;
+	NearBatch.Reserve(Parsed.Buildings.Num());
 
 	for (const FParsedBuilding& B : Parsed.Buildings)
 	{
@@ -497,25 +578,46 @@ void AODBuildingManager::FinalizeTile(const FIntPoint& Key, FParsedBuildingTile&
 		MinPlacementDeltaCm = FMath::Min(MinPlacementDeltaCm, ZOffsetCm);
 		MaxPlacementDeltaCm = FMath::Max(MaxPlacementDeltaCm, ZOffsetCm);
 		++PlacedCount;
-		CreateBuildingComponent(Tile, B, ZOffsetCm);
+
+		double CentroidX = 0.0, CentroidY = 0.0;
+		const uint32 VCount = B.Verts.Num() / 3;
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			CentroidX += B.Verts[v * 3 + 0];
+			CentroidY += B.Verts[v * 3 + 1];
+		}
+		if (VCount > 0)
+		{
+			CentroidX /= VCount;
+			CentroidY /= VCount;
+		}
+		(IsNearRoadCorridor(CentroidX, CentroidY) ? NearBatch : FarBatch)
+			.Emplace(&B, ZOffsetCm);
 	}
 
+	AppendBuildingsToTileMesh(Tile, true, NearBatch);
+	AppendBuildingsToTileMesh(Tile, false, FarBatch);
+
 	UE_LOG(LogTemp, Display,
-		TEXT("ODBuildingManager: tile (%d,%d) parsed %d building(s), %d placed, "
-		     "%d deferred pending ground trace retry"),
-		Key.X, Key.Y, Parsed.Buildings.Num(), Parsed.Buildings.Num() - NumDeferred, NumDeferred);
+		TEXT("ODBuildingManager: tile (%d,%d) parsed %d building(s), %d placed "
+		     "(%d collidable near-corridor + %d visual-only far) into %d merged "
+		     "component(s), %d deferred pending ground trace retry"),
+		Key.X, Key.Y, Parsed.Buildings.Num(), Parsed.Buildings.Num() - NumDeferred,
+		NearBatch.Num(), FarBatch.Num(),
+		(Tile.NearMesh ? 1 : 0) + (Tile.FarMesh ? 1 : 0), NumDeferred);
 }
 
 void AODBuildingManager::ReleaseTile(const FIntPoint& Key)
 {
 	if (FBuildingTile* Tile = Tiles.Find(Key))
 	{
-		for (const auto& Comp : Tile->Buildings)
+		if (Tile->NearMesh)
 		{
-			if (Comp)
-			{
-				Comp->DestroyComponent();
-			}
+			Tile->NearMesh->DestroyComponent();
+		}
+		if (Tile->FarMesh)
+		{
+			Tile->FarMesh->DestroyComponent();
 		}
 		Tiles.Remove(Key);
 	}
@@ -557,7 +659,22 @@ void AODBuildingManager::ProcessPendingBuildings()
 			MinPlacementDeltaCm = FMath::Min(MinPlacementDeltaCm, ZOffsetCm);
 			MaxPlacementDeltaCm = FMath::Max(MaxPlacementDeltaCm, ZOffsetCm);
 			++PlacedCount;
-			CreateBuildingComponent(*Tile, Pending.Building, ZOffsetCm);
+			double CentroidX = 0.0, CentroidY = 0.0;
+			const uint32 VCount = Pending.Building.Verts.Num() / 3;
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				CentroidX += Pending.Building.Verts[v * 3 + 0];
+				CentroidY += Pending.Building.Verts[v * 3 + 1];
+			}
+			if (VCount > 0)
+			{
+				CentroidX /= VCount;
+				CentroidY /= VCount;
+			}
+			TArray<TPair<const FParsedBuilding*, float>> One;
+			One.Emplace(&Pending.Building, ZOffsetCm);
+			AppendBuildingsToTileMesh(*Tile,
+				IsNearRoadCorridor(CentroidX, CentroidY), One);
 			PendingBuildings.RemoveAtSwap(i);
 			continue;
 		}
@@ -677,13 +794,15 @@ void AODBuildingManager::Tick(float DeltaSeconds)
 	{
 		LastDiagTime = Now;
 		int32 NumBuildings = 0;
+		int32 NumComponents = 0;
 		for (const auto& Pair : Tiles)
 		{
-			NumBuildings += Pair.Value.Buildings.Num();
+			NumBuildings += Pair.Value.NumBuildings;
+			NumComponents += (Pair.Value.NearMesh ? 1 : 0) + (Pair.Value.FarMesh ? 1 : 0);
 		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODBuildingManager: tiles=%d pending=%d missing=%d buildings=%d"),
-			Tiles.Num(), PendingTiles.Num(), MissingTiles.Num(), NumBuildings);
+			TEXT("ODBuildingManager: tiles=%d pending=%d missing=%d buildings=%d components=%d"),
+			Tiles.Num(), PendingTiles.Num(), MissingTiles.Num(), NumBuildings, NumComponents);
 		// Placement-fix QA summary (2026-08-27, temporary instrumentation for
 		// the "grey slabs misplaced vertically" live-drive bug) - proves every
 		// placed building went through a ground-snap-gated trace, how many
