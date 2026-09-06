@@ -2662,6 +2662,61 @@ def main():
     if n_reblended2:
         print(f"re-blended approaches for {n_reblended2} overlap-fused junction(s)")
 
+    # A pad's drawn rim (footprint + PAD_OVERLAP_MARGIN_M of flattened
+    # pavement) must not reach under a crossing whose REGRADED elevation
+    # disagrees with the pad's: the elevation-split shrink separates two
+    # pads' outlines by 6m, but a crossing belonging to the OTHER junction
+    # can sit in that gap, just inside this pad's margin - the pad pavement
+    # is flattened to pad elev right under roads pinned ~3m higher (Ida
+    # Bell Drive @ (19859,9230): 2.22m baked step, profile step 0.01m).
+    # Trim the offending axis of the pad until every foreign
+    # elevation-conflicting crossing sits clear of the drawn rim.
+    trim_grow = PAD_OVERLAP_MARGIN_M + 1.0
+    n_trimmed = 0
+    for j in junctions:
+        e = j.get("ellipse")
+        if e is None:
+            continue
+        trimmed = False
+        for c in crossings:
+            cix, ciy = c["xy"]
+            if (cix - e[0]) ** 2 + (ciy - e[1]) ** 2 > (max(e[2], e[3]) + trim_grow) ** 2:
+                continue
+            ce = 0.5 * (float(regraded[c["a"]["edge"]]) + float(regraded[c["b"]["edge"]]))
+            if abs(ce - j["elev"]) <= 1.0:
+                continue
+            co, si = math.cos(e[4]), math.sin(e[4])
+            du = (cix - e[0]) * co + (ciy - e[1]) * si
+            dv = -(cix - e[0]) * si + (ciy - e[1]) * co
+            if (du / (e[2] + trim_grow)) ** 2 + (dv / (e[3] + trim_grow)) ** 2 >= 1.0:
+                continue   # already clear of the drawn rim
+            a, b = e[2], e[3]
+            if abs(du) / (a + trim_grow) >= abs(dv) / (b + trim_grow):
+                # trim the u-axis so the crossing lands on the grown rim
+                rest = 1.0 - (dv / (b + trim_grow)) ** 2
+                if rest > 1e-6:
+                    a_fit = abs(du) / math.sqrt(rest) - trim_grow
+                    a = max(PAD_RADIUS_MIN_M, min(a, a_fit * 0.98))
+            else:
+                rest = 1.0 - (du / (a + trim_grow)) ** 2
+                if rest > 1e-6:
+                    b_fit = abs(dv) / math.sqrt(rest) - trim_grow
+                    b = max(PAD_RADIUS_MIN_M, min(b, b_fit * 0.98))
+            if a < e[2] - 1e-9 or b < e[3] - 1e-9:
+                e = (e[0], e[1], a, b, e[4])
+                j["ellipse"] = e
+                j["radius_m"] = max(a, b)
+                trimmed = True
+                print(f"  trimmed pad @ ({e[0]:.0f},{e[1]:.0f}) elev "
+                      f"{j['elev']:.1f}m clear of foreign crossing "
+                      f"({cix:.0f},{ciy:.0f}) at {ce:.1f}m -> "
+                      f"a={a:.1f} b={b:.1f}")
+        if trimmed:
+            n_trimmed += 1
+    if n_trimmed:
+        print(f"rim-trim: {n_trimmed} pad(s) trimmed clear of "
+              f"elevation-conflicting crossings")
+
     # Preview hook for the footprint-ellipse redesign: dump every proposed
     # pad footprint (post-merge, post-connector-weld, post-overlap-fuse -
     # i.e. exactly what a bake would draw) as JSON and stop - nothing on
