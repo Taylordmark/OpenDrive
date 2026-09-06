@@ -1001,6 +1001,15 @@ def merge_same_intersection(junctions, east, north, elev, bounds, structural):
     return junctions
 
 
+OVERLAP_MUST_MERGE_GAP_M = 1.0          # merge_drawn_overlaps: two pads whose
+                                         # drawn outlines come within this
+                                         # distance MUST fuse, no elevation
+                                         # exception (2026-09-05, Taylor: "if
+                                         # within 1m must merge") - the fused
+                                         # pad takes its flattest member's
+                                         # elevation and the approach re-blend
+                                         # absorbs the difference over the
+                                         # transition length.
 OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
                                          # pairs are shrunk until their drawn
                                          # outlines sit at least this far
@@ -1078,15 +1087,18 @@ def merge_drawn_overlaps(junctions):
     duplicate welds at one point, corridor-split neighbors that still
     graze).
 
-    Any two pads whose drawn footprints overlap are fused - EXCEPT when the
-    fused group's pinned elevations span more than
-    OVERLAP_MERGE_MAX_ELEV_SPREAD_M (each pad is a flat surface at one
-    elevation: fusing across a bigger disagreement trades the overlap for
-    an abrupt step at the fused pad's edge, e.g. the Keystone US 6 row
-    climbs 3m over 140m). No size cap here: the fused ellipse is fitted to
-    the union of the member outlines, so it is only as big as what is
-    already drawn. Blocked (elevation-split) overlaps are reported.
-    Iterated so a fused pad that now overlaps a third is re-tested."""
+    Two tiers (2026-09-05, Taylor: "if within 1m must merge"): pads whose
+    drawn outlines come within OVERLAP_MUST_MERGE_GAP_M fuse
+    UNCONDITIONALLY; pads merely within the OVERLAP_SPLIT_CLEAR_M visual-
+    closeness band fuse only when the fused group's pinned elevations span
+    at most OVERLAP_MERGE_MAX_ELEV_SPREAD_M (each pad is one flat surface -
+    a forced fuse across a climb like Keystone US 6's trades the overlap
+    for a regrade the approach re-blend must absorb, which is Taylor's
+    accepted trade inside 1m). Elevation-blocked band pairs are shrunk to
+    the clearance gap below. No size cap here: the fused ellipse is fitted
+    to the union of the member outlines, so it is only as big as what is
+    already drawn. Iterated so a fused pad that now overlaps a third is
+    re-tested."""
     # One visual-closeness definition for the whole pass: two pads closer
     # than OVERLAP_SPLIT_CLEAR_M read as a single mashed shape whether they
     # interpenetrate or merely kiss, so FUSION also detects at this widened
@@ -1116,9 +1128,15 @@ def merge_drawn_overlaps(junctions):
                 if not _ellipses_overlap_precise(ei_, junctions[k]["ellipse"],
                                                   margin_sep):
                     continue
-                if (max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
-                        > OVERLAP_MERGE_MAX_ELEV_SPREAD_M):
-                    continue
+                # Within OVERLAP_MUST_MERGE_GAP_M the fuse is UNCONDITIONAL
+                # (Taylor: "if within 1m must merge"); only the wider
+                # visual-closeness band respects the elevation gate.
+                if not _ellipses_overlap_precise(
+                        ei_, junctions[k]["ellipse"],
+                        PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_MUST_MERGE_GAP_M):
+                    if (max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
+                            > OVERLAP_MERGE_MAX_ELEV_SPREAD_M):
+                        continue
                 parent[ri] = rk
                 elo[rk] = min(elo[rk], elo[ri])
                 ehi[rk] = max(ehi[rk], ehi[ri])
