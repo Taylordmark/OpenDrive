@@ -2901,6 +2901,76 @@ independently, plan-view half-width narrower than the tire's outer edge
 
 ---
 
+## Immediate queue (2026-09-05) — post-junction-pads plan of attack
+
+*Written after the sloped-junction-pad work (§ 7.13 follow-through) merged to
+`main` at `c8b2c55`. Supersedes the § 7.10 "Next up" list; scoping re-verified
+against the CURRENT code (several audit-era items had gone stale: water now
+has `AODWaterManager`/`build_water_tiles.py`, guardrails exist per § 7.16,
+`BARRIER_ENABLED` is back on). Taylor's drive-test of the sloped pads runs in
+parallel with all of this and gates none of it except item 6's live half.*
+
+**Coordination note:** the main checkout (branch `audit-and-arc7-rescope`)
+has UNCOMMITTED edits to `build_road_guardrails.py`, `build_road_network.py`,
+`build_road_stations.py`, `road_mesh_common.py`, `apply_road_material.py` —
+live work in progress. Items 3 and 5 below touch the same files; whoever
+picks them up must check that state first and not collide.
+
+1. **Barrier → out-of-bounds reset** *(hours — AUDIT § 7 item 4, direction
+   already confirmed)*: crossing the corridor barrier triggers the race
+   framework's existing respawn-at-last-gate (plus a short fade) instead of
+   bouncing off an invisible wall; keep a light visual boundary. Verify
+   headless via a scripted drive off-corridor (`-odgo`/`-odtrace`: expect a
+   teleport signature, not a wall impact).
+2. **Validate `sample_mesh_height` + keep the road-vs-terrain gate honest**
+   *(hours — AUDIT § 7 item 7)*: fixture test with an analytically-known mesh
+   (flat plane + known slope + a shared-edge case for the `idxs[0]`
+   first-containing-triangle note), asserted in a small test script the
+   README's test-hooks section points at. Every fit number in § 7.11–7.16
+   rests on this reconstructed function; hours of work to make the gate
+   trustworthy.
+3. **Per-tile building merge + corridor-gated collision** *(1 session — the
+   top runtime item, ~25,000 draw calls → ~25)*: `AODBuildingManager` builds
+   ONE `UDynamicMeshComponent` per building today (its own header comment
+   documents the debt). Merge all buildings in a tile into one dynamic mesh
+   per tile; enable complex collision only on tiles intersecting the road
+   corridor (players can't reach the rest). Verify headless: component/draw
+   counts in the manager log before/after, collision drive-test against a
+   known near-road building (the § 7.0-step-3 scripted-impact method).
+4. **OSM road tags → width/surface/layer** *(1–2 sessions — largest realism
+   gain)*: `fetch_osm_network.py` currently keeps NO per-way tags. Re-query
+   (or extend the fetch) for `lanes`/`surface`/`layer`, thread through
+   `build_road_stations.py` like `road_name`/`is_bridge` already are, then
+   consume: lane count → real per-road width (biggest visual payoff),
+   `surface` → unpaved grip/visual variants, `layer` → feeds the existing
+   `detect_elevation_conflicts()` instead of pure geometry. Do the width
+   consumer first; grip/visual can trail.
+5. **Junction profile-step smoothing** *(1 session, low urgency)*: the pad
+   audit still shows 39 sites with profile-only steps > 0.3 m (worst 1.07 m)
+   — member-road STATION profiles disagree at crossings before the pad
+   flattens them; the baked pavement is already clean (worst 0.43 m).
+   Blend member profiles toward agreement upstream
+   (`reconcile_junction_elevations()` is the natural home) rather than
+   asking the pad bake to hide more. Gate: junction audit worst profile
+   step, plus the standard road-fit/terrain-fit suite. **Wait for Taylor's
+   sloped-pad drive-test first** — it may show these don't read at speed.
+6. **Pale background hills — fresh diagnosis** *(unknown; diagnostic)*:
+   three rounds of real fixes (`037c85c`, `fffe321`, `2ecf266`) and the
+   symptom still stands, which means the mechanism is still unidentified —
+   stop patching candidates. Next round is isolation, not fixes: screenshot
+   the same vista with fog, atmosphere/exposure, vertex-color tint, and
+   distance-tint each toggled independently (the § 7.15 art stack has
+   flags/materials for each) and bisect which layer carries the paleness.
+   Second half needs Taylor's eyes live to confirm "fixed" (subjective
+   read, same rule as audio character).
+
+**Recommended order: 1 → 2 → 3 → 4, with 5 and 6 gated on Taylor input**
+(5 on the drive-test verdict, 6's confirmation on a live look). 1 and 2 are
+hours each and de-risk everything after them; 3 is the top runtime win; 4 is
+the top realism win.
+
+---
+
 ## Cross-cutting (release engineering)
 
 - **Packaging ✅ first proof (2026-07-18):** scripted `BuildCookRun`
