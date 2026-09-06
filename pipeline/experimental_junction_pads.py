@@ -1209,7 +1209,7 @@ def pad_plane_z(j, x, y):
     return float(j["elev"]) + gx * (x - cx) + gy * (y - cy)
 
 
-def merge_drawn_overlaps(junctions):
+def merge_drawn_overlaps(junctions, east, north, elev, seg_ids, structural):
     """FINAL overlap-resolution pass, run after EVERY pad exists (crossing
     pads, corridor-split runs, connector welds - which the pre-connector
     merge_same_intersection pass never sees). 2026-09-05, Taylor, on the
@@ -1372,14 +1372,36 @@ def merge_drawn_overlaps(junctions):
                     members2.append({"reps": m["reps"],
                                      "snap_xy": m.get("snap_xy", m["xy"]),
                                      "flat_seg": m["flat_seg"]})
-            # Sloped-pad plane: the gate above already accepted this exact
-            # point set; refit here (the union may have grown across several
-            # pairwise unions) and express the plane about the fitted
-            # ellipse's own center so pad_plane_z/j["elev"] stay in one frame
-            # through the later shrink/trim passes (which never move the
-            # center, only the axes).
+            # Sloped-pad plane. The GATE fit ran over member snap points
+            # only - enough to tell a stack from a hill, but a fused ellipse
+            # can extend far beyond its members' snap points (the CO 9 braid
+            # pad reaches ~200m past its southernmost member), and a plane
+            # EXTRAPOLATED that far undershot the real road by 3.5m at the
+            # tip (terrain SHIPPED gate 3.56m FAIL at (7522,15584)). So the
+            # plane the pad actually ships is refit over the member roads'
+            # own STATIONS inside the fitted footprint - real road surface
+            # samples across the pad's whole extent, no extrapolation.
+            # Expressed about the fitted ellipse's own center so
+            # pad_plane_z/j["elev"] stay in one frame through the later
+            # shrink/trim passes (which never move the center, only the
+            # axes).
             group_pts = [p for m in members for p in _pad_plane_pts(m)]
-            px, py, pz, pgx, pgy, _grade, _resid = _fit_pad_plane(group_pts)
+            group_segs = set().union(*(m["segs"] for m in members))
+            r_max = max(ell[2], ell[3])
+            bb = np.where(np.isin(seg_ids, list(group_segs)) & ~structural
+                          & (np.abs(east - ell[0]) <= r_max)
+                          & (np.abs(north - ell[1]) <= r_max))[0]
+            if len(bb):
+                co_, si_ = math.cos(ell[4]), math.sin(ell[4])
+                dxs, dys = east[bb] - ell[0], north[bb] - ell[1]
+                du_ = dxs * co_ + dys * si_
+                dv_ = -dxs * si_ + dys * co_
+                bb = bb[(du_ / ell[2]) ** 2 + (dv_ / ell[3]) ** 2 <= 1.0]
+            if len(bb) >= 3:
+                fit_pts = list(zip(east[bb], north[bb], elev[bb]))
+            else:
+                fit_pts = group_pts
+            px, py, pz, pgx, pgy, _grade, _resid = _fit_pad_plane(fit_pts)
             new_junctions.append({
                 "xy": (ell[0], ell[1]),
                 "elev": pz + pgx * (ell[0] - px) + pgy * (ell[1] - py),
@@ -2829,7 +2851,7 @@ def main():
     # entirely, so a weld stacked on a crossing pad (or a duplicate weld)
     # otherwise ships as two visibly overlapping shapes (2026-09-05, Taylor:
     # "I see overlapping junctions clearly in the show displays").
-    junctions = merge_drawn_overlaps(junctions)
+    junctions = merge_drawn_overlaps(junctions, east, north, elev, seg_ids, structural)
 
     # Same downstream consistency fix as after merge_same_intersection: a
     # pass-2 merged pad picked one elevation, so re-blend every member road
