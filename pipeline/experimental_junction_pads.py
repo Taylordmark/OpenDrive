@@ -1010,23 +1010,34 @@ OVERLAP_MUST_MERGE_GAP_M = 1.0          # merge_drawn_overlaps: two pads whose
                                          # elevation and the approach re-blend
                                          # absorbs the difference over the
                                          # transition length.
-OVERLAP_MUST_MERGE_MAX_DZ_M = 2.5       # ...unless the group's elevations
-                                         # span more than this (Taylor, after
-                                         # the (7814,14029) trench: "force
-                                         # merge based on x and y only if z
-                                         # axis is far enough away"). One flat
-                                         # pad across a >3m climb digs its
-                                         # approaches ~6m under the adjacent
-                                         # terrain (road-fit dev 5.93m /
-                                         # terrain SHIPPED 6.13m FAIL at that
-                                         # one site), and at 3.0 the Keystone
-                                         # US-6 rows (2.6-2.8m climbs) still
-                                         # fused and left the SHIPPED terrain
-                                         # 4.21m off the sidecar at their
-                                         # unregraded neighbor stations; such
-                                         # pairs fall through to the
-                                         # shrink-to-clearance
-                                         # fallback instead.
+OVERLAP_MUST_MERGE_MAX_DZ_M = 2.5       # ...unless the group's SLOPED-PLANE
+                                         # residual (see _fit_pad_plane) is
+                                         # larger than this (Taylor, after the
+                                         # (7814,14029) trench: "force merge
+                                         # based on x and y only if z axis is
+                                         # far enough away"). Was a flat
+                                         # elevation-SPREAD gate first (3.0,
+                                         # then 2.5) - but a spread gate can't
+                                         # tell a frontage-road STACK (should
+                                         # never merge) from a continuous road
+                                         # CLIMBING through both pads (should
+                                         # always merge): all four split pairs
+                                         # Taylor flagged 2026-09-05 ("still
+                                         # have unmerged junctions... something
+                                         # isn't right") were continuous
+                                         # climbs at 1.9-4.2% grade. Sloped
+                                         # pads fit a tilted plane to the
+                                         # member points and gate on what the
+                                         # plane CAN'T absorb.
+PAD_PLANE_MAX_GRADE = 0.06              # steepest plane a fused pad may tilt
+                                         # (6%). The real climbing-road merges
+                                         # measure 1.9-4.2%; a frontage-road
+                                         # stack (separate levels ~4m apart
+                                         # with centers a few tens of meters
+                                         # apart) demands an 8-15% "grade",
+                                         # so a group whose least-squares fit
+                                         # is steeper than this is a stack,
+                                         # not a hill - refuse the fuse.
 OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
                                          # pairs are shrunk until their drawn
                                          # outlines sit at least this far
@@ -1038,14 +1049,15 @@ OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
                                          # ~a lane width of visible road
                                          # between them makes them read as two
                                          # distinct junctions on a climb.
-OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max pinned-
-                                         # elevation spread a fused group may
-                                         # span - a pad is a single flat
-                                         # surface, so fusing pads whose
-                                         # elevations disagree more than the
-                                         # approach re-blend can absorb would
-                                         # trade visible overlap for a
-                                         # visible step at the pad edge.
+OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max sloped-
+                                         # plane residual for the wider
+                                         # visual-closeness band (pads that
+                                         # merely read as one mashed shape,
+                                         # not literally within 1m) - fusing
+                                         # pads whose surfaces disagree more
+                                         # than the approach re-blend can
+                                         # absorb would trade visible overlap
+                                         # for a visible step at the pad edge.
 
 
 def _segments_intersect(p1, p2, p3, p4):
@@ -1093,6 +1105,110 @@ def _ellipses_overlap_precise(e1, e2, margin, sides=96):
     return False
 
 
+def _pad_plane_pts(j):
+    """The (x, y, elev) point(s) a junction contributes to a fused group's
+    plane fit: its accumulated member points if it is already a fusion, else
+    its own snap anchor at its own pinned elevation."""
+    pts = j.get("plane_pts")
+    if pts:
+        return pts
+    sx, sy = j.get("snap_xy", j["xy"])
+    return [(float(sx), float(sy), float(j["elev"]))]
+
+
+PAD_FUSE_MAX_AREA_RATIO = 6.0           # merge_drawn_overlaps: a candidate
+                                         # fuse is refused when the fitted
+                                         # covering ellipse's area exceeds
+                                         # this multiple of the members' own
+                                         # summed ellipse areas. The pass's
+                                         # "no size cap - the fused ellipse
+                                         # is only as big as what is already
+                                         # drawn" claim is only true for one
+                                         # fusion: an ellipse fitted over an
+                                         # L-shaped or serpentine UNION
+                                         # blankets the empty space between
+                                         # the arms, then overlaps (and
+                                         # swallows) more pads next round -
+                                         # measured runaway: a 316x154m pad
+                                         # over the CO 9/Jarelle Drive area
+                                         # covering ~17x its members' area,
+                                         # mostly roadless space. Corridor
+                                         # merges of two thin pads separated
+                                         # ALONG a road legitimately cover
+                                         # the connecting gap and measure
+                                         # 3.5-5.2x (the Keystone/Ida Bell
+                                         # and trench-site pairs Taylor
+                                         # required merged), so the line
+                                         # sits between those and the 17x
+                                         # runaway.
+PAD_PLANE_RIDGE_M2 = 100.0              # _fit_pad_plane ridge weight per
+                                         # point, in m^2 ((10m)^2): a plain
+                                         # least-squares fit is
+                                         # ill-conditioned for the point sets
+                                         # this actually sees - 3 nearly-
+                                         # colinear corridor points let a few
+                                         # cm of cross-track z noise fit
+                                         # exactly via a preposterous
+                                         # cross-slope (measured 973%/2034%
+                                         # "grades" with 0.1-0.5m residuals
+                                         # on summit_county), which the
+                                         # PAD_PLANE_MAX_GRADE gate then
+                                         # refuses. Penalizing gx^2+gy^2
+                                         # means a direction needs point
+                                         # spread well beyond ~10m to claim
+                                         # slope; an 81m two-point baseline
+                                         # keeps ~94% of its true grade while
+                                         # short-baseline noise slopes
+                                         # collapse to ~0 (their dz lands in
+                                         # the residual, where the gate can
+                                         # judge it honestly).
+
+
+def _fit_pad_plane(pts):
+    """Ridge-regularized least-squares plane z = z0 + gx*(x-x0) + gy*(y-y0)
+    through the member points, about their centroid (z0 unpenalized -
+    centering decouples it, so z0 = mean(z) exactly). Returns (x0, y0, z0,
+    gx, gy, grade, residual): `grade` is the UNCLAMPED ridge fit's gradient
+    magnitude (the gate refuses groups steeper than PAD_PLANE_MAX_GRADE - a
+    too-steep fit means the points are a level stack, not a hill),
+    `residual` the max |z - plane| after clamping the gradient to that
+    cap."""
+    xs = np.array([p[0] for p in pts], dtype=np.float64)
+    ys = np.array([p[1] for p in pts], dtype=np.float64)
+    zs = np.array([p[2] for p in pts], dtype=np.float64)
+    x0, y0 = float(xs.mean()), float(ys.mean())
+    dx, dy = xs - x0, ys - y0
+    zc = zs - zs.mean()
+    lam = len(pts) * PAD_PLANE_RIDGE_M2
+    sxx = float(np.dot(dx, dx)) + lam
+    syy = float(np.dot(dy, dy)) + lam
+    sxy = float(np.dot(dx, dy))
+    sxz = float(np.dot(dx, zc))
+    syz = float(np.dot(dy, zc))
+    det = sxx * syy - sxy * sxy
+    gx = (syy * sxz - sxy * syz) / det
+    gy = (sxx * syz - sxy * sxz) / det
+    z0 = float(zs.mean())
+    grade = math.hypot(gx, gy)
+    if grade > PAD_PLANE_MAX_GRADE:
+        s = PAD_PLANE_MAX_GRADE / grade
+        gx, gy = gx * s, gy * s
+    residual = float(np.max(np.abs(zs - (z0 + gx * dx + gy * dy))))
+    return x0, y0, z0, gx, gy, grade, residual
+
+
+def pad_plane_z(j, x, y):
+    """The pad SURFACE elevation at (x, y): j["elev"] plus the pad's plane
+    gradient about its own center. A pad without a "plane" (single-cluster
+    pads, connector welds, merge_same_intersection pads, fill discs) is flat
+    at j["elev"], exactly as before sloped pads existed."""
+    gx, gy = j.get("plane", (0.0, 0.0))
+    if gx == 0.0 and gy == 0.0:
+        return float(j["elev"])
+    cx, cy = j["xy"]
+    return float(j["elev"]) + gx * (x - cx) + gy * (y - cy)
+
+
 def merge_drawn_overlaps(junctions):
     """FINAL overlap-resolution pass, run after EVERY pad exists (crossing
     pads, corridor-split runs, connector welds - which the pre-connector
@@ -1105,14 +1221,16 @@ def merge_drawn_overlaps(junctions):
     graze).
 
     Two tiers (2026-09-05, Taylor: "if within 1m must merge"): pads whose
-    drawn outlines come within OVERLAP_MUST_MERGE_GAP_M fuse
-    UNCONDITIONALLY; pads merely within the OVERLAP_SPLIT_CLEAR_M visual-
-    closeness band fuse only when the fused group's pinned elevations span
-    at most OVERLAP_MERGE_MAX_ELEV_SPREAD_M (each pad is one flat surface -
-    a forced fuse across a climb like Keystone US 6's trades the overlap
-    for a regrade the approach re-blend must absorb, which is Taylor's
-    accepted trade inside 1m). Elevation-blocked band pairs are shrunk to
-    the clearance gap below. No size cap here: the fused ellipse is fitted
+    drawn outlines come within OVERLAP_MUST_MERGE_GAP_M fuse whenever a
+    SLOPED plane fits the group (residual <= OVERLAP_MUST_MERGE_MAX_DZ_M,
+    grade <= PAD_PLANE_MAX_GRADE - see _fit_pad_plane); pads merely within
+    the OVERLAP_SPLIT_CLEAR_M visual-closeness band fuse only under the
+    tighter OVERLAP_MERGE_MAX_ELEV_SPREAD_M residual. A fused pad is a
+    TILTED plane, not a flat disc (2026-09-05, Taylor chose sloped pads
+    after "still have unmerged junctions... something isn't right"): a
+    continuous road climbing through both members merges and the pad
+    follows the grade; a frontage-road stack still refuses. Refused pairs
+    are shrunk to the clearance gap below. No size cap here: the fused ellipse is fitted
     to the union of the member outlines, so it is only as big as what is
     already drawn. Iterated so a fused pad that now overlaps a third is
     re-tested."""
@@ -1123,7 +1241,21 @@ def merge_drawn_overlaps(junctions):
     # shrink fallback separates to the same clearance.
     margin_sep = PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_SPLIT_CLEAR_M
     total_folded = 0
-    for _round in range(3):
+    refused_seen = set()
+    # The area guard must compare against the ORIGINAL constituent pads'
+    # summed area, carried through fusions - comparing against the current
+    # member ellipses lets each round's slightly-ballooned product inflate
+    # the next round's budget (ratchet), which is exactly how the 17x
+    # runaway grew while every individual union stayed under the ratio.
+    for j in junctions:
+        e = j["ellipse"]
+        j.setdefault("_fuse_base_area", math.pi * e[2] * e[3])
+    # Iterate to quiescence, not a fixed round count: a fused ellipse is
+    # fitted to the UNION of its members' outlines and can newly overlap a
+    # third pad, and any fusion made in the last permitted round would ship
+    # gate-untested straight into the elevation-split fallback (measured:
+    # the (10567,4074) pair fell through exactly this crack at 3 rounds).
+    for _round in range(12):
         n = len(junctions)
         parent = list(range(n))
 
@@ -1133,8 +1265,7 @@ def merge_drawn_overlaps(junctions):
                 x = parent[x]
             return x
 
-        elo = [j["elev"] for j in junctions]
-        ehi = [j["elev"] for j in junctions]
+        pts = [list(_pad_plane_pts(j)) for j in junctions]
         n_unions = 0
         for i in range(n):
             ei_ = junctions[i]["ellipse"]
@@ -1145,22 +1276,64 @@ def merge_drawn_overlaps(junctions):
                 if not _ellipses_overlap_precise(ei_, junctions[k]["ellipse"],
                                                   margin_sep):
                     continue
-                # Within OVERLAP_MUST_MERGE_GAP_M the fuse is forced as long
-                # as the fused group's elevations stay within
-                # OVERLAP_MUST_MERGE_MAX_DZ_M ("force merge based on x and y
-                # only if z axis is far enough away"); the wider visual-
-                # closeness band keeps the tighter elevation gate.
-                spread = max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
-                if _ellipses_overlap_precise(
-                        ei_, junctions[k]["ellipse"],
-                        PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_MUST_MERGE_GAP_M):
-                    if spread > OVERLAP_MUST_MERGE_MAX_DZ_M:
-                        continue
-                elif spread > OVERLAP_MERGE_MAX_ELEV_SPREAD_M:
+                # SLOPED-PAD gate (2026-09-05, Taylor: "still have unmerged
+                # junctions... something isn't right", chose sloped pads):
+                # fit a tilted plane to the candidate union's member points
+                # and gate on what the plane CAN'T absorb, not on raw
+                # elevation spread. A continuous road climbing through both
+                # pads fits the plane exactly (residual ~0, grade 2-4%) and
+                # merges; a frontage-road stack either demands a
+                # steeper-than-plausible plane (grade > PAD_PLANE_MAX_GRADE)
+                # or, clamped, leaves a residual bigger than the re-blend can
+                # absorb - refused either way ("force merge based on x and y
+                # only if z axis is far enough away").
+                cand = pts[ri] + pts[rk]
+                _px, _py, _pz, _gx, _gy, grade, residual = _fit_pad_plane(cand)
+                must = _ellipses_overlap_precise(
+                    ei_, junctions[k]["ellipse"],
+                    PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_MUST_MERGE_GAP_M)
+                limit = (OVERLAP_MUST_MERGE_MAX_DZ_M if must
+                         else OVERLAP_MERGE_MAX_ELEV_SPREAD_M)
+                if grade > PAD_PLANE_MAX_GRADE or residual > limit:
+                    key = (round(ei_[0]), round(ei_[1]),
+                           round(junctions[k]["ellipse"][0]),
+                           round(junctions[k]["ellipse"][1]))
+                    if key not in refused_seen:
+                        refused_seen.add(key)
+                        print(f"  refused fuse @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
+                              f"({junctions[k]['ellipse'][0]:.0f},"
+                              f"{junctions[k]['ellipse'][1]:.0f}): "
+                              f"grade={grade * 100.0:.1f}% "
+                              f"residual={residual:.2f}m "
+                              f"({len(cand)} pt(s), "
+                              f"{'must-merge' if must else 'band'})")
+                    continue
+                # Area guard (see PAD_FUSE_MAX_AREA_RATIO): fit the covering
+                # ellipse the fusion would actually draw and refuse when it
+                # blankets far more than its members - the ellipse-of-union
+                # balloons over bent unions and cascades.
+                group_m = [junctions[m] for m in range(n)
+                           if find(m) == ri or find(m) == rk]
+                area_members = sum(m["_fuse_base_area"] for m in group_m)
+                cand_poly = [p for m in group_m
+                             for p in _ellipse_polygon(m["ellipse"], 0.0, sides=24)]
+                ell_c = _fit_ellipse_to_points(cand_poly, PAD_RADIUS_MIN_M)
+                if (math.pi * ell_c[2] * ell_c[3]
+                        > PAD_FUSE_MAX_AREA_RATIO * area_members):
+                    key = ("area", round(ei_[0]), round(ei_[1]),
+                           round(junctions[k]["ellipse"][0]),
+                           round(junctions[k]["ellipse"][1]))
+                    if key not in refused_seen:
+                        refused_seen.add(key)
+                        print(f"  refused fuse @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
+                              f"({junctions[k]['ellipse'][0]:.0f},"
+                              f"{junctions[k]['ellipse'][1]:.0f}): covering "
+                              f"ellipse {ell_c[2]:.0f}x{ell_c[3]:.0f}m is "
+                              f"{math.pi * ell_c[2] * ell_c[3] / max(area_members, 1.0):.1f}x "
+                              f"the members' area ({len(group_m)} member(s))")
                     continue
                 parent[ri] = rk
-                elo[rk] = min(elo[rk], elo[ri])
-                ehi[rk] = max(ehi[rk], ehi[ri])
+                pts[rk] = cand
                 n_unions += 1
         if n_unions == 0:
             break
@@ -1199,8 +1372,19 @@ def merge_drawn_overlaps(junctions):
                     members2.append({"reps": m["reps"],
                                      "snap_xy": m.get("snap_xy", m["xy"]),
                                      "flat_seg": m["flat_seg"]})
+            # Sloped-pad plane: the gate above already accepted this exact
+            # point set; refit here (the union may have grown across several
+            # pairwise unions) and express the plane about the fitted
+            # ellipse's own center so pad_plane_z/j["elev"] stay in one frame
+            # through the later shrink/trim passes (which never move the
+            # center, only the axes).
+            group_pts = [p for m in members for p in _pad_plane_pts(m)]
+            px, py, pz, pgx, pgy, _grade, _resid = _fit_pad_plane(group_pts)
             new_junctions.append({
-                "xy": (ell[0], ell[1]), "elev": flattest["elev"],
+                "xy": (ell[0], ell[1]),
+                "elev": pz + pgx * (ell[0] - px) + pgy * (ell[1] - py),
+                "plane": (pgx, pgy), "plane_pts": group_pts,
+                "_fuse_base_area": sum(m["_fuse_base_area"] for m in members),
                 "radius_m": max(ell[2], ell[3]), "shape": "ellipse",
                 "ellipse": ell, "merged": True, "merged2": True,
                 "flat_seg": flattest["flat_seg"],
@@ -1399,23 +1583,36 @@ def build_pad_chunk_hull(name, hull_members, elev_m, margin, sides=PAD_SIDES):
     return _build_pad_fan(name, (cx, cy), z_m, ring)
 
 
-def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES):
+def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
+                             plane=(0.0, 0.0)):
     """Like build_pad_chunk, but the ring is the fitted-ellipse boundary
     _ellipse_polygon() computes for a merged pad (see
     _fit_ellipse_to_circles/merge_overlapping_pads) instead of a plain
     circle - same fan topology, UVs, and winding, just a differently-
     shaped ring. The hub vertex is the ellipse's own center (well-defined,
-    unlike build_pad_chunk_hull's average-of-ring-points approximation)."""
+    unlike build_pad_chunk_hull's average-of-ring-points approximation).
+
+    `plane` = (gx, gy), the pad's tilt about its center (sloped pads,
+    2026-09-05): elev_m is the surface elevation AT the center, each ring
+    vertex gets elev_m + gx*dx + gy*dy - a fan over a plane is still exactly
+    planar, so nothing else about the topology/UV/winding changes."""
     cx, cy, _a0, _b0, _theta = ellipse
     ring = _ellipse_polygon(ellipse, margin, sides)
     z_m = road_ue_z_m(elev_m, ROAD_LIFT, ORIGIN_HEIGHT_M)
-    return _build_pad_fan(name, (cx, cy), z_m, ring)
+    gx, gy = plane
+    ring_z_m = None
+    if gx != 0.0 or gy != 0.0:
+        ring_z_m = [road_ue_z_m(elev_m + gx * (vx - cx) + gy * (vy - cy),
+                                 ROAD_LIFT, ORIGIN_HEIGHT_M) for vx, vy in ring]
+    return _build_pad_fan(name, (cx, cy), z_m, ring, ring_z_m=ring_z_m)
 
 
-def _build_pad_fan(name, hub_xy, z_m, ring):
+def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     """Shared fan-mesh builder for build_pad_chunk/build_pad_chunk_hull:
     hub vertex 0 at hub_xy (UE-frame elevation z_m) plus a ring of (x, y)
-    points (pipeline-frame meters), triangulated as a fan."""
+    points (pipeline-frame meters), triangulated as a fan. `ring_z_m`
+    (sloped pads) gives each ring vertex its own UE-frame elevation instead
+    of the hub's flat z_m."""
     cx, cy = hub_xy
     sides = len(ring)
     verts = [cx * 100.0, -cy * 100.0, z_m * 100.0]
@@ -1437,8 +1634,9 @@ def _build_pad_fan(name, hub_xy, z_m, ring):
     # fallback height). Flatness ruled out; see merge_chunk_into's docstring
     # for the confirmed cause (disconnected islands) and its fix (bridge
     # triangles).
-    for vx, vy in ring:
-        verts.extend([vx * 100.0, -vy * 100.0, z_m * 100.0])
+    for vi, (vx, vy) in enumerate(ring):
+        vz_m = ring_z_m[vi] if ring_z_m is not None else z_m
+        verts.extend([vx * 100.0, -vy * 100.0, vz_m * 100.0])
         uvs.extend([PAD_UV[0], PAD_UV[1]])
     # CONFIRMED ROOT CAUSE (2026-08-26): this fan must wind (0,a,b), not
     # (0,b,a). The 2026-08-25 fix that swapped to (0,b,a) was chasing a real
@@ -2215,7 +2413,11 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
         for (px, py) in _pad_rim_points(j):
             rim_x.append(px)
             rim_y.append(py)
-            rim_elev.append(j["elev"])
+            # sloped pads: the rim anchor carries the pad SURFACE height at
+            # that rim point (plane height, not the center elevation), so
+            # the terrain carve follows the tilt instead of trenching a flat
+            # shelf across a climb.
+            rim_elev.append(pad_plane_z(j, px, py))
     rim_x_cm = np.asarray(rim_x, dtype=np.float64) * 100.0
     rim_y_cm = -np.asarray(rim_y, dtype=np.float64) * 100.0
     rim_elev = np.asarray(rim_elev, dtype=np.float64)
@@ -2653,9 +2855,14 @@ def main():
             continue
         n_reblended2 += 1
         for spec in specs:
-            fs = (spec["flat_seg"]
-                  if tuple(spec["snap_xy"]) == tuple(j["snap_xy"]) else -1)
-            _blend_approaches_to_junction(spec["reps"], fs, j["elev"],
+            # Sloped pads: every member (its former flat_seg included)
+            # blends toward the pad PLANE's height at that member's own
+            # snap point - the plane is a least-squares fit, so no member
+            # sits exactly on it; leaving any road unblended would bake the
+            # fit residual as a pavement step at that crossing.
+            sx, sy = spec["snap_xy"]
+            _blend_approaches_to_junction(spec["reps"], -1,
+                                           pad_plane_z(j, sx, sy),
                                            spec["snap_xy"],
                                            bounds, structural, s_m, elev, east, north,
                                            regraded, regraded_east, regraded_north)
@@ -2683,7 +2890,10 @@ def main():
             if (cix - e[0]) ** 2 + (ciy - e[1]) ** 2 > (max(e[2], e[3]) + trim_grow) ** 2:
                 continue
             ce = 0.5 * (float(regraded[c["a"]["edge"]]) + float(regraded[c["b"]["edge"]]))
-            if abs(ce - j["elev"]) <= 1.0:
+            # sloped pads: compare against the pad SURFACE at the crossing's
+            # own xy, not the center elevation - a tilted corridor pad's rim
+            # is legitimately meters away from j["elev"] at its tips.
+            if abs(ce - pad_plane_z(j, cix, ciy)) <= 1.0:
                 continue
             co, si = math.cos(e[4]), math.sin(e[4])
             du = (cix - e[0]) * co + (ciy - e[1]) * si
@@ -2729,6 +2939,7 @@ def main():
                 "xy": [float(j["xy"][0]), float(j["xy"][1])],
                 "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
                 "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
+                "plane": [float(v) for v in j.get("plane", (0.0, 0.0))],
                 "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
                 "merged2": bool(j.get("merged2")),
                 "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
@@ -2913,7 +3124,8 @@ def main():
     for k, j in enumerate(junctions):
         if j.get("shape") == "ellipse":
             pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}", j["ellipse"],
-                                           j["elev"], PAD_OVERLAP_MARGIN_M)
+                                           j["elev"], PAD_OVERLAP_MARGIN_M,
+                                           plane=j.get("plane", (0.0, 0.0)))
         else:
             pad = build_pad_chunk(f"junctionpad_{k:04d}", j["xy"],
                                    j["elev"], j["radius_m"] + PAD_OVERLAP_MARGIN_M)
