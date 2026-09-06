@@ -1010,7 +1010,7 @@ OVERLAP_MUST_MERGE_GAP_M = 1.0          # merge_drawn_overlaps: two pads whose
                                          # elevation and the approach re-blend
                                          # absorbs the difference over the
                                          # transition length.
-OVERLAP_MUST_MERGE_MAX_DZ_M = 3.0       # ...unless the group's elevations
+OVERLAP_MUST_MERGE_MAX_DZ_M = 2.5       # ...unless the group's elevations
                                          # span more than this (Taylor, after
                                          # the (7814,14029) trench: "force
                                          # merge based on x and y only if z
@@ -1019,8 +1019,13 @@ OVERLAP_MUST_MERGE_MAX_DZ_M = 3.0       # ...unless the group's elevations
                                          # approaches ~6m under the adjacent
                                          # terrain (road-fit dev 5.93m /
                                          # terrain SHIPPED 6.13m FAIL at that
-                                         # one site); such pairs fall through
-                                         # to the shrink-to-clearance
+                                         # one site), and at 3.0 the Keystone
+                                         # US-6 rows (2.6-2.8m climbs) still
+                                         # fused and left the SHIPPED terrain
+                                         # 4.21m off the sidecar at their
+                                         # unregraded neighbor stations; such
+                                         # pairs fall through to the
+                                         # shrink-to-clearance
                                          # fallback instead.
 OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
                                          # pairs are shrunk until their drawn
@@ -1215,11 +1220,51 @@ def merge_drawn_overlaps(junctions):
             s_floor = min(s_floor, 1.0)
             if _ellipses_overlap_precise(_scaled(ei_, s_floor), _scaled(ek_, s_floor),
                                           margin_sep):
-                n_irreducible += 1
-                print(f"  irreducible overlap (floor {s_floor:.2f} still "
-                      f"overlaps) @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
-                      f"({ek_[0]:.0f},{ek_[1]:.0f}), d_elev="
-                      f"{abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m")
+                # Long thin corridor pads hit the short-axis PAD_RADIUS_MIN_M
+                # floor while their long axes still cross - shrink the long
+                # axis only (down to circular at worst; the short axis is
+                # what the min-radius floor protects) on top of the uniform
+                # floor before declaring the pair irreducible.
+                def _scaled_long(e, s_uni, s_long):
+                    if e[2] >= e[3]:
+                        return (e[0], e[1], e[2] * s_uni * s_long,
+                                e[3] * s_uni, e[4])
+                    return (e[0], e[1], e[2] * s_uni,
+                            e[3] * s_uni * s_long, e[4])
+                sl_floor = max(min(ei_[2], ei_[3]) / max(ei_[2], ei_[3]),
+                               min(ek_[2], ek_[3]) / max(ek_[2], ek_[3]))
+                if _ellipses_overlap_precise(
+                        _scaled_long(ei_, s_floor, sl_floor),
+                        _scaled_long(ek_, s_floor, sl_floor), margin_sep):
+                    n_irreducible += 1
+                    print(f"  irreducible overlap (floor {s_floor:.2f} "
+                          f"+ long-axis floor {sl_floor:.2f} still overlaps) "
+                          f"@ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
+                          f"({ek_[0]:.0f},{ek_[1]:.0f}), d_elev="
+                          f"{abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m")
+                    continue
+                lo, hi = sl_floor, 1.0   # lo separates, hi overlaps
+                for _ in range(24):
+                    mid = 0.5 * (lo + hi)
+                    if _ellipses_overlap_precise(
+                            _scaled_long(ei_, s_floor, mid),
+                            _scaled_long(ek_, s_floor, mid), margin_sep):
+                        hi = mid
+                    else:
+                        lo = mid
+                sl = lo * 0.995
+                for j, e in ((junctions[i], ei_), (junctions[k], ek_)):
+                    e2 = _scaled_long(e, s_floor, sl)
+                    j["ellipse"] = e2
+                    j["radius_m"] = max(e2[2], e2[3])
+                n_shrunk_pairs += 1
+                print(f"  elevation-split overlap @ ({ei_[0]:.0f},{ei_[1]:.0f}) "
+                      f"elev {junctions[i]['elev']:.1f}m vs "
+                      f"({ek_[0]:.0f},{ek_[1]:.0f}) elev "
+                      f"{junctions[k]['elev']:.1f}m "
+                      f"(d_elev={abs(junctions[i]['elev'] - junctions[k]['elev']):.2f}m) "
+                      f"-> both shrunk x{s_floor:.3f} + long-axis x{sl:.3f} "
+                      f"to a {OVERLAP_SPLIT_CLEAR_M:.0f}m gap")
                 continue
             lo, hi = s_floor, 1.0   # lo separates, hi overlaps
             for _ in range(24):
