@@ -11,6 +11,7 @@
 #include "ODGhost.h"
 #include "ODMainMenu.h"
 #include "ODPauseMenu.h"
+#include "ODVehiclePawn.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODTuningManager.h"
@@ -721,6 +722,25 @@ void AODRaceHUD::DrawHUD()
 			Canvas->DrawItem(Toast);
 		}
 		break;
+	}
+
+	// ---- out-of-bounds countdown (2026-09-06) - warns while the car is past
+	// AODVehiclePawn::OobDistCm, before the reset teleports it back. Centered
+	// and big: the player needs to know WHY they're about to move.
+	if (const AODVehiclePawn* Veh = Cast<AODVehiclePawn>(GetOwningPawn()))
+	{
+		const float Cd = Veh->GetOobCountdownSec();
+		if (Cd >= 0.0f)
+		{
+			FCanvasTextItem Warn(
+				FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.28f),
+				FText::FromString(FString::Printf(
+					TEXT("OFF ROAD - RETURNING IN %.0f"), FMath::CeilToFloat(Cd))),
+				Font, FLinearColor(1.0f, 0.35f, 0.2f));
+			Warn.Scale = FVector2D(2.2f, 2.2f);
+			Warn.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(Warn);
+		}
 	}
 
 	// ---- speed readout - only needs the owning pawn

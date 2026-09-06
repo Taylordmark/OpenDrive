@@ -375,71 +375,18 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 			SpeciesInstanceCounts[6], BushInstanceCount);
 	}
 
-	// the actual guaranteed collision: a continuous mesh, not discrete
-	// per-point objects (see class comment for why the first version of
-	// this actor didn't actually work). 2026-07-28: the ribbon is now
-	// extruded HERE from the baked station polyline (2 verts + 2 tris per
-	// station step) instead of parsing a pre-triangulated mesh off disk -
-	// mechanically the same geometry build_wall_chunks() used to do in
-	// Python, just moved to load time (see AUDIT.md 5.1/rec. 3).
-	Tile.WallRuns.Reserve(Parsed.WallRuns.Num());
-	for (const FParsedWallRun& Run : Parsed.WallRuns)
-	{
-		const int32 SCount = Run.Stations.Num();
-		if (SCount < 2)
-		{
-			continue;
-		}
-
-		auto* Comp = NewObject<UDynamicMeshComponent>(this);
-		Comp->SetupAttachment(RootComponent);
-		Comp->RegisterComponent();
-
-		Comp->EditMesh([&](FDynamicMesh3& Mesh)
-		{
-			Mesh.EnableAttributes();
-			FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
-
-			TArray<int32> BotIds, TopIds, BotUvIds, TopUvIds;
-			BotIds.SetNumUninitialized(SCount);
-			TopIds.SetNumUninitialized(SCount);
-			BotUvIds.SetNumUninitialized(SCount);
-			TopUvIds.SetNumUninitialized(SCount);
-			for (int32 s = 0; s < SCount; ++s)
-			{
-				const FVector& P = Run.Stations[s];
-				BotIds[s] = Mesh.AppendVertex(FVector3d(P.X, P.Y, P.Z));
-				TopIds[s] = Mesh.AppendVertex(FVector3d(P.X, P.Y, P.Z + WallHeightCm));
-				const float V = s * 2.0f;   // same along-wall UV convention build_wall_chunks() used
-				BotUvIds[s] = UV->AppendElement(FVector2f(V, 0.0f));
-				TopUvIds[s] = UV->AppendElement(FVector2f(V, 1.0f));
-			}
-			for (int32 s = 0; s < SCount - 1; ++s)
-			{
-				const int32 T0 = Mesh.AppendTriangle(BotIds[s], BotIds[s + 1], TopIds[s]);
-				if (T0 >= 0)
-				{
-					UV->SetTriangle(T0, FIndex3i(BotUvIds[s], BotUvIds[s + 1], TopUvIds[s]));
-				}
-				const int32 T1 = Mesh.AppendTriangle(BotIds[s + 1], TopIds[s + 1], TopIds[s]);
-				if (T1 >= 0)
-				{
-					UV->SetTriangle(T1, FIndex3i(BotUvIds[s + 1], TopUvIds[s + 1], TopUvIds[s]));
-				}
-			}
-		});
-
-		// invisible - the HISM trees/bushes above are the visual "wall of
-		// scenery"; this is purely the guaranteed collision surface
-		Comp->SetVisibility(false);
-		Comp->EnableComplexAsSimpleCollision();
-		Comp->SetCollisionProfileName(TEXT("BlockAll"));
-
-		Tile.WallRuns.Add(Comp);
-	}
+	// 2026-09-06 (AUDIT.md 5.4/rec. 5, direction confirmed): the invisible
+	// collision ribbon is GONE. The wall-run polylines still ship in the ODW3
+	// sidecar and still parse (no format change), but no collision mesh is
+	// built from them any more - the HISM trees/bushes above remain as the
+	// visible boundary cue, and AODVehiclePawn::TickOutOfBounds() now owns
+	// the guarantee the wall used to provide (sustained off-corridor travel
+	// or a void fall teleports the car back to the nearest road point,
+	// instead of the car bouncing off collision it cannot see).
 
 	UE_LOG(LogTemp, Display,
-		TEXT("ODBarrierManager: tile (%d,%d) built %d point(s), %d wall run(s)"),
+		TEXT("ODBarrierManager: tile (%d,%d) built %d point(s) "
+		     "(%d wall run(s) parsed, collision disabled - OOB reset owns it)"),
 		Key.X, Key.Y, Parsed.Points.Num(), Parsed.WallRuns.Num());
 }
 
@@ -452,13 +399,6 @@ void AODBarrierManager::ReleaseTile(const FIntPoint& Key)
 			if (Hism)
 			{
 				Hism->DestroyComponent();
-			}
-		}
-		for (const auto& Comp : Tile->WallRuns)
-		{
-			if (Comp)
-			{
-				Comp->DestroyComponent();
 			}
 		}
 		Tiles.Remove(Key);
@@ -520,13 +460,8 @@ void AODBarrierManager::Tick(float DeltaSeconds)
 	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastDiagTime > 5.0)
 	{
 		LastDiagTime = Now;
-		int32 NumRuns = 0;
-		for (const auto& Pair : Tiles)
-		{
-			NumRuns += Pair.Value.WallRuns.Num();
-		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODBarrierManager: tiles=%d pending=%d missing=%d wallRuns=%d"),
-			Tiles.Num(), PendingTiles.Num(), MissingTiles.Num(), NumRuns);
+			TEXT("ODBarrierManager: tiles=%d pending=%d missing=%d"),
+			Tiles.Num(), PendingTiles.Num(), MissingTiles.Num());
 	}
 }

@@ -47,14 +47,12 @@ struct FParsedBarrierTile
 
 /** Live components for one loaded tile: per-species HISM for the visual
  *  trees/bushes (cheap even at thousands of instances, same reasoning
- *  AODForestManager already relies on), plus one UDynamicMeshComponent per
- *  wall chunk - a genuinely CONTINUOUS collision surface, not discrete
- *  per-point objects (see build_road_barrier.py's docstring for why a row
- *  of discrete capsules doesn't actually guarantee a solid wall). */
+ *  AODForestManager already relies on). */
 struct FBarrierTile
 {
 	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;   // one per species/bush
-	TArray<TObjectPtr<UDynamicMeshComponent>> WallRuns;
+	// 2026-09-06: no WallRuns components any more - the invisible collision
+	// ribbon is retired (AODVehiclePawn::TickOutOfBounds owns the guarantee).
 };
 
 /**
@@ -72,6 +70,13 @@ struct FBarrierTile
  * cross-section already relies on) instead of point obstacles. The
  * deterministic tree/bush points are still placed for the visual look,
  * they just no longer carry any collision responsibility themselves.
+ *
+ * 2026-09-06 (AUDIT.md 5.4/rec. 5): the collision ribbon itself is retired
+ * too - this manager is now VISUAL-ONLY (the boundary trees/bushes). The
+ * escape guarantee moved to AODVehiclePawn::TickOutOfBounds(): sustained
+ * off-corridor travel or a void fall soft-resets the car to the nearest
+ * road point, which removes the invisible-wall feel the audit called the
+ * most-criticized-in-genre element of the project.
  */
 UCLASS()
 class OPENDRIVEUE_API AODBarrierManager : public AActor
@@ -105,12 +110,6 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Barrier")
 	int32 MaxNewLoadsPerTick = 1;
-
-	/** Vertical extrusion height (cm) for the runtime-built collision
-	 *  ribbon - MUST match what build_road_barrier.py's docstring documents
-	 *  (4 m), since the pipeline no longer bakes this itself. */
-	UPROPERTY(EditAnywhere, Category = "Barrier")
-	float WallHeightCm = 400.0f;
 
 	/** Content/OpenDrive/Masks/<prefix>.bin - the SAME point-classified
 	 *  biome sidecar AODForestManager reads (pipeline/classify_biomes.py +

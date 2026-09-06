@@ -173,6 +173,33 @@ public:
 	 *  the trace) settles in seconds instead of the full spawn timeout. */
 	void ResetVehicle();
 
+	// --- out-of-bounds reset (2026-09-06, AUDIT.md 5.4/rec. 5) ---
+	/** Distance from the road centerline (cm) beyond which the off-road
+	 *  countdown starts. Replaces the invisible barrier wall: the player can
+	 *  roam the shoulder freely, but sustained travel past this line resets
+	 *  them to the nearest road point instead of bouncing off unseen
+	 *  collision. */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float OobDistCm = 6000.0f;   // 60 m
+
+	/** Seconds the car may stay beyond OobDistCm before the reset fires -
+	 *  long enough to recover a wide slide, short enough that "driving away
+	 *  into the wilderness" visibly doesn't work. */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float OobGraceSec = 3.0f;
+
+	/** Seconds with ALL FOUR wheels out of contact before the reset fires -
+	 *  the void-fall catch (no-collision far terrain, carve gaps). ~2 s of
+	 *  true freefall is a ~20 m drop, far past any jump a road crest can
+	 *  launch. */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float OobAirborneSec = 2.0f;
+
+	/** Remaining seconds on the off-road countdown for the HUD warning, or
+	 *  <0 when not out of bounds (also <0 on levels with no AODRoadManager,
+	 *  where the feature is entirely inert - e.g. Tail of the Dragon). */
+	float GetOobCountdownSec() const { return OobCountdownSec; }
+
 	/** Place the car at a FIXED, self-contained location (the main menu's
 	 *  showroom void, 2026-07-28) with no ground-snap wait at all - unlike
 	 *  TeleportToSpawn, which waits on real streamed terrain/road, this
@@ -304,6 +331,20 @@ private:
 	double LastSnapLogTime = 0.0;
 	double LastRollLogTime = 0.0;   // rollover-tripwire log throttle
 	double LastScriptLogTime = 0.0; // 1 Hz scripted-drive telemetry throttle
+
+	// --- out-of-bounds reset state (2026-09-06) ---
+	/** Ticks the off-road/airborne accumulators and fires the reset. */
+	void TickOutOfBounds(float DeltaSeconds);
+	/** Nearest-road scan is O(centerline) - throttled to 2 Hz (same
+	 *  convention as AODRoadManager's place-label scan); the cached distance
+	 *  is reused between scans. */
+	double LastOobScanTime = 0.0;
+	float OobDistNowCm = 0.0f;      // last measured distance to centerline
+	float OobOffRoadSec = 0.0f;     // time continuously beyond OobDistCm
+	float OobAirSec = 0.0f;         // time continuously with 0 wheel contacts
+	float OobCountdownSec = -1.0f;  // HUD-visible remaining grace, <0 = clear
+	TWeakObjectPtr<class AODRoadManager> OobRoadMgr;
+	bool bOobRoadMgrSearched = false;
 	// generous: the road tile at the spawn point now gets priority in
 	// AODRoadManager's own wait-queue (closest-to-player, not first-parsed),
 	// so this should rarely be hit, but a long fallback is cheap insurance

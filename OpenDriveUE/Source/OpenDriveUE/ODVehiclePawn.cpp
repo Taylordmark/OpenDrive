@@ -12,6 +12,8 @@
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
+#include "EngineUtils.h"
+#include "ODRoadManager.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
@@ -1339,6 +1341,82 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 				Movement->IsWheelInContact(2) ? 1 : 0,
 				Movement->IsWheelInContact(3) ? 1 : 0,
 				GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+		}
+	}
+
+	TickOutOfBounds(DeltaSeconds);
+}
+
+void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)
+{
+	// AUDIT.md 5.4/rec. 5 (2026-09-06): the invisible barrier wall is gone
+	// (AODBarrierManager keeps only the visual tree/bush boundary); this is
+	// its replacement. Two independent triggers, both requiring SUSTAINED
+	// violation so slides, crests, and brief shoulder excursions never fire:
+	// distance-from-centerline (wandering off into the world) and
+	// all-wheels-airborne (falling through/off no-collision far terrain).
+	OobCountdownSec = -1.0f;
+	if (bInShowroom || !bGroundSnapped || !Body || !Body->IsSimulatingPhysics())
+	{
+		OobOffRoadSec = OobAirSec = 0.0f;
+		return;
+	}
+	if (!bOobRoadMgrSearched)
+	{
+		bOobRoadMgrSearched = true;
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+		{
+			OobRoadMgr = *It;
+			break;
+		}
+	}
+	// No road manager = no centerline to measure against or reset to (Tail
+	// of the Dragon keeps its own race-gate respawn) - feature fully inert.
+	const AODRoadManager* Road = OobRoadMgr.Get();
+	if (!Road)
+	{
+		return;
+	}
+
+	const FVector Loc = GetActorLocation();
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastOobScanTime > 0.5)   // O(centerline) scan, 2 Hz is plenty
+	{
+		LastOobScanTime = Now;
+		FVector2D Nearest;
+		float NearestYaw = 0.0f;
+		if (Road->NearestRoadPoint(FVector2D(Loc.X, Loc.Y), Nearest, NearestYaw))
+		{
+			OobDistNowCm = FVector2D::Distance(FVector2D(Loc.X, Loc.Y), Nearest);
+		}
+	}
+
+	const bool bAnyContact = Movement->IsWheelInContact(0)
+		|| Movement->IsWheelInContact(1) || Movement->IsWheelInContact(2)
+		|| Movement->IsWheelInContact(3);
+	OobAirSec = bAnyContact ? 0.0f : OobAirSec + DeltaSeconds;
+	OobOffRoadSec = OobDistNowCm > OobDistCm ? OobOffRoadSec + DeltaSeconds : 0.0f;
+
+	if (OobOffRoadSec > 0.0f)
+	{
+		OobCountdownSec = OobGraceSec - OobOffRoadSec;   // HUD warning
+	}
+	if (OobOffRoadSec > OobGraceSec || OobAirSec > OobAirborneSec)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("ODVehiclePawn OOB RESET: pos=%.0f/%.0f/%.0f dist=%.0fcm "
+			     "offroad=%.1fs air=%.1fs -> nearest road point"),
+			Loc.X, Loc.Y, Loc.Z, OobDistNowCm, OobOffRoadSec, OobAirSec);
+		OobOffRoadSec = OobAirSec = 0.0f;
+		OobDistNowCm = 0.0f;
+		OobCountdownSec = -1.0f;
+		FVector2D Snap;
+		float SnapYaw = 0.0f;
+		if (Road->NearestRoadPoint(FVector2D(Loc.X, Loc.Y), Snap, SnapYaw))
+		{
+			// TeleportToSpawn re-arms the proven PM_Asphalt ground snap, so
+			// the car re-enters frozen and settles exactly like a map spawn.
+			TeleportToSpawn(FVector(Snap.X, Snap.Y, 0.0f), SnapYaw);
 		}
 	}
 }
