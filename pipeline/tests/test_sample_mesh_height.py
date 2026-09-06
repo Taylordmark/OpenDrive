@@ -143,9 +143,63 @@ def test_outside_every_triangle_returns_none():
     assert h is None, h
 
 
+def test_shared_edge_seam():
+    # Query EXACTLY on the diagonal shared by both triangles of a sloped
+    # quad - the seam case the function's own docstring flags as a
+    # floating-point hazard ("right on a shared-edge seam that rounding
+    # pushed just outside both neighbors"). With the default eps tolerance
+    # the point must land INSIDE at least one triangle, and both triangles
+    # interpolate the same Z along their shared edge, so the answer is
+    # well-defined either way: midpoint of the (0,0,0)-(100,100,400)
+    # diagonal -> z = 200.
+    positions = np.array([
+        [0.0, 0.0, 0.0],
+        [100.0, 0.0, 100.0],
+        [100.0, 100.0, 400.0],
+        [0.0, 100.0, 300.0],
+    ])
+    triangles = np.array([
+        [0, 1, 2],
+        [0, 2, 3],
+    ])
+    h = sample_mesh_height(positions, triangles, 50.0, 50.0)
+    assert h is not None and abs(h - 200.0) < 1e-6, h
+
+    # exactly on the OUTER boundary edge (y=0, between verts 0 and 1):
+    # z interpolates linearly along the edge -> 50 at its midpoint.
+    h = sample_mesh_height(positions, triangles, 50.0, 0.0)
+    assert h is not None and abs(h - 50.0) < 1e-6, h
+
+
+def test_degenerate_triangle_ignored():
+    # A zero-area (colinear) triangle covering the query point in XY must
+    # not poison the result (the denom==0 guard): the real triangle behind
+    # it wins, and a mesh containing ONLY the degenerate one is a miss.
+    positions = np.array([
+        [0.0, 0.0, 100.0],
+        [100.0, 0.0, 100.0],
+        [100.0, 100.0, 100.0],
+        # colinear trio along y=x at a bogus height
+        [0.0, 0.0, 9999.0],
+        [50.0, 50.0, 9999.0],
+        [100.0, 100.0, 9999.0],
+    ])
+    triangles = np.array([
+        [0, 1, 2],
+        [3, 4, 5],
+    ])
+    h = sample_mesh_height(positions, triangles, 60.0, 20.0)
+    assert h is not None and abs(h - 100.0) < 1e-6, h
+
+    h = sample_mesh_height(positions, np.array([[3, 4, 5]]), 50.0, 50.0)
+    assert h is None, h
+
+
 if __name__ == "__main__":
     test_flat_patch()
     test_sloped_ramp()
     test_overlapping_geometry_returns_topmost()
     test_outside_every_triangle_returns_none()
+    test_shared_edge_seam()
+    test_degenerate_triangle_ignored()
     print("all sample_mesh_height fixture tests passed")
