@@ -63,7 +63,8 @@ from pymartini import Martini
 
 import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
-from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m,
+from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
+                              half_width_for_stations, road_ue_z_m,
                                classify_wall_stations)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
@@ -665,19 +666,34 @@ def _get_lake_beds():
 
 
 def load_stations():
-    """Returns (lat0, lon0, east, north, elev, exclude, wall_pairs). `exclude`
-    is True for any station the terrain carve must skip (real bridge/tunnel,
-    OR an elevation conflict - either wall-eligible or out-of-scope, see
-    classify_wall_stations()). `wall_pairs` is the (i, j) station-index list
-    of in-scope, above-WALL_MIN_GRADE conflicts that need generated wall
-    geometry - build_retaining_walls.py consumes this same loader so its
-    run-clustering always starts from the identical pair list terrain
-    carving used to decide what to exclude."""
+    """Returns (lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs).
+    `exclude` is True for any station the terrain carve must skip (real
+    bridge/tunnel, OR an elevation conflict - either wall-eligible or
+    out-of-scope, see classify_wall_stations()). `clamp_r` (2026-09-06,
+    variable road width) is each station's hard-clamp footprint radius in
+    meters - that station's real pavement half-width
+    (road_mesh_common.half_width_for_stations, lanes= tag or class-table
+    fallback) plus SKIRT_EXTRA; HARD_CLAMP_RADIUS_M everywhere for older
+    road_stations.json files with no per-station tags. `wall_pairs` is the
+    (i, j) station-index list of in-scope, above-WALL_MIN_GRADE conflicts
+    that need generated wall geometry - build_retaining_walls.py consumes
+    this same loader so its run-clustering always starts from the identical
+    pair list terrain carving used to decide what to exclude."""
     data = json.loads(STATIONS_PATH.read_text())
     lat0, lon0 = data["origin_latlon"]
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
+    clamp_parts = []
+    for seg in data["segments"]:
+        n_st = len(seg["east_m"])
+        hwy = seg.get("highway_class")
+        if hwy:
+            hw = half_width_for_stations(hwy, seg.get("oneway"), seg.get("lanes"))
+        else:
+            hw = np.full(n_st, ROAD_HALF_WIDTH)
+        clamp_parts.append(hw + SKIRT_EXTRA)
+    clamp_r = np.concatenate(clamp_parts)
     is_bridge = np.concatenate([
         np.array(seg.get("is_bridge", [False] * len(seg["east_m"])), dtype=bool)
         for seg in data["segments"]])
@@ -697,7 +713,7 @@ def load_stations():
               f"excluded from the terrain carve the same way is_bridge "
               f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
-    return lat0, lon0, east, north, elev, exclude, wall_pairs
+    return lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs
 
 
 def sample_dem(lat_arr, lon_arr, zoom, session, cache):
@@ -778,7 +794,8 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
                   drop=TERRAIN_CARVE_DROP_M,
                   cut_inner=TERRAIN_CARVE_CUT_INNER_M,
-                  cut_outer=TERRAIN_CARVE_CUT_OUTER_M):
+                  cut_outer=TERRAIN_CARVE_CUT_OUTER_M,
+                  st_clamp_r=None):
     """Same inverse-distance-stamp + smoothstep blend as
     road_mesh_common.carve_heightmap, but operating directly in the local
     east/north METER frame instead of a lon/lat-bounded pixel grid - no
@@ -815,6 +832,10 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     P = gx.shape[0]
     best_d = np.full(P, np.inf, dtype=np.float64)
     best_elev = np.zeros(P, dtype=np.float64)
+    # per-station hard-clamp footprint radius (variable road width,
+    # 2026-09-06) - carried alongside best_elev from the same nearest
+    # station; the old constant everywhere when the caller has no widths.
+    best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
     for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
         sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
         sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
@@ -825,6 +846,9 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
         better = nearest_d < best_d
         best_d = np.where(better, nearest_d, best_d)
         best_elev = np.where(better, se[nearest], best_elev)
+        if st_clamp_r is not None:
+            sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
+            best_clamp = np.where(better, sc[nearest], best_clamp)
     raw = elev_grid.reshape(-1)
     is_cut = raw > best_elev
     px_inner = np.where(is_cut, cut_inner, inner)
@@ -835,7 +859,7 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     # hard clamp under the literal road footprint - see HARD_CLAMP_MARGIN_M's
     # comment. Reuses best_d/best_elev from the blend above rather than a
     # second nearest-station search.
-    under_road = best_d <= HARD_CLAMP_RADIUS_M
+    under_road = best_d <= best_clamp
     out = np.where(under_road, np.minimum(out, best_elev - HARD_CLAMP_MARGIN_M), out)
     return out.reshape(shape)
 
@@ -982,7 +1006,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     plus (verts Px3 cm, uvs Px2, tris Tx3) - the single production function
     both main() (writes the ODT1 sidecar) and verify_terrain_fit.py (checks
     the actual built mesh, not a reimplementation) call into."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude = station_data
+    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r = station_data
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
     tile_cm = TERRAIN_TILE_SIZE_CM
     near_cache, far_cache = caches
@@ -1025,7 +1049,8 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
                  np.clip(st_y_cm, y0_cm, y1_cm) - st_y_cm) / 100.0 <= prefilter_m)
     if keep.any():
         elev = carve_grid_m(elev, east_m, north_m,
-                             st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep])
+                             st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep],
+                             st_clamp_r=st_clamp_r[keep])
 
     if is_near:
         gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
@@ -1153,7 +1178,7 @@ def classify_tiles(station_data):
     tile key covering that wider bbox, added as far/no-collision unless
     already claimed as near by the road-distance pass above - a
     background tile never downgrades a driveable one."""
-    lat0, lon0, st_x_cm, st_y_cm, _, _ = station_data
+    lat0, lon0, st_x_cm, st_y_cm, *_ = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
     pad = RENDER_DISTANCE_M * 100.0
     tx0 = int((st_x_cm.min() - pad) // tile_cm)
@@ -1203,9 +1228,9 @@ def main():
         if arg.startswith("--bbox-cm="):
             bbox_cm = tuple(float(v) for v in arg.split("=", 1)[1].split(","))
 
-    lat0, lon0, east, north, elev, exclude, _wall_pairs_unused = load_stations()
+    lat0, lon0, east, north, elev, exclude, clamp_r, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude)
+    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r)
 
     tiles = classify_tiles(station_data)
 

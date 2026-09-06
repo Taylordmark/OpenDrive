@@ -23,10 +23,13 @@ profile. AODGuardrailManager picks the actual cross-section at runtime from
 each run's class_id - this script only records which class a run's
 majority-vote highway= tag implies.
 
-Rail lateral seat position: pavement edge (ROAD_HALF_WIDTH, 4.5 m) + 30 cm,
+Rail lateral seat position: pavement edge + 30 cm, where "pavement edge" is
+the same per-station half-width the road mesh itself is built with
+(road_mesh_common.half_width_for_stations - OSM lanes= tag or class-table
+guess, 4.5 m for an untagged 2-lane road),
 matching build_road_barrier.py's BARRIER_OFFSET_M convention of offsetting
 from the same road-frame tangent/right vectors. The terrain-drop PROBE point
-is sampled a few meters further out (GUARDRAIL_PROBE_OFFSET_M) - separate
+is sampled a few meters further out (GUARDRAIL_PROBE_EXTRA_M) - separate
 from the rail's own seat offset because the whole point is checking what's
 actually beyond the shoulder, not right at it.
 
@@ -99,8 +102,9 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from road_mesh_common import (ROAD_HALF_WIDTH, road_class_and_lanes,
-                               road_ue_z_m, reconcile_junction_elevations)
+from road_mesh_common import (ROAD_HALF_WIDTH, half_width_for_stations,
+                               road_class_and_lanes, road_ue_z_m,
+                               reconcile_junction_elevations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
                                        load_lake_beds, _point_in_polygon,
@@ -112,8 +116,8 @@ from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
 LAKE_SHORE_EXCLUSION_MARGIN_M = WATER_SHORE_BLEND_M + 3.0
 
 GUARDRAIL_DROP_THRESHOLD_M = 2.5     # road-above-terrain drop that triggers a rail
-GUARDRAIL_PROBE_OFFSET_M = ROAD_HALF_WIDTH + 3.0   # "a few meters" beyond pavement edge
-GUARDRAIL_RAIL_OFFSET_M = ROAD_HALF_WIDTH + 0.3    # rail seat: pavement edge + 30cm
+GUARDRAIL_PROBE_EXTRA_M = 3.0   # probe "a few meters" beyond pavement edge
+GUARDRAIL_RAIL_EXTRA_M = 0.3    # rail seat: pavement edge + 30cm
 GUARDRAIL_MIN_RUN_M = 10.0           # sustained-drop requirement
 GUARDRAIL_GAP_BRIDGE_M = 6.0         # short sub-threshold gaps get bridged
 JUNCTION_EXCLUDE_MARGIN_M = 15.0     # break a run this far before/after a junction
@@ -253,11 +257,21 @@ def main():
 
         road_z_ue_m = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M)
 
+        # Per-station pavement half-width, same computation the road mesh
+        # itself uses - rails hug the real edge on wide (I-70) and narrow
+        # (oneway ramp) roads alike instead of assuming 4.5 m everywhere.
+        if highway and any(highway):
+            half_w = half_width_for_stations(highway, seg.get("oneway"), seg.get("lanes"))
+        else:
+            half_w = np.full(n, ROAD_HALF_WIDTH)
+        probe_off = half_w + GUARDRAIL_PROBE_EXTRA_M
+        rail_off = half_w + GUARDRAIL_RAIL_EXTRA_M
+
         for side in (-1.0, 1.0):
-            probe_e = east + rx * GUARDRAIL_PROBE_OFFSET_M * side
-            probe_n = north + ry * GUARDRAIL_PROBE_OFFSET_M * side
-            rail_e = east + rx * GUARDRAIL_RAIL_OFFSET_M * side
-            rail_n = north + ry * GUARDRAIL_RAIL_OFFSET_M * side
+            probe_e = east + rx * probe_off * side
+            probe_n = north + ry * probe_off * side
+            rail_e = east + rx * rail_off * side
+            rail_n = north + ry * rail_off * side
 
             probe_lat = lat0 + probe_n / M_PER_DEG_LAT
             probe_lon = lon0 + probe_e / m_per_deg_lon

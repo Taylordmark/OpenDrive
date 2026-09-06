@@ -7,20 +7,16 @@ Usage:  python export_road_mesh_bin_v2.py
 Reads   data/road_tiles/<AREA_NAME>_test/road_mesh.json
 Writes  OpenDriveUE/Content/OpenDrive/MasksV2/roadv3_<AREA_NAME>_test_tile_<tx>_<ty>.bin
 
-IMPORTANT - this is a PARALLEL output, not a replacement for
-export_road_mesh_bin.py's ODR2 sidecars in OpenDriveUE/Content/OpenDrive/Masks/:
-AODRoadManager::ParseRoadTileFile (ODRoadManager.cpp) only understands the
-ODR2 magic/layout today, so an ODR3 file dropped into Masks/ would just fail
-its magic check and silently read as "no road in that tile" (see
-ParseRoadTileFile's early-out on a magic mismatch) - not a crash, but every
-road in the game would vanish. Writing to a separate MasksV2/ directory with
-a distinct "roadv3_" filename prefix means the current C++ never even probes
-these files, so this script is fully inert until a follow-up agent adds an
-ODR3 reader (and a RoadTilePrefix/output-dir switch) to ODRoadManager.cpp.
-export_road_mesh_bin.py keeps writing the real, currently-loaded ODR2
-sidecars unchanged (same byte LAYOUT as before - only the numeric UV values
-baked into them changed, via road_mesh_common.build_road_chunks()'s new u/v
-convention; see that function's docstring).
+IMPORTANT - this is a PARALLEL output alongside export_road_mesh_bin.py's
+ODR2 sidecars in OpenDriveUE/Content/OpenDrive/Masks/, and since 2026-09-03
+AODRoadManager::RequestTileLoad PREFERS the MasksV2/roadv3_* tile when one
+exists (ParseRoadTileFileV3 first, plain ODR2 as the fallback for tiles with
+no v3 file). That preference cuts both ways: a MISSING or STALE roadv3 tile
+silently overrides a perfectly fresh ODR2 bake for that tile, which is why
+this script is a registered rebuild_area.py stage (2026-09-06 - it was left
+out of STAGES when the reader landed, shipping a stale ODR3 generation over
+a fresh rebake) and why experimental_junction_pads.py patches MasksV2/ with
+the same regraded geometry it writes into Masks/.
 
 ODR3 format (2026-09-03, Phase 2a road-visual overhaul - extends ODR2 with a
 second per-vertex UV channel + two new per-chunk metadata bytes so a future
@@ -45,8 +41,10 @@ re-deriving anything from OSM tags at runtime):
                    [0,1]); v0: distance along centerline, METERS, continuous
                    - see road_mesh_common.build_road_chunks()'s docstring
         vertex_count * (float32 u1, float32 v1)   u1: road HALF-width in
-                   meters at this vertex (full pavement width = 2*u1,
-                   currently constant per chunk); v1: reserved, 0.0
+                   meters at this vertex (full pavement width = 2*u1; varies
+                   per STATION along a chunk since the 2026-09-06 lanes=-tag
+                   width work - the 4 verts of one station row share one
+                   value); v1: reserved, 0.0
         tri_count   * (uint32 i0, uint32 i1, uint32 i2)
 """
 
@@ -137,8 +135,9 @@ def main():
     print(f"{len(chunks)} chunks -> {len(buckets)} tile(s) "
           f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
-    print("NOTE: this is a PARALLEL ODR3 output - AODRoadManager (ODRoadManager.cpp) "
-          "does not read MasksV2/ yet. See this file's module docstring.")
+    print("NOTE: AODRoadManager PREFERS these ODR3 tiles over the ODR2 tiles in "
+          "Masks/ wherever both exist - keep the two exports in the same bake "
+          "generation. See this file's module docstring.")
 
 
 if __name__ == "__main__":

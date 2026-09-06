@@ -120,7 +120,7 @@ def _fit_station_data():
     """Shared station loading + tile bucketing for both the shipped-artifact
     and pre-bake checks below - same station set, same exclusions, so the
     two checks are directly comparable."""
-    lat0, lon0, east, north, elev, exclude, wall_pairs = btmt.load_stations()
+    lat0, lon0, east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
     fit_idx = np.where(~exclude)[0]
@@ -309,9 +309,9 @@ def check_prebake_consistency():
     for that) - it answers "would baking right now, from today's code and
     today's stations, produce a consistent world," independent of whatever
     partial/stale state Content/OpenDrive/Masks/ happens to be in."""
-    lat0, lon0, east, north, elev, exclude, wall_pairs = btmt.load_stations()
+    lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude)
+    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r)
 
     fit_idx = np.where(~exclude)[0]
 

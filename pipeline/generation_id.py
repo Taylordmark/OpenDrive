@@ -46,12 +46,16 @@ from pathlib import Path
 from road_mesh_common import (
     BANK_GAIN,
     DEM_SPIKE_THRESHOLD_M,
+    LANE_WIDTH_M,
     MAX_BANK_RAD,
+    MAX_HALF_WIDTH_M,
+    MIN_HALF_WIDTH_M,
     ROAD_HALF_WIDTH,
     ROAD_LIFT,
     SKIRT_DROP,
     SKIRT_EXTRA,
     STATION_SPACING,
+    WIDTH_SMOOTH_SIGMA_M,
 )
 from test_areas import (
     AREA_NAME,
@@ -109,6 +113,13 @@ def compute_generation_id() -> str:
         TERRAIN_TILE_SIZE_CM,
         STATION_SPACING,
         ROAD_HALF_WIDTH,
+        # Per-station lanes-tag width (2026-09-06): these change the road
+        # footprint and the terrain carve radius, so a pre-width tile must
+        # mismatch a post-width one loudly.
+        LANE_WIDTH_M,
+        MIN_HALF_WIDTH_M,
+        MAX_HALF_WIDTH_M,
+        WIDTH_SMOOTH_SIGMA_M,
         SKIRT_EXTRA,
         SKIRT_DROP,
         ROAD_LIFT,

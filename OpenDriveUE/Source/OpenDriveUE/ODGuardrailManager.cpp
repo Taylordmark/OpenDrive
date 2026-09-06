@@ -308,7 +308,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 			const TArray<FVector>& St = Run.Stations;
 			// recompute the same outward-tangent convention BuildRailMesh used,
 			// so posts sit at the rail's own seat line (station position IS
-			// the seat - see build_road_guardrails.py's GUARDRAIL_RAIL_OFFSET_M).
+			// the seat - see build_road_guardrails.py's GUARDRAIL_RAIL_EXTRA_M).
 			for (int32 s = 0; s < St.Num() - 1; ++s)
 			{
 				const double SegLen = FVector::Dist(St[s], St[s + 1]);

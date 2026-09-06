@@ -152,7 +152,7 @@ def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1):
 
 
 def check_road_vs_terrain_fit():
-    lat0, lon0, east, north, elev, exclude, wall_pairs = btmt.load_stations()
+    lat0, lon0, east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
     fit_idx = np.where(~exclude)[0]

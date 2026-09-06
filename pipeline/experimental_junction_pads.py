@@ -85,12 +85,20 @@ import build_terrain_mesh_tiles as btmt
 from build_road_network import split_excluding_tunnels, write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
-                               STATION_SPACING, build_road_chunks, road_ue_z_m,
+                               STATION_SPACING, build_road_chunks,
+                               half_width_for_stations, road_ue_z_m,
                                sample_mesh_height)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 BACKUP_DIR = OUT_DIR / "_road_backup_junction_pads"
+# ODR3 mirror (2026-09-06): AODRoadManager::RequestTileLoad PREFERS
+# MasksV2/roadv3_* over the ODR2 tile when both exist, so patching only
+# Masks/ would leave every regrade silently overridden wherever a roadv3
+# tile covers the same grid cell - the v3 set gets the identical rebuilt
+# chunks (same buckets, same gen id), with its own first-run-wins backup.
+OUT_DIR_V2 = OUT_DIR.parent / "MasksV2"
+V3_BACKUP_DIR = OUT_DIR_V2 / "_roadv3_backup_junction_pads"
 TERRAIN_BACKUP_DIR = OUT_DIR / "_terrain_backup_junction_pads"
 SIDECAR_PATH = OUT_DIR / f"roadstations_{AREA_NAME}.bin"
 SIDECAR_BACKUP_DIR = OUT_DIR / "_sidecar_backup_junction_pads"
@@ -166,6 +174,30 @@ def write_tile(path, chunks, gen_id_bytes):
             f.write(struct.pack("<B", 1 if c.get("oneway") else 0))
             f.write(struct.pack(f"<{len(verts)}f", *verts))
             f.write(struct.pack(f"<{len(uvs)}f", *uvs))
+            f.write(struct.pack(f"<{len(tris)}I", *tris))
+
+
+def write_tile_v3(path, chunks, gen_id_bytes):
+    """ODR3 layout - must stay byte-identical to export_road_mesh_bin_v2.
+    write_tile() (which is what ODRoadManager::ParseRoadTileFileV3 parses):
+    ODR2's header/verts/uv0/tris plus a second per-vertex UV channel (uv1.x =
+    half-width m) and two per-chunk metadata bytes (road_class_id,
+    lane_count)."""
+    with open(path, "wb") as f:
+        f.write(b"ODR3")
+        f.write(gen_id_bytes)
+        f.write(struct.pack("<I", len(chunks)))
+        for c in chunks:
+            verts, uvs, uv1, tris = c["vertices"], c["uvs"], c["uv1"], c["triangles"]
+            vcount, tcount = len(verts) // 3, len(tris) // 3
+            assert len(uv1) // 2 == vcount, f"{c['name']}: uv1/vertex count mismatch"
+            f.write(struct.pack("<II", vcount, tcount))
+            f.write(struct.pack("<B", 1 if c.get("oneway") else 0))
+            f.write(struct.pack("<B", int(c.get("road_class_id", 6))))
+            f.write(struct.pack("<B", int(c.get("lane_count", 2))))
+            f.write(struct.pack(f"<{len(verts)}f", *verts))
+            f.write(struct.pack(f"<{len(uvs)}f", *uvs))
+            f.write(struct.pack(f"<{len(uv1)}f", *uv1))
             f.write(struct.pack(f"<{len(tris)}I", *tris))
 
 
@@ -285,6 +317,10 @@ def merge_chunk_into(host, guest):
     guest_vcount = len(guest["vertices"]) // 3
     host["vertices"].extend(guest["vertices"])
     host["uvs"].extend(guest["uvs"])
+    # uv1 must stay vertex-parallel for the ODR3/MasksV2 mirror write
+    # (write_tile_v3); every chunk built in this script carries it
+    # (build_road_chunks ribbons and _build_pad_fan pads alike).
+    host["uv1"].extend(guest["uv1"])
     host["triangles"].extend(idx + base for idx in guest["triangles"])
     bridge_pad_to_host(host, base, guest_vcount)
 
@@ -1683,8 +1719,16 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     for k in range(sides):
         a, b = 1 + k, 1 + (k + 1) % sides
         tris.extend([0, a, b])
+    # uv1/road_class_id/lane_count: the ODR3 mirror (write_tile_v3) needs
+    # every chunk to carry the extended-format fields. A pad disc has no
+    # single meaningful road width/class, so it gets the classic half-width
+    # (uv1.x is only used by the material for lane-line placement, and the
+    # disc's constant uv0 already opts it out of lane lines entirely) and
+    # the "unknown" class defaults (6 = service/track/unknown, 2 lanes).
+    uv1 = [ROAD_HALF_WIDTH, 0.0] * (1 + len(ring))
     return {"name": name, "vertices": [round(v, 1) for v in verts],
-            "uvs": [round(v, 4) for v in uvs], "triangles": tris, "oneway": False}
+            "uvs": [round(v, 4) for v in uvs], "uv1": uv1, "triangles": tris,
+            "oneway": False, "road_class_id": 6, "lane_count": 2}
 
 
 def _pad_draw_radius(j):
@@ -2247,6 +2291,22 @@ def restore():
         print(f"restored {n} road tile(s) from {BACKUP_DIR}"
               + (f", removed {n_extra} tile(s) with no original" if n_extra else ""))
 
+    if not V3_BACKUP_DIR.exists():
+        print("no ODR3 (MasksV2) backup found - nothing to restore there")
+    else:
+        n = 0
+        for p in V3_BACKUP_DIR.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
+            (OUT_DIR_V2 / p.name).write_bytes(p.read_bytes())
+            n += 1
+        n_extra = 0
+        kept = {p.name for p in V3_BACKUP_DIR.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin")}
+        for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
+            if p.name not in kept:
+                p.unlink()
+                n_extra += 1
+        print(f"restored {n} ODR3 road tile(s) from {V3_BACKUP_DIR}"
+              + (f", removed {n_extra} tile(s) with no original" if n_extra else ""))
+
     if not TERRAIN_BACKUP_DIR.exists():
         print("no terrain backup found - nothing to restore there")
     else:
@@ -2316,6 +2376,12 @@ def build_solo_junction(junctions, raw, target_xy=(-2485.0, 7115.0), stub_len_m=
 
     removed = 0
     for p in OUT_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin"):
+        p.unlink()
+        removed += 1
+    # ODR3 tiles would silently OVERRIDE the wiped debug world (the game
+    # prefers roadv3_* per tile) - wipe them too; a full pads rerun or
+    # rebuild_area rebake regenerates them.
+    for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
         p.unlink()
         removed += 1
 
@@ -2427,7 +2493,7 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
     st_exclude) tuple build_tile()/carve_grid_m() consume, each carrying its
     junction's own pinned elevation - see the module comment above for why
     this replaces a separate feather/blend pass instead of adding one."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude = station_data
+    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r = station_data
     if not junctions:
         return station_data
     rim_x, rim_y, rim_elev = [], [], []
@@ -2444,15 +2510,19 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
     rim_y_cm = -np.asarray(rim_y, dtype=np.float64) * 100.0
     rim_elev = np.asarray(rim_elev, dtype=np.float64)
     rim_exclude = np.zeros(len(rim_x), dtype=bool)
+    # rim anchors keep the classic constant footprint radius - they mark the
+    # pad's blend boundary, not a lane-tagged road surface
+    rim_clamp = np.full(len(rim_x), btmt.HARD_CLAMP_RADIUS_M, dtype=np.float64)
     return (lat0, lon0,
             np.concatenate([st_x_cm, rim_x_cm]),
             np.concatenate([st_y_cm, rim_y_cm]),
             np.concatenate([st_elev, rim_elev]),
-            np.concatenate([st_exclude, rim_exclude]))
+            np.concatenate([st_exclude, rim_exclude]),
+            np.concatenate([st_clamp_r, rim_clamp]))
 
 
 def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded_elev,
-                                  terrain_exclude):
+                                  terrain_exclude, st_clamp_r):
     """Re-carve the (small) set of terrain tiles a snapped junction actually
     touches, from the SAME regraded station arrays the road pads/ribbons
     above were just built from - reuses build_terrain_mesh_tiles.build_tile()
@@ -2495,7 +2565,8 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     st_x_cm = regraded_east * 100.0
     st_y_cm = -regraded_north * 100.0
     station_data = _augment_station_data_with_pad_rims(
-        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude), junctions)
+        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r),
+        junctions)
 
     session = requests.Session()
     caches = ({}, {})
@@ -2526,21 +2597,27 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
 
 
 def read_station_sidecar(path):
-    """Parses the ODS1 layout write_station_sidecar() (build_road_network.py)
-    writes: magic, gen-id string, station count, then N*(x_cm,y_cm,z_cm)
-    float32 triples, UE world frame. Returns (gen_id_str, x_cm, y_cm, z_cm)
-    as float64 numpy arrays (upcast for the matching/math below - the file
+    """Parses the layout write_station_sidecar() (build_road_network.py)
+    writes: magic, gen-id string, station count, then per-station float32
+    fields, UE world frame - ODS2 is (x_cm, y_cm, z_cm, halfwidth_cm)
+    quads; the older ODS1 was (x, y, z) triples (half-width defaults to
+    ROAD_HALF_WIDTH). Returns (gen_id_str, x_cm, y_cm, z_cm, hw_cm) as
+    float64 numpy arrays (upcast for the matching/math below - the file
     itself stays float32, matching write_station_sidecar's own dtype)."""
     with open(path, "rb") as f:
         magic = f.read(4)
-        if magic != b"ODS1":
-            raise ValueError(f"{path}: bad magic {magic!r}, expected b'ODS1'")
+        if magic not in (b"ODS1", b"ODS2"):
+            raise ValueError(f"{path}: bad magic {magic!r}, expected b'ODS1'/b'ODS2'")
+        stride = 4 if magic == b"ODS2" else 3
         (gen_len,) = struct.unpack("<I", f.read(4))
         gen_id = f.read(gen_len).decode("ascii")
         (n,) = struct.unpack("<I", f.read(4))
-        flat = np.frombuffer(f.read(n * 3 * 4), dtype="<f4")
+        flat = np.frombuffer(f.read(n * stride * 4), dtype="<f4")
     flat = flat.astype(np.float64)
-    return gen_id, flat[0::3].copy(), flat[1::3].copy(), flat[2::3].copy()
+    hw = (flat[3::4].copy() if stride == 4
+          else np.full(n, ROAD_HALF_WIDTH * 100.0))
+    return (gen_id, flat[0::stride].copy(), flat[1::stride].copy(),
+            flat[2::stride].copy(), hw)
 
 
 def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
@@ -2578,7 +2655,7 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
     else:
         print(f"reusing existing sidecar backup baseline at {backup_path}")
 
-    gen_id, sc_x, sc_y, sc_z = read_station_sidecar(backup_path)
+    gen_id, sc_x, sc_y, sc_z, sc_hw = read_station_sidecar(backup_path)
 
     idxs = np.nonzero(regraded_mask)[0]
     px_cm = orig_east[idxs] * 100.0
@@ -2625,7 +2702,7 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
           + (f", {unmatched} unmatched (likely tunnel-excluded)" if unmatched else "")
           + (f", {ambiguous} had >1 candidate within epsilon (closest used)" if ambiguous else ""))
 
-    write_station_sidecar(SIDECAR_PATH, [(sc_x, sc_y, sc_z)], pack_generation_id(gen_id))
+    write_station_sidecar(SIDECAR_PATH, [(sc_x, sc_y, sc_z, sc_hw)], pack_generation_id(gen_id))
     print(f"rewrote station sidecar ({len(sc_x)} station(s), unchanged count) -> {SIDECAR_PATH}")
 
 
@@ -2665,7 +2742,7 @@ def main():
         restore()
         return
 
-    lat0, lon0, east, north, elev, terrain_exclude, _wp = btmt.load_stations()
+    lat0, lon0, east, north, elev, terrain_exclude, clamp_r, _wp = btmt.load_stations()
     raw = json.loads(btmt.STATIONS_PATH.read_text())
     seg_ids = np.concatenate([
         np.full(len(seg["east_m"]), si, dtype=np.int32)
@@ -2980,7 +3057,7 @@ def main():
         off += cnt
 
     regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
-                                  terrain_exclude)
+                                  terrain_exclude, clamp_r)
 
     # The runtime terrain carve (AODTerrainManager) doesn't only read the
     # road-mesh tiles patched above - it reads roadstations_{AREA_NAME}.bin,
@@ -3073,6 +3150,8 @@ def main():
         h_full = np.array(seg["elev_m"])
         is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
         is_oneway_full = seg.get("oneway")
+        highway_full = seg.get("highway_class")   # absent in older files
+        lanes_full = seg.get("lanes")
         runs = list(split_excluding_tunnels(is_tunnel))
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
@@ -3080,6 +3159,17 @@ def main():
             s, e, nn, h = s_full[lo:hi], e_full[lo:hi], n_full[lo:hi], h_full[lo:hi]
             z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
+            highway_run = highway_full[lo:hi] if highway_full else None
+            lanes_run = lanes_full[lo:hi] if lanes_full else None
+            # Same per-station width build_road_network.py bakes into
+            # road_mesh.json (2026-09-06 lanes=-tag width work) - computed
+            # over the whole run, like build_road_network does, so the
+            # Gaussian taper sees the same window regardless of where the
+            # junction-pad omission below cuts the ribbon into sub-runs.
+            # Without this the rebuild here silently reverted every road to
+            # the constant classic width.
+            half_width_run = (half_width_for_stations(highway_run, is_oneway, lanes_run)
+                              if highway_run else None)
             name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
 
             # OMIT this road's ribbon entirely (not just its skirt) wherever
@@ -3114,7 +3204,11 @@ def main():
                         chunks, cx, cy, cz = build_road_chunks(
                             s[p0:p1], e[p0:p1], nn[p0:p1], z[p0:p1], name_prefix=sub_name,
                             spacing=STATION_SPACING, is_oneway=sub_oneway,
-                            skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP)
+                            skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP,
+                            highway_classes=(highway_run[p0:p1] if highway_run else None),
+                            osm_lanes=(lanes_run[p0:p1] if lanes_run else None),
+                            half_width_s=(half_width_run[p0:p1]
+                                          if half_width_run is not None else None))
                         all_chunks.extend(chunks)
                         total_km += float(s[p1 - 1] - s[p0]) / 1000.0
                         sub_idx += 1
@@ -3188,6 +3282,32 @@ def main():
         if p.resolve() not in written_set and p.parent != BACKUP_DIR:
             p.unlink()
             n_stale += 1
+
+    # ODR3/MasksV2 mirror - same chunks, same buckets, same gen id (see
+    # OUT_DIR_V2's comment: the game PREFERS roadv3_* tiles, so they must
+    # carry the identical patched geometry or every regrade above is
+    # silently overridden wherever a v3 tile exists).
+    OUT_DIR_V2.mkdir(parents=True, exist_ok=True)
+    if not V3_BACKUP_DIR.exists():
+        V3_BACKUP_DIR.mkdir(parents=True)
+        for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
+            (V3_BACKUP_DIR / p.name).write_bytes(p.read_bytes())
+        print(f"backed up original (unpatched) ODR3 road tiles -> {V3_BACKUP_DIR}")
+    else:
+        print(f"reusing existing ODR3 backup baseline at {V3_BACKUP_DIR}")
+    written_v3 = []
+    for (tx, ty), tile_chunks in buckets.items():
+        path = OUT_DIR_V2 / f"roadv3_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        write_tile_v3(path, tile_chunks, gen_id_bytes)
+        written_v3.append(path)
+    n_stale_v3 = 0
+    written_v3_set = {p.resolve() for p in written_v3}
+    for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
+        if p.resolve() not in written_v3_set and p.parent != V3_BACKUP_DIR:
+            p.unlink()
+            n_stale_v3 += 1
+    print(f"ODR3 mirror: {len(written_v3)} MasksV2 tile(s) written, "
+          f"{n_stale_v3} stale tile(s) removed")
 
     for j in junctions:
         print(f"  junction @ ({j['xy'][0]:.0f},{j['xy'][1]:.0f}): {j['n_roads']} road(s) "

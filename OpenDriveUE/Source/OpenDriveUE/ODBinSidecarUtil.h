@@ -137,6 +137,11 @@ inline int32 PickWeightedIndex(float R, const float* Weight, int32 Count)
 struct FRoadStation
 {
 	float X = 0.0f, Y = 0.0f, Z = 0.0f; // cm, UE world frame
+	// Pavement half-width at this station (cm) - per-station since ODS2
+	// (pipeline lanes= tag width, 2026-09-06); ODS1 files fall back to the
+	// classic constant 4.5 m footprint. The runtime carve uses this as its
+	// clamp-radius floor so wide roads carve their full footprint.
+	float HalfWidthCm = 450.0f;
 };
 
 /** Read-only spatial hash over every road station - built once at BeginPlay
@@ -191,14 +196,17 @@ struct FStationSpatialHash
 	}
 };
 
-/** PINNED format (roadstations_{area}.bin): "ODS1" magic (reused from
- *  ODWallManager's walls_*.bin magic bytes - harmless, the two are never read
- *  by the same code path, callers key entirely off filename), then a
+/** PINNED format (roadstations_{area}.bin): "ODS2" magic (the "ODS1" prefix
+ *  was reused from ODWallManager's walls_*.bin magic bytes - harmless, the
+ *  two are never read by the same code path, callers key entirely off
+ *  filename), then a
  *  LENGTH-PREFIXED UTF-8 generation id (NOT the fixed 16-byte ASCII-hex field
  *  ReadGenerationId() above expects - deliberately a different, simpler
  *  header shape, so this is parsed by hand rather than reusing that helper),
- *  then a station count and N flat (x,y,z) float32 triples in cm, UE world
- *  frame. Shared (2026-08-26) between AODTerrainManager (runtime carve) and
+ *  then a station count and N flat (x,y,z,halfwidth) float32 quads in cm, UE
+ *  world frame. The older "ODS1" (x,y,z) triple layout is still accepted with
+ *  HalfWidthCm left at its 450 cm default (pre-lanes-tag pipeline output).
+ *  Shared (2026-08-26) between AODTerrainManager (runtime carve) and
  *  AODForestManager (road-exclusion) - see FStationSpatialHash's comment for
  *  why each manager still builds its own hash rather than sharing one
  *  instance. */
@@ -206,10 +214,13 @@ inline bool ParseRoadStationSidecarFile(const FString& Path, TArray<FRoadStation
 {
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'S' || Bin[3] != '1')
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'S'
+		|| (Bin[3] != '1' && Bin[3] != '2'))
 	{
 		return false;
 	}
+	const bool bHasHalfWidth = (Bin[3] == '2');
+	const int64 Stride = bHasHalfWidth ? 16 : 12;
 
 	const uint8* Cur = Bin.GetData() + 4;
 	const uint8* End = Bin.GetData() + Bin.Num();
@@ -233,18 +244,22 @@ inline bool ParseRoadStationSidecarFile(const FString& Path, TArray<FRoadStation
 		return false;
 	}
 	const uint32 N = ReadU32LE(Cur); Cur += 4;
-	const int64 NeedBytes = (int64)N * 12;
+	const int64 NeedBytes = (int64)N * Stride;
 	if (Remaining() < NeedBytes)
 	{
 		return false;
 	}
 
-	OutStations.SetNumUninitialized(N);
+	OutStations.SetNum(N); // NOT Uninitialized - ODS1 relies on the 450 cm default
 	for (uint32 i = 0; i < N; ++i)
 	{
-		OutStations[i].X = ReadF32LE(Cur + i * 12 + 0);
-		OutStations[i].Y = ReadF32LE(Cur + i * 12 + 4);
-		OutStations[i].Z = ReadF32LE(Cur + i * 12 + 8);
+		OutStations[i].X = ReadF32LE(Cur + i * Stride + 0);
+		OutStations[i].Y = ReadF32LE(Cur + i * Stride + 4);
+		OutStations[i].Z = ReadF32LE(Cur + i * Stride + 8);
+		if (bHasHalfWidth)
+		{
+			OutStations[i].HalfWidthCm = ReadF32LE(Cur + i * Stride + 12);
+		}
 	}
 	return true;
 }

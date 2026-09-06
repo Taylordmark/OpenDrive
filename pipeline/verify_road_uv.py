@@ -92,6 +92,37 @@ def parse_odr3_tile(path):
     return chunks
 
 
+PAD_U = 0.58   # experimental_junction_pads._build_pad_fan's constant PAD_UV
+PAD_UV_EPS = 1e-6
+
+
+def strip_pad_verts(chunk):
+    """experimental_junction_pads.py patches the shipped ODR2 tiles AFTER
+    export: pad discs are standalone fan chunks OR get their verts APPENDED
+    to an existing ribbon chunk (merge_chunk_into's bridge-triangle merge),
+    so a patched chunk's vcount/%4 alignment and per-row column layout no
+    longer describe the whole vertex array. Pad verts carry the exact
+    constant PAD_UV (0.58, 0.0) (single flat asphalt texel - see
+    _build_pad_fan); strip them and check only the surviving ribbon part.
+    Returns a filtered chunk, or None if nothing but pad verts remain."""
+    us = chunk["uvs"][0::2]
+    vs = chunk["uvs"][1::2]
+    keep = [i for i in range(len(us))
+            if not (abs(us[i] - PAD_U) < PAD_UV_EPS and vs[i] == 0.0)]
+    if not keep:
+        return None
+    if len(keep) == len(us):
+        return chunk
+    out = dict(chunk)
+    out["vcount"] = len(keep)
+    out["uvs"] = [c for i in keep for c in (us[i], vs[i])]
+    if "uv1" in chunk:
+        u1 = chunk["uv1"][0::2]
+        v1 = chunk["uv1"][1::2]
+        out["uv1"] = [c for i in keep for c in (u1[i], v1[i])]
+    return out
+
+
 def check_uv0(chunk, path, errors):
     vcount = chunk["vcount"]
     uvs = chunk["uvs"]
@@ -138,9 +169,26 @@ def check_uv1_and_meta(chunk, path, errors):
     if any(w <= 0.0 or w > 15.0 for w in half_widths):
         bad = next(w for w in half_widths if w <= 0.0 or w > 15.0)
         errors.append(f"{path.name}: implausible road half-width in uv1.x: {bad:.3f} m")
-    lo, hi = min(half_widths), max(half_widths)
-    if hi - lo > 1e-3:
-        errors.append(f"{path.name}: uv1.x (half-width) not constant within chunk ({lo:.3f}..{hi:.3f})")
+    # Per-station width (2026-09-06, lanes= tags): uv1.x may now vary ALONG
+    # a chunk, but only smoothly (WIDTH_SMOOTH_SIGMA_M gaussian over 5 m
+    # stations bounds any legal row-to-row step well under this), and the 4
+    # verts of one station row must still share one half-width exactly.
+    MAX_ROW_STEP_M = 2.0
+    if vcount % N_PROF == 0:
+        n_rows = vcount // N_PROF
+        prev = None
+        for row in range(n_rows):
+            base = row * N_PROF
+            row_ws = half_widths[base:base + N_PROF]
+            if max(row_ws) - min(row_ws) > 1e-3:
+                errors.append(f"{path.name} row {row}: uv1.x differs within one "
+                              f"station row ({min(row_ws):.3f}..{max(row_ws):.3f})")
+                break
+            if prev is not None and abs(row_ws[0] - prev) > MAX_ROW_STEP_M:
+                errors.append(f"{path.name} row {row}: uv1.x jumps {prev:.3f} -> "
+                              f"{row_ws[0]:.3f} m between adjacent stations")
+                break
+            prev = row_ws[0]
     if not (0 <= chunk["road_class_id"] <= 6):
         errors.append(f"{path.name}: road_class_id {chunk['road_class_id']} out of [0,6]")
     if not (1 <= chunk["lane_count"] <= 8):
@@ -171,6 +219,9 @@ def main():
             errors.append(f"{path.name}: parse failed: {e}")
             continue
         for chunk in chunks:
+            chunk = strip_pad_verts(chunk)
+            if chunk is None:
+                continue   # pure junction-pad fan disc - no ribbon to check
             check_uv0(chunk, path, errors)
             checked_chunks_odr2 += 1
 
@@ -184,6 +235,9 @@ def main():
             errors.append(f"{path.name}: parse failed: {e}")
             continue
         for chunk in chunks:
+            chunk = strip_pad_verts(chunk)
+            if chunk is None:
+                continue   # pure junction-pad fan disc - no ribbon to check
             check_uv0(chunk, path, errors)
             check_uv1_and_meta(chunk, path, errors)
             checked_chunks_odr3 += 1

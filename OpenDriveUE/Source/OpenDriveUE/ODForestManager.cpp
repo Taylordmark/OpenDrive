@@ -994,26 +994,39 @@ bool AODForestManager::IsNearRoadStation(double WorldX, double WorldY) const
 		}
 	}
 
+	// Wide-road widening (ODS2 per-station half-width, 2026-09-06): the
+	// tuned exclusion radii assume the classic 4.5 m half-width; a station
+	// tagged wider (lanes=4 I-70, up to the pipeline's 8 m MAX_HALF_WIDTH_M
+	// cap) pushes its pavement edge out by (HalfWidthCm - 450), so its own
+	// exclusion grows by exactly that much - otherwise trees can spawn ON
+	// the extra pavement (10 m base exclusion < 11 m wide-road footprint).
+	constexpr float ClassicHalfWidthCm = 450.0f;
+	constexpr float MaxHalfWidthExtraCm = 350.0f; // MAX_HALF_WIDTH_M (8 m) - 4.5 m
+
 	// FStationSpatialHash::QueryBox is a coarse cell-overlap test (see its
-	// own comment) - pad the box by EffectiveExclusionCm so a station
-	// sitting just across a cell boundary from (WorldX, WorldY) isn't missed,
-	// same convention ApplyRoadCarve's own StationQueryMarginCm follows.
-	const float MinX = (float)WorldX - EffectiveExclusionCm;
-	const float MaxX = (float)WorldX + EffectiveExclusionCm;
-	const float MinY = (float)WorldY - EffectiveExclusionCm;
-	const float MaxY = (float)WorldY + EffectiveExclusionCm;
+	// own comment) - pad the box by EffectiveExclusionCm (plus the maximum
+	// possible wide-road widening) so a station sitting just across a cell
+	// boundary from (WorldX, WorldY) isn't missed, same convention
+	// ApplyRoadCarve's own StationQueryMarginCm follows.
+	const float PadCm = EffectiveExclusionCm + MaxHalfWidthExtraCm;
+	const float MinX = (float)WorldX - PadCm;
+	const float MaxX = (float)WorldX + PadCm;
+	const float MinY = (float)WorldY - PadCm;
+	const float MaxY = (float)WorldY + PadCm;
 	TArray<int32> Candidates;
 	RoadStationHash.QueryBox(MinX, MinY, MaxX, MaxY, Candidates);
 	if (Candidates.Num() == 0)
 	{
 		return false;
 	}
-	const float ExclusionSq = EffectiveExclusionCm * EffectiveExclusionCm;
 	const float BaseExclusionSq = RoadStationExclusionCm * RoadStationExclusionCm;
 	const FVector2D Here((float)WorldX, (float)WorldY);
 	for (int32 Idx : Candidates)
 	{
 		const FRoadStation& St = RoadStationHash.Stations[Idx];
+		const float StExclusionCm =
+			EffectiveExclusionCm + FMath::Max(0.0f, St.HalfWidthCm - ClassicHalfWidthCm);
+		const float ExclusionSq = StExclusionCm * StExclusionCm;
 		const float D2 = FVector2D::DistSquared(FVector2D(St.X, St.Y), Here);
 		if (D2 < ExclusionSq)
 		{

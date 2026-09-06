@@ -43,6 +43,11 @@ static constexpr float CarveCutOuterCm = 7500.0f;       // TERRAIN_CARVE_CUT_OUT
 // bias) became the tunable AODTerrainManager::RoadCarveClampMarginCm
 // (default 40 cm) for the same reason - see that UPROPERTY's comment.
 static constexpr float HardClampRadiusCm = 750.0f;
+// SKIRT_EXTRA (3 m) - per-station footprint radius is now the station's own
+// HalfWidthCm (ODS2 sidecar, lanes-tag width 2026-09-06) + this skirt, which
+// reproduces HardClampRadiusCm exactly for a classic 4.5 m half-width station
+// and mirrors the pipeline's own clamp_r = half_width + SKIRT_EXTRA.
+static constexpr float SkirtExtraCm = 300.0f;
 
 // How far past a tile's own bounds to query the station spatial hash -
 // comfortably past CarveOuterCm's 150 m taper so no vertex near a tile edge
@@ -676,6 +681,7 @@ void AODTerrainManager::ApplyRoadCarve(FParsedTerrainTile& Tile, const FIntPoint
 		float BestD = TNumericLimits<float>::Max();
 		float BestElev = 0.0f;
 		float BestX = 0.0f, BestY = 0.0f;
+		float BestHalfWidthCm = 450.0f;
 		for (int32 Idx : Candidates)
 		{
 			const FRoadStation& St = Hash.Stations[Idx];
@@ -688,6 +694,7 @@ void AODTerrainManager::ApplyRoadCarve(FParsedTerrainTile& Tile, const FIntPoint
 				BestElev = St.Z;
 				BestX = St.X;
 				BestY = St.Y;
+				BestHalfWidthCm = St.HalfWidthCm;
 			}
 		}
 
@@ -759,7 +766,13 @@ void AODTerrainManager::ApplyRoadCarve(FParsedTerrainTile& Tile, const FIntPoint
 		// corridor near it, rather than only the taper (Inner/Outer, unchanged
 		// and shared with Near) doing the work.
 		const float ClampMultiplier = (Fidelity == ETileFidelity::Coarse) ? 2.5f : 1.5f;
-		const float DynamicClampRadiusCm = FMath::Max(HardClampRadiusCm, MaxAdjEdgeCm[v] * ClampMultiplier);
+		// Floor is the NEAREST station's own literal footprint (half-width +
+		// skirt, per-station since ODS2) rather than the fixed 7.5 m - a
+		// 4-lane I-70 station carves its full 8+3 m footprint, a narrow
+		// oneway ramp doesn't over-carve. Identical to the old constant for
+		// classic 4.5 m stations (450 + 300 = HardClampRadiusCm).
+		const float FootprintClampCm = BestHalfWidthCm + SkirtExtraCm;
+		const float DynamicClampRadiusCm = FMath::Max(FootprintClampCm, MaxAdjEdgeCm[v] * ClampMultiplier);
 		const bool bHardClamped = BestD <= DynamicClampRadiusCm;
 		if (bHardClamped)
 		{
@@ -787,7 +800,11 @@ void AODTerrainManager::ApplyRoadCarve(FParsedTerrainTile& Tile, const FIntPoint
 				const float Dx = X - St.X;
 				const float Dy = Y - St.Y;
 				const float D = FMath::Sqrt(Dx * Dx + Dy * Dy);
-				if (D > DynamicClampRadiusCm || St.Z >= MinElevWithinRadius)
+				// A candidate's own footprint counts too - a wide (ODS2
+				// half-width) station's pavement can reach this vertex even
+				// when the vertex's nearest-station-derived radius doesn't.
+				if (D > FMath::Max(DynamicClampRadiusCm, St.HalfWidthCm + SkirtExtraCm)
+					|| St.Z >= MinElevWithinRadius)
 				{
 					continue;   // out of range, or can't lower the min further anyway
 				}

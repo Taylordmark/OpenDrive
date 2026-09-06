@@ -38,6 +38,9 @@ filenames:
   9. build_road_network.py    -> road_mesh.json, road_test_meta.json (needs
      road_stations.json)
  10. export_road_mesh_bin.py  -> road_*.bin (needs road_mesh.json)
+ 10b. export_road_mesh_bin_v2.py -> MasksV2/roadv3_*.bin (needs road_mesh.json;
+     ODR3 extended format - AODRoadManager PREFERS these over the ODR2 tiles
+     when present, so skipping this stage ships a stale road generation)
  11. export_road_centerline_bin.py -> centerline_*.bin, centerline_map_*.bin
      (needs road_stations.json)
  12. build_road_barrier.py    -> road_barrier.json (needs road_stations.json;
@@ -117,6 +120,10 @@ STAGES = [
     ("export_retaining_wall_bin.py", "export wall tiles -> Content/OpenDrive/Masks/walls_*.bin"),
     ("build_road_network.py", "build road_mesh.json + road_test_meta.json"),
     ("export_road_mesh_bin.py", "export road tiles -> Content/OpenDrive/Masks/road_*.bin"),
+    # 2026-09-06: was MISSING since ODR3 landed (2026-09-03) - ODRoadManager
+    # prefers MasksV2/roadv3_* when present, so a rebake without this stage
+    # left 1161 stale-generation ODR3 tiles overriding every fresh ODR2 tile.
+    ("export_road_mesh_bin_v2.py", "export extended ODR3 tiles -> Content/OpenDrive/MasksV2/roadv3_*.bin"),
     ("export_road_centerline_bin.py", "export centerline_*.bin / centerline_map_*.bin"),
     ("build_road_barrier.py", "build road_barrier.json"),
     ("export_road_barrier_bin.py", "export barrier tiles -> Content/OpenDrive/Masks/barrier_*.bin"),

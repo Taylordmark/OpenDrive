@@ -57,6 +57,16 @@ Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
                                # ROAD_CLASS_GRADE; kept in the output too so
                                # downstream consumers (speed limits, HUD)
                                # aren't stuck re-deriving it from raw OSM.
+         "lanes": [...],      # int per station (2026-09-06, OSM lanes= tag) -
+                               # 0 = untagged. Real tagged lane count; overrides
+                               # the ROAD_CLASS_LANES_TWOWAY class-table guess
+                               # downstream and drives per-road width. See
+                               # way_tag_meta().
+         "surface": [...],    # str per station (OSM surface= tag, "" untagged)
+                               # - for a future unpaved grip/visual pass.
+         "layer": [...],      # int per station (OSM layer= tag, 0 untagged) -
+                               # vertical-ordering hint for
+                               # detect_elevation_conflicts() later.
          "east_m": [...], "north_m": [...], "s_m": [...],
          "elev_m": [...]}   # grade-CONFORMING absolute DEM elevation (rides
                              # the real ground; only deviates via cut/bridge/
@@ -81,6 +91,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -424,6 +435,33 @@ def is_oneway_way(tags):
     return tags.get("oneway") not in (None, "no", "0", "false")
 
 
+def way_tag_meta(tags):
+    """(lanes, surface, layer) triple for a way (2026-09-06, AUDIT § 7 item
+    6 / "OSM road tags"). The raw osm.json has always carried full way tags
+    (Overpass `out body`) - they were just dropped here. Now threaded through
+    per-station like road_name/is_bridge so downstream consumers can use
+    real data instead of per-class heuristics:
+      lanes   int, 0 = untagged. Real tagged lane count - overrides
+              road_mesh_common.ROAD_CLASS_LANES_TWOWAY's class-table guess
+              (and, via lane count, drives real per-road width). OSM allows
+              messy values ("2; 3", "1.5") - take the leading integer,
+              anything unparseable degrades to 0/untagged rather than
+              crashing a whole area bake on one vandalized tag.
+      surface str, "" = untagged ("asphalt", "gravel", "dirt", ...) - for a
+              future unpaved grip/visual variant pass.
+      layer   int, 0 = untagged/ground level - OSM's vertical-ordering hint,
+              for feeding detect_elevation_conflicts() something better than
+              pure geometry later."""
+    raw_lanes = str(tags.get("lanes") or "")
+    m = re.match(r"\s*(\d+)", raw_lanes)
+    lanes = int(m.group(1)) if m else 0
+    try:
+        layer = int(str(tags.get("layer") or "0").strip())
+    except ValueError:
+        layer = 0
+    return lanes, (tags.get("surface") or ""), layer
+
+
 def merge_way_chains(ways):
     """Chain consecutive OSM ways through degree-2 nodes into maximal
     polylines, breaking only at real junctions (degree >= 3) or dead ends
@@ -432,20 +470,23 @@ def merge_way_chains(ways):
     the graph itself is the same "way = edge, endpoint = node" model, just
     walked as connected chains instead of shortest-pathed. Returns a list
     of (node_id_chain, is_structure_chain, is_tunnel_chain, name_chain,
-    is_oneway_chain, highway_chain) 6-tuples - the 2nd array flags which
-    nodes came from a bridge/tunnel way, the 3rd flags the tunnel subset
-    specifically (see is_tunnel_way()), the 4th carries each node's source
-    way's display name (way_name()), the 5th flags one-way carriageways
-    (is_oneway_way()), the 6th carries each node's source way's OSM
-    highway= class (highway_class()) - used to pick per-class grade/grade-
-    change limits, not thrown away even though it isn't rendered directly -
-    all parallel to the first."""
+    is_oneway_chain, highway_chain, meta_chain) 7-tuples - the 2nd array
+    flags which nodes came from a bridge/tunnel way, the 3rd flags the
+    tunnel subset specifically (see is_tunnel_way()), the 4th carries each
+    node's source way's display name (way_name()), the 5th flags one-way
+    carriageways (is_oneway_way()), the 6th carries each node's source
+    way's OSM highway= class (highway_class()) - used to pick per-class
+    grade/grade-change limits, not thrown away even though it isn't
+    rendered directly - the 7th carries each node's source way's
+    (lanes, surface, layer) triple (way_tag_meta()) - all parallel to the
+    first."""
     edges = []
     edge_structure = []
     edge_tunnel = []
     edge_name = []
     edge_oneway = []
     edge_highway = []
+    edge_meta = []
     adj = {}
     for w in ways:
         nds = w["nodes"]
@@ -458,6 +499,7 @@ def merge_way_chains(ways):
         edge_name.append(way_name(w.get("tags", {})))
         edge_oneway.append(is_oneway_way(w.get("tags", {})))
         edge_highway.append(highway_class(w.get("tags", {})))
+        edge_meta.append(way_tag_meta(w.get("tags", {})))
         adj.setdefault(nds[0], []).append(i)
         if nds[-1] != nds[0]:
             adj.setdefault(nds[-1], []).append(i)
@@ -472,6 +514,7 @@ def merge_way_chains(ways):
         names = [edge_name[i]] * len(nds)
         oneway = [edge_oneway[i]] * len(nds)
         highway = [edge_highway[i]] * len(nds)
+        meta = [edge_meta[i]] * len(nds)
         used[i] = True
         while True:
             tail = chain[-1]
@@ -492,7 +535,8 @@ def merge_way_chains(ways):
             names.extend([edge_name[wi]] * (len(nxt) - 1))
             oneway.extend([edge_oneway[wi]] * (len(nxt) - 1))
             highway.extend([edge_highway[wi]] * (len(nxt) - 1))
-        return chain, struct, tunnel, names, oneway, highway
+            meta.extend([edge_meta[wi]] * (len(nxt) - 1))
+        return chain, struct, tunnel, names, oneway, highway, meta
 
     chains = []
     for i, nds in enumerate(edges):
@@ -527,13 +571,13 @@ def main():
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     scored = []
-    for chain, struct, tunnel, names, oneway, highway in chains:
+    for chain, struct, tunnel, names, oneway, highway, meta in chains:
         latlon = np.array([nodes[n] for n in chain])
         is_struct = np.array(struct, dtype=bool)
         is_tunnel = np.array(tunnel, dtype=bool)
         length = float(np.sum(np.hypot(np.diff(latlon[:, 0]) * M_PER_DEG_LAT,
                                         np.diff(latlon[:, 1]) * m_per_deg_lon)))
-        scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway))
+        scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway, meta))
     scored.sort(key=lambda t: -t[0])
 
     # only fetch DEM tiles for chains that will actually become segments
@@ -541,10 +585,10 @@ def main():
     # fragment/link-ramp the ref-filtered OSM fetch happened to include.
     kept = [t for t in scored
             if t[0] >= MIN_SEGMENT_STATIONS * STATION_SPACING][:MAX_SEGMENTS]
-    all_lat = np.concatenate([latlon[:, 0] for _, latlon, _, _, _, _, _ in kept])
-    all_lon = np.concatenate([latlon[:, 1] for _, latlon, _, _, _, _, _ in kept])
+    all_lat = np.concatenate([latlon[:, 0] for _, latlon, *_ in kept])
+    all_lon = np.concatenate([latlon[:, 1] for _, latlon, *_ in kept])
     dem_tiles = fetch_dem_tiles_sparse(all_lat, all_lon)
-    n_struct_nodes = sum(int(is_struct.sum()) for _, _, is_struct, _, _, _, _ in kept)
+    n_struct_nodes = sum(int(is_struct.sum()) for _, _, is_struct, *_ in kept)
     if n_struct_nodes:
         print(f"{n_struct_nodes} bridge/tunnel node(s) across kept chains - "
               f"DEM will be skipped and interpolated across those spans")
@@ -553,7 +597,7 @@ def main():
     total_km = 0.0
     n_grade_warnings = 0
     n_spike_repairs = 0
-    for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway) in enumerate(kept):
+    for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway, meta) in enumerate(kept):
         east = (latlon[:, 1] - lon0) * m_per_deg_lon
         north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
         s, e, n = resample_stations(east, north, STATION_SPACING)
@@ -590,6 +634,12 @@ def main():
         # of one flat constant for every road.
         highway_s = [highway[j] for j in nearest_orig]
         max_grade_s, max_grade_delta_s = road_class_grade_arrays(highway_s)
+        # lanes/surface/layer are categorical per-way values like
+        # road_name/oneway/highway_class - same nearest-station lookup
+        # (way_tag_meta() for what each field means).
+        lanes_s = [int(meta[j][0]) for j in nearest_orig]
+        surface_s = [meta[j][1] for j in nearest_orig]
+        layer_s = [int(meta[j][2]) for j in nearest_orig]
 
         raw_ground = dem_sample_sparse(dem_tiles, lat_s, lon_s)
         # 2026-07-29: two independent guards against corrupt Terrarium DEM
@@ -676,6 +726,7 @@ def main():
             "road_name_s": road_name_s,
             "is_oneway_s": is_oneway_s,
             "highway_s": highway_s,
+            "lanes_s": lanes_s, "surface_s": surface_s, "layer_s": layer_s,
             "e": e, "n": n, "s": s, "h": h,
             "max_grade_s": max_grade_s, "max_grade_delta_s": max_grade_delta_s,
         })
@@ -780,6 +831,9 @@ def main():
             "road_name": seg["road_name_s"],
             "oneway": seg["is_oneway_s"],
             "highway_class": seg["highway_s"],
+            "lanes": seg["lanes_s"],
+            "surface": seg["surface_s"],
+            "layer": seg["layer_s"],
             "east_m": [round(float(v), 2) for v in seg["e"]],
             "north_m": [round(float(v), 2) for v in seg["n"]],
             "s_m": [round(float(v), 2) for v in seg["s"]],

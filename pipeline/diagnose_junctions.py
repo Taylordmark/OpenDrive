@@ -202,7 +202,7 @@ def main():
         half = float(sys.argv[3]) if len(sys.argv) > 3 else 1500.0
 
     data = json.loads(btmt.STATIONS_PATH.read_text())
-    lat0, lon0, east, north, elev, exclude, _ = btmt.load_stations()
+    lat0, lon0, east, north, elev, exclude, _clamp_r, _ = btmt.load_stations()
     seg_of = np.concatenate([np.full(len(s["east_m"]), si, dtype=np.int32)
                              for si, s in enumerate(data["segments"])])
     loc_of = np.concatenate([np.arange(len(s["east_m"])) for s in data["segments"]])

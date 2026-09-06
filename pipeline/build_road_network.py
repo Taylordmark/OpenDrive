@@ -35,7 +35,9 @@ import numpy as np
 
 from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
-from road_mesh_common import STATION_SPACING, ROAD_LIFT, build_road_chunks, road_ue_z_m
+from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
+                              build_road_chunks, half_width_for_stations,
+                              road_ue_z_m)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
@@ -44,41 +46,49 @@ MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 
 def write_station_sidecar(path, segment_geoms, gen_id_bytes):
-    """Writes the ODS1 road-station sidecar (Arc 7 runtime-carve slice):
-    every road station's final UE-world-frame (cm) position, at the exact
-    same 5 m spacing and post-regrade elevation build_road_chunks() just
-    used to build road_mesh.json's ribbon geometry - so the C++ runtime
-    terrain carve can read station elevations far beyond the road-mesh
-    spawn radius (out to the 6 km terrain visual radius) without
-    re-deriving anything road_mesh_common.py already computed.
+    """Writes the ODS2 road-station sidecar (Arc 7 runtime-carve slice):
+    every road station's final UE-world-frame (cm) position plus its
+    pavement half-width, at the exact same 5 m spacing and post-regrade
+    elevation build_road_chunks() just used to build road_mesh.json's
+    ribbon geometry - so the C++ runtime terrain carve can read station
+    elevations far beyond the road-mesh spawn radius (out to the 6 km
+    terrain visual radius) without re-deriving anything road_mesh_common.py
+    already computed.
 
-    `segment_geoms` is the same list of (cx, cy, cz) UE-frame (cm) station-
-    centerline arrays main() already builds per non-tunnel run (tunnel
-    stretches get no road mesh, so they're excluded here too - this sidecar
-    only ever describes stations the road mesh itself is built from).
+    `segment_geoms` is the same list of (cx, cy, cz, hw_cm) UE-frame (cm)
+    station-centerline arrays main() already builds per non-tunnel run
+    (tunnel stretches get no road mesh, so they're excluded here too - this
+    sidecar only ever describes stations the road mesh itself is built
+    from). hw_cm is the per-station pavement half-width in cm
+    (road_mesh_common.half_width_for_stations - the same values baked into
+    the ribbon's uv1.x channel, x100).
 
-    Layout (pinned contract w/ AODRoadManager's C++ station reader - do not
-    change without updating both sides):
-        'O','D','S','1'                              magic (4 bytes)
+    Layout (pinned contract w/ ODBinSidecarUtil.h's
+    ParseRoadStationSidecarFile - do not change without updating both
+    sides; that reader still accepts the older 3-float ODS1 layout with a
+    default half-width):
+        'O','D','S','2'                              magic (4 bytes)
         uint32 LE  generation-id string byte length L
         L bytes    UTF-8 generation id (generation_id.py)
         uint32 LE  station count N
-        N * (float32 x_cm, float32 y_cm, float32 z_cm)   UE world frame,
-                   same frame/units as road_mesh.json's exported vertices
+        N * (float32 x_cm, float32 y_cm, float32 z_cm, float32 hw_cm)
+                   UE world frame, same frame/units as road_mesh.json's
+                   exported vertices
     """
     gen_id_utf8 = gen_id_bytes  # already ASCII bytes from pack_generation_id
     with open(path, "wb") as f:
-        f.write(b"ODS1")
+        f.write(b"ODS2")
         f.write(struct.pack("<I", len(gen_id_utf8)))
         f.write(gen_id_utf8)
-        total = sum(len(cx) for cx, cy, cz in segment_geoms)
+        total = sum(len(g[0]) for g in segment_geoms)
         f.write(struct.pack("<I", total))
-        for cx, cy, cz in segment_geoms:
+        for cx, cy, cz, hw_cm in segment_geoms:
             n = len(cx)
-            interleaved = np.empty(n * 3, dtype=np.float32)
-            interleaved[0::3] = cx
-            interleaved[1::3] = cy
-            interleaved[2::3] = cz
+            interleaved = np.empty(n * 4, dtype=np.float32)
+            interleaved[0::4] = cx
+            interleaved[1::4] = cy
+            interleaved[2::4] = cz
+            interleaved[3::4] = hw_cm
             f.write(interleaved.tobytes())
     return total
 
@@ -115,7 +125,7 @@ def main():
                             # needs at least 2 points for its tangent calc)
 
     segments = []
-    segment_geoms = []   # (cx, cy, cz) per built segment, for center-based player-start pick
+    segment_geoms = []   # (cx, cy, cz, hw_cm) per built segment - player-start pick + ODS2 sidecar
     total_km = 0.0
     n_tunnel_truncated = 0
     for seg in data["segments"]:
@@ -133,6 +143,7 @@ def main():
         is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
         is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
         highway_full = seg.get("highway_class")   # absent in older files - defaults to unknown class
+        lanes_full = seg.get("lanes")   # absent in older files - class-table fallback (2026-09-06)
         runs = list(split_excluding_tunnels(is_tunnel))
         if len(runs) > 1:
             n_tunnel_truncated += 1
@@ -146,12 +157,20 @@ def main():
             z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_classes = highway_full[lo:hi] if highway_full else None
+            osm_lanes = lanes_full[lo:hi] if lanes_full else None
+            # Real per-road width from lanes= tags (class-table fallback for
+            # untagged ways) - see road_mesh_common.half_width_for_stations().
+            half_width_s = (half_width_for_stations(highway_classes, is_oneway, osm_lanes)
+                            if highway_classes else None)
             name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
             chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
                                                    spacing=STATION_SPACING, is_oneway=is_oneway,
-                                                   highway_classes=highway_classes)
+                                                   highway_classes=highway_classes,
+                                                   osm_lanes=osm_lanes, half_width_s=half_width_s)
             segments.append({"name": name, "chunks": chunks})
-            segment_geoms.append((cx, cy, cz))
+            hw_m = (half_width_s if half_width_s is not None
+                    else np.full(len(cx), ROAD_HALF_WIDTH))
+            segment_geoms.append((cx, cy, cz, hw_m * 100.0))
             length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0
             total_km += length_km
             tag = " [tunnel-truncated]" if len(runs) > 1 else ""
@@ -216,7 +235,7 @@ def main():
     TILE_MARGIN_CM = 10000.0   # 100 m
     best = None       # (dist2, cx, cy, cz, station_idx) - respects TILE_MARGIN_CM
     best_any = None   # closest overall, ignoring margin - fallback only
-    for cx, cy, cz in segment_geoms:
+    for cx, cy, cz, _hw in segment_geoms:
         for i in range(1, len(cx) - LOOKAHEAD):
             dist2 = cx[i] ** 2 + cy[i] ** 2
             if best_any is None or dist2 < best_any[0]:

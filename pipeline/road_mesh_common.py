@@ -113,8 +113,54 @@ ROAD_CLASS_LANES_TWOWAY = {
 }
 DEFAULT_ROAD_CLASS_LANES_TWOWAY = 2   # unrecognized/missing highway= tag
 
+# Per-road width from lane count (2026-09-06, AUDIT § 7 item 6 "OSM road
+# tags -> width"). LANE_WIDTH_M is deliberately the game's established
+# 2-lane scale (2 * ROAD_HALF_WIDTH / 2 lanes = 4.5 m/lane - wider than a
+# real ~3.5 m lane, matching the whole world's slightly-forgiving scale),
+# so an untagged or genuinely-2-lane road keeps EXACTLY today's 9 m
+# pavement and nothing already-verified moves. The clamp bounds:
+#   floor 3.0 m half-width - a 1-lane service/track still fits a car with
+#     margin (6 m full) instead of collapsing to 4.5 m;
+#   cap 8.0 m half-width - pavement + SKIRT_EXTRA (3 m) = 11 m footprint
+#     stays inside AODForestManager's 11.5 m PavementExclusionCm and the
+#     barrier line's ~13 m offset, so no existing exclusion band needs
+#     retuning for the widest tagged roads.
+LANE_WIDTH_M = 4.5
+MIN_HALF_WIDTH_M = 3.0
+MAX_HALF_WIDTH_M = 8.0
+# Width-change taper: smooth the per-station half-width with this sigma
+# (meters of arc length) so a lanes= tag boundary becomes a ~50 m taper,
+# the way real pavement gains/loses a lane, not a lateral step mid-road.
+WIDTH_SMOOTH_SIGMA_M = 15.0
 
-def road_class_and_lanes(highway_classes, is_oneway=None):
+
+def half_width_for_stations(highway_classes, is_oneway=None, osm_lanes=None,
+                             spacing=STATION_SPACING):
+    """Per-station pavement HALF-width (m) from real lanes= tags where
+    present (osm_lanes, 0 = untagged) falling back to the
+    ROAD_CLASS_LANES_TWOWAY class-table guess (halved for oneway
+    carriageways, same heuristic road_class_and_lanes() uses), then
+    Gaussian-tapered (WIDTH_SMOOTH_SIGMA_M) so width changes ramp over
+    ~3-sigma instead of stepping sideways at a way boundary. Returns a
+    float np array parallel to highway_classes."""
+    n = len(highway_classes)
+    hw = np.empty(n)
+    for i in range(n):
+        lanes = int(osm_lanes[i]) if osm_lanes is not None and int(osm_lanes[i]) > 0 else 0
+        if lanes == 0:
+            lanes = ROAD_CLASS_LANES_TWOWAY.get(highway_classes[i],
+                                                DEFAULT_ROAD_CLASS_LANES_TWOWAY)
+            if is_oneway is not None and is_oneway[i] and lanes >= 2:
+                lanes = max(1, -(-lanes // 2))
+        hw[i] = lanes * LANE_WIDTH_M / 2.0
+    hw = np.clip(hw, MIN_HALF_WIDTH_M, MAX_HALF_WIDTH_M)
+    sigma_st = WIDTH_SMOOTH_SIGMA_M / spacing
+    if n > 1 and sigma_st > 0:
+        hw = gaussian1d(hw, sigma_st)
+    return np.clip(hw, MIN_HALF_WIDTH_M, MAX_HALF_WIDTH_M)
+
+
+def road_class_and_lanes(highway_classes, is_oneway=None, osm_lanes=None):
     """Majority-vote a chunk's stations' OSM highway= class into a single
     (road_class_id, road_class_name, lane_count) triple - same "pick a
     single per-chunk value from many per-station tags" approach
@@ -128,6 +174,13 @@ def road_class_and_lanes(highway_classes, is_oneway=None):
     oneway=yes is one carriageway of what's usually a divided road, not a
     road with half as many total lanes.
 
+    `osm_lanes` (optional, parallel int array/list, 0 = untagged - 2026-09-06,
+    AUDIT § 7 item 6): REAL per-station lanes= tag values from
+    road_stations.json. When any station on the chunk carries a real tag,
+    the most common tagged value wins outright over the class-table guess,
+    and the oneway halving is skipped - OSM's lanes= on a oneway carriageway
+    already counts just that carriageway.
+
     Returns (road_class_id: int, road_class_name: str, lane_count: int),
     lane_count clamped to [1, 8] (uint8 wire field in ODR3)."""
     if not highway_classes:
@@ -138,12 +191,19 @@ def road_class_and_lanes(highway_classes, is_oneway=None):
     majority_cls = max(counts, key=counts.get)
     road_class_id = ROAD_CLASS_ID.get(majority_cls, DEFAULT_ROAD_CLASS_ID)
     road_class_name = ROAD_CLASS_ID_NAMES[road_class_id]
-    lanes = ROAD_CLASS_LANES_TWOWAY.get(majority_cls, DEFAULT_ROAD_CLASS_LANES_TWOWAY)
-    oneway_majority = False
-    if is_oneway is not None and len(is_oneway):
-        oneway_majority = (sum(1 for v in is_oneway if v) / len(is_oneway)) > 0.5
-    if oneway_majority and lanes >= 2:
-        lanes = max(1, -(-lanes // 2))   # ceil-div by 2, floor 1
+    tagged = [int(v) for v in osm_lanes if int(v) > 0] if osm_lanes is not None else []
+    if tagged:
+        lane_counts = defaultdict(int)
+        for v in tagged:
+            lane_counts[v] += 1
+        lanes = max(lane_counts, key=lane_counts.get)
+    else:
+        lanes = ROAD_CLASS_LANES_TWOWAY.get(majority_cls, DEFAULT_ROAD_CLASS_LANES_TWOWAY)
+        oneway_majority = False
+        if is_oneway is not None and len(is_oneway):
+            oneway_majority = (sum(1 for v in is_oneway if v) / len(is_oneway)) > 0.5
+        if oneway_majority and lanes >= 2:
+            lanes = max(1, -(-lanes // 2))   # ceil-div by 2, floor 1
     lanes = max(1, min(8, lanes))
     return road_class_id, road_class_name, lanes
 
@@ -525,7 +585,8 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        chunk_stations=CHUNK_STATIONS,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
-                       bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None):
+                       bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
+                       osm_lanes=None, half_width_s=None):
     """Build banked, skirted road mesh chunks from station arrays.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
@@ -556,12 +617,18 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             width changes between classes. (The material divides by its own
             world-space tile size; baking a fixed /20 scale in here would
             have permanently coupled the two.)
-    A second UV channel ("uv1") is also emitted per vertex: uv1.x = the
-    chunk's road HALF-width in meters (so u's normalization is recoverable:
-    full pavement width = 2 * uv1.x; currently constant per chunk since
-    road_half_width doesn't vary by class yet, but written per-vertex so a
-    future variable-width profile doesn't need another format bump),
-    uv1.y = reserved (0.0).
+    A second UV channel ("uv1") is also emitted per vertex: uv1.x = that
+    STATION's road HALF-width in meters (so u's normalization is
+    recoverable: full pavement width = 2 * uv1.x), uv1.y = reserved (0.0).
+
+    Variable width (2026-09-06, AUDIT § 7 item 6): `half_width_s` (optional
+    per-station float array, meters - see half_width_for_stations()) makes
+    the pavement half-width per-station instead of the constant
+    road_half_width; `osm_lanes` (optional per-station ints, 0 = untagged)
+    additionally feeds real lanes= tags into each chunk's lane_count field.
+    The per-vertex uv1.x channel always carried the half-width, so no wire
+    format change is needed. Skirt width (skirt_extra) stays constant
+    beyond whichever pavement edge applies.
 
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
     {"name","vertices","uvs","uv1","triangles","oneway","road_class_id",
@@ -589,14 +656,18 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     bank_tan = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
     raise_side = -np.sign(gaussian1d(curv, BANK_SMOOTH_SIGMA_M))  # +1: raise right side
 
-    # cross-section: (lateral offset m, z offset m), left -> right
-    profile = [(-(road_half_width + skirt_extra), -skirt_drop),
-               (-road_half_width, 0.0),
-               (road_half_width, 0.0),
-               (road_half_width + skirt_extra, -skirt_drop)]
-    n_prof = len(profile)
+    # cross-section: (lateral offset m, z offset m), left -> right - the
+    # pavement offset is per-station when half_width_s is given (variable
+    # width, 2026-09-06); the skirt is always skirt_extra beyond it.
+    def station_profile(i):
+        hw = float(half_width_s[i]) if half_width_s is not None else road_half_width
+        return hw, [(-(hw + skirt_extra), -skirt_drop),
+                    (-hw, 0.0),
+                    (hw, 0.0),
+                    (hw + skirt_extra, -skirt_drop)]
+    n_prof = 4
 
-    def station_verts(i):
+    def station_verts(i, profile):
         out = []
         for off, dz in profile:
             lift = bank_tan[i] * max(0.0, off * raise_side[i])  # outer-edge raise
@@ -605,11 +676,6 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                         cz[i] + (dz + lift) * 100.0))
         return out
 
-    # u-coordinate per profile column, normalized to the PAVEMENT edges
-    # (columns 1/2 = pave-L/pave-R at off=+-road_half_width -> u=0/1; columns
-    # 0/3 = skirt-L/skirt-R extrapolate outside [0,1] on the same scale).
-    prof_u = [off / (2.0 * road_half_width) + 0.5 for off, _dz in profile]
-
     # chunked mesh buffers; winding (A, A+right, A+forward) faces up in UE
     chunks = []
     n_st = len(s)
@@ -617,10 +683,15 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
         c1 = min(c0 + chunk_stations, n_st - 1)
         verts, tris, uvs, uv1 = [], [], [], []
         for i in range(c0, c1 + 1):
-            verts.extend(station_verts(i))
+            hw, profile = station_profile(i)
+            verts.extend(station_verts(i, profile))
             v = s[i]   # meters, continuous - see build_road_chunks docstring
-            uvs.extend([(prof_u[j], v) for j in range(n_prof)])
-            uv1.extend([(road_half_width, 0.0) for _ in range(n_prof)])
+            # u-coordinate per profile column, normalized to THIS station's
+            # PAVEMENT edges (columns 1/2 = pave-L/pave-R at off=+-hw ->
+            # u=0/1; columns 0/3 = skirt-L/skirt-R extrapolate outside
+            # [0,1] on the same scale).
+            uvs.extend([(off / (2.0 * hw) + 0.5, v) for off, _dz in profile])
+            uv1.extend([(hw, 0.0) for _ in range(n_prof)])
         for irow in range(c1 - c0):
             b = irow * n_prof
             for j in range(n_prof - 1):
@@ -630,7 +701,9 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
         oneway_mask = is_oneway[c0:c1 + 1] if is_oneway is not None else None
         oneway = bool(np.mean(oneway_mask) > 0.5) if oneway_mask is not None else False
         hwy_chunk = highway_classes[c0:c1 + 1] if highway_classes is not None else None
-        road_class_id, road_class_name, lane_count = road_class_and_lanes(hwy_chunk, oneway_mask)
+        lanes_chunk = osm_lanes[c0:c1 + 1] if osm_lanes is not None else None
+        road_class_id, road_class_name, lane_count = road_class_and_lanes(
+            hwy_chunk, oneway_mask, lanes_chunk)
         chunks.append({
             "name": f"{name_prefix}_{c0:04d}",
             "vertices": [round(v, 1) for xyz in verts for v in xyz],
