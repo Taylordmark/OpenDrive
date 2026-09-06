@@ -1182,6 +1182,23 @@ def merge_drawn_overlaps(junctions):
             for m in members:
                 for sgg, e in m.get("reps", {}).items():
                     combined_reps.setdefault(sgg, e)
+            # Per-member blend specs: a fused corridor can be far longer than
+            # TRANSITION_LEN_M, so one blend around the flattest member's
+            # snap point leaves the OTHER member crossings (e.g. a corridor's
+            # far tip) at their original elevations while the pad pavement is
+            # flattened right up to the rim - a multi-meter baked pavement
+            # step exactly at a crossing (Ida Bell Drive @ (19859,9230),
+            # 3.41m). Keep each member's own reps + snap so main() can
+            # re-blend every member crossing toward the merged elevation at
+            # its own location; nested fusions flatten their specs through.
+            members2 = []
+            for m in members:
+                if m.get("members2"):
+                    members2.extend(m["members2"])
+                elif m.get("reps"):
+                    members2.append({"reps": m["reps"],
+                                     "snap_xy": m.get("snap_xy", m["xy"]),
+                                     "flat_seg": m["flat_seg"]})
             new_junctions.append({
                 "xy": (ell[0], ell[1]), "elev": flattest["elev"],
                 "radius_m": max(ell[2], ell[3]), "shape": "ellipse",
@@ -1189,6 +1206,7 @@ def merge_drawn_overlaps(junctions):
                 "flat_seg": flattest["flat_seg"],
                 "flat_grade": flattest.get("flat_grade", 0.0),
                 "snap_xy": flattest.get("snap_xy", flattest["xy"]),
+                "members2": members2,
                 "reps": combined_reps,
                 "n_roads": max(len(combined_reps),
                                max(m["n_roads"] for m in members)),
@@ -2614,15 +2632,33 @@ def main():
     # Same downstream consistency fix as after merge_same_intersection: a
     # pass-2 merged pad picked one elevation, so re-blend every member road
     # approach toward it (reps can be empty for weld-only groups - the weld
-    # transition blend above already pinned those approaches).
+    # transition blend above already pinned those approaches). Blend PER
+    # MEMBER CROSSING, each at its own snap point: a fused corridor is
+    # longer than TRANSITION_LEN_M, and one blend around the flattest
+    # member's snap leaves the far members' crossings at original elevation
+    # while the pavement is flattened to the rim (3.41m baked step at the
+    # Ida Bell Drive crossing (19859,9230) sitting on a corridor tip). The
+    # flattest member keeps its flat_seg untouched as before; every other
+    # member blends ALL its roads (its local roads sit at a different
+    # elevation than the pad by construction).
     n_reblended2 = 0
     for j in junctions:
-        if not j.get("merged2") or not j.get("reps"):
+        if not j.get("merged2"):
+            continue
+        specs = j.get("members2")
+        if not specs:
+            specs = ([{"reps": j["reps"], "snap_xy": j["snap_xy"],
+                       "flat_seg": j["flat_seg"]}] if j.get("reps") else [])
+        if not specs:
             continue
         n_reblended2 += 1
-        _blend_approaches_to_junction(j["reps"], j["flat_seg"], j["elev"], j["snap_xy"],
-                                       bounds, structural, s_m, elev, east, north,
-                                       regraded, regraded_east, regraded_north)
+        for spec in specs:
+            fs = (spec["flat_seg"]
+                  if tuple(spec["snap_xy"]) == tuple(j["snap_xy"]) else -1)
+            _blend_approaches_to_junction(spec["reps"], fs, j["elev"],
+                                           spec["snap_xy"],
+                                           bounds, structural, s_m, elev, east, north,
+                                           regraded, regraded_east, regraded_north)
     if n_reblended2:
         print(f"re-blended approaches for {n_reblended2} overlap-fused junction(s)")
 
