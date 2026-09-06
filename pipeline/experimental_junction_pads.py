@@ -1010,6 +1010,18 @@ OVERLAP_MUST_MERGE_GAP_M = 1.0          # merge_drawn_overlaps: two pads whose
                                          # elevation and the approach re-blend
                                          # absorbs the difference over the
                                          # transition length.
+OVERLAP_MUST_MERGE_MAX_DZ_M = 3.0       # ...unless the group's elevations
+                                         # span more than this (Taylor, after
+                                         # the (7814,14029) trench: "force
+                                         # merge based on x and y only if z
+                                         # axis is far enough away"). One flat
+                                         # pad across a >3m climb digs its
+                                         # approaches ~6m under the adjacent
+                                         # terrain (road-fit dev 5.93m /
+                                         # terrain SHIPPED 6.13m FAIL at that
+                                         # one site); such pairs fall through
+                                         # to the shrink-to-clearance
+                                         # fallback instead.
 OVERLAP_SPLIT_CLEAR_M = 6.0             # merge_drawn_overlaps: elevation-split
                                          # pairs are shrunk until their drawn
                                          # outlines sit at least this far
@@ -1128,15 +1140,19 @@ def merge_drawn_overlaps(junctions):
                 if not _ellipses_overlap_precise(ei_, junctions[k]["ellipse"],
                                                   margin_sep):
                     continue
-                # Within OVERLAP_MUST_MERGE_GAP_M the fuse is UNCONDITIONAL
-                # (Taylor: "if within 1m must merge"); only the wider
-                # visual-closeness band respects the elevation gate.
-                if not _ellipses_overlap_precise(
+                # Within OVERLAP_MUST_MERGE_GAP_M the fuse is forced as long
+                # as the fused group's elevations stay within
+                # OVERLAP_MUST_MERGE_MAX_DZ_M ("force merge based on x and y
+                # only if z axis is far enough away"); the wider visual-
+                # closeness band keeps the tighter elevation gate.
+                spread = max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
+                if _ellipses_overlap_precise(
                         ei_, junctions[k]["ellipse"],
                         PAD_OVERLAP_MARGIN_M + 0.5 * OVERLAP_MUST_MERGE_GAP_M):
-                    if (max(ehi[ri], ehi[rk]) - min(elo[ri], elo[rk])
-                            > OVERLAP_MERGE_MAX_ELEV_SPREAD_M):
+                    if spread > OVERLAP_MUST_MERGE_MAX_DZ_M:
                         continue
+                elif spread > OVERLAP_MERGE_MAX_ELEV_SPREAD_M:
+                    continue
                 parent[ri] = rk
                 elo[rk] = min(elo[rk], elo[ri])
                 ehi[rk] = max(ehi[rk], ehi[ri])
