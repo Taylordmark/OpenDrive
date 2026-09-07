@@ -184,7 +184,16 @@ private:
 	double LoadingSettledSinceTime = 0.0;
 	static constexpr double LoadingSettleDebounceSec = 0.5;
 	static constexpr double LoadingMinDisplaySec = 1.0;
-	static constexpr double LoadingFailsafeSec = 25.0;
+	// 25 -> 60 (2026-09-07, Taylor's cold-boot "screen is blank, game
+	// doesn't appear to be loading" report): a genuinely cold first load
+	// (disk cache empty) was still at road tiles=0 well past the old 25s
+	// ceiling - the failsafe dropped the player into an empty world that
+	// then visibly filled in, which reads as broken, while the loading
+	// screen it replaced shows animated dots + live tile counts and reads
+	// as working. 60s comfortably covers the measured cold worst case
+	// (buildings were still waiting on ground past 30s) while still
+	// guaranteeing a stuck streaming state can't black-screen forever.
+	static constexpr double LoadingFailsafeSec = 60.0;
 
 	// headless QA (mirrors AODPauseMenu's -odmenu): -odmenumap=T jumps to the
 	// map stage + screenshots; -odpick=<Town> auto-picks a town and starts;
