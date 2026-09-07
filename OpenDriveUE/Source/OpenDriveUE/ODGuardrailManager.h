@@ -94,21 +94,24 @@ public:
 
 	/** W-beam cross-section: (lateral offset outward from the rail seat
 	 *  line, cm; height above the seat, cm), bottom to top - 3 quads, angled
-	 *  face bulging outward with a top lip curling back in, ~70cm tall to
-	 *  match a real W-beam guardrail. */
+	 *  face bulging outward with a top lip curling back in. ~92cm tall -
+	 *  deliberately taller than a real W-beam's ~70cm (2026-09-07, Taylor's
+	 *  drive-test: rails read too low from the driver camera and were too
+	 *  easy to hop at speed; heights scaled ~1.28x, lateral shape kept). */
 	UPROPERTY(EditAnywhere, Category = "Guardrail|Profile")
 	TArray<FVector2D> WBeamProfile = {
-		FVector2D(0.0, 0.0), FVector2D(0.0, 45.0),
-		FVector2D(-14.0, 58.0), FVector2D(-6.0, 72.0)
+		FVector2D(0.0, 0.0), FVector2D(0.0, 58.0),
+		FVector2D(-14.0, 74.0), FVector2D(-6.0, 92.0)
 	};
 
 	/** Concrete Jersey barrier cross-section - simple sloped-face prism,
-	 *  wide base narrowing to a vertical top section, ~81cm tall (standard
-	 *  Jersey barrier height). */
+	 *  wide base narrowing to a vertical top section. ~100cm tall (tall
+	 *  F-shape-barrier territory rather than the standard 81cm Jersey -
+	 *  same 2026-09-07 raise as WBeamProfile above). */
 	UPROPERTY(EditAnywhere, Category = "Guardrail|Profile")
 	TArray<FVector2D> JerseyProfile = {
 		FVector2D(0.0, 0.0), FVector2D(-18.0, 0.0),
-		FVector2D(-9.0, 50.0), FVector2D(-4.0, 81.0), FVector2D(0.0, 81.0)
+		FVector2D(-9.0, 62.0), FVector2D(-4.0, 100.0), FVector2D(0.0, 100.0)
 	};
 
 	/** Post instance spacing along a W-beam run, cm. */
@@ -119,7 +122,9 @@ public:
 	float PostRadiusCm = 6.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Guardrail|Profile")
-	float PostHeightCm = 85.0f;   // includes ~15cm embedded below the rail seat
+	float PostHeightCm = 105.0f;  // includes ~15cm embedded below the rail seat
+	                              // (raised with the 2026-09-07 profile bump so
+	                              // posts still reach just under the beam top)
 
 private:
 	static bool ParseGuardrailTileFile(const FString& Path, FParsedGuardrailTile& Out);

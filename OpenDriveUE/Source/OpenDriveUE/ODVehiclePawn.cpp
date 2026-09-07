@@ -693,7 +693,16 @@ void AODVehiclePawn::TrySnapToGround()
 		SetActorLocation(FVector(Loc.X, Loc.Y, Hit.ImpactPoint.Z + GroundClearanceCm),
 			false, nullptr, ETeleportType::TeleportPhysics);
 	}
-	if (Now - SnapReadyTime < GroundSnapSettleSec)
+	// Warm settle (2026-09-07, "respawn takes forever"): the full 3s settle
+	// exists for the Chaos registration race on freshly-streamed tiles. When
+	// the asphalt trace connected almost immediately after the teleport
+	// (mid-drive OOB/stuck reset onto collision that's been resident and
+	// simulated for a while), that race can't apply - release after the
+	// short window instead. bOnRoad is required so a timeout fallback onto
+	// arbitrary ground never takes the fast path.
+	const bool bWarmSnap = bOnRoad && (SnapReadyTime - SpawnTime) < WarmSnapWindowSec;
+	const double SettleSec = bWarmSnap ? WarmSnapSettleSec : GroundSnapSettleSec;
+	if (Now - SnapReadyTime < SettleSec)
 	{
 		return;   // held kinematic on the surface until collision has had time to register
 	}
@@ -1358,7 +1367,7 @@ void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)
 	OobCountdownSec = -1.0f;
 	if (bInShowroom || !bGroundSnapped || !Body || !Body->IsSimulatingPhysics())
 	{
-		OobOffRoadSec = OobAirSec = 0.0f;
+		OobOffRoadSec = OobAirSec = OobStuckSec = 0.0f;
 		return;
 	}
 	if (!bOobRoadMgrSearched)
@@ -1397,17 +1406,39 @@ void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)
 	OobAirSec = bAnyContact ? 0.0f : OobAirSec + DeltaSeconds;
 	OobOffRoadSec = OobDistNowCm > OobDistCm ? OobOffRoadSec + DeltaSeconds : 0.0f;
 
+	// Stuck trigger (2026-09-07, see StuckThrottleFrac's UPROPERTY doc):
+	// full throttle into a guardrail/tree/ditch within OobDistCm, where the
+	// distance trigger above can never fire. Ground contact required (the
+	// airborne trigger owns the no-contact case) and brake must be released
+	// - holding throttle+brake together is a deliberate burnout/launch, not
+	// a player trying and failing to move.
+	const bool bStuckNow = bAnyContact
+		&& Movement->GetThrottleInput() > StuckThrottleFrac
+		&& Movement->GetBrakeInput() < 0.1f
+		&& Body->GetPhysicsLinearVelocity().Size() < StuckSpeedCmS;
+	OobStuckSec = bStuckNow ? OobStuckSec + DeltaSeconds : 0.0f;
+
+	bOobStuckReset = OobStuckSec > 0.0f && OobOffRoadSec <= 0.0f;
 	if (OobOffRoadSec > 0.0f)
 	{
 		OobCountdownSec = OobGraceSec - OobOffRoadSec;   // HUD warning
 	}
-	if (OobOffRoadSec > OobGraceSec || OobAirSec > OobAirborneSec)
+	else if (OobStuckSec > 0.5f)
+	{
+		// 0.5s lead-in before the HUD warning: a launch from standstill
+		// spends a frame or two below StuckSpeedCmS and would otherwise
+		// flash the countdown on every pull-away.
+		OobCountdownSec = StuckGraceSec - OobStuckSec;   // HUD "STUCK" warning
+	}
+	if (OobOffRoadSec > OobGraceSec || OobAirSec > OobAirborneSec
+		|| OobStuckSec > StuckGraceSec)
 	{
 		UE_LOG(LogTemp, Display,
 			TEXT("ODVehiclePawn OOB RESET: pos=%.0f/%.0f/%.0f dist=%.0fcm "
-			     "offroad=%.1fs air=%.1fs -> nearest road point"),
-			Loc.X, Loc.Y, Loc.Z, OobDistNowCm, OobOffRoadSec, OobAirSec);
-		OobOffRoadSec = OobAirSec = 0.0f;
+			     "offroad=%.1fs air=%.1fs stuck=%.1fs -> nearest road point"),
+			Loc.X, Loc.Y, Loc.Z, OobDistNowCm, OobOffRoadSec, OobAirSec,
+			OobStuckSec);
+		OobOffRoadSec = OobAirSec = OobStuckSec = 0.0f;
 		OobDistNowCm = 0.0f;
 		OobCountdownSec = -1.0f;
 		FVector2D Snap;

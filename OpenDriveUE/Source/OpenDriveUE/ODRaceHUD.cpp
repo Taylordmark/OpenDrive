@@ -735,7 +735,9 @@ void AODRaceHUD::DrawHUD()
 			FCanvasTextItem Warn(
 				FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.28f),
 				FText::FromString(FString::Printf(
-					TEXT("OFF ROAD - RETURNING IN %.0f"), FMath::CeilToFloat(Cd))),
+					TEXT("%s - RETURNING IN %.0f"),
+					Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
+					FMath::CeilToFloat(Cd))),
 				Font, FLinearColor(1.0f, 0.35f, 0.2f));
 			Warn.Scale = FVector2D(2.2f, 2.2f);
 			Warn.EnableShadow(FLinearColor::Black);

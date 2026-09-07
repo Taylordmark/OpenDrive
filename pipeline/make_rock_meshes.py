@@ -178,7 +178,18 @@ def save_obj(name, verts, uvs, faces):
         n = np.cross(pb - pa, pc - pa)
         ln = np.linalg.norm(n)
         n = n / ln if ln > 1e-8 else np.array([0.0, 0.0, 1.0])
-        for idx in (a, b, c):
+        # Corner order a,c,b - NOT a,b,c (2026-09-07, Taylor's live find:
+        # every boulder rendered inside-out). The Y-negation below mirrors
+        # the mesh, which flips handedness: the mirrored triangle's
+        # geometric normal is OPPOSITE the (also Y-negated) vn written
+        # here, so with the original a,b,c order the outward faces were
+        # backface-culled by one-sided M_Rock030 and only the boulder's
+        # interior was visible. The car/tree writers share the same
+        # mirror-without-reversal, but their materials are two-sided
+        # (import_car_meshes.py documents it), which masked this. Swapping
+        # two corners re-reverses the winding so the exported faces agree
+        # with the exported normals and point outward.
+        for idx in (a, c, b):
             p = verts[idx]
             uv = uvs[idx]
             lines.append(f"v {p[0]:.4f} {-p[1]:.4f} {p[2]:.4f}")

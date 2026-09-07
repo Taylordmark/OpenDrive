@@ -195,10 +195,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
 	float OobAirborneSec = 2.0f;
 
+	/** Stuck-recovery trigger (2026-09-07, Taylor's drive-test find: wedged
+	 *  behind a guardrail just off the shoulder - INSIDE OobDistCm, so the
+	 *  distance trigger above never fires - with no way back over the rail).
+	 *  Fires the same nearest-road reset when the player is actively trying
+	 *  to move (throttle above StuckThrottleFrac, brake released) but the
+	 *  car isn't going anywhere (below StuckSpeedCmS) for StuckGraceSec.
+	 *  Requiring ACTIVE throttle is what makes this safe in free-roam: a
+	 *  player who parks off-road to look at the scenery holds no throttle
+	 *  and is never yanked back; a launch from standstill passes
+	 *  StuckSpeedCmS in well under a second, so it never accumulates. */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float StuckThrottleFrac = 0.5f;
+
+	/** Speed floor (cm/s) below which throttle input counts as "stuck". */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float StuckSpeedCmS = 60.0f;
+
+	/** Seconds of continuous throttle-but-not-moving before the reset. */
+	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
+	float StuckGraceSec = 2.5f;
+
 	/** Remaining seconds on the off-road countdown for the HUD warning, or
 	 *  <0 when not out of bounds (also <0 on levels with no AODRoadManager,
 	 *  where the feature is entirely inert - e.g. Tail of the Dragon). */
 	float GetOobCountdownSec() const { return OobCountdownSec; }
+
+	/** True while the active countdown (GetOobCountdownSec() >= 0) came from
+	 *  the stuck trigger rather than the off-road distance trigger - HUD
+	 *  wording only ("STUCK" vs "OFF ROAD"). */
+	bool IsOobStuckReset() const { return bOobStuckReset; }
 
 	/** Place the car at a FIXED, self-contained location (the main menu's
 	 *  showroom void, 2026-07-28) with no ground-snap wait at all - unlike
@@ -342,7 +368,11 @@ private:
 	float OobDistNowCm = 0.0f;      // last measured distance to centerline
 	float OobOffRoadSec = 0.0f;     // time continuously beyond OobDistCm
 	float OobAirSec = 0.0f;         // time continuously with 0 wheel contacts
+	float OobStuckSec = 0.0f;       // time continuously throttling-but-not-moving
+	                                 // (see StuckThrottleFrac's UPROPERTY doc)
 	float OobCountdownSec = -1.0f;  // HUD-visible remaining grace, <0 = clear
+	bool bOobStuckReset = false;    // last countdown/reset was the stuck trigger
+	                                 // (HUD wording only)
 	TWeakObjectPtr<class AODRoadManager> OobRoadMgr;
 	bool bOobRoadMgrSearched = false;
 	// generous: the road tile at the spawn point now gets priority in
@@ -365,6 +395,16 @@ private:
 	// Chaos/UE5.8 registration bug's window). The settle restarts if the
 	// asphalt hit lapses mid-wait.
 	static constexpr double GroundSnapSettleSec = 3.0;
+	// 2026-09-07 (Taylor: "respawn takes forever"): the 3s settle above
+	// guards against Chaos body registration lag on FRESHLY STREAMED tiles.
+	// A mid-drive OOB/stuck reset teleports to a road whose collision has
+	// been resident and simulated for a while - if the asphalt trace
+	// connects almost immediately after the teleport (within
+	// WarmSnapWindowSec of SpawnTime), the registration race can't apply
+	// and the short settle below is used instead. Cold spawns and genuinely
+	// streaming-lagged resets still take the full 3s path.
+	static constexpr double WarmSnapWindowSec = 1.0;
+	static constexpr double WarmSnapSettleSec = 0.75;
 	double SnapReadyTime = 0.0;
 
 	// 2026-09-01: additionally require quiet frames before release. The

@@ -93,6 +93,7 @@ public:
 	void SetSteeringInput(float V) { SteerIn = FMath::Clamp(V, -1.0f, 1.0f); }
 	void SetHandbrakeInput(bool bOn) { bHandbrakeIn = bOn; }
 	float GetThrottleInput() const { return ThrottleIn; }
+	float GetBrakeInput() const { return BrakeIn; }
 	float GetSteeringInput() const { return SteerIn; }
 
 	// --- spawn parking hold (2026-09-02) ---
