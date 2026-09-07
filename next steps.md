@@ -2954,6 +2954,12 @@ picks them up must check that state first and not collide.
    asking the pad bake to hide more. Gate: junction audit worst profile
    step, plus the standard road-fit/terrain-fit suite. **Wait for Taylor's
    sloped-pad drive-test first** — it may show these don't read at speed.
+   *(✅ DONE 2026-09-06, `e95ac1e` — proceeded per Taylor's "work through
+   all of them, saving any questions" mandate; the drive-test caveat is
+   flagged in the end-of-run questions. Audit: 37 sites > 0.3m / worst
+   1.09m → **2 sites / worst 0.70m** after a full rebake, all gates green.
+   See the item-5/6 results entry below for the two failed designs this
+   went through first.)*
 6. **Pale background hills — fresh diagnosis** *(unknown; diagnostic)*:
    three rounds of real fixes (`037c85c`, `fffe321`, `2ecf266`) and the
    symptom still stands, which means the mechanism is still unidentified —
@@ -2963,11 +2969,77 @@ picks them up must check that state first and not collide.
    flags/materials for each) and bisect which layer carries the paleness.
    Second half needs Taylor's eyes live to confirm "fixed" (subjective
    read, same rule as audio character).
+   *(✅ isolation DONE 2026-09-06 — carrier identified per vantage, no
+   fixes applied per this item's own "isolation, not fixes" rule; see the
+   item-5/6 results entry below. Awaiting Taylor's live look + fix-direction
+   pick.)*
 
 **Recommended order: 1 → 2 → 3 → 4, with 5 and 6 gated on Taylor input**
 (5 on the drive-test verdict, 6's confirmation on a live look). 1 and 2 are
 hours each and de-risk everything after them; 3 is the top runtime win; 4 is
 the top realism win.
+
+### Item 5 + 6 results (2026-09-06 run)
+
+**Item 5 — junction profile-step smoothing (`e95ac1e`).** Landed as
+`junction_agreement_pass()` in `road_mesh_common.py`, run by
+`build_road_stations.py` LAST — on the final smoothed profiles, output
+shipped as-is. Raise-only lo→hi snap (highest-first) of every cross-segment
+pair within `JUNCTION_AGREE_RADIUS_M` (5 m) whose gap is below the conflict
+threshold, each snap laying a 3% (`JUNCTION_AGREE_TAPER_GRADE`) raise-only
+taper along the lower road's own stations; the `conflict_flat | is_struct`
+skip mask keeps bridge/tunnel/grade-separation stations out. **Two full
+rebakes proved the obvious pre-smooth design cannot work** (write agreement
+into reconciled ground, re-smooth touched segments): (a)
+`grade_smooth_elevation()`'s envelope clamp cuts a lone-station raise back
+to ~`max_grade*spacing` — audit REGRESSED 37→72 sites; (b) even taper-raised
+and completely unpinned, pass 2's rate limiter + endpoint-drift ramp floats
+whole approaches ~1 m ABOVE their reconciled ground (the final
+`envelope_clamp` bounds grade, not "≤ ground") — 38 sites/1.16 m. Per-segment
+re-smoothing structurally cannot preserve a two-road agreement it only sees
+one road of at a time. Final numbers after the full rebake + pads: **2
+at-grade sites > 0.3 m, worst profile step 0.70 m** (residual sits inside the
+skip mask by design), worst baked step 0.46 m unchanged; road-fit /
+terrain-fit / road-uv / gen-id gates all PASS. Visual spot-check at the
+formerly-worst CO 9 / Peak One Boulevard site: pads flush, no step.
+`build_road_guardrails.py` now unions the pass's junction mask (both
+stations of every at-grade crossing, agreeing or not) into its rail-break
+mask. NOTE for future full rebakes: FOUR pads-backup dirs must be cleared
+(`_road/_terrain/_sidecar_backup_junction_pads` in Masks plus
+`_roadv3_backup_junction_pads` in MasksV2).
+
+**Item 6 — pale background hills, isolation verdict (no fixes applied).**
+Render matrix at Silverthorne (Ruby Ranch Rd) + Vail (Piney Lake Rd),
+`-odhour=15`, each layer toggled independently on the post-item-5 world:
+baseline / `ShowFlag.ColorGrading 0` / slope-layer-off (`flat_w = 1.0`
+material variant) / snow-off (snow line 99,999 m) /
+`ShowFlag.SpecularLighting 0` / `ShowFlag.Atmosphere 0`. Pixel-diffed hill
+crops (mean RGB, 0–255):
+- **Snow, color grading, specular: exact no-ops** on the pale hills (<1.6
+  delta) at both vantages. Slope-rock layer: near no-op on the big
+  Silverthorne hill (+2), and removing it made the right-hand band
+  BRIGHTER (+13) — the flat grass/dirt albedo is just as pale out there,
+  so the Rock030 slope layer is NOT the carrier (kills the previous
+  leading hypothesis; the ~2× facet-slope overstatement on FAR tiles is
+  real but paints a layer that isn't what reads pale).
+- **Silverthorne carrier = SkyAtmosphere aerial perspective + pale distant
+  flat albedo.** Base hill color (109,117,126) is blue-dominant;
+  `ShowFlag.Atmosphere 0` strips (−20,−24,−36) off the hills while moving
+  foreground ground only slightly — a distance-scaled blue-white inscatter
+  veil is the dominant contributor, over an albedo that still renders pale
+  warm-gray (89,93,90 vs foreground grass ~(116,110,91)).
+  (`r.SkyAtmosphere.AerialPerspective.StartDepth 200` via -ExecCmds was a
+  no-op — use the component's aerial-perspective properties, not that
+  cvar, when tuning.)
+- **Vail carrier = the flat albedo itself.** The pale mid-distance slope is
+  warm-neutral (94,95,88 — no blue veil at that range) and every toggle
+  left it within run-to-run cloud noise: the dirt/sand flat blend + no
+  distant groundcover reads pale sandy, same as it does close up.
+Candidate fix directions (NOT implemented, per the item's isolation-only
+scope): turn down the SkyAtmosphere component's aerial-perspective
+strength/distance scale; darken+saturate the distant flat albedo (distance
+or mip-based vegetation/moisture bias rather than more Rock030 changes).
+Needs Taylor's live read before any of these move.
 
 ---
 
