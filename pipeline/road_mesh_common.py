@@ -805,6 +805,27 @@ WALL_MIN_GRADE = 0.50
 # each other, not just disagreements steep enough to look wall-eligible.
 CROSS_ROAD_CONFLICT_MAX_GRADE = 0.05
 
+# Cross-segment stations this close in XY are "the same physical junction
+# spot" for junction_agreement_pass()
+# (2026-09-06, immediate-queue item 5). Matches diagnose_junctions.py's
+# JUNCTION_RADIUS_M - the audit that measures the residual steps this pass
+# exists to remove - and is deliberately tighter than road half-width +
+# margin so parallel dual carriageways don't pair up.
+JUNCTION_AGREE_RADIUS_M = 5.0
+
+# Grade of the raised taper junction_agreement_pass() lays along the LOWER
+# road's own stations on each side of a crossing (2026-09-06, third
+# revision). The pass runs on the FINAL smoothed profiles and its output
+# ships as-is, so the taper IS the approach shape: a bare one-station raise
+# would be a vertical kink, and re-smoothing afterward is exactly what the
+# first two revisions tried and what regressed the audit both times (see
+# junction_agreement_pass()'s docstring). 0.03 sits well under every
+# ROAD_CLASS_GRADE ceiling (tightest: motorway 0.06) - "after departing the
+# road width they can SLOWLY start changing gradient" (Taylor, 2026-08-24) -
+# and bounds the footprint: a worst-case ~1.75m raise reaches ~58m (~12
+# stations) per side, a typical 0.3-0.6m raise ~10-20m.
+JUNCTION_AGREE_TAPER_GRADE = 0.03
+
 # Bias a generated wall's bottom/top edges past the real station elevation
 # by this much so the wall visually embeds into terrain instead of leaving a
 # hairline gap - the same "gap hidden under geometry" pattern already used
@@ -1113,7 +1134,15 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
     rate-limited approach ramp instead of a new vertical kink at the
     junction - the same vertical-curve easing grade_smooth_elevation already
     does for any other local disagreement between input ground and
-    profile."""
+    profile.
+
+    At-grade CROSS-road agreement (immediate-queue item 5) is deliberately
+    NOT handled here: this function's output feeds the caller's per-segment
+    re-smoothing, which structurally cannot preserve a two-road agreement it
+    only sees one road of at a time (grade_smooth_elevation()'s pass 2 can
+    float a whole approach ~1m off its reconciled ground - measured
+    2026-09-06). See junction_agreement_pass() below, which
+    build_road_stations.py runs on the FINAL smoothed profiles instead."""
     elev_m = np.array(elev_m, dtype=np.float64)
     n = len(elev_m)
     pairs_i, pairs_j = detect_elevation_conflict_pairs(
@@ -1121,8 +1150,6 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
         radius_m, max_grade, min_gap_m, same_chain_gap_stations)
     touched = np.zeros(n, dtype=bool)
     pinned_grade = np.full(n, np.nan, dtype=np.float64)
-    if len(pairs_i) == 0:
-        return elev_m, touched, pinned_grade
 
     keep = []
     for k in range(len(pairs_i)):
@@ -1135,8 +1162,6 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
         grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
         if grade < wall_min_grade:
             keep.append(k)
-    if not keep:
-        return elev_m, touched, pinned_grade
 
     def local_tangent(idx):
         # unit (east, north) direction at idx, in increasing-station_idx
@@ -1172,27 +1197,158 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
         d = math.hypot(east_m[b] - east_m[a], north_m[b] - north_m[a])
         return (elev_orig[b] - elev_orig[a]) / d if d > 1e-9 else 0.0
 
-    keep_i = pairs_i[np.array(keep)]
-    keep_j = pairs_j[np.array(keep)]
-    order = np.argsort(-np.maximum(elev_m[keep_i], elev_m[keep_j]))
-    for k in order:
-        i, j = int(keep_i[k]), int(keep_j[k])
-        hi, lo = (i, j) if elev_m[i] >= elev_m[j] else (j, i)
-        if elev_m[lo] < elev_m[hi]:
-            elev_m[lo] = elev_m[hi]
-            touched[lo] = True
-            hx, hy = local_tangent(hi)
-            lx, ly = local_tangent(lo)
-            aligned = (hx * lx + hy * ly) >= 0.0
-            target = local_grade(hi)
-            # hard backstop: a pinned slope should never exceed wall_min_grade
-            # (the same "single heightfield can still represent this"
-            # ceiling classify_wall_stations uses) - anything past that is
-            # not a real road grade and would tear the terrain carve instead
-            # of easing into it.
-            target = float(np.clip(target, -wall_min_grade, wall_min_grade))
-            pinned_grade[lo] = target if aligned else -target
+    if keep:
+        keep_i = pairs_i[np.array(keep)]
+        keep_j = pairs_j[np.array(keep)]
+        order = np.argsort(-np.maximum(elev_m[keep_i], elev_m[keep_j]))
+        for k in order:
+            i, j = int(keep_i[k]), int(keep_j[k])
+            hi, lo = (i, j) if elev_m[i] >= elev_m[j] else (j, i)
+            if elev_m[lo] < elev_m[hi]:
+                elev_m[lo] = elev_m[hi]
+                touched[lo] = True
+                hx, hy = local_tangent(hi)
+                lx, ly = local_tangent(lo)
+                aligned = (hx * lx + hy * ly) >= 0.0
+                target = local_grade(hi)
+                # hard backstop: a pinned slope should never exceed
+                # wall_min_grade (the same "single heightfield can still
+                # represent this" ceiling classify_wall_stations uses) -
+                # anything past that is not a real road grade and would tear
+                # the terrain carve instead of easing into it.
+                target = float(np.clip(target, -wall_min_grade, wall_min_grade))
+                pinned_grade[lo] = target if aligned else -target
+
     return elev_m, touched, pinned_grade
+
+
+def junction_agreement_pass(east_m, north_m, elev_m, seg_idx,
+                             junction_radius_m=JUNCTION_AGREE_RADIUS_M,
+                             max_grade=CONFLICT_MAX_GRADE,
+                             min_gap_m=CONFLICT_MIN_GAP_M,
+                             junction_skip=None):
+    """Cross-road at-grade junction agreement (2026-09-06, immediate-queue
+    item 5). reconcile_junction_elevations() only acts on pairs
+    detect_elevation_conflict_pairs() flags, and that threshold
+    (max_grade * d + min_gap_m) deliberately ignores roughly sub-meter
+    disagreements - which is exactly the size of step two independently
+    grade-smoothed roads leave where they CROSS at grade (junction audit
+    2026-09-06 baseline: 37 sites > 0.3m, worst 1.09m - one pavement
+    sitting proud of the other right at the crossing, left for the
+    junction-pad bake to paper over).
+
+    Same snap rule as reconcile_junction_elevations() (raise the LOWER
+    station to the higher one, highest-elevation pair first, raise-only so
+    ordering can't oscillate), applied to every cross-SEGMENT pair within
+    junction_radius_m whose gap sits BELOW the conflict threshold - bigger
+    gaps are wall/exclusion territory and are left alone, and
+    `junction_skip` (the caller's bridge/tunnel/conflict exclusion mask)
+    guards the tagged cases so a road passing under an overpass is never
+    dragged up to the deck.
+
+    CRITICALLY, this pass runs on the FINAL smoothed profiles and its
+    output ships as-is - NOT on raw reconciled ground with a re-smooth
+    after, which was tried twice on the 2026-09-06 rebakes and regressed
+    the audit both times: grade_smooth_elevation()'s envelope clamp cut a
+    bare one-station ground raise back to ~max_grade*spacing (72 sites
+    > 0.3m vs 37 baseline), and its pass-2 rate limiter + endpoint-drift
+    ramp floated whole approaches ~1m ABOVE their reconciled ground even
+    with no pins at all (the final envelope_clamp backstop bounds GRADE,
+    not "<= ground") - per-segment re-smoothing structurally cannot
+    preserve a two-road agreement it only sees one road of at a time.
+    Instead each snap shapes its own approach: taper_walk() below extends
+    a JUNCTION_AGREE_TAPER_GRADE descent from the crossing along the lower
+    road's own stations (raise-only, so it stops the moment the road's
+    existing profile is already higher), grade-legal under every
+    ROAD_CLASS_GRADE ceiling and "SLOWLY start[ing] changing gradient"
+    (Taylor, 2026-08-24) away from the crossing.
+
+    Returns (elev_m, touched): a NEW array (input is not mutated) and a
+    bool mask marking BOTH stations of every at-grade crossing pair - also
+    the ones already in agreement, since `touched` means "an at-grade
+    junction lives here" (build_road_guardrails.py breaks rail runs on it),
+    not "this station's elevation moved". Taper-raised approach stations
+    are not flagged. junction_radius_m <= 0 disables the pass."""
+    elev_m = np.array(elev_m, dtype=np.float64)
+    n = len(elev_m)
+    touched = np.zeros(n, dtype=bool)
+    if junction_radius_m <= 0.0 or n == 0:
+        return elev_m, touched
+    skip = (np.zeros(n, dtype=bool) if junction_skip is None
+            else np.asarray(junction_skip, dtype=bool))
+    cell = junction_radius_m
+    jbuckets = defaultdict(list)
+    for i in range(n):
+        if not skip[i]:
+            jbuckets[(int(east_m[i] // cell), int(north_m[i] // cell))].append(i)
+    r2 = junction_radius_m * junction_radius_m
+    jpairs = []
+    for (bx, by), idxs in jbuckets.items():
+        neigh = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neigh.extend(jbuckets.get((bx + dx, by + dy), ()))
+        for i in idxs:
+            for j in neigh:
+                if j <= i or seg_idx[i] == seg_idx[j]:
+                    continue
+                de = east_m[i] - east_m[j]
+                dn = north_m[i] - north_m[j]
+                d2 = de * de + dn * dn
+                if d2 > r2:
+                    continue
+                d = math.sqrt(d2)
+                if abs(elev_m[i] - elev_m[j]) > max_grade * d + min_gap_m:
+                    continue   # conflict-sized gap - not an at-grade junction
+                jpairs.append((i, j))
+    if not jpairs:
+        return elev_m, touched
+
+    def taper_walk(start, step, target):
+        # Raise the profile along `start`'s own segment in direction
+        # `step`, following a JUNCTION_AGREE_TAPER_GRADE descent from
+        # `target`. Raise-only; stops at the segment boundary, at a skipped
+        # (bridge/tunnel/conflict) station, or once the taper dips below
+        # the road's own existing profile.
+        raised = 0
+        seg = seg_idx[start]
+        k, prev = start + step, start
+        dist = 0.0
+        while 0 <= k < n and seg_idx[k] == seg:
+            if skip[k]:
+                break
+            dist += math.hypot(east_m[k] - east_m[prev],
+                               north_m[k] - north_m[prev])
+            want = target - JUNCTION_AGREE_TAPER_GRADE * dist
+            if want <= elev_m[k]:
+                break
+            elev_m[k] = want
+            raised += 1
+            prev, k = k, k + step
+        return raised
+
+    jp = np.array(jpairs, dtype=np.int64)
+    jorder = np.argsort(-np.maximum(elev_m[jp[:, 0]], elev_m[jp[:, 1]]))
+    n_junction_snaps = 0
+    n_taper_raised = 0
+    for k in jorder:
+        i, j = int(jp[k, 0]), int(jp[k, 1])
+        hi, lo = (i, j) if elev_m[i] >= elev_m[j] else (j, i)
+        touched[hi] = touched[lo] = True
+        if elev_m[lo] < elev_m[hi]:
+            target = float(elev_m[hi])
+            elev_m[lo] = target
+            n_junction_snaps += 1
+            n_taper_raised += taper_walk(lo, -1, target)
+            n_taper_raised += taper_walk(lo, +1, target)
+    if n_junction_snaps:
+        print(f"junction-agreement pass: {n_junction_snaps} station(s) "
+              f"raised to their crossing's higher pavement, "
+              f"{n_taper_raised} approach station(s) taper-raised at "
+              f"{JUNCTION_AGREE_TAPER_GRADE * 100:.0f}% "
+              f"({len(jpairs)} at-grade cross-segment pair(s) within "
+              f"{junction_radius_m:.0f}m)")
+    return elev_m, touched
 
 
 def carve_heightmap(hm, station_lon, station_lat, station_elev_m,

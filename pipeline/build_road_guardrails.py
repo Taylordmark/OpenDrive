@@ -103,8 +103,8 @@ import numpy as np
 import requests
 
 from road_mesh_common import (ROAD_HALF_WIDTH, half_width_for_stations,
-                               road_class_and_lanes, road_ue_z_m,
-                               reconcile_junction_elevations)
+                               junction_agreement_pass, road_class_and_lanes,
+                               road_ue_z_m, reconcile_junction_elevations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
                                        load_lake_beds, _point_in_polygon,
@@ -219,6 +219,14 @@ def main():
     all_road_name = [name for seg in data["segments"] for name in seg["road_name"]]
     _reconciled, junction_touched, _pinned = reconcile_junction_elevations(
         all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
+    # ... plus every at-grade cross-road crossing junction_agreement_pass()
+    # knows about (item 5, 2026-09-06): on shipped stations those pairs now
+    # AGREE exactly (the stations build already ran the pass), so only its
+    # `touched` junction-location mask matters here - a rail running
+    # straight through an at-grade crossing would fence off the cross road.
+    _agreed, agree_touched = junction_agreement_pass(
+        all_east, all_north, all_elev, all_seg_idx)
+    junction_touched = junction_touched | agree_touched
     offsets = np.concatenate([[0], np.cumsum([len(seg["east_m"]) for seg in data["segments"]])])
     print(f"{int(junction_touched.sum())} station(s) flagged near a road-road junction "
           f"(guardrail runs will break there)")

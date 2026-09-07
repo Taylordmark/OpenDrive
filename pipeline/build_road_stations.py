@@ -103,7 +103,8 @@ from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
                                despike_ground, clamp_plausible_elevation,
                                despike_road_profile,
-                               classify_wall_stations, reconcile_junction_elevations)
+                               classify_wall_stations, junction_agreement_pass,
+                               reconcile_junction_elevations)
 
 # ---------------------------------------------------------------- config
 DEM_ZOOM = 15                   # matches build_terrain_tiles.py's MAX_ZOOM
@@ -780,6 +781,7 @@ def main():
     # carries the higher-priority side's own local slope at each seam, which
     # gets threaded into grade_smooth_elevation as pinned_edge_grades so the
     # rate limiter eases away from a MATCHED slope instead of a free one.
+    all_is_struct = np.concatenate([seg["is_struct_s"] for seg in segments])
     reconciled_elev, touched, pinned_grade = reconcile_junction_elevations(
         all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
     n_touched = int(touched.sum())
@@ -808,6 +810,23 @@ def main():
                 reconciled_elev[lo:hi], STATION_SPACING,
                 seg["max_grade_s"], seg["max_grade_delta_s"],
                 pinned_edge_grades=pinned_edges)
+
+    # Cross-road at-grade junction agreement (2026-09-06, immediate-queue
+    # item 5) - runs LAST, on the final smoothed profiles, and ships as-is:
+    # see junction_agreement_pass()'s docstring for why writing agreement
+    # into pre-smooth ground and re-smoothing (tried twice) regressed the
+    # junction audit instead. junction_skip: never raise a road toward a
+    # grade-separated neighbor - bridges/tunnels (with their approach spans)
+    # and every auto-detected elevation conflict sit out.
+    if os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
+        print("OD_RAW_ROAD_STATIONS=1: skipping the junction-agreement pass")
+    else:
+        all_h = np.concatenate([seg["h"] for seg in segments])
+        agreed_h, _agree_touched = junction_agreement_pass(
+            all_east, all_north, all_h, all_seg_idx,
+            junction_skip=conflict_flat | all_is_struct)
+        for idx in sorted(set(all_seg_idx[agreed_h != all_h].tolist())):
+            segments[idx]["h"] = agreed_h[offsets[idx]:offsets[idx + 1]]
 
     out_segments = []
     for idx, seg in enumerate(segments):

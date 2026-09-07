@@ -46,6 +46,8 @@ from pathlib import Path
 from road_mesh_common import (
     BANK_GAIN,
     DEM_SPIKE_THRESHOLD_M,
+    JUNCTION_AGREE_RADIUS_M,
+    JUNCTION_AGREE_TAPER_GRADE,
     LANE_WIDTH_M,
     MAX_BANK_RAD,
     MAX_HALF_WIDTH_M,
@@ -120,6 +122,11 @@ def compute_generation_id() -> str:
         MIN_HALF_WIDTH_M,
         MAX_HALF_WIDTH_M,
         WIDTH_SMOOTH_SIGMA_M,
+        # Junction-agreement pass (2026-09-06, item 5): changes station
+        # profiles at every at-grade crossing, so pre/post bakes must
+        # mismatch loudly.
+        JUNCTION_AGREE_RADIUS_M,
+        JUNCTION_AGREE_TAPER_GRADE,
         SKIRT_EXTRA,
         SKIRT_DROP,
         ROAD_LIFT,
