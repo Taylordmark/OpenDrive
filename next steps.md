@@ -3871,3 +3871,71 @@ item 6 as a side effect; V5 is art tuning that needs Taylor live.
 - ODB1 sidecar format change (V2) forces a `classify_biomes` +
   `export_biome_bin` re-run and an editor rebuild — cheap, but flags the
   usual "pipeline output and C++ must move together" coupling.
+
+---
+
+## Car editor feature (2026-09-07) — visual car customization in the garage
+
+*Taylor: "I want to be able to visually edit my own cars. this is a new
+feature to add to the game." Plan below builds on what already exists: the
+garage scene (`ODGarageEnvironment`, camera + lit bay, reachable from main
+menu and pause), the row-based car-config screen in `ODMainMenu`
+(Car/Engine/Drivetrain/Tuning, live-applies), and the fact that every car
+body is already PARAMETRIC — `make_car_meshes.py` builds each archetype
+from three authored curves (side profile / plan view / cross-section) plus
+a style dict (wheel radius, ride height, wing, mirrors...). "Editing a
+car" therefore means editing parameters the generator already understands,
+not free-form modeling.*
+
+### C1. Paint & trim editor *(1 session — immediate "my car" payoff)*
+New garage rows/sub-screen: body color, accent/stripe color, wheel color,
+glass tint. Runtime-only — dynamic material instance parameters on the
+existing car materials (`apply_garage_material.py` defines the slots; add
+scalar/vector params if any are baked constants today). Persist per-car in
+a JSON profile under `Saved/` (same pattern as existing settings). No
+pipeline round-trip, applies live in the garage view.
+
+### C2. Part & stance toggles *(1 session)*
+Expose the discrete style knobs the generator already has: rear wing
+on/off, mirrors, ride height, wheel radius, track width. Two
+implementation options — decide by C1's experience with the garage UI:
+  (a) BAKE VARIANTS: pipeline pre-generates the small combinatorial set
+      (e.g. wing x2, stance x3 per archetype) via `make_car_meshes.py` +
+      `import_car_meshes.py`, garage swaps static meshes. Zero new runtime
+      mesh code, but combinatorics cap how many knobs can join.
+  (b) RUNTIME BOLT-ONS: keep one hull mesh, spawn wing/mirror/wheel bits
+      as separate components positioned by the same parameters. Ride
+      height/track are already runtime-adjustable physics-side
+      (`ODVehicleMovement` suspension params) — only visuals need moving.
+Recommendation: (b) for wing/mirrors/stance (they're already separate
+primitives in the generator), no variant explosion.
+
+### C3. Shape sliders — the real "edit my own car" *(2–3 sessions, the
+headline)*
+Port `make_car_meshes.py`'s `build_hull()` 3-curve loft to C++ building a
+`UDynamicMeshComponent` live (the codebase already builds dynamic meshes
+at runtime everywhere — buildings, terrain, roads — so the machinery and
+material plumbing exist). Expose per-archetype sliders that move the
+authored control points within safe ranges: hood height, roofline peak,
+greenhouse start/end, haunch width, arch radius, overhangs, wheelbase.
+The Python generator stays the source of truth for the five STOCK cars
+(pipeline still bakes those); the C++ port only re-lofts EDITED cars in
+the garage, from the stock car's control points + the player's deltas.
+Slider deltas persist in the same JSON profile; the drive spawns the
+edited mesh. Collision/physics: keep the stock car's collision + mass —
+edits are visual-only in v1 (prevents editor-driven physics exploits and
+keeps the port small).
+Risks to watch: keeping the C++ loft numerically identical to numpy's
+(UV/cell mapping, arch clipping order), and hull self-intersection at
+slider extremes — clamp ranges conservatively and add a "reset to stock"
+row.
+
+### C4. Polish/persistence pass *(1 session, after C1–C3 settle)*
+Multiple save slots per archetype ("my Muscle #2"), name-your-car text
+row, garage turntable/orbit camera QoL, and a small stat readout row
+(mass/power — unchanged in v1, but the screen should say so).
+
+**Order: C1 → C2 → C3 → C4.** C1/C2 ship value fast with near-zero risk;
+C3 is where "visually edit" is really delivered and its scope is the main
+open question for Taylor: paint+parts only (stop after C2), or full shape
+sliders (C3)?
