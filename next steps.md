@@ -3767,3 +3767,107 @@ Committed locally only (`ODGuardrailManager.cpp`, `ODGuardrailManager.h`,
 `ODGameMode.cpp`, `ODGameMode.h`, `pipeline/build_road_guardrails.py`,
 `pipeline/export_road_guardrails_bin.py`, `pipeline/rebuild_area.py`,
 `unreal/apply_guardrail_assets.py`); not pushed.
+
+---
+
+## Terrain-variety queue (2026-09-07) — "why does it all look the same"
+
+*Taylor's question: "how do we make the terrain not all look the same? fauna?
+shading? different textures?" Root-cause answer first, then the plan. This
+queue also absorbs the pending pale-hills fix (immediate-queue item 6's
+follow-through) since the same edits carry both.*
+
+### Diagnosis — why it's monotone today
+
+The variety systems mostly EXIST but are being fed uniform data:
+
+- **The biome pipeline is real but degenerate for summit_county.**
+  `classify_biomes.py` → `road_biomes.json` is 27,465 samples but **87%
+  Evergreen** (23,993; next largest Canyon 1,023). One biome ⇒ one ground
+  tint (`BiomeGroundTintTable`) and one forest recipe almost everywhere.
+- **Biome samples are corridor-only** (classifier gates to road bbox +2 km
+  by design). `ApplyBiomeTint` gives up beyond `FarBiomeFallbackCm` (1 km)
+  and applies NO tint — so the background hills, the thing you stare at most,
+  are exactly the vertices the biome system never reaches. This is the
+  mechanism behind the old `distinctBiomes=0` observation.
+- **The ground material's flat layer is one grass/dirt blend everywhere**
+  (`apply_ground_material.py`); at distance its mips average to the pale
+  warm-khaki measured in item 6 (Vail carrier: flat albedo 94,95,88).
+  `value_noise()` exists but is only used for snow breakup — no macro
+  albedo variation.
+- **Aerial perspective** (item-6 Silverthorne carrier) desaturates whatever
+  variety survives to the far field.
+- The forest side is actually rich (7-species `SpeciesWeight` recipes,
+  `TreeDensityScale`, shrub/ambient-veg floors per biome) — it's starved by
+  the same 87%-one-biome input, not missing features.
+
+So: not "add fauna vs shading vs textures" — **fix the variation DATA, then
+add macro albedo variation in the material, and the existing tint + forest
+systems light up on their own.** Plan, in dependency order:
+
+### V1. Off-corridor biome coverage *(1 session — unblocks everything visual
+behind the corridor)*
+Extend `classify_biomes.py` with a coarse full-bbox sample grid (the z13
+imagery mosaic is ~19 m/px and cheap; classify on a ~200–400 m grid across
+the whole terrain bbox, keep the dense corridor samples as-is) and write
+both into the sidecar (`export_biome_bin.py` format is grid-agnostic —
+just more points). Raise/parametrize `FarBiomeFallbackCm` if needed.
+Gate: per-tile `distinctBiomes` log > 0 on background-hill tiles;
+render-matrix diff shows background tint actually moving.
+
+### V2. Within-biome variation drivers: aspect + moisture *(1 session)*
+87% Evergreen is CORRECT classification — the variety inside a real
+evergreen zone comes from aspect and moisture, not land-cover class. Compute
+per-sample **aspect** (from the DEM normal; south-facing → dry/tan/sparser,
+north-facing → darker/denser) and a **valley-bottom moisture proxy**
+(elevation above local minimum within ~1 km, and/or distance to
+`build_water_tiles.py` water) in `classify_biomes.py`; extend the ODB1
+sidecar record (bump magic or append fields — C++ parser is versioned by
+magic) and consume in `ApplyBiomeTint` as a tint modulation on top of the
+biome base color, and in `AODForestManager::BlendAt` as density/species
+bias (aspen/meadow on moist north aspects and valley bottoms). This is the
+single highest-leverage item for "real Colorado hillside" reads.
+
+### V3. Material macro-variation + distant-flat darkening *(1 session —
+doubles as the Vail pale-hills fix)*
+In `apply_ground_material.py`: add a 2-octave world-space `value_noise`
+(~300 m and ~1200 m periods) lerping the flat albedo between 2–3 variants
+(dry meadow / green meadow / bare dirt) and darkening+saturating the blend
+toward distance so far mips stop averaging to pale khaki. Keep it to the
+flat layer; slope/rock/snow blends stay as shipped. Commandlet re-apply +
+render matrix (Silverthorne/Vail/Frisco/Dillon) with hue/sat variance
+stats over hillside crops — variance should INCREASE, mean value DROP
+slightly at distance.
+
+### V4. Aerial-perspective tuning *(hours — the Silverthorne pale-hills fix)*
+Reduce the SkyAtmosphere COMPONENT's aerial-perspective contribution
+(aerial perspective view distance scale / Mie scattering) in
+`build_openworld_test_level.py` or wherever the component is configured —
+NOT the `r.SkyAtmosphere.AerialPerspective.StartDepth` cvar (proven silent
+no-op via -ExecCmds, see item-6 results). Small steps; this is mood/legibility,
+not variety, and too much kills depth cueing. Needs Taylor's live eyes for
+final level (same rule as audio character).
+
+### V5. Vegetation banding polish *(1–2 sessions, after V1+V2 land)*
+With real biome + aspect/moisture data flowing, tune the summit_county
+read: elevation-banded species mix within Evergreen (lodgepole low,
+spruce-fir high, krummholz at treeline — recipe interpolation by elevation,
+not new enum entries), and **aspen patches** driven by the V2
+moisture/aspect signal + a coarse noise mask (bright green tint variant of
+an existing broadleaf species first; dedicated mesh only if the tint
+variant reads badly). This is the biggest "postcard" win but is pure
+tuning until V1/V2 exist.
+
+**Order: V1 → V2 → V3 (V4 anytime; V5 last).** V1+V2 are pipeline+C++ data
+work with objective gates; V3/V4 close out both pale-hills carriers from
+item 6 as a side effect; V5 is art tuning that needs Taylor live.
+
+**Decision points for Taylor before/while starting:**
+- Palette direction is subjective — V3's meadow variants and V5's aspen
+  read need a live look at some point; headless pixel-stats gate the
+  mechanism, not the taste.
+- V1 full-bbox imagery fetch adds a modest one-time download (z13 over the
+  full terrain bbox vs. corridor-only today) — assumed fine.
+- ODB1 sidecar format change (V2) forces a `classify_biomes` +
+  `export_biome_bin` re-run and an editor rebuild — cheap, but flags the
+  usual "pipeline output and C++ must move together" coupling.
