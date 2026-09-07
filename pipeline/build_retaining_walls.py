@@ -71,6 +71,28 @@ WALL_MIN_SAMPLES = 3         # a run shorter than this along its own axis
 WALL_MAX_SAMPLES = 400       # sanity ceiling (a genuinely enormous run would
                               # otherwise produce an unbounded triangle count)
 
+# 2026-09-07 fix (Taylor's live find: ground-to-sky wall slabs at Copper
+# Mountain and Piney Lake Road/Vail). Union-Find's transitive merging can
+# percolate one "run" across an entire town's road network (the worst
+# summit_county run touched ~100 distinct Vail roads), and
+# build_wall_run_mesh then fits ONE principal axis and ONE upper/lower
+# 2-means split to that whole blob - the ruled surface interpolates
+# between unrelated wall sites kilometers apart, which renders as a giant
+# slab from ground to sky (176 of 447 baked walls had a triangle edge
+# > 200 m; worst single edge 8.5 km). Two-stage split before meshing:
+#   1. WALL_RUN_GAP_M: break a run into spatially-contiguous components -
+#      two stations belong to the same wall only if connected by hops of
+#      at most this distance. Catches genuinely disjoint sites that only
+#      chained together through the shared Union-Find.
+#   2. WALL_PIECE_MAX_EXTENT_M: recursively bisect any component whose
+#      spatial extent still exceeds this, along its own PCA axis, until
+#      every piece is short enough that a single dominant axis + a single
+#      upper/lower elevation split is a valid local model. Catches the
+#      contiguous-but-curved/branched case (a run snaking through a road
+#      network is connected at 40 m hops yet spans kilometers).
+WALL_RUN_GAP_M = 40.0
+WALL_PIECE_MAX_EXTENT_M = 250.0
+
 
 def load_station_arrays():
     data = json.loads(STATIONS_PATH.read_text())
@@ -121,6 +143,60 @@ def cluster_runs(wall_pairs, n_stations):
     for s in touched:
         runs[uf.find(s)].append(s)
     return list(runs.values())
+
+
+def split_run_spatial(run_stations, east, north, gap_m=WALL_RUN_GAP_M):
+    """Break one Union-Find run into spatially-contiguous components: two
+    stations share a component only if reachable via hops of <= gap_m.
+    Grid-hash accelerated (cell = gap_m, check 3x3 neighborhood) so the
+    pathological town-spanning runs (thousands of stations) stay cheap."""
+    pts = np.array([[east[s], north[s]] for s in run_stations])
+    n = len(run_stations)
+    if n <= 1:
+        return [run_stations]
+    cells = defaultdict(list)
+    for k in range(n):
+        cells[(int(pts[k, 0] // gap_m), int(pts[k, 1] // gap_m))].append(k)
+    uf = _UnionFind(n)
+    gap_sq = gap_m * gap_m
+    for (cx, cy), members in cells.items():
+        neigh = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neigh.extend(cells.get((cx + dx, cy + dy), []))
+        neigh = np.array(neigh)
+        for k in members:
+            d2 = ((pts[neigh] - pts[k]) ** 2).sum(axis=1)
+            for m in neigh[d2 <= gap_sq]:
+                uf.union(k, int(m))
+    comps = defaultdict(list)
+    for k in range(n):
+        comps[uf.find(k)].append(run_stations[k])
+    return list(comps.values())
+
+
+def split_run_extent(run_stations, east, north, max_extent_m=WALL_PIECE_MAX_EXTENT_M):
+    """Recursively bisect a spatially-contiguous component along its own
+    PCA axis until each piece's extent along that axis is <= max_extent_m.
+    Keeps every piece short enough for build_wall_run_mesh's single-axis
+    ruled-surface model to be locally valid."""
+    if len(run_stations) < 2:
+        return [run_stations]
+    pts = np.array([[east[s], north[s]] for s in run_stations])
+    centered = pts - pts.mean(axis=0)
+    cov = centered.T @ centered
+    evals, evecs = np.linalg.eigh(cov)
+    axis = evecs[:, int(np.argmax(evals))]
+    proj = centered @ axis
+    if proj.max() - proj.min() <= max_extent_m:
+        return [run_stations]
+    cut = float(np.median(proj))
+    left = [s for s, p in zip(run_stations, proj) if p <= cut]
+    right = [s for s, p in zip(run_stations, proj) if p > cut]
+    if not left or not right:   # degenerate median split - stop recursing
+        return [run_stations]
+    return (split_run_extent(left, east, north, max_extent_m)
+            + split_run_extent(right, east, north, max_extent_m))
 
 
 def kmeans_1d_2(values):
@@ -328,28 +404,48 @@ def main():
     runs = cluster_runs(wall_pairs, len(east))
     print(f"{len(runs)} run(s) after clustering")
 
+    # 2026-09-07 giant-slab fix (see WALL_RUN_GAP_M's comment): break each
+    # transitively-merged run into spatially-contiguous, bounded-extent
+    # pieces BEFORE fitting the single-axis ruled-surface model.
+    pieces = []
+    for run_stations in runs:
+        for comp in split_run_spatial(run_stations, east, north):
+            pieces.extend(split_run_extent(comp, east, north))
+    print(f"{len(pieces)} piece(s) after spatial-gap + extent splitting")
+
     walls = []
     n_skipped = 0
-    for run_idx, run_stations in enumerate(runs):
-        centroid_ref_cm = own_chain_centroid_cm(run_stations, east, north, seg_idx)
-        mesh = build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm)
+    max_edge_m = 0.0
+    for piece_idx, piece_stations in enumerate(pieces):
+        centroid_ref_cm = own_chain_centroid_cm(piece_stations, east, north, seg_idx)
+        mesh = build_wall_run_mesh(piece_stations, east, north, elev, centroid_ref_cm)
         if mesh is None:
             n_skipped += 1
             continue
         verts, uvs, tris = mesh
-        names = sorted({road_name[s] for s in run_stations if road_name[s]})
-        chunks = chunk_and_bucket(f"wall_{run_idx:04d}", verts, uvs, tris, names)
+        va, vb, vc = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+        piece_max = max(np.linalg.norm(va - vb, axis=1).max(),
+                        np.linalg.norm(vb - vc, axis=1).max(),
+                        np.linalg.norm(vc - va, axis=1).max()) / 100.0
+        max_edge_m = max(max_edge_m, float(piece_max))
+        names = sorted({road_name[s] for s in piece_stations if road_name[s]})
+        chunks = chunk_and_bucket(f"wall_{piece_idx:04d}", verts, uvs, tris, names)
         walls.extend(chunks)
 
     if n_skipped:
-        print(f"{n_skipped} run(s) skipped (degenerate - fewer than 2 stations "
+        print(f"{n_skipped} piece(s) skipped (degenerate - fewer than 2 stations "
               f"on one side, or non-overlapping sides)")
 
     OUT_PATH.write_text(json.dumps({"area": AREA_NAME, "walls": walls}))
     total_verts = sum(len(w["vertices"]) // 3 for w in walls)
     total_tris = sum(len(w["triangles"]) // 3 for w in walls)
-    print(f"Built {len(walls)} wall chunk(s) from {len(runs) - n_skipped} run(s), "
+    print(f"Built {len(walls)} wall chunk(s) from {len(pieces) - n_skipped} piece(s), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_PATH}")
+    print(f"max triangle edge: {max_edge_m:.1f} m")
+    if max_edge_m > 2.0 * WALL_PIECE_MAX_EXTENT_M:
+        raise SystemExit(
+            f"GATE FAIL: max wall triangle edge {max_edge_m:.1f} m exceeds "
+            f"{2.0 * WALL_PIECE_MAX_EXTENT_M:.0f} m - giant-slab regression")
 
 
 if __name__ == "__main__":
