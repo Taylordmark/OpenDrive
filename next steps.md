@@ -3939,3 +3939,32 @@ row, garage turntable/orbit camera QoL, and a small stat readout row
 C3 is where "visually edit" is really delivered and its scope is the main
 open question for Taylor: paint+parts only (stop after C2), or full shape
 sliders (C3)?
+
+## Drive-test fix queue (2026-09-07) - CLOSED
+
+All six of Taylor's live-drive findings fixed and committed same day:
+
+1. **Giant retaining-wall slabs** (Copper, Piney Lake Rd) - f12813c.
+   Union-Find run percolation + single-PCA ruled surface; fixed with
+   spatial-gap split (40m) + recursive extent bisection (250m cap),
+   hard max-edge gate. Verified clean in renders at both sighting spots.
+2. **Respawn slow / not on road** - 5e237b4. Warm settle (0.75s vs 3s)
+   when asphalt is already resident at the reset target.
+3. **Stuck behind guardrails** - 5e237b4. Throttle-but-not-moving
+   trigger (>50% throttle, <60cm/s, 2.5s) fires the nearest-road reset
+   with a "STUCK - RETURNING IN N" HUD countdown; guardrail profiles
+   also raised ~25% (W-beam 92cm, Jersey 100cm) so rails are harder to
+   hop in the first place.
+4. **Streaming frame drops** - 08c8056. Forest burst ms-budgeted
+   (2.5ms/frame), guardrail/wall/building collision cooks moved async,
+   building deferral queue batched (was: full tile re-cook per resolved
+   building), bulk AddInstances, per-tile build logs -> Verbose.
+   NOT yet re-measured with a frame-time capture on a scripted drive -
+   do that if Taylor still feels drops.
+5. **Inside-out rocks** - 5e237b4. OBJ writer mirrored Y without
+   reversing winding; one-sided M_Rock030 exposed what the two-sided
+   car/tree materials mask. Winding fixed at the writer, boulders
+   re-imported, verified in-game.
+6. **Cold-load blank screen** - 2fb58bf. 25s loading-screen failsafe
+   released into a still-empty world on cold disk loads; ceiling now
+   60s (settle-based release unchanged, warm loads unaffected).
