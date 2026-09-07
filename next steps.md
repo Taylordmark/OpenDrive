@@ -3968,3 +3968,39 @@ All six of Taylor's live-drive findings fixed and committed same day:
 6. **Cold-load blank screen** - 2fb58bf. 25s loading-screen failsafe
    released into a still-empty world on cold disk loads; ceiling now
    60s (settle-based release unchanged, warm loads unaffected).
+
+## Second drive-test report (2026-09-07 evening) - CLOSED
+
+Taylor's post-launch report, both fixed + render-verified same day:
+
+1. **Junction pads still look bad** (Lone Pine Circle giant flat brown
+   amoeba blob, no markings) - c498718. Three compounding causes in
+   experimental_junction_pads.py: constant pad UV (0.58,0) collapsed
+   every pad to one texel under the procedural M_Road (flat brown, no
+   detail); merge_drawn_overlaps had no absolute size cap (only a
+   per-member area ratio that scales with member count); and the 12m
+   partner-proximity rule deleted a loop street's whole marked ribbon,
+   replacing it with the chain of unmarked 6.5m fill discs that WAS the
+   amoeba outline. Now: world-derived per-vertex pad UVs confined to
+   the marking-free meterPos band [0.5,2.0]m, a 25m semi-axis cap on
+   drawn-overlap fusion, and proximity omission scoped to pad reach
+   +25m of a junction pairing those segments. Rebaked (1322km, 561
+   pads all <=23.8m semi-axis), verified at Lone Pine.
+2. **"Terrain above ground" black marbled wedge** (Tennis Club Road) -
+   5dc829a. Not terrain: degenerate retaining-wall slabs from
+   build_retaining_walls.py (union-range sampling clamp-collapsed rows
+   onto single vertices -> 24,000 m^2 fans; 1,743/1,841 shipped chunks
+   had degenerate tris feeding garbage normals into M_GroundStylized's
+   slope blend = black marble). Now: intersection-range sampling with
+   10m slack, 30m max row span, zero-area tris dropped. Rebaked (wall
+   area 15.27 -> 1.13 km^2), verified at both Tennis Club vantages.
+
+Also hardened same evening: 8fbcd11 - warm-settle respawn fast path
+can never apply to the initial cold-boot spawn (bEverGroundSnapped
+gate; the first spawn always takes the full 3s Chaos-registration
+settle).
+
+Watch item from the verification renders: at the US 6 / Tennis Club
+junction the road sits visibly above terrain with an exposed skirt
+step in the foreground - not the reported bug, but worth a look on the
+next junction/terrain pass.
