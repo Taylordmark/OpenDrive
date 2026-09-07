@@ -699,8 +699,13 @@ void AODVehiclePawn::TrySnapToGround()
 	// (mid-drive OOB/stuck reset onto collision that's been resident and
 	// simulated for a while), that race can't apply - release after the
 	// short window instead. bOnRoad is required so a timeout fallback onto
-	// arbitrary ground never takes the fast path.
-	const bool bWarmSnap = bOnRoad && (SnapReadyTime - SpawnTime) < WarmSnapWindowSec;
+	// arbitrary ground never takes the fast path, and bEverGroundSnapped so
+	// the INITIAL spawn never does either: a cold boot's road tile can be
+	// queryable 0.1s after the teleport (built during the loading screen,
+	// observed live 2026-09-07) while its physics body is exactly the
+	// maybe-not-simulation-ready case the 3s settle was added for.
+	const bool bWarmSnap = bEverGroundSnapped && bOnRoad
+		&& (SnapReadyTime - SpawnTime) < WarmSnapWindowSec;
 	const double SettleSec = bWarmSnap ? WarmSnapSettleSec : GroundSnapSettleSec;
 	if (Now - SnapReadyTime < SettleSec)
 	{
@@ -829,6 +834,9 @@ void AODVehiclePawn::TrySnapToGround()
 		Movement->EngageParkHold();
 	}
 	bGroundSnapped = true;
+	bEverGroundSnapped = true;   // real-world snap completed - arms the warm
+	                              // settle for later mid-drive resets (NOT set
+	                              // by PlaceInShowroom's fake snap)
 }
 
 void AODVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)

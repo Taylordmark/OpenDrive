@@ -405,6 +405,12 @@ private:
 	// streaming-lagged resets still take the full 3s path.
 	static constexpr double WarmSnapWindowSec = 1.0;
 	static constexpr double WarmSnapSettleSec = 0.75;
+	// true once ANY real-world snap has fully completed this session - the
+	// warm settle requires it, so the initial spawn (whose road tile may
+	// have JUST been built - the exact registration race the 3s settle
+	// guards) always takes the full settle even when its trace connects
+	// instantly. PlaceInShowroom's fake snap deliberately does not set it.
+	bool bEverGroundSnapped = false;
 	double SnapReadyTime = 0.0;
 
 	// 2026-09-01: additionally require quiet frames before release. The
