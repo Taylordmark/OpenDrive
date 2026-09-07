@@ -1354,6 +1354,25 @@ def merge_drawn_overlaps(junctions, east, north, elev, seg_ids, structural):
                 cand_poly = [p for m in group_m
                              for p in _ellipse_polygon(m["ellipse"], 0.0, sides=24)]
                 ell_c = _fit_ellipse_to_points(cand_poly, PAD_RADIUS_MIN_M)
+                # Absolute size cap (2026-09-07, Lone Pine Circle blob): the
+                # area-ratio guard below scales with the MEMBER COUNT (a
+                # chain of N pads may grow to 6*N a single pad's area), so a
+                # loop street whose fill/junction pads chain-fuse could
+                # still balloon far past anything one intersection can be.
+                # merge_same_intersection already refuses/corridor-splits at
+                # PAD_MERGE_MAX_SEMI_AXIS_M; hold this pass to the same cap.
+                if max(ell_c[2], ell_c[3]) > PAD_MERGE_MAX_SEMI_AXIS_M:
+                    key = ("cap", round(ei_[0]), round(ei_[1]),
+                           round(junctions[k]["ellipse"][0]),
+                           round(junctions[k]["ellipse"][1]))
+                    if key not in refused_seen:
+                        refused_seen.add(key)
+                        print(f"  refused fuse @ ({ei_[0]:.0f},{ei_[1]:.0f}) vs "
+                              f"({junctions[k]['ellipse'][0]:.0f},"
+                              f"{junctions[k]['ellipse'][1]:.0f}): covering "
+                              f"ellipse {ell_c[2]:.0f}x{ell_c[3]:.0f}m exceeds "
+                              f"the {PAD_MERGE_MAX_SEMI_AXIS_M:.0f}m semi-axis cap")
+                    continue
                 if (math.pi * ell_c[2] * ell_c[3]
                         > PAD_FUSE_MAX_AREA_RATIO * area_members):
                     key = ("area", round(ei_[0]), round(ei_[1]),
@@ -1674,17 +1693,34 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     cx, cy = hub_xy
     sides = len(ring)
     verts = [cx * 100.0, -cy * 100.0, z_m * 100.0]
-    # RoadMat reads U across build_road_chunks()'s skirt-L/pave-L/pave-R/
-    # skirt-R profile (U=0..1), with the yellow centerline stripe baked in
-    # around U=0.5 - the physical pavement centerline. A radial 0.5+0.5cos/
-    # sin UV sweeps this disc through that ENTIRE skirt->stripe->skirt range
-    # at every angle, painting a fanned mix of stripe/pavement/skirt texture
-    # radiating out from the center instead of plain pavement (2026-08-25,
-    # Taylor: "legitimately identical" - the pad was rendering, just with
-    # nonsense UVs). Use one constant UV, off-center in the pavement band,
-    # for every vertex so the whole disc samples a single flat asphalt texel.
-    PAD_UV = (0.58, 0.0)
-    uvs = [PAD_UV[0], PAD_UV[1]]
+
+    # UV0 (2026-09-07, Taylor: "junctions definitely still do not look
+    # good" - the Lone Pine Circle flat brown blob). The old constant
+    # PAD_UV=(0.58,0.0) predates the procedural M_Road: under the current
+    # material (unreal/apply_road_material.py) every base-asphalt lookup is
+    # Append(meterPos, v0)/tile_m, so a constant UV0 collapsed the whole pad
+    # to ONE texel of albedo+normal+roughness - a flat, detail-free,
+    # warm-brown disc with a frozen normal. Give each vertex a real
+    # world-derived UV instead, but keep every vertex's decoded meterPos
+    # ((u0-0.5)*2*uv1.x) inside the marking-free band [PAD_METER_MIN,
+    # PAD_METER_MAX]: the material's center double-yellow lives at
+    # |meterPos| <= ~0.2 and the edge/dash lines at >= ~2.15 (4-lane host
+    # worst case), and since per-pixel UVs are LINEAR interpolations of
+    # vertex UVs, keeping every VERTEX in the band keeps every PIXEL in it
+    # - the pad tiles real asphalt texture with zero paint, by construction.
+    # u is a ping-pong of local x (any monotone map would sweep out of the
+    # band on a 25m pad; the fold keeps it bounded), v is local y in meters
+    # (v0's own unit), so texture variation is genuinely 2D.
+    PAD_METER_MIN, PAD_METER_MAX = 0.5, 2.0
+
+    def _pad_uv(vx, vy):
+        span = PAD_METER_MAX - PAD_METER_MIN
+        t = math.fmod(abs(vx - cx), 2.0 * span)
+        m = PAD_METER_MIN + (t if t <= span else 2.0 * span - t)
+        return 0.5 + m / (2.0 * ROAD_HALF_WIDTH), vy - cy
+
+    hub_u, hub_v = _pad_uv(cx, cy)
+    uvs = [hub_u, hub_v]
     # 2026-08-26: a +-3cm alternating Z jitter was tried here (testing
     # whether an exactly-coplanar disc, independent of topology, was what
     # broke Chaos's collision cook) and headless-retested at the same
@@ -1695,7 +1731,7 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     for vi, (vx, vy) in enumerate(ring):
         vz_m = ring_z_m[vi] if ring_z_m is not None else z_m
         verts.extend([vx * 100.0, -vy * 100.0, vz_m * 100.0])
-        uvs.extend([PAD_UV[0], PAD_UV[1]])
+        uvs.extend(_pad_uv(vx, vy))
     # CONFIRMED ROOT CAUSE (2026-08-26): this fan must wind (0,a,b), not
     # (0,b,a). The 2026-08-25 fix that swapped to (0,b,a) was chasing a real
     # symptom (the pad was invisible from normal driving angles) but landed
@@ -1722,9 +1758,9 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     # uv1/road_class_id/lane_count: the ODR3 mirror (write_tile_v3) needs
     # every chunk to carry the extended-format fields. A pad disc has no
     # single meaningful road width/class, so it gets the classic half-width
-    # (uv1.x is only used by the material for lane-line placement, and the
-    # disc's constant uv0 already opts it out of lane lines entirely) and
-    # the "unknown" class defaults (6 = service/track/unknown, 2 lanes).
+    # (uv1.x is what decodes u0 back to meterPos - the marking-free band
+    # math in _pad_uv above assumes exactly this value) and the "unknown"
+    # class defaults (6 = service/track/unknown, 2 lanes).
     uv1 = [ROAD_HALF_WIDTH, 0.0] * (1 + len(ring))
     return {"name": name, "vertices": [round(v, 1) for v in verts],
             "uvs": [round(v, 4) for v in uvs], "uv1": uv1, "triangles": tris,
@@ -3115,6 +3151,38 @@ def main():
                 if a != b:
                     junction_partners[a].add(b)
 
+    # Junction-locality scope for the proximity omission (2026-09-07, Lone
+    # Pine Circle blob): partnering two segments used to license the
+    # ribbon-delete-and-fill-disc treatment along their ENTIRE shared
+    # near-parallel length - a small loop street whose two halves run
+    # within JUNCTION_PARTNER_GAP_M of each other for most of the loop had
+    # its whole marked ribbon deleted and replaced by a chain of unmarked
+    # 6.5m discs (the amoeba blob). The gap-bridging this rule exists for
+    # (near-miss ribbons right at a junction mouth) only ever happens NEAR
+    # the junction, so a station only qualifies within this distance of a
+    # junction that actually pairs its segment with the partner it's close
+    # to (measured beyond the junction's own pad reach, so big merged pads
+    # keep full coverage at their rim).
+    JUNCTION_PROX_SCOPE_M = 25.0
+    pair_scopes = defaultdict(list)   # (min_seg, max_seg) -> [(x, y, reach2)]
+    for j in junctions:
+        jx, jy = j["xy"]
+        reach = (max(j["ellipse"][2], j["ellipse"][3])
+                 if j.get("shape") == "ellipse" else j["radius_m"])
+        reach2 = (reach + JUNCTION_PROX_SCOPE_M) ** 2
+        segs = sorted(j["segs"])
+        for ai in range(len(segs)):
+            for bi in range(ai + 1, len(segs)):
+                pair_scopes[(segs[ai], segs[bi])].append((jx, jy, reach2))
+
+    def near_pair_junction(gi, sa, sb):
+        pair = (sa, sb) if sa <= sb else (sb, sa)
+        px, py = east[gi], north[gi]
+        for jx, jy, reach2 in pair_scopes.get(pair, ()):
+            if (px - jx) ** 2 + (py - jy) ** 2 <= reach2:
+                return True
+        return False
+
     JUNCTION_PARTNER_GAP_M = JUNCTION_OVERLAP_M + 3.0
     overlap_cell = JUNCTION_PARTNER_GAP_M
     overlap_buckets = defaultdict(list)
@@ -3134,7 +3202,9 @@ def main():
                     if seg_ids[j] not in partners:
                         continue
                     d2 = (east[gi] - east[j]) ** 2 + (north[gi] - north[j]) ** 2
-                    if d2 <= overlap2 and abs(elev[gi] - elev[j]) <= JUNCTION_MAX_ELEV_DIFF_M:
+                    if (d2 <= overlap2
+                            and abs(elev[gi] - elev[j]) <= JUNCTION_MAX_ELEV_DIFF_M
+                            and near_pair_junction(gi, si, seg_ids[j])):
                         return True
         return False
 
