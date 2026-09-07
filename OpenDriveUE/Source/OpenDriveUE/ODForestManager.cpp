@@ -1796,7 +1796,11 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	// initial fill settles. Instance counts are per-TILE, not a running
 	// total.
 	{
-		UE_LOG(LogTemp, Display,
+		// Verbose since 2026-09-07 (was Display): during a fill burst this
+		// fired once per built tile - dozens of formatted lines in single
+		// frames, a real cost stacked on top of the scatter itself. Flip
+		// LogTemp to Verbose to get the per-tile mix back.
+		UE_LOG(LogTemp, Verbose,
 			TEXT("ODForestManager: tile (%d,%d) biome=%s species blob=%d olive=%d "
 			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | "
 			     "shrub bush=%d sagebrush=%d"),
@@ -1971,16 +1975,23 @@ void AODForestManager::Tick(float DeltaSeconds)
 	// hardcoded absolute Z.
 	PlayerZHint = Loc.Z;
 
-	// spawn missing tiles nearest-first, a few per tick
+	// spawn missing tiles nearest-first, a few per tick - capped by BOTH the
+	// TilesPerTick count ceiling and TileBuildMsBudget of actual frame time
+	// (2026-09-07, see TileBuildMsBudget's header comment: 40 unbudgeted
+	// tiles in one frame was a measured hitch source, not the assumed
+	// "cheap" burst). bBudgetSpent is checked AFTER each build so at least
+	// one tile always completes per tick and the fill can never stall.
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 	const int32 Reach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
+	const double BuildStart = FPlatformTime::Seconds();
+	bool bBudgetSpent = false;
 	int32 Built = 0;
-	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick; ++Ring)
+	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick && !bBudgetSpent; ++Ring)
 	{
-		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick; ++dy)
+		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dy)
 		{
-			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick; ++dx)
+			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dx)
 			{
 				if (FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring)
 				{
@@ -1995,6 +2006,8 @@ void AODForestManager::Tick(float DeltaSeconds)
 					// with no extra bookkeeping here.
 					BuildTile(Key, Player);
 					++Built;
+					bBudgetSpent = (FPlatformTime::Seconds() - BuildStart) * 1000.0
+						> TileBuildMsBudget;
 				}
 			}
 		}

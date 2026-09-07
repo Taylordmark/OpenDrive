@@ -245,12 +245,12 @@ void AODWaterManager::FinalizeTile(const FIntPoint& Key, FParsedWaterTile&& Pars
 	for (const FParsedLake& Lk : Parsed.Lakes)
 	{
 		const float SurfaceZCm = Lk.Verts.Num() >= 3 ? Lk.Verts[2] : 0.0f;
-		UE_LOG(LogTemp, Display,
+		UE_LOG(LogTemp, Verbose,
 			TEXT("ODWaterManager: tile (%d,%d) lake verts=%d tris=%d surfaceZ=%.1f cm"),
 			Key.X, Key.Y, Lk.Verts.Num() / 3, Lk.Tris.Num() / 3, SurfaceZCm);
 	}
 
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODWaterManager: tile (%d,%d) built %d lake(s)"),
 		Key.X, Key.Y, Parsed.Lakes.Num());
 }

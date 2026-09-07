@@ -224,7 +224,12 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 		});
 
 		// walls always collide - they exist specifically to fill a gap on
-		// the drivable corridor a bare terrain carve couldn't resolve
+		// the drivable corridor a bare terrain carve couldn't resolve.
+		// Async cook (2026-09-07 frame-drop pass): a 2 km tile's worth of
+		// wall chunks cooked synchronously in one frame otherwise - same
+		// flag AODTerrainManager/AODRoadManager already use; walls load at
+		// SpawnRadius (2.5 km) so the cook finishes long before contact.
+		Comp->bUseAsyncCooking = true;
 		Comp->EnableComplexAsSimpleCollision();
 		Comp->SetCollisionProfileName(TEXT("BlockAll"));
 		if (WallMat)
@@ -235,7 +240,7 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 		Tile.Walls.Add(Comp);
 	}
 
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODWallManager: tile (%d,%d) built %d wall chunk(s)"),
 		Key.X, Key.Y, Parsed.Walls.Num());
 }

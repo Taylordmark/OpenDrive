@@ -781,11 +781,28 @@ private:
 	// Found 2026-08-24 (Taylor: "a single line of trees at the edge of the
 	// road... a tiny see-through line, not a whole collection") - what
 	// looked like a placement/density bug was the ring-by-ring BFS fill
-	// (Tick(), nearest-ring-first) permanently stuck only a few rings out
+	// (Tick(), nearest-first) permanently stuck only a few rings out
 	// from wherever the player has been, which reads as a thin, spotty band
-	// rather than the full biome-density forest. 40/tick clears the whole
-	// disc in a handful of ticks (well under a second at 60 fps) -
-	// BuildTile() itself is cheap (bucketed grid lookups, no physics), so
-	// this has plenty of headroom before it could hitch.
+	// rather than the full biome-density forest. 40/tick cleared the whole
+	// disc in a handful of ticks.
+	//
+	// 2026-09-07 (Taylor: "frames are frequently dropping... while loading
+	// new tiles"): the "BuildTile() itself is cheap, plenty of headroom"
+	// assumption above did NOT survive the tile audit. One tile scatters
+	// ~1470 candidates (each a GroundAt() spatial-hash/trace query) and
+	// registers up to 13 fresh HISM components - 40 tiles in one frame is
+	// tens of thousands of queries plus hundreds of component
+	// registrations, and it all lands at once whenever the fill gate opens
+	// (boot, respawn) or the drive-front outruns the filled disc. So the
+	// burst is now additionally capped by TileBuildMsBudget per frame,
+	// same pattern as AODTerrainManager/AODRoadManager's ms budgets:
+	// TilesPerTick stays as a hard count ceiling, but the loop stops early
+	// once the frame has spent its budget (always completing at least one
+	// tile so the fill can never stall). A stationary fill now spreads
+	// over ~1-2 s instead of hitching a handful of frames; the moving-car
+	// fill front keeps up fine (a car crosses one 96 m tile ring in ~2 s
+	// even at highway speed, and the budget clears several tiles per
+	// SECOND at 60 fps).
 	static constexpr int32 TilesPerTick = 40;
+	static constexpr double TileBuildMsBudget = 2.5;
 };

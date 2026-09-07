@@ -444,6 +444,12 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 		Comp->RegisterComponent();
 		if (bNear)
 		{
+			// Async cook (2026-09-07 frame-drop pass): a whole tile's merged
+			// building geometry cooked synchronously on the game thread
+			// otherwise - same flag the road/terrain/wall/guardrail managers
+			// use. Buildings sit off the pavement, so a body that's a frame
+			// or two late is unreachable anyway.
+			Comp->bUseAsyncCooking = true;
 			Comp->EnableComplexAsSimpleCollision();
 			Comp->SetCollisionProfileName(TEXT("BlockAll"));
 		}
@@ -632,26 +638,44 @@ void AODBuildingManager::ProcessPendingBuildings()
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	const double Now = GetWorld()->GetTimeSeconds();
 
-	// Iterate backwards so RemoveAtSwap (used for both the "resolved" and
-	// "give up"/"tile gone" removals below) never skips an unvisited entry.
-	for (int32 i = PendingBuildings.Num() - 1; i >= 0; --i)
+	// 2026-09-07 frame-drop pass: this used to call AppendBuildingsToTileMesh
+	// with a batch of ONE inside the loop - each resolved building triggered
+	// a full EditMesh + render-state rebuild + collision re-cook of the
+	// entire tile's merged near mesh, several times per frame while the
+	// deferral queue drained. Now: pass 1 resolves ground offsets (capped -
+	// each attempt is up to 32 line traces), grouping resolved entries by
+	// (tile, near/far); pass 2 appends each group with ONE mesh edit; pass 3
+	// removes resolved/expired entries. Indices collected in pass 1 stay
+	// valid through pass 2 because nothing is removed until pass 3, and
+	// pass 3 removes in descending index order so RemoveAtSwap never
+	// disturbs a lower pending index.
+	constexpr int32 MaxResolveAttemptsPerTick = 8;
+	int32 Attempts = 0;
+	TMap<TPair<FIntPoint, bool>, TArray<TPair<const FParsedBuilding*, float>>> Resolved;
+	TArray<int32, TInlineAllocator<16>> DoneIndices;
+
+	for (int32 i = 0; i < PendingBuildings.Num(); ++i)
 	{
 		FPendingBuilding& Pending = PendingBuildings[i];
 
-		FBuildingTile* Tile = Tiles.Find(Pending.TileKey);
-		if (!Tile)
+		if (!Tiles.Contains(Pending.TileKey))
 		{
 			// Tile was released (player drove out of range) before this
 			// building ever resolved - about to be out of despawn range
 			// anyway, so just drop it rather than place something that would
 			// be torn down again almost immediately.
-			PendingBuildings.RemoveAtSwap(i);
+			DoneIndices.Add(i);
 			continue;
 		}
 		if (Now < Pending.NextRetryTime)
 		{
 			continue;
 		}
+		if (Attempts >= MaxResolveAttemptsPerTick)
+		{
+			break;   // trace budget spent - the rest keep their NextRetryTime
+		}
+		++Attempts;
 
 		float ZOffsetCm = 0.0f;
 		if (ComputeBuildingZOffset(Pending.Building, Player, ZOffsetCm))
@@ -671,11 +695,9 @@ void AODBuildingManager::ProcessPendingBuildings()
 				CentroidX /= VCount;
 				CentroidY /= VCount;
 			}
-			TArray<TPair<const FParsedBuilding*, float>> One;
-			One.Emplace(&Pending.Building, ZOffsetCm);
-			AppendBuildingsToTileMesh(*Tile,
-				IsNearRoadCorridor(CentroidX, CentroidY), One);
-			PendingBuildings.RemoveAtSwap(i);
+			Resolved.FindOrAdd({Pending.TileKey, IsNearRoadCorridor(CentroidX, CentroidY)})
+				.Emplace(&Pending.Building, ZOffsetCm);
+			DoneIndices.Add(i);
 			continue;
 		}
 
@@ -687,11 +709,23 @@ void AODBuildingManager::ProcessPendingBuildings()
 				     "after %.1f s - no valid ground trace anywhere on its footprint "
 				     "(genuine data gap, not just a streaming race)"),
 				Pending.TileKey.X, Pending.TileKey.Y, PendingGiveUpAfterSec);
-			PendingBuildings.RemoveAtSwap(i);
+			DoneIndices.Add(i);
 			continue;
 		}
 
 		Pending.NextRetryTime = Now + PendingRetryIntervalSec;
+	}
+
+	for (auto& Group : Resolved)
+	{
+		if (FBuildingTile* Tile = Tiles.Find(Group.Key.Key))
+		{
+			AppendBuildingsToTileMesh(*Tile, Group.Key.Value, Group.Value);
+		}
+	}
+	for (int32 d = DoneIndices.Num() - 1; d >= 0; --d)
+	{
+		PendingBuildings.RemoveAtSwap(DoneIndices[d]);
 	}
 }
 

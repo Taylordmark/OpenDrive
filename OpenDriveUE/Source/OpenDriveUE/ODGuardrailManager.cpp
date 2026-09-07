@@ -276,6 +276,14 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 		// check coexists with (that check only ever governs WHEEL raycast
 		// grip; this is the actual Chaos body-vs-body contact friction the
 		// car's chassis feels when it physically touches the rail).
+		// Async cook (2026-09-07 frame-drop pass): without this the whole
+		// triangle-mesh cook for every run in a 2 km tile ran synchronously
+		// on the game thread in one frame - the same cost AODRoadManager/
+		// AODTerrainManager already moved off-thread with this exact flag.
+		// Queries against a still-cooking body miss for a frame or two,
+		// which is fine here: rails load at SpawnRadius (1.5 km), long
+		// before the car can reach them.
+		Comp->bUseAsyncCooking = true;
 		Comp->EnableComplexAsSimpleCollision();
 		Comp->SetCollisionProfileName(TEXT("BlockAll"));
 		if (SlickPhysMat)
@@ -309,6 +317,9 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 			// recompute the same outward-tangent convention BuildRailMesh used,
 			// so posts sit at the rail's own seat line (station position IS
 			// the seat - see build_road_guardrails.py's GUARDRAIL_RAIL_EXTRA_M).
+			// Batched into one AddInstances call (2026-09-07 frame-drop pass) -
+			// per-instance AddInstance dirties the HISM tree every call.
+			TArray<FTransform> PostXfs;
 			for (int32 s = 0; s < St.Num() - 1; ++s)
 			{
 				const double SegLen = FVector::Dist(St[s], St[s + 1]);
@@ -316,20 +327,20 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 				{
 					const double T = SegLen > 1e-3 ? (NextPost - Accum) / SegLen : 0.0;
 					const FVector P = FMath::Lerp(St[s], St[s + 1], (double)T);
-					const FTransform Xf(FRotator::ZeroRotator,
+					PostXfs.Emplace(FRotator::ZeroRotator,
 						P - FVector(0, 0, PostHeightCm * 0.15),   // embed a little below the seat
 						FVector(PostRadiusCm / 50.0f, PostRadiusCm / 50.0f, PostHeightCm / 100.0f));
-					Hism->AddInstance(Xf);
 					++NumPosts;
 					NextPost += PostSpacingCm;
 				}
 				Accum += SegLen;
 			}
+			Hism->AddInstances(PostXfs, false, true);
 			Tile.PostHisms.Add(Hism);
 		}
 	}
 
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODGuardrailManager: tile (%d,%d) built %d W-beam run(s), %d Jersey run(s), %d post(s)"),
 		Key.X, Key.Y, NumWBeam, NumJersey, NumPosts);
 }

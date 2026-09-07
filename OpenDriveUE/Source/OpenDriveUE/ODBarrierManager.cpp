@@ -328,6 +328,12 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 	// one 4-way roll, since bush isn't part of the 7-way SpeciesWeight table.
 	int32 SpeciesInstanceCounts[NumExtendedTreeSpecies] = {};
 	int32 BushInstanceCount = 0;
+	// Batched per-HISM (2026-09-07 frame-drop pass): AddInstance one at a
+	// time dirtied each HISM's cluster tree once per barrier point - a tile
+	// holds hundreds of points, all landing in the same frame. Collect per
+	// species, then one AddInstances per HISM below.
+	TArray<TArray<FTransform>> PendingXfs;
+	PendingXfs.SetNum(NumExtendedTreeSpecies + 1);
 	for (const FParsedBarrierPoint& Pt : Parsed.Points)
 	{
 		FRandomStream Rng(Pt.Seed);
@@ -349,10 +355,16 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 				AODForestManager::RecipeForBiome(Biome).SpeciesWeight, NumExtendedTreeSpecies);
 			++SpeciesInstanceCounts[HismIdx];
 		}
-		if (UHierarchicalInstancedStaticMeshComponent* Hism = Tile.Hisms[HismIdx])
+		if (Tile.Hisms[HismIdx])
 		{
-			const FTransform InstXf(FRotator(0, Yaw, 0), Pt.Pos, FVector(Scale));
-			Hism->AddInstance(InstXf);
+			PendingXfs[HismIdx].Emplace(FRotator(0, Yaw, 0), Pt.Pos, FVector(Scale));
+		}
+	}
+	for (int32 m = 0; m < PendingXfs.Num(); ++m)
+	{
+		if (PendingXfs[m].Num() > 0)
+		{
+			Tile.Hisms[m]->AddInstances(PendingXfs[m], false, true);
 		}
 	}
 
@@ -366,7 +378,7 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 	{
 		const EODBiome TileBiome = BiomeAt(
 			(Key.X + 0.5) * (double)TileSizeCm, (Key.Y + 0.5) * (double)TileSizeCm);
-		UE_LOG(LogTemp, Display,
+		UE_LOG(LogTemp, Verbose,
 			TEXT("ODBarrierManager: tile (%d,%d) biome=%s windbreak species blob=%d olive=%d "
 			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | bush=%d"),
 			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)TileBiome),
@@ -384,7 +396,7 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 	// or a void fall teleports the car back to the nearest road point,
 	// instead of the car bouncing off collision it cannot see).
 
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODBarrierManager: tile (%d,%d) built %d point(s) "
 		     "(%d wall run(s) parsed, collision disabled - OOB reset owns it)"),
 		Key.X, Key.Y, Parsed.Points.Num(), Parsed.WallRuns.Num());

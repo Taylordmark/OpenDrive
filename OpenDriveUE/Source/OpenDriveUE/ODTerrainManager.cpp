@@ -1627,7 +1627,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	// moved the actual physics cook off this synchronous path - see Comp's own
 	// bUseAsyncCooking comment above), so a big TCollision here would mean the
 	// async path silently isn't engaging, not that the cook itself is slow.
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODTerrainManager: BuildTile (%s) verts=%d tris=%d totalMs=%.2f ")
 		TEXT("[create=%.2f meshBuild=%.2f normals=%.2f collisionSetup=%.2f material=%.2f wall=%.2f]"),
 		Fidelity == ETileFidelity::Near ? TEXT("Near") : TEXT("Coarse"), VCount, TCount, TotalMs,

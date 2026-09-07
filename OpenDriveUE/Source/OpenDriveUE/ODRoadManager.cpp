@@ -884,7 +884,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	// what actually triggers RebuildPhysicsData once EditMesh has dirtied
 	// the mesh), so a big TRegister here despite bUseAsyncCooking=true would
 	// mean the async path isn't engaging as expected.
-	UE_LOG(LogTemp, Display,
+	UE_LOG(LogTemp, Verbose,
 		TEXT("ODRoadManager: BuildOneChunk verts=%d tris=%d totalMs=%.2f ")
 		TEXT("[create=%.2f collisionSetup=%.2f meshBuild=%.2f material=%.2f register=%.2f]"),
 		VCount, TCount, TotalMs, TCreate, TCollisionSetup, TMeshBuild, TMaterial, TRegister);
