@@ -93,6 +93,21 @@ WALL_MAX_SAMPLES = 400       # sanity ceiling (a genuinely enormous run would
 WALL_RUN_GAP_M = 40.0
 WALL_PIECE_MAX_EXTENT_M = 250.0
 
+# 2026-09-07 wedge-slab fix (Taylor's Tennis Club Road black wedge; see
+# build_wall_run_mesh's intersection comment for the full account):
+#  - WALL_SIDE_RANGE_SLACK_M: how far past the two sides' projection-range
+#    INTERSECTION sampling may extend - big enough that a single conflict
+#    pair (two single-point "ranges" a few meters apart along the run axis)
+#    still builds, small enough that a side can never be flat-clamped into
+#    a giant fan again.
+#  - WALL_MAX_ROW_SPAN_M: max horizontal distance between a row's lower and
+#    upper vertex. A real retaining wall is a steep face a few meters deep;
+#    rows spanning tens of meters horizontally (wall_0738_0000 reached
+#    175 m) are the ruled surface bridging unrelated geometry - such rows
+#    are dropped (no quad emitted), splitting the mesh at the bogus rows.
+WALL_SIDE_RANGE_SLACK_M = 10.0
+WALL_MAX_ROW_SPAN_M = 30.0
+
 
 def load_station_arrays():
     data = json.loads(STATIONS_PATH.read_text())
@@ -296,20 +311,27 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
     lo_proj, lo_pts = side_arrays(lower_idx)
     hi_proj, hi_pts = side_arrays(upper_idx)
 
-    # UNION of both sides' projection ranges, not intersection - the common
-    # minimal case (exactly one station per side, e.g. a single conflict
-    # pair with no further clustering) has a single-point "range" on each
-    # side, so two different single points never satisfy an intersection
-    # test at all (found live: this bug alone skipped 223/315 runs on the
-    # first real Oahu run). np.interp already clamps flatly outside its own
-    # side's data range instead of erroring, so using the union just means
-    # the shorter side's last real sample gets held flat past where the
-    # longer side still has new data - acceptable for a first pass, not a
-    # crash or a wildly wrong shape.
-    p_min = min(float(lo_proj.min()), float(hi_proj.min()))
-    p_max = max(float(lo_proj.max()), float(hi_proj.max()))
+    # INTERSECTION of both sides' projection ranges, padded by a small slack
+    # (2026-09-07, Taylor's Tennis Club Road "terrain above ground" black
+    # wedge). This used to be the UNION, relying on np.interp's flat
+    # clamping past the shorter side's data - which was "acceptable for a
+    # first pass" when sides were similar lengths, but when one side is
+    # much shorter, dozens of sample rows all collapse onto that side's
+    # single clamped endpoint: a giant triangular fan (wall_0738_0000 near
+    # Tennis Club Road had rows 0-15 sharing ONE upper vertex and rows
+    # 30-45 sharing ONE lower vertex - a 24,000 m^2 slab draped over the
+    # hillside, shading near-black off its degenerate normals). A wall only
+    # exists where BOTH sides actually have data; the slack keeps the
+    # original union-fix's motivating case working (exactly one station per
+    # side = two single-point "ranges" that never literally intersect - a
+    # nearby pair still builds, a far-apart junk pair is now skipped).
+    slack = WALL_SIDE_RANGE_SLACK_M
+    lo_min, lo_max = float(lo_proj.min()), float(lo_proj.max())
+    hi_min, hi_max = float(hi_proj.min()), float(hi_proj.max())
+    p_min = max(max(lo_min, hi_min) - slack, min(lo_min, hi_min))
+    p_max = min(min(lo_max, hi_max) + slack, max(lo_max, hi_max))
     if p_max <= p_min:
-        return None   # every station in the run projects to the same point
+        return None   # sides don't overlap along the run axis - junk pairing
 
     n_samples = int(round((p_max - p_min) / WALL_SAMPLE_SPACING_M)) + 1
     n_samples = max(WALL_MIN_SAMPLES, min(WALL_MAX_SAMPLES, n_samples))
@@ -343,16 +365,38 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
         verts.append((hi_x[k] * 100.0, -hi_y[k] * 100.0, hi_z_ue[k] * 100.0))
         uvs.append((u, 1.0))
 
+    # Per-row plausibility gate (see WALL_MAX_ROW_SPAN_M): a row whose lower
+    # and upper vertices sit implausibly far apart horizontally is the ruled
+    # surface bridging unrelated geometry, not a wall face - no quad is
+    # emitted on either side of it, splitting the mesh there instead of
+    # draping a shallow sheet over the hillside.
+    row_span = np.hypot(hi_x - lo_x, hi_y - lo_y)
+    row_ok = row_span <= WALL_MAX_ROW_SPAN_M
+
     tris = []
     for k in range(n_samples - 1):
+        if not (row_ok[k] and row_ok[k + 1]):
+            continue
         b = k * 2
         lo0, hi0 = b, b + 1
         lo1, hi1 = b + 2, b + 3
         tris.append((lo0, lo1, hi0))
         tris.append((lo1, hi1, hi0))
+    if not tris:
+        return None
 
     verts = np.array(verts, dtype=np.float64)
     tris = np.array(tris, dtype=np.int64)
+    # Drop zero/near-zero-area triangles (duplicate clamped vertices,
+    # coincident rows): they contribute garbage to the runtime's per-vertex
+    # normal averaging, and M_GroundStylized's slope blend reads those
+    # normals - degenerate triangles are a big part of why broken walls
+    # shaded streaky near-black.
+    va, vb, vc = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    area2 = np.linalg.norm(np.cross(vb - va, vc - va), axis=1)   # cm^2 * 2
+    tris = tris[area2 > 100.0]   # > 0.005 m^2
+    if len(tris) == 0:
+        return None
     tris = face_outward_flip(tris, verts, centroid_ref_cm)
     return verts.astype(np.float32), np.array(uvs, dtype=np.float32), tris.astype(np.uint32)
 
