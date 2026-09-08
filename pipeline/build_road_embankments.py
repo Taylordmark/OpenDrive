@@ -145,6 +145,110 @@ Both new conditions are AND'd onto the existing short+both-sided test (which
 stays necessary but not sufficient, per the task brief); they do not apply
 to the unconditional water-crossing OR.
 
+§7.23 water-crossing as a first-class bridge trigger (2026-09-07, this pass):
+7.21/7.22 both left the "water crossing" caveat honestly unresolved - the
+in-lake branch inside `classify_with_hysteresis()` only ever promoted a
+station to BRIDGE_CLS if it ALSO cleared the ordinary EMBANK_LOW_THRESHOLD_M
+(2.5 m, hysteresis-adjusted) drop against the raw DEM sample, and that DEM
+sample is exactly what's untrustworthy right at a shoreline (the offline
+inventory below found the classifier's own `sample_dem()` reads within
+centimeters of the lake's own baked surface Z at the one place a road
+noticeably touches mapped water in this county - i.e. the "drop" signal is
+near zero there, not because there's no gap, but because the raw DEM simply
+doesn't resolve one). Per the task brief, a water crossing should get a
+bridge deck "regardless of measured drop" - this pass makes that literal:
+`main()` now runs a SECOND, independent pass over both sides of every
+segment (after `compute_side()`'s ordinary hysteresis classification) that
+can promote a station straight to BRIDGE_CLS purely from lake-polygon
+geometry, with no DEM drop requirement at all.
+
+**Offline inventory first** (`scratchpad/inventory_water_crossings*.py`,
+county-wide, against the same baked lake polygons `load_lake_beds()` already
+serves to this module): at the pipeline's own pavement-edge offset
+(ROAD_HALF_WIDTH = 4.5 m, same convention `compute_side()`'s existing
+`in_lake` test already uses), **zero** stations anywhere in the 1,579-segment
+network have BOTH pavement edges inside a mapped lake polygon at once - i.e.
+no location in this county's current OSM/DEM data reads as the road running
+directly INTO the middle of open water on both sides. The single place
+pavement geometry comes close is a ~250 m stretch of Swan Mountain Road
+(lat 39.6007-39.6013, lon -106.0144 to -106.0176) where ONE edge dips inside
+the Dillon Reservoir polygon; comparing that stretch's road elevation
+against the SAME baked lake surface Z the water bake itself uses (not the
+raw DEM) gives a clearance of -1.2 m to +0.6 m - i.e. the road sits
+essentially AT water level, not elevated over a gap. That is the geometric
+signature of a lakeside road on shoreline fill/rip-rap, not a deck spanning
+open water. Dillon Dam Road - the dam's own crest - never gets closer than
+~12 m to any mapped lake polygon at its ROAD centerline anywhere along its
+length, let alone at the pavement edge: the dam carries the road on wide
+engineered fill set back from the current shoreline, and OSM does not tag
+`man_made=dam` anywhere in this county's cached data (checked directly), so
+there is no tag to key a special-case off of - the geometry itself (no
+edge ever enters mapped water) already excludes it before any clearance
+guard is even needed. US 6, CO 9, CO 91, and I-70/"Gerald R. Ford Memorial
+Highway" all pass within 10-200 m of various lake/pond polygons but their
+pavement edges never enter one anywhere in the county. Separately: the named
+creek/river crossings the task brief itself anticipated (Blue River, Tenmile
+Creek, Straight Creek) are OSM `waterway=river|stream` LINEAR features, which
+`build_water_tiles.py` explicitly does not bake into lake polygons at all
+(only closed `natural=water`/`landuse=reservoir` rings, per that module's own
+documented scope) - a lake-polygon water-crossing test structurally cannot
+see those regardless of how the geometry test below is tuned; this is a
+pre-existing scope limit of the water bake, out of this pass's declared
+scope (`build_road_embankments.py`/`build_road_bridges.py` only).
+
+**The trigger** (`main()`, right after both sides' `compute_side()` calls,
+before `subclassify_bridge_runs()`): for each side, a station is forced to
+BRIDGE_CLS (from whatever `classify_with_hysteresis()` left it, NONE_CLS or
+EMBANK_CLS - EMBANK_CLS is impossible at an in-lake station by construction,
+see that function) if its edge is inside a lake polygon AND either -
+  1. the OPPOSITE edge is inside a lake polygon too at the same station
+     (genuine both-sided straddle - trusted unconditionally, no clearance
+     check needed, since both pavement edges cannot be inside the mapped
+     ring while the road sits on dry ground), or
+  2. this edge alone is inside a lake polygon and the road's own elevation
+     clears the matching lake's BAKED surface Z (not the raw DEM) by at
+     least `WATER_CROSSING_MIN_CLEARANCE_M` (1.5 m) - **this is the dam/
+     one-sided-shoreline guard**, calibrated directly against the Swan
+     Mountain Road evidence above (-1.2 m to +0.6 m actual clearance, well
+     under the 1.5 m bar) so that a lakeside road sitting at grade next to
+     the reservoir does NOT get promoted to a floating deck. Dillon Dam Road
+     never reaches this branch at all (its edges never test `in_lake` in
+     the first place, per the inventory above), so no clearance check ever
+     runs for it either - the geometry excludes it upstream of the guard.
+On this county's current baked data, condition 1 never fires (confirmed
+zero both-sided stations county-wide) and condition 2 never clears the
+guard (Swan Mountain Road's clearance stays negative/near-zero the whole
+stretch) - so this pass adds **zero** new genuine bridge stations to the
+county's current bake. That is the honest, calibrated result, not a bug:
+the code path is real and will correctly promote a genuine future/other-
+county water crossing (both edges in water, or one edge clearly elevated
+over it), it simply finds none to promote here. Total genuine bridge
+mileage is expected to stay at 7.22's 1.78 km (see verify_water_bridge_
+stats.txt for the as-run number). `subclassify_bridge_runs()`'s existing
+water-crossing OR (previously keyed off the raw, unguarded `in_lake` mask)
+now reads this same guarded per-station result instead, so a run promoted
+by the new trigger stays genuine unconditionally, bypassing the paved/
+rebound/short-both-sided gates - exactly the "existing genuine-subclass
+rules bypassed via the unconditional water rule" the task brief asked for -
+while a run that merely brushes a lake polygon without clearing the guard
+falls through to the ordinary discriminator, same as before.
+
+Forced BRIDGE_CLS runs are still subject to `demote_short_runs()` (reapplied
+after the override) - a momentary single-station polygon touch doesn't spawn
+a degenerate one-station bridge, matching every other run-building path in
+this module.
+
+**Pier/deck height over water surface, not DEM lakebed:** any final
+BRIDGE_CLS station whose edge is `in_lake` (regardless of which rule put it
+there) has its shipped `drop_cm` recomputed against the baked lake surface Z
+plus `WATER_PIER_SUBMERGENCE_M` (0.5 m) instead of the raw DEM sample -
+`build_road_bridges.py`'s pier-height math (`drop_cm - DECK_DEPTH_M`) is
+unchanged, so this makes a water-crossing pier's foot terminate a half-meter
+BELOW the lake's own flat, trustworthy baked surface (visually submerged,
+not floating at the waterline or planted in a noisy raw-DEM "lakebed"
+reading that build_terrain_mesh_tiles.py's own water-depression pass has
+already established is not the real terrain height under the lake anyway).
+
 Exclusions, reused from build_road_guardrails.py's own precedent:
   - junction proximity: FIRST DRAFT of this module used only the newer
     per-station `in_junction_box` field (Arc 7.18) directly, reasoning that
@@ -242,6 +346,22 @@ STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stati
 OUT_PATH = STATIONS_PATH.parent / "road_embankments.json"
 REPORT_PATH = STATIONS_PATH.parent / "bridge_subclass_report.json"
 OSM_CACHE_PATH = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm.json"
+
+# --- §7.23 water-crossing-as-first-class-trigger thresholds (see module
+# docstring addendum) ---
+WATER_CROSSING_MIN_CLEARANCE_M = 1.5   # one-edge-in-lake stations need this much
+                                         # clearance above the BAKED lake surface Z
+                                         # (not the raw DEM) to count as a real
+                                         # elevated crossing rather than an at-grade
+                                         # shoreline road/dam-top/rip-rap fill - see
+                                         # docstring for the Swan Mountain Road/
+                                         # Dillon Dam Road evidence this was
+                                         # calibrated against
+WATER_PIER_SUBMERGENCE_M = 0.5          # a water-crossing pier's foot terminates
+                                         # this far BELOW the baked lake surface Z
+                                         # (visually anchored under the waterline)
+                                         # instead of at the noisy raw-DEM "lakebed"
+                                         # reading
 
 # --- §7.22 refinement thresholds (see module docstring addendum) ---
 MINOR_HIGHWAY_CLASSES = {"track", "path", "bridleway", "cycleway", "footway", "steps", "service"}
@@ -580,6 +700,11 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
     edge_cy = -edge_n * 100.0
 
     in_lake = np.zeros(n, dtype=bool)
+    lake_z_cm = np.full(n, np.nan)   # §7.23: baked lake surface Z (cm) at whichever
+                                       # lake polygon this edge point falls inside, NaN
+                                       # elsewhere - used for the water-crossing
+                                       # clearance guard and the pier/deck water-surface
+                                       # termination (see module docstring)
     bbox_margin_cm = LAKE_SHORE_EXCLUSION_MARGIN_M * 100.0
     for lake in lakes:
         bx0, bx1, by0, by1 = lake["bbox"]
@@ -590,6 +715,8 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
         idx = np.where(bb)[0]
         inside = _point_in_polygon(edge_cx[idx], edge_cy[idx], lake["ring_x"], lake["ring_y"])
         in_lake[idx] |= inside
+        hit_idx = idx[inside]
+        lake_z_cm[hit_idx] = lake["z_cm"]  # last-match wins on rare overlap - harmless
 
     cls_arr = classify_with_hysteresis(drop_m, in_lake, in_junction_box)
     cls_arr = demote_short_runs(cls_arr, s)
@@ -597,10 +724,11 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
 
     return {
         "east": east, "north": north, "s": s, "road_name": road_name,
-        "in_junction_box": in_junction_box, "in_lake": in_lake,
+        "in_junction_box": in_junction_box, "in_lake": in_lake, "lake_z_cm": lake_z_cm,
         "edge_cx": edge_cx, "edge_cy": edge_cy, "z_cm": z_cm_all,
         "drop_m": drop_m, "drop_cm": drop_cm, "cls_arr": cls_arr,
         "is_bridge_osm": is_bridge_osm_seg,
+        "water_crossing": np.zeros(n, dtype=bool),  # filled in by main()'s §7.23 pass
     }
 
 
@@ -617,7 +745,13 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
     surface_index = build_road_surface_index()
     for run_start, run_end in contiguous_runs(cls_arr == BRIDGE_CLS):
         run_len_m = float(s[run_end - 1] - s[run_start]) if run_end > run_start else 0.0
-        water_frac = float(d["in_lake"][run_start:run_end].mean())
+        # §7.23: water_frac now reads the GUARDED water_crossing mask (both-edges-in-
+        # lake, or one-edge-in-lake with real clearance above the baked water surface -
+        # see module docstring), not the raw in_lake geometry test - a run that merely
+        # brushes a lake polygon at grade (Swan Mountain Road's shoreline stretch) must
+        # NOT unconditionally pass here, only a run with an actual water-crossing
+        # signal should.
+        water_frac = float(d["water_crossing"][run_start:run_end].mean())
         osm_frac = float(d["is_bridge_osm"][run_start:run_end].mean())
         other_slice = other["cls_arr"][run_start:run_end]
         both_sided_frac = float((other_slice != NONE_CLS).mean()) if len(other_slice) else 0.0
@@ -785,6 +919,8 @@ def main():
     bridge_report = []
     n_bridge_runs_pre = 0
     n_bridge_runs_demoted = 0
+    n_water_crossing_stations = 0
+    n_water_crossing_both_edges = 0
 
     for seg_i, seg in enumerate(data["segments"]):
         n = len(seg["east_m"])
@@ -802,6 +938,40 @@ def main():
                                         session, dem_cache)
             n_skipped_junction += int((sides[side]["in_junction_box"] &
                                         (sides[side]["drop_m"] >= EMBANK_LOW_THRESHOLD_M)).sum())
+
+        # §7.23: water-crossing-as-first-class-trigger override, BEFORE §7.21's
+        # sub-classification (so subclassify_bridge_runs()'s water_frac test -
+        # which now reads d["water_crossing"], not raw in_lake, see that
+        # function's docstring - sees the fully-resolved mask). See module
+        # docstring for the offline inventory this threshold was calibrated
+        # against (Swan Mountain Road's at-grade shoreline stretch vs. Dillon
+        # Dam Road never touching a lake polygon at all).
+        for side in (-1.0, 1.0):
+            d = sides[side]
+            other = sides[-side]
+            both_edges_in_lake = d["in_lake"] & other["in_lake"]
+            clearance_m = d["z_cm"] / 100.0 - d["lake_z_cm"] / 100.0  # NaN-safe: comparisons with NaN are False
+            guarded_one_sided = (d["in_lake"] & ~both_edges_in_lake &
+                                  (clearance_m >= WATER_CROSSING_MIN_CLEARANCE_M))
+            water_crossing = (both_edges_in_lake | guarded_one_sided) & ~d["in_junction_box"]
+            d["water_crossing"] = water_crossing
+            n_water_crossing_stations += int(water_crossing.sum())
+            n_water_crossing_both_edges += int((both_edges_in_lake & ~d["in_junction_box"]).sum())
+            if water_crossing.any():
+                d["cls_arr"] = np.where(water_crossing, BRIDGE_CLS, d["cls_arr"]).astype(np.int8)
+                d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"])
+
+            # Pier/deck termination at the WATER SURFACE (baked lake Z), not the
+            # noisy raw-DEM sample - any in_lake station (whichever rule promoted
+            # it to bridge) ships a drop_cm measured against the lake's own flat
+            # surface plus WATER_PIER_SUBMERGENCE_M, so build_road_bridges.py's
+            # existing "drop_cm - DECK_DEPTH_M" pier-height math terminates the
+            # pier foot a half-meter below the real water surface instead of at
+            # whatever the raw DEM happened to read under the lake.
+            has_lake_z = d["in_lake"] & ~np.isnan(d["lake_z_cm"])
+            if has_lake_z.any():
+                water_drop_cm = (d["z_cm"] - (d["lake_z_cm"] - WATER_PIER_SUBMERGENCE_M * 100.0))
+                d["drop_cm"] = np.where(has_lake_z, np.clip(water_drop_cm, 0.0, None), d["drop_cm"])
 
         # §7.21: sub-classify every bridge-threshold run on each side against
         # the OTHER side's data before committing to final run geometry.
@@ -855,6 +1025,8 @@ def main():
             "tiger_unreviewed_length_frac": TIGER_UNREVIEWED_LENGTH_FRAC,
             "rebound_window_m": REBOUND_WINDOW_M,
             "rebound_drop_m": REBOUND_DROP_M,
+            "water_crossing_min_clearance_m": WATER_CROSSING_MIN_CLEARANCE_M,
+            "water_pier_submergence_m": WATER_PIER_SUBMERGENCE_M,
         },
     }, indent=1))
 
@@ -869,6 +1041,10 @@ def main():
     n_genuine = sum(1 for r in bridge_report if r["genuine"])
     print(f"  §7.21 sub-classification: {n_bridge_runs_pre} bridge-threshold run(s) found pre-tile-chunking, "
           f"{n_genuine} genuine ({n_bridge_runs_pre - n_genuine} demoted to embankment) -> {REPORT_PATH}")
+    print(f"  §7.23 water-crossing trigger: {n_water_crossing_stations} station(s) forced to 'bridge' by "
+          f"lake-polygon geometry regardless of DEM drop ({n_water_crossing_both_edges} via the unconditional "
+          f"both-edges-in-water case, {n_water_crossing_stations - n_water_crossing_both_edges} via the "
+          f"guarded one-edge-in-water+{WATER_CROSSING_MIN_CLEARANCE_M:.1f}m-clearance case)")
     if dam_report:
         print("  Dillon Dam Road runs found:")
         for cls_name, run_len_m, max_drop in dam_report:
