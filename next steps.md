@@ -4373,3 +4373,143 @@ Committed: `pipeline/build_road_embankments.py`,
 `OpenDriveUE/Source/OpenDriveUE/ODGameMode.h`,
 `OpenDriveUE/Source/OpenDriveUE/ODGameMode.cpp`,
 `unreal/apply_embankment_material.py`. Not pushed.
+
+### 7.20 Bridge-classification root cause: reconcile_junction_elevations() false pair matches (2026-09-07)
+
+**The bug (Taylor's report, following straight on from 7.19):** build_road_
+embankments.py's 3-way drop classifier was calling 57,222 station-points
+(~281 km) of summit_county roads "bridge" - absurd for a county with a
+handful of real bridge/viaduct decks. 7.19's own bridge-count caveat had
+already spot-checked this down to "the same-road-name cross-matching issue
+reconcile_junction_elevations()'s own docstring already flags as unfixed"
+via Potato Patch Drive (an 87 m computed drop that persisted even sampled at
+the pavement centerline, 0 m probe offset - ruling out a DEM-probe-placement
+explanation).
+
+**Root cause, in full:** `reconcile_junction_elevations()` in
+`pipeline/road_mesh_common.py` exists to snap two stations of the SAME road
+that disagree on elevation at the same physical spot (the documented "Lake
+Hughes" bug, 1.1-2.4 m apart) up to match each other. Its scope test was far
+too permissive in two independent ways, neither related to a real same-spot
+disagreement:
+
+1. **Divided-highway false match.** Cross-segment, same-road-name pairs were
+   in scope anywhere within `CONFLICT_RADIUS_M` (150 m) and under 50% grade.
+   I-70 through Summit County runs as two independently-graded carriageways
+   (benched into opposite sides of the Straight Creek valley) sharing the
+   OSM name "I 70"/"Gerald R. Ford Memorial Highway" across dozens of
+   separate way segments for the whole corridor - "same name, <150 m, <50%
+   grade" is true almost everywhere along a road running roughly parallel to
+   itself for kilometers, so one carriageway's real elevation kept getting
+   hiked up by several meters to match the other's, station after station.
+   145,742 qualifying I-70 pairs confirmed before the fix.
+2. **Switchback false match.** Same-segment pairs (one OSM way chain, e.g.
+   Potato Patch Drive, a continuous switchback climb) had no station-index-
+   gap restriction at all - two points on the SAME climb, hundreds of
+   stations apart (different switchback legs) but close together in plan
+   view, were treated as "the same spot disagreeing" and forcibly snapped
+   together at an ordinary driveable grade. 3,750 qualifying same-segment
+   pairs confirmed on Potato Patch Drive alone at 150 m radius.
+
+**The fix** (`pipeline/road_mesh_common.py`, the only file touched):
+- New `JUNCTION_RECONCILE_RADIUS_M = 20.0` - `reconcile_junction_elevations()`
+  now searches its own candidate pairs at a tight, dedicated 20 m radius
+  instead of reusing `CONFLICT_RADIUS_M` (150 m, correctly sized for
+  `classify_wall_stations()`'s different carve-exclusion/wall-geometry
+  purpose and left untouched there).
+- New `JUNCTION_SAME_NAME_EDGE_STATIONS = 5` - a cross-segment, name-only
+  match is now only in scope when BOTH stations sit within 5 stations of
+  their own segment's start/end (a real chain-break/switchback seam is a
+  local event at the join, not scattered across a segment's interior).
+  Same-segment pairs are unaffected by this restriction (the genuine
+  intra-chain switchback case, already scoped correctly by `seg_idx`
+  equality) but do benefit from the tighter radius.
+- No call-site changes needed: `build_road_guardrails.py`,
+  `build_road_embankments.py`, and `build_road_stations.py` all call
+  `reconcile_junction_elevations()` at the default `radius_m`, so the fix
+  takes effect everywhere automatically.
+- Verified at 20 m: 0 qualifying I-70 cross-segment pairs and 0 qualifying
+  Potato Patch Drive same-segment pairs remain, while the documented real
+  Lake Hughes disagreement (1.1-2.4 m) is still comfortably caught.
+
+**Dead end, documented for the record:** mid-investigation, road_stations.
+json's per-station `is_bridge` OUTPUT field was found True for ~48.7% of all
+stations countywide, including ordinary residential streets - looked like a
+smoking gun. It wasn't: that field is `expand_carve_exclusion(is_struct_s,
+CARVE_BUFFER_FRAC) | conflict_s`, a deliberately wide mask for terrain-carve
+exclusion unioned with the wide-radius (150 m) elevation-conflict mask used
+for retaining-wall geometry - misleadingly named, but it doesn't feed
+elevation values and wasn't the drop-classification root cause. Traced every
+consumer before ruling it out.
+
+**Before/after (summit_county, rebaked fresh against the same cached OSM/DEM
+inputs both times, via `git stash` on this fix and back):**
+
+| class | before | after |
+|---|---|---|
+| embankment | 1114 runs, 31,291 stations, ~150.89 km | 1135 runs, 40,413 stations, ~196.39 km |
+| bridge | 374 runs, 58,695 stations, ~291.60 km | 157 runs, 13,723 stations, ~67.83 km |
+
+Bridge km down 76.7%. Embankment km grew, as expected - stations that were
+falsely forced all the way to "bridge" by the corrupted elevation now read a
+smaller, real drop and land in "embankment" instead. Top surviving bridge
+runs by length are I-70's East Portal/Straight Creek approach (real
+cut-and-fill interstate terrain feeding the Eisenhower-Johnson Tunnel),
+Boreas Pass Road and CO-9/Hoosier Pass (real unpaved high-alpine switchback
+passes) - not ordinary residential streets. Full downstream chain rebaked:
+`build_road_stations.py` -> `build_road_network.py` ->
+`export_road_mesh_bin.py` -> `build_road_guardrails.py` ->
+`export_road_guardrails_bin.py` -> `build_road_embankments.py` ->
+`export_road_embankment_bin.py`.
+
+**Junction regression check** (SS7.18's own two spot-checks, since this
+touches the same function the graph-junction flatten pass's input elevation
+flows through): Silverthorne (Blue River Parkway x 3rd Street) and
+Breckenridge (Ski Hill Rd/N+S Main St/Lincoln Ave) both measured 0.0 m
+elevation spread among participants within 15 m of the junction center,
+BEFORE this fix and AFTER - no regression. Expected: real-junction
+flushness at these two spots comes from the separate, later "real (graph)
+junction detection + flatten" pass (SS7.17/7.18), independent of this fix's
+target (`reconcile_junction_elevations()`'s own same-road/same-segment pair
+matching, which was corrupting elevation far from any real junction).
+
+**Offline verification (scratchpad, no `-game` launch per current
+project-wide protocol):**
+- `verify_drop_rootcause.png` - road elev_m vs DEM terrain, before/after, for
+  I-70's East Portal approach and the full Potato Patch Drive climb. Potato
+  Patch Drive shows the bug at its clearest: before, road elevation is flat
+  and disconnected from terrain (~2625-2650 m regardless of the real climb);
+  after, it tracks the DEM climb from ~2555 m to ~2635 m almost exactly.
+  I-70 improves (max |road-DEM| 39.2 m -> 29.7 m in the plotted window) but
+  not to zero - see the unprovable-offline note below.
+- `verify_drop_classes_fixed.png` - county-wide map, bridge (red) now reads
+  as a small number of clearly linear corridors matching real mountain
+  highway/pass geography (I-70 corridor, Boreas Pass, CO-9) instead of
+  scattered across the whole network; before/after km per class in the
+  title.
+- `verify_junction_still_ok.txt` - the regression check above, in detail.
+- `verify_drop_stats.txt` - full before/after station/run/km counts, root
+  cause in plain language, top 10 longest surviving bridge runs with road
+  names for a geography sanity check, and the `is_bridge`-field dead end.
+
+**What this offline pass cannot prove:** whether 67.83 km of remaining
+"bridge" classification is exactly right or still somewhat inflated. I-70's
+East Portal plot still shows up to ~30 m of road-vs-DEM disagreement even
+after the fix - large enough that a residual DEM-vs-two-independently-
+benched-carriageway artifact (same class of issue as `is_structure_way()`'s
+own documented I-5/Skagit River precedent: a single terrain heightmap can't
+represent two carriageways benched at different heights on the same
+mountainside) can't be ruled out from station data alone. This is the
+"bridge elevation jump" symptom flagged during the SS7.18 junction work as
+related-but-distinct, and was intentionally NOT touched by this fix, which
+targeted only `reconcile_junction_elevations()`'s pair-matching scope. Also
+unverified: whether the grown embankment total (196.39 km) is itself fully
+honest at its own, smaller magnitude, and any in-engine visual read of the
+remaining bridge runs (no `-game` launch performed, per this task's testing
+protocol).
+
+Committed: `pipeline/road_mesh_common.py`. Bakes (road_stations.json,
+road_embankments.json, road_guardrails.json, and the exported .bin tiles
+under `OpenDriveUE/Content/OpenDrive/Masks`) are all gitignored per
+`.gitignore` (`data/` and `OpenDriveUE/Content/`) - regenerated locally, not
+committed, matching 7.18/7.19 precedent. Not pushed.

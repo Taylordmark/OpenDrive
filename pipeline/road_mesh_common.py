@@ -921,6 +921,74 @@ CONFLICT_SAME_CHAIN_GAP_STATIONS = 8   # ~40m at 5m spacing - skip evaluating
 # ~180-200%). Ship-a-guess, tune by drive-test, same as ROAD_CLASS_GRADE.
 WALL_MIN_GRADE = 0.50
 
+# Root-cause fix (2026-09-07, Taylor: "57,222 station-points classified
+# bridge, absurd"). reconcile_junction_elevations()'s in_scope test below
+# used to accept ANY cross-segment pair sharing a road_name, anywhere within
+# CONFLICT_RADIUS_M (150m) of each other and under WALL_MIN_GRADE - meant to
+# catch a same-road CHAIN BREAK (a way split into two segments by
+# MAX_SEGMENTS/MIN_SEGMENT_STATIONS, or a genuine switchback fold-back) at
+# the seam where the two pieces meet. It does NOT distinguish that narrow
+# case from a divided highway: I-70 through Silverthorne/Straight Creek runs
+# as two separately-graded carriageways (each benched into its own side of
+# the valley) that share the OSM name "I 70" across dozens of separate way
+# segments for the entire corridor. Traced via a spot-check (build_road_
+# embankments.py's absurd "bridge" county total): station pairs on DIFFERENT
+# I 70 segments, 140-150m apart, under 5% grade between them (a perfectly
+# ordinary shallow road grade, not a real disagreement) were being pulled
+# together by this pass across essentially the WHOLE length of the
+# corridor - one carriageway's real, DEM-agreeing elevation kept getting
+# hiked up to match the other's, by several meters, at station after
+# station, because "same road_name, <150m, <50% grade" is true almost
+# everywhere along a road that runs roughly parallel to itself for
+# kilometers. That elevation is exactly what build_road_embankments.py
+# diffs against DEM terrain, so the corrupted, artificially-raised
+# carriageway measured a huge fake "drop" and got classified bridge.
+# A genuine chain-break/switchback seam is a single, LOCAL event: it happens
+# at (or within a handful of stations of) the END of one segment and the
+# START of the next - not scattered across a segment's interior. Restricting
+# cross-segment same-name matches to pairs where BOTH stations sit within
+# this many stations of their OWN segment's start/end excludes the
+# divided-highway false-match class almost entirely (145,742 -> 63
+# qualifying I-70 pairs in the summit_county bake) while preserving the
+# narrow seam case this pass actually exists for. Same-segment pairs
+# (a road folding back on itself within its OWN chain) are unrestricted -
+# that's the genuine switchback case and already scoped by seg_idx equality.
+JUNCTION_SAME_NAME_EDGE_STATIONS = 5
+
+# Second, larger part of the same root cause, found by the same spot-check
+# (Potato Patch Drive, a single continuous switchback climb - ONE seg_idx,
+# no cross-segment name matching involved at all): a mountain road climbing
+# via switchbacks routinely brings two points on ITS OWN chain, hundreds of
+# stations apart in station_idx (different switchback legs), within
+# CONFLICT_RADIUS_M (150m) of each other in plan view while genuinely
+# sitting many meters apart in real elevation, at an ordinary <50% grade
+# (a real switchback has to be driveable). Nothing here restricts SAME-
+# segment matches by station-index gap the way the cross-segment fix above
+# does for different segments - CONFLICT_SAME_CHAIN_GAP_STATIONS only skips
+# TRIVIALLY adjacent same-chain stations (ordinary progression), so a real
+# switchback (station 0 vs station 73, say - clearly not adjacent) still
+# qualifies and gets forcibly snapped toward whichever nearby-in-plan-view
+# station happens to be highest, over and over, corrupting the road's real
+# climbing profile (3,750 qualifying same-segment pairs found on Potato
+# Patch Drive alone at the 150m radius - this is what produced its reported
+# 87m road-vs-DEM discrepancy even AT the pavement centerline, 0m probe
+# offset, not a DEM-probe-placement artifact).
+#
+# The function's own documented true-positive case (Lake Hughes, 2026-08-24:
+# "one road's pavement visibly bursting through the other") was measured at
+# 1.1-2.4m apart, not anywhere near 150m - CONFLICT_RADIUS_M=150 is tuned for
+# classify_wall_stations()/carve-exclusion's own, much wider purpose (it
+# matches TERRAIN_CARVE_OUTER_M, the distance a carve stamp can still reach),
+# not for "are these two stations actually the same physical spot," which
+# reconcile_junction_elevations alone needs answered. Using a much tighter,
+# dedicated radius for THIS function's own pair search (not touching
+# CONFLICT_RADIUS_M or classify_wall_stations' unrelated carve/wall
+# behavior) eliminates both the Potato Patch Drive same-segment case and the
+# I-70 cross-segment case (confirmed empirically: 0 qualifying pairs remain
+# for either at 20m, combined with the edge restriction above) while still
+# comfortably covering the documented real same-spot disagreement distances.
+JUNCTION_RECONCILE_RADIUS_M = 20.0
+
 # Separate, much tighter threshold used ONLY to catch cross-road (different
 # seg_idx AND different/missing road_name) pairs (2026-08-24, Taylor's Lake
 # Hughes screenshot: a torn-open canyon where "Lake Hughes Road" and an
@@ -1179,10 +1247,11 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
 
 
 def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
-                                   radius_m=CONFLICT_RADIUS_M, max_grade=CONFLICT_MAX_GRADE,
+                                   radius_m=JUNCTION_RECONCILE_RADIUS_M, max_grade=CONFLICT_MAX_GRADE,
                                    min_gap_m=CONFLICT_MIN_GAP_M,
                                    same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
-                                   wall_min_grade=WALL_MIN_GRADE, is_bridge=None):
+                                   wall_min_grade=WALL_MIN_GRADE, is_bridge=None,
+                                   same_name_edge_stations=JUNCTION_SAME_NAME_EDGE_STATIONS):
     """The reusable road-road junction smoothing pass (Taylor, 2026-08-24: two
     roads meeting/crossing at grade were disagreeing on elevation by meters
     at the same physical spot - Lake Hughes near spawn, one road's pavement
@@ -1249,6 +1318,20 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
     2026-08-24 Lake Hughes same-road behavior unchanged for callers that
     don't have a bridge flag handy.
 
+    `same_name_edge_stations` (2026-09-07 fix - see JUNCTION_SAME_NAME_EDGE_
+    STATIONS's docstring): a cross-segment, name-only match is only in scope
+    when BOTH stations sit within this many stations of their OWN segment's
+    start/end. Without this, a divided highway sharing one name across many
+    separate OSM way segments (I-70 through Silverthorne, whose two
+    carriageways are independently graded and legitimately disagree in
+    elevation by meters for kilometers) got treated as "the same physical
+    road disagreeing with itself" at nearly every station pair within
+    radius_m along its whole length, corrupting one carriageway's elevation
+    toward the other's and producing enormous fake road-vs-terrain drops
+    downstream. Same-segment pairs (seg_idx[i] == seg_idx[j], i.e. a road
+    genuinely switchbacking/folding back on itself within its own chain) are
+    unaffected by this restriction.
+
     Returns (elev_m, touched, pinned_grade): a NEW array (input is not
     mutated) with these snaps applied, a parallel bool mask of which
     stations changed, and a parallel float array (nan where unset) of the
@@ -1273,13 +1356,38 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
         return elev_m, touched, pinned_grade
 
     is_bridge_arr = None if is_bridge is None else np.asarray(is_bridge, dtype=bool)
+    # per-segment station-index bound (last valid station_idx), used below to
+    # tell a genuine chain-break/switchback seam apart from a divided-highway
+    # false match - see JUNCTION_SAME_NAME_EDGE_STATIONS's docstring.
+    seg_idx_arr = np.asarray(seg_idx)
+    station_idx_arr = np.asarray(station_idx)
+    seg_last_station = {}
+    for s_val, st_val in zip(seg_idx_arr.tolist(), station_idx_arr.tolist()):
+        prev = seg_last_station.get(s_val, -1)
+        if st_val > prev:
+            seg_last_station[s_val] = st_val
     keep = []
     for k in range(len(pairs_i)):
         i, j = int(pairs_i[k]), int(pairs_j[k])
         if is_bridge_arr is not None and (is_bridge_arr[i] or is_bridge_arr[j]):
             continue
-        in_scope = (seg_idx[i] == seg_idx[j]) or (
-            bool(road_name[i]) and road_name[i] == road_name[j])
+        same_seg = seg_idx[i] == seg_idx[j]
+        same_name = bool(road_name[i]) and road_name[i] == road_name[j]
+        if same_seg:
+            in_scope = True
+        elif same_name:
+            # Cross-segment, name-only match: only in scope near EITHER end
+            # of BOTH segments (a real chain-break seam is local, not
+            # scattered along a segment's interior - see
+            # JUNCTION_SAME_NAME_EDGE_STATIONS).
+            si, sj = int(station_idx[i]), int(station_idx[j])
+            last_i = seg_last_station.get(int(seg_idx[i]), si)
+            last_j = seg_last_station.get(int(seg_idx[j]), sj)
+            near_edge_i = si <= same_name_edge_stations or si >= last_i - same_name_edge_stations
+            near_edge_j = sj <= same_name_edge_stations or sj >= last_j - same_name_edge_stations
+            in_scope = near_edge_i and near_edge_j
+        else:
+            in_scope = False
         if not in_scope:
             continue
         dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
