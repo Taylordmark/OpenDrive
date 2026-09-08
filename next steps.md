@@ -5107,3 +5107,80 @@ Committed: `pipeline/build_water_tiles.py` only. `cars_manifest.json`,
 physics untouched. Bakes (water tiles, terrain tiles, and the raw
 Overpass/summary caches) are gitignored - regenerated locally, not
 committed. Not pushed.
+
+### 7.27 Gap-clip the water ribbon at unbridged road crossings (2026-09-07)
+
+Closes the 7.26 "132 crossings render at grade" caveat directly. Of the
+449 waterway/road crossings 7.26 found, 317 coincide with a 7.22 bridge
+station (deck + terrain carve already separate ribbon from road
+vertically - left alone) but 132 do not, and the ribbon rendered straight
+across the road pavement at grade there - a visible water-sheet-over-
+pavement defect. `pipeline/build_water_tiles.py` only (no road/station/
+bridge pipeline code touched, per scope).
+
+**Fix:** `build_waterway_ribbons()`'s existing per-segment crossing check
+(unchanged - angle >= `ROAD_CROSSING_ANGLE_DEG`=45 deg between waterway
+and nearest-road tangent) now branches on the nearest road station's
+`is_bridge` flag. Bridged: draw the segment exactly as before (one
+continuous quad, untouched code path). Unbridged: two new helpers,
+`find_road_gap_intervals()` (sub-samples the segment at 21 points, finds
+contiguous runs within `ROAD_HALF_WIDTH + ROAD_GAP_MARGIN_M` = 4.5 + 1.5 =
+6.0 m of the nearest road station, rounds each run outward by one
+subsample step - conservative, never leaves a sliver poking out) and
+`retained_t_intervals()` (the segment's [0,1] span minus the gap
+interval(s)) rebuild the segment's ribbon quad only for the retained sub-
+spans, corners/elevation linearly interpolated between the segment's own
+two endpoints. A retained fragment shorter than `MIN_GAP_FRAGMENT_M`=1.0 m
+is dropped instead of emitted as a sliver (handles a gap consuming a whole
+chain-end stub). Each segment is evaluated independently, so two close
+crossings, a road crossing the same ribbon twice at a switchback, and a
+gap spanning more than one resampled segment all fall out of the same
+per-segment logic with no special-casing - confirmed against real cases in
+this county's data (see verification below).
+
+**This session's re-run numbers** (fresh Overpass fetch, not the cached
+7.26 numbers - see the stats file for why the crossing count itself
+shifted slightly, 453/320/133 vs. 449/317/132; not a code regression, the
+gap-clip logic is unaffected either way): 119 of 133 non-bridged crossings
+actually gap-clipped (14 were flagged "crossing" by the existing coarse
+trigger but never came within the tighter 6 m gap threshold at any
+subsample - a real "no defect there" case, not a bug); 5 sub-fragments
+dropped below the 1.0 m floor; ribbon length 879.95 km after vs. 880.91 km
+if every gap were left uncut - 0.109% shrink, trivial, confirms the fix
+only removes the road-corridor pinch and not real creek length.
+
+**Terrain rebake: needed, and done, not skipped.** Checked `build_terrain_
+mesh_tiles.py`'s `apply_water_depression()` before deciding whether the
+~10 m gap would be visually negligible - it is not: the terrain water-bed
+carve is `WATER_BED_MIN_DEPTH_M`=2.0 m at the shoreline ramping to
+`WATER_BED_MAX_DEPTH_M`=5.0 m over a 40 m falloff (plus a 35 m exterior
+shore-blend), applied to the tile's FINAL grid AFTER the road carve - so
+every one of the 132 unbridged crossings had a real 2-5 m pit carved
+directly under the road pavement before this fix, not just an at-grade
+water sheet. Cutting the water MESH gap alone would leave that pit baked
+into already-built TERRAIN tiles with no water visible in it - a more
+confusing defect than the one being fixed. Both `build_water_tiles.py` and
+`build_terrain_mesh_tiles.py` were re-run to completion in the foreground:
+water bake clean (one Overpass mirror timeout/fallback, same pattern as
+7.26), terrain bake 1221/1221 tiles, 0 errors, 305 coarse-fallback tiles
+(same count as the pre-change bake, unaffected), 6,895,831 verts /
+12,967,397 tris, 45,644 lake beds loaded from 513 water tiles (up from
+45,097/509, consistent with gap-clipped segments now contributing more,
+smaller ribbon fragments).
+
+**Offline verification (scratchpad, no `-game` launch):**
+- `verify_ribbon_clip.png` - three zoomed panels: (a) "Snake River" at an
+  unbridged crossing, before (red dashed, uncut) vs. after (blue, gap cut)
+  with the road corridor overlaid; (b) "Soda Creek" at a real 7.22 bridge
+  station, ribbon drawn continuous through the corridor, no gap; (c)
+  "Buffehr Creek", two distinct crossings near a real road switchback in
+  this county's data, each independently gap-clipped.
+- `verify_ribbon_clip_stats.txt` - full numbers above, the bridged-
+  crossing preservation proof (code-path + numeric + visual), the terrain-
+  rebake justification, and honest caveats (gap-boundary discretization,
+  no actual culvert geometry/drainage modeled, one switchback example not
+  an exhaustive sweep, not drive-tested).
+
+Committed: `pipeline/build_water_tiles.py` and this note only.
+`cars_manifest.json` and all road/station/bridge pipeline code untouched.
+Bakes are gitignored - regenerated locally, not committed. Not pushed.

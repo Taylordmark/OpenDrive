@@ -83,6 +83,18 @@ into the same lake mesh entry" - this pass is that), so no runtime/terrain
 code changes were needed - see fetch_waterways()/build_waterway_ribbons()
 below for the new pipeline stage feeding that same path.
 
+ROAD CROSSING GAPS (added 2026-09-07, §7.27): of the 449 waterway/road
+crossings §7.26 found, 317 coincide with a §7.22 bridge station (deck +
+terrain carve already separate ribbon from road vertically - left alone)
+but 132 do not, and the ribbon used to render straight across the road at
+grade there - a visible water-sheet-over-pavement defect. Each such
+crossing segment now gets a gap cut spanning the road corridor (+ margin,
+see ROAD_GAP_MARGIN_M) via find_road_gap_intervals()/retained_t_intervals(),
+so the ribbon terminates at one road edge and resumes at the other (an
+implied culvert under the road) instead of rendering through it. Bridged
+crossings are untouched by this logic (find_road_gap_intervals is only
+called when the crossing's nearest road point is NOT a bridge).
+
 Usage:  python build_water_tiles.py   (needs road_stations.json first, for
                                         the shared world-frame origin)
 
@@ -329,6 +341,33 @@ ROAD_CROSSING_ANGLE_DEG = 45.0  # >= this angle between waterway and
                                   # deck + terrain carve already separates
                                   # them vertically) rather than a
                                   # "parallel run" (clipped off pavement).
+
+# §7.27: at a "crossing" that does NOT coincide with a §7.22 bridge station,
+# there is no deck/terrain separation - the ribbon must not render across
+# the road at grade (a visible water-sheet-over-pavement defect). Instead a
+# gap is cut in the ribbon spanning the road corridor (+ margin) so the
+# creek reads as terminating at one road edge and resuming at the other -
+# an implied culvert under the road, same visual language a real county
+# road/creek crossing without a bridge actually uses.
+ROAD_GAP_MARGIN_M = 1.5         # extra clearance added to ROAD_HALF_WIDTH
+                                  # on each side of an unbridged-crossing
+                                  # gap, so no ribbon triangle pokes out
+                                  # from under the implied culvert (same
+                                  # spirit as ROAD_WATER_CLEARANCE_M for
+                                  # parallel runs, just its own constant
+                                  # since a crossing gap and a parallel
+                                  # pull-back are different clearances).
+GAP_SUBSAMPLES = 21             # sub-samples taken along a crossing
+                                  # segment (WATERWAY_RESAMPLE_M ~= 20 m
+                                  # long) to locate the gap's entry/exit
+                                  # parametric position precisely - ~1 m
+                                  # spacing, well inside ROAD_GAP_MARGIN_M's
+                                  # buffer against the resulting rounding.
+MIN_GAP_FRAGMENT_M = 1.0        # a retained ribbon fragment shorter than
+                                  # this after a gap clip (chain-end stub,
+                                  # or two closely-spaced gaps leaving a
+                                  # sliver between them) is dropped instead
+                                  # of emitted as a degenerate quad.
 
 
 def fetch_waterways():
@@ -586,6 +625,71 @@ def clip_corner_to_road(corner_e, corner_n, center_e, center_n, road_idx):
     return center_e + dx * scale, center_n + dy * scale, True
 
 
+def find_road_gap_intervals(e0, n0, e1, n1, road_idx, gap_half_width_m,
+                             n_subsamples=GAP_SUBSAMPLES):
+    """§7.27: along the straight segment from (e0,n0) to (e1,n1), finds the
+    parametric t-interval(s) in [0,1] where the centerline sits within
+    gap_half_width_m of the nearest road station AND that nearest station is
+    NOT on a bridge - i.e. where an unbridged road corridor overlaps this
+    ribbon segment and must be cut out (implied culvert) rather than drawn
+    across the pavement at grade. A bridged crossing never contributes an
+    interval here (the deck already separates ribbon from road vertically -
+    §7.22/§7.26), so bridged crossings are left fully continuous.
+
+    Each contiguous run of in-gap subsamples is rounded outward by one
+    subsample step before being returned - conservative, so the discretized
+    boundary never leaves a sliver of ribbon poking out from under the
+    implied culvert; ROAD_GAP_MARGIN_M's own clearance covers the resulting
+    <= 1 subsample-step (~1 m) of over-clip. Returns a list of merged
+    (t_start, t_end) pairs, empty if the whole segment clears the corridor
+    or every nearby road point on it is a bridge."""
+    ts = np.linspace(0.0, 1.0, n_subsamples)
+    pts_e = e0 + (e1 - e0) * ts
+    pts_n = n0 + (n1 - n0) * ts
+    dists, idxs = road_idx["tree"].query(np.stack([pts_e, pts_n], axis=1))
+    in_gap = (dists < gap_half_width_m) & (~road_idx["bridge"][idxs])
+    n = len(ts)
+    raw_intervals = []
+    i = 0
+    while i < n:
+        if in_gap[i]:
+            j = i
+            while j + 1 < n and in_gap[j + 1]:
+                j += 1
+            raw_intervals.append((ts[max(0, i - 1)], ts[min(n - 1, j + 1)]))
+            i = j + 1
+        else:
+            i += 1
+    merged = []
+    for lo, hi in raw_intervals:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def retained_t_intervals(gap_intervals):
+    """[0,1] minus the union of gap_intervals (already sorted/merged by
+    find_road_gap_intervals) -> the list of retained (t0,t1) sub-intervals
+    a segment's ribbon quad(s) should actually be built from."""
+    if not gap_intervals:
+        return [(0.0, 1.0)]
+    retained = []
+    cursor = 0.0
+    for lo, hi in gap_intervals:
+        if lo > cursor:
+            retained.append((cursor, lo))
+        cursor = max(cursor, hi)
+    if cursor < 1.0:
+        retained.append((cursor, 1.0))
+    return retained
+
+
 def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache, road_idx):
     """Centerline (lat/lon chain) -> list of per-segment flat ribbon quads
     ("lake" dicts, SAME shape build_lake_mesh's caller already produces) +
@@ -595,6 +699,7 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
     summaries = []
     n_width_tagged = n_width_default = 0
     n_crossings = n_crossings_bridged = n_parallel_clipped = 0
+    n_gap_segments = n_gap_fragments_dropped = 0
     total_ribbon_km = 0.0
 
     for chain in chains:
@@ -640,10 +745,13 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
         clip_left_e, clip_left_n = left_e.copy(), left_n.copy()
         clip_right_e, clip_right_n = right_e.copy(), right_n.copy()
 
-        n_seg_crossings = n_seg_parallel_clipped = 0
+        gap_half_width_m = ROAD_HALF_WIDTH + ROAD_GAP_MARGIN_M
+        seg_gaps = []   # (i, t_start, t_end) in chain order, for the verify plot
+        n_seg_crossings = n_seg_parallel_clipped = n_seg_gap_segments = n_seg_fragments_dropped = 0
         for i in range(len(rs_e) - 1):
             l0e, l0n, r0e, r0n = left_e[i], left_n[i], right_e[i], right_n[i]
             l1e, l1n, r1e, r1n = left_e[i + 1], left_n[i + 1], right_e[i + 1], right_n[i + 1]
+            gap_intervals = []
             if road_idx is not None:
                 mid_e = (rs_e[i] + rs_e[i + 1]) / 2.0
                 mid_n = (rs_n[i] + rs_n[i + 1]) / 2.0
@@ -660,6 +768,18 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
                         n_seg_crossings += 1
                         if road_idx["bridge"][ridx]:
                             n_crossings_bridged += 1
+                            # §7.22 bridge deck already separates ribbon from
+                            # road vertically - no gap, draw straight through.
+                        else:
+                            # §7.27: no bridge at this crossing - cut a gap
+                            # spanning the road corridor (+ margin) instead
+                            # of drawing the ribbon across pavement at grade.
+                            gap_intervals = find_road_gap_intervals(
+                                rs_e[i], rs_n[i], rs_e[i + 1], rs_n[i + 1],
+                                road_idx, gap_half_width_m)
+                            if gap_intervals:
+                                n_seg_gap_segments += 1
+                                seg_gaps.append((i, gap_intervals))
                     else:
                         l0e, l0n, c0 = clip_corner_to_road(l0e, l0n, rs_e[i], rs_n[i], road_idx)
                         r0e, r0n, c1 = clip_corner_to_road(r0e, r0n, rs_e[i], rs_n[i], road_idx)
@@ -672,26 +792,51 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
                         if c2: clip_left_e[i + 1], clip_left_n[i + 1] = l1e, l1n
                         if c3: clip_right_e[i + 1], clip_right_n[i + 1] = r1e, r1n
 
-            quad_xy_cm = [(l0e * 100.0, -l0n * 100.0), (r0e * 100.0, -r0n * 100.0),
-                          (r1e * 100.0, -r1n * 100.0), (l1e * 100.0, -l1n * 100.0)]
-            seg_z_cm = float((z_cm[i] + z_cm[i + 1]) / 2.0)
-            verts, uvs, tris, method = build_lake_mesh(quad_xy_cm, seg_z_cm)
-            if len(tris) == 0:
-                continue
-            cx_cm = float(np.mean([p[0] for p in quad_xy_cm]))
-            cy_cm = float(np.mean([p[1] for p in quad_xy_cm]))
-            ribbons.append({"verts": verts, "uvs": uvs, "tris": tris,
-                             "centroid_cm": (cx_cm, cy_cm)})
-            total_ribbon_km += math.hypot(rs_e[i + 1] - rs_e[i], rs_n[i + 1] - rs_n[i]) / 1000.0
+            seg_len_m = math.hypot(rs_e[i + 1] - rs_e[i], rs_n[i + 1] - rs_n[i])
+
+            def _emit_quad(ta, tb):
+                # Corners/elevation lerped linearly between vertex i and
+                # i+1 at parametric ta/tb - the base smoothed water surface
+                # (z_cm) is already monotonic non-increasing along the
+                # chain, and a linear interpolation between two points of a
+                # monotonic sequence stays monotonic, so splitting a segment
+                # here changes nothing about flow monotonicity (§7.26).
+                qle0, qln0 = _lerp(l0e, l1e, ta), _lerp(l0n, l1n, ta)
+                qre0, qrn0 = _lerp(r0e, r1e, ta), _lerp(r0n, r1n, ta)
+                qle1, qln1 = _lerp(l0e, l1e, tb), _lerp(l0n, l1n, tb)
+                qre1, qrn1 = _lerp(r0e, r1e, tb), _lerp(r0n, r1n, tb)
+                q_xy_cm = [(qle0 * 100.0, -qln0 * 100.0), (qre0 * 100.0, -qrn0 * 100.0),
+                           (qre1 * 100.0, -qrn1 * 100.0), (qle1 * 100.0, -qln1 * 100.0)]
+                za = _lerp(z_cm[i], z_cm[i + 1], ta)
+                zb = _lerp(z_cm[i], z_cm[i + 1], tb)
+                q_z_cm = float((za + zb) / 2.0)
+                verts, uvs, tris, method = build_lake_mesh(q_xy_cm, q_z_cm)
+                if len(tris) == 0:
+                    return 0.0
+                cx_cm = float(np.mean([p[0] for p in q_xy_cm]))
+                cy_cm = float(np.mean([p[1] for p in q_xy_cm]))
+                ribbons.append({"verts": verts, "uvs": uvs, "tris": tris,
+                                 "centroid_cm": (cx_cm, cy_cm)})
+                return seg_len_m * (tb - ta)
+
+            for ta, tb in retained_t_intervals(gap_intervals):
+                frag_len_m = seg_len_m * (tb - ta)
+                if gap_intervals and frag_len_m < MIN_GAP_FRAGMENT_M:
+                    n_seg_fragments_dropped += 1
+                    continue
+                total_ribbon_km += _emit_quad(ta, tb) / 1000.0
 
         n_crossings += n_seg_crossings
         n_parallel_clipped += n_seg_parallel_clipped
+        n_gap_segments += n_seg_gap_segments
+        n_gap_fragments_dropped += n_seg_fragments_dropped
         summaries.append({
             "name": chain["name"], "class": chain["class"],
             "n_segments": len(rs_e) - 1, "half_width_m": half_width_m,
             "elev_hi_m": float(smooth_elev[0]), "elev_lo_m": float(smooth_elev[-1]),
             "reversed": bool(reversed_chain),
             "n_crossings": n_seg_crossings, "n_parallel_clipped": n_seg_parallel_clipped,
+            "n_gap_segments": n_seg_gap_segments, "n_fragments_dropped": n_seg_fragments_dropped,
             # Full geometry for offline verification plots (map + longitudinal
             # profile) - small enough per-chain (WATERWAY_RESAMPLE_M spacing)
             # to dump for every chain, not just the named highlights.
@@ -700,12 +845,18 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
             "water_elev_m": water_elev.tolist(),
             "left_e": clip_left_e.tolist(), "left_n": clip_left_n.tolist(),
             "right_e": clip_right_e.tolist(), "right_n": clip_right_n.tolist(),
+            # gap intervals for the verify-script overlay: (segment index,
+            # [(t_start, t_end), ...]) - lets the plot draw the exact clipped
+            # span against the road corridor rather than re-deriving it.
+            "seg_gaps": [(int(idx), [(float(a), float(b)) for a, b in ivls])
+                         for idx, ivls in seg_gaps],
         })
 
     stats = {
         "n_width_tagged": n_width_tagged, "n_width_default": n_width_default,
         "n_crossings": n_crossings, "n_crossings_bridged": n_crossings_bridged,
         "n_parallel_clipped": n_parallel_clipped, "total_ribbon_km": total_ribbon_km,
+        "n_gap_segments": n_gap_segments, "n_gap_fragments_dropped": n_gap_fragments_dropped,
     }
     return ribbons, summaries, stats
 
@@ -1028,13 +1179,17 @@ def main():
         print(f"  \"{s['name']}\" class={s['class']} segments={s['n_segments']} "
               f"half_width={s['half_width_m']:.1f}m elev {s['elev_hi_m']:.1f}->{s['elev_lo_m']:.1f}m "
               f"reversed={s['reversed']} crossings={s['n_crossings']} "
-              f"parallel_clipped={s['n_parallel_clipped']}")
+              f"parallel_clipped={s['n_parallel_clipped']} gap_segments={s['n_gap_segments']} "
+              f"fragments_dropped={s['n_fragments_dropped']}")
 
     print(f"\nwaterway width sourcing: {ww_stats['n_width_tagged']} tagged, "
           f"{ww_stats['n_width_default']} class default")
     print(f"waterway/road crossings: {ww_stats['n_crossings']} "
           f"({ww_stats['n_crossings_bridged']} coincide with a bridge station)")
     print(f"waterway/road parallel-run clips applied: {ww_stats['n_parallel_clipped']}")
+    print(f"§7.27 unbridged-crossing gaps: {ww_stats['n_gap_segments']} segment(s) gap-clipped, "
+          f"{ww_stats['n_gap_fragments_dropped']} sub-fragment(s) dropped below "
+          f"{MIN_GAP_FRAGMENT_M:.1f} m")
 
     # Dump a machine-readable record (gitignored data/raw, same as every
     # other *_test raw-fetch cache this module already writes) for offline
