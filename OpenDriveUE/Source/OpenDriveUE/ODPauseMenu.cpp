@@ -9,7 +9,9 @@
 #include "Misc/CommandLine.h"
 #include "UnrealClient.h"
 #include "ODCreditsMenu.h"
+#include "ODInputConfig.h"
 #include "ODMainMenu.h"
+#include "ODRebindMenu.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
 
@@ -67,8 +69,12 @@ void AODPauseMenu::BeginPlay()
 		B.bExecuteWhenPaused = true;
 		B.bConsumeInput = bConsume;
 	};
+	// Escape is a fixed, always-on cancel/pause key - deliberately NOT
+	// rebindable (Arc 4.1, SS7.32) so a player can never lock themselves out
+	// of pausing. Pause's OTHER key is the rebindable primary - see
+	// RefreshPauseKeyBinding, called here and again live by AODRebindMenu.
 	Bind(EKeys::Escape, &AODPauseMenu::Toggle, true);
-	Bind(EKeys::P, &AODPauseMenu::Toggle, false);
+	RefreshPauseKeyBinding();
 	Bind(EKeys::Up, &AODPauseMenu::Up, false);
 	Bind(EKeys::Down, &AODPauseMenu::Down, false);
 	Bind(EKeys::Left, &AODPauseMenu::Left, false);
@@ -103,12 +109,52 @@ void AODPauseMenu::BeginPlay()
 	}
 }
 
+void AODPauseMenu::RefreshPauseKeyBinding()
+{
+	if (!InputComponent)
+	{
+		return;
+	}
+	if (LastPauseKey.IsValid())
+	{
+		InputComponent->KeyBindings.RemoveAll([this](const FInputKeyBinding& B)
+		{
+			return B.Chord.Key == LastPauseKey;
+		});
+		LastPauseKey = FKey();
+	}
+	const FKey PauseKey = FODInputConfig::GetKeyboardKey(EODInputAction::Pause);
+	if (PauseKey.IsValid() && PauseKey != EKeys::Escape)
+	{
+		FInputKeyBinding& B = InputComponent->BindKey(PauseKey, IE_Pressed, this, &AODPauseMenu::Toggle);
+		B.bExecuteWhenPaused = true;
+		B.bConsumeInput = false;
+		LastPauseKey = PauseKey;
+	}
+}
+
 void AODPauseMenu::Toggle()
 {
 	// Settings/Credits back out one level first (Escape), same as any other
 	// modal-inside-a-modal convention - see this class's header comment.
+	// Rebind (Arc 4.1, SS7.32) is a further level under Settings: Escape
+	// cancels an in-progress key capture first, then backs out of the rebind
+	// screen, then out of Settings, matching the same one-level-at-a-time
+	// convention.
 	if (bSettingsOpen)
 	{
+		if (SettingsMenu && SettingsMenu->IsRebindOpen())
+		{
+			if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu(); Rebind && Rebind->IsCapturing())
+			{
+				Rebind->CancelCapture();
+			}
+			else
+			{
+				SettingsMenu->CloseRebind();
+			}
+			return;
+		}
 		bSettingsOpen = false;
 		return;
 	}
@@ -193,9 +239,21 @@ void AODPauseMenu::Activate()
 	{
 		if (SettingsMenu)
 		{
-			if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
+			if (SettingsMenu->IsRebindOpen())
+			{
+				if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu();
+					Rebind && Rebind->ActivateSelected())   // true == "Back" row selected
+				{
+					SettingsMenu->CloseRebind();
+				}
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
 			{
 				bSettingsOpen = false;
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->ControlsRowIndex())   // "Controls" row
+			{
+				SettingsMenu->OpenRebind();
 			}
 			else
 			{

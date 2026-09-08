@@ -12,6 +12,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
+#include "ODInputConfig.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
@@ -823,34 +824,96 @@ void AODVehiclePawn::TrySnapToGround()
 void AODVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 {
 	Super::SetupPlayerInputComponent(Input);
+	CachedInputComponent = Input;
+
+	// Arrow keys are a fixed, always-on ALIAS for Throttle/Brake/Steer -
+	// deliberately NOT rebindable (see RefreshODManagedKeyBindings) so a
+	// player who reassigns W/A/S/D can't lock themselves out of driving, and
+	// so the pre-existing "WASD or arrows" convenience keeps working exactly
+	// as before regardless of what's bound to the config-driven primary key.
 	struct FKeyFn
 	{
 		FKey Key;
 		void (AODVehiclePawn::*Press)();
 		void (AODVehiclePawn::*Release)();
 	};
-	const FKeyFn Binds[] = {
-		{EKeys::W, &AODVehiclePawn::ThrottlePressed, &AODVehiclePawn::ThrottleReleased},
+	const FKeyFn ArrowAliases[] = {
 		{EKeys::Up, &AODVehiclePawn::ThrottlePressed, &AODVehiclePawn::ThrottleReleased},
-		{EKeys::S, &AODVehiclePawn::BrakePressed, &AODVehiclePawn::BrakeReleased},
 		{EKeys::Down, &AODVehiclePawn::BrakePressed, &AODVehiclePawn::BrakeReleased},
-		{EKeys::A, &AODVehiclePawn::LeftPressed, &AODVehiclePawn::LeftReleased},
 		{EKeys::Left, &AODVehiclePawn::LeftPressed, &AODVehiclePawn::LeftReleased},
-		{EKeys::D, &AODVehiclePawn::RightPressed, &AODVehiclePawn::RightReleased},
 		{EKeys::Right, &AODVehiclePawn::RightPressed, &AODVehiclePawn::RightReleased},
-		{EKeys::SpaceBar, &AODVehiclePawn::HandbrakePressed, &AODVehiclePawn::HandbrakeReleased},
 	};
-	for (const FKeyFn& B : Binds)
+	for (const FKeyFn& B : ArrowAliases)
 	{
 		Input->BindKey(B.Key, IE_Pressed, this, B.Press);
 		Input->BindKey(B.Key, IE_Released, this, B.Release);
 	}
-	// V: cycle to the next car (garage groundwork - dev-facing live hot-swap)
+	// V: cycle to the next car (garage groundwork - dev-facing live hot-swap,
+	// not a player-facing rebindable action - see next steps.md SS7.32)
 	Input->BindKey(EKeys::V, IE_Pressed, this, &AODVehiclePawn::CycleVehicle);
-	// R: flip recovery - right the car in place (see ResetVehicle)
-	Input->BindKey(EKeys::R, IE_Pressed, this, &AODVehiclePawn::ResetVehicle);
 
+	RefreshODManagedKeyBindings(Input);
 	SetupGamepadAndWheelInput(Input);
+}
+
+void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
+{
+	if (!Input)
+	{
+		Input = CachedInputComponent.Get();
+	}
+	if (!Input)
+	{
+		return;
+	}
+
+	// remove exactly the keys we bound last call (arrow aliases and V are
+	// never in this list - see SetupPlayerInputComponent)
+	if (LastODManagedKeys.Num() > 0)
+	{
+		Input->KeyBindings.RemoveAll([this](const FInputKeyBinding& B)
+		{
+			return LastODManagedKeys.Contains(B.Chord.Key);
+		});
+	}
+	LastODManagedKeys.Reset();
+
+	struct FActionFn
+	{
+		EODInputAction Action;
+		void (AODVehiclePawn::*Press)();
+		void (AODVehiclePawn::*Release)();
+	};
+	const FActionFn KeyboardBinds[] = {
+		{EODInputAction::Throttle, &AODVehiclePawn::ThrottlePressed, &AODVehiclePawn::ThrottleReleased},
+		{EODInputAction::Brake, &AODVehiclePawn::BrakePressed, &AODVehiclePawn::BrakeReleased},
+		{EODInputAction::SteerLeft, &AODVehiclePawn::LeftPressed, &AODVehiclePawn::LeftReleased},
+		{EODInputAction::SteerRight, &AODVehiclePawn::RightPressed, &AODVehiclePawn::RightReleased},
+		{EODInputAction::Handbrake, &AODVehiclePawn::HandbrakePressed, &AODVehiclePawn::HandbrakeReleased},
+		{EODInputAction::ResetVehicle, &AODVehiclePawn::ResetVehicle, nullptr},
+	};
+	for (const FActionFn& B : KeyboardBinds)
+	{
+		const FKey Key = FODInputConfig::GetKeyboardKey(B.Action);
+		if (!Key.IsValid())
+		{
+			continue;   // explicitly unbound
+		}
+		Input->BindKey(Key, IE_Pressed, this, B.Press);
+		if (B.Release)
+		{
+			Input->BindKey(Key, IE_Released, this, B.Release);
+		}
+		LastODManagedKeys.AddUnique(Key);
+	}
+
+	const FKey GamepadHandbrakeKey = FODInputConfig::GetGamepadKey(EODInputAction::Handbrake);
+	if (GamepadHandbrakeKey.IsValid())
+	{
+		Input->BindKey(GamepadHandbrakeKey, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
+		Input->BindKey(GamepadHandbrakeKey, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
+		LastODManagedKeys.AddUnique(GamepadHandbrakeKey);
+	}
 }
 
 // ===========================================================================
@@ -912,8 +975,8 @@ void AODVehiclePawn::SetupGamepadAndWheelInput(UInputComponent* Input)
 	{
 		Input->BindAxisKey(EKeys::Gamepad_RightY, this, &AODVehiclePawn::GamepadLookYAxis);
 	}
-	Input->BindKey(EKeys::Gamepad_FaceButton_Bottom, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
-	Input->BindKey(EKeys::Gamepad_FaceButton_Bottom, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
+	// gamepad Handbrake bind lives in RefreshODManagedKeyBindings (Arc 4.1,
+	// SS7.32) - it's rebindable, unlike everything else in this function.
 	// menu navigation while driving-screen input is live is cheap to add here
 	// (AODMainMenu binds its OWN separate Dpad/face-button keys for the menu
 	// stage itself - these are just so a gamepad-only player isn't stuck
@@ -956,31 +1019,28 @@ void AODVehiclePawn::SetupGamepadAndWheelInput(UInputComponent* Input)
 
 void AODVehiclePawn::GamepadSteerAxis(float Value)
 {
-	// deadzone, then a mild x*|x| response curve (Taylor: "an analog stick
-	// ... a mild response curve, x*|x| feels right for steering") - full
-	// precision near center, full lock still reachable at full deflection.
+	// Arc 4.1 (SS7.32): deadzone + response-curve exponent are now the
+	// persisted FODInputConfig sliders instead of a hardcoded constant/x*|x|
+	// literal - ConditionSteering with the default 0.15 deadzone / 2.0
+	// exponent reproduces the exact pre-existing curve (Taylor: "an analog
+	// stick ... a mild response curve, x*|x| feels right for steering").
 	// Deliberately NOT applied to keyboard (SmSteer's own fade/rate logic
-	// above is untouched) or to the wheel (1:1, no curve - see class notes).
-	const float Mag = FMath::Abs(Value);
-	if (Mag < GamepadDeadzone)
-	{
-		GamepadSteerRaw = 0.0f;
-		return;
-	}
-	// rescale so the curve still reaches +/-1 at full deflection instead of
-	// leaving a dead gap just past the deadzone
-	const float Rescaled = (Mag - GamepadDeadzone) / (1.0f - GamepadDeadzone);
-	GamepadSteerRaw = FMath::Sign(Value) * Rescaled * Rescaled;
+	// above is untouched) or to the wheel (1:1, no curve - see class notes) -
+	// this is specifically the gamepad-stick conditioning point, and (per
+	// the task brief) the exact point a future Arc 6 wheel steering axis
+	// would plug into the same FODInputConfig::ConditionSteering call.
+	GamepadSteerRaw = FODInputConfig::ConditionSteering(
+		Value, FODInputConfig::GetSteeringDeadzone(), FODInputConfig::GetSteeringSensitivity());
 }
 
 void AODVehiclePawn::GamepadThrottleAxis(float Value)
 {
-	GamepadThrottleRaw = Value < GamepadDeadzone ? 0.0f : Value;
+	GamepadThrottleRaw = FODInputConfig::ConditionThrottleBrake(Value, FODInputConfig::GetThrottleBrakeDeadzone());
 }
 
 void AODVehiclePawn::GamepadBrakeAxis(float Value)
 {
-	GamepadBrakeRaw = Value < GamepadDeadzone ? 0.0f : Value;
+	GamepadBrakeRaw = FODInputConfig::ConditionThrottleBrake(Value, FODInputConfig::GetThrottleBrakeDeadzone());
 }
 
 void AODVehiclePawn::GamepadHandbrakePressed() { bGamepadHandbrake = true; }

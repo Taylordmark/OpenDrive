@@ -4,6 +4,8 @@
 #include "GameFramework/Actor.h"
 #include "ODSettingsMenu.generated.h"
 
+class AODRebindMenu;
+
 /**
  * Release settings shell (Arc 4.4, next steps.md SS4.4/SS7.31): graphics
  * (resolution/window mode/quality/upscaler/screen-percentage/vsync), audio
@@ -51,16 +53,31 @@ public:
 	virtual void BeginPlay() override;
 
 	// Resolution, Window Mode, Quality, Upscaler, Screen %, VSync,
-	// Master Volume, Vehicle Volume, Ambient Volume, Input Device, Close.
-	int32 NumRows() const { return 11; }
+	// Master Volume, Vehicle Volume, Ambient Volume, Input Device, Controls,
+	// Close.
+	int32 NumRows() const { return 12; }
+	/** Row index of "Controls" - the parent menus' Activate() special-cases
+	 *  this exactly like the terminal "Close" row (NumRows()-1) to open the
+	 *  rebind sub-screen instead of cycling a value (Arc 4.1, SS7.32). */
+	int32 ControlsRowIndex() const { return 10; }
 	int32 GetSelected() const { return Selected; }
-	void MoveSelection(int32 Dir) { Selected = (Selected + Dir + NumRows()) % NumRows(); }
+	/** Forwards to the rebind sub-screen's own MoveSelection while it's open
+	 *  (see IsRebindOpen) - one level of the same "check the sub-screen flag
+	 *  first" idiom AODPauseMenu/AODMainMenu use for THIS menu. */
+	void MoveSelection(int32 Dir);
 	/** Left/Right (Dir = -1/+1) on the selected row; Enter also calls this
 	 *  with Dir=+1 for a value row (same "Enter cycles" idiom as the other
-	 *  two menus), except the terminal "Close" row - see the parent menus'
-	 *  Activate() for that one special case. */
+	 *  two menus), except the terminal "Close" row and the "Controls" row -
+	 *  see the parent menus' Activate() for those two special cases. Also
+	 *  forwards to the rebind sub-screen while it's open. */
 	void AdjustSelected(int32 Dir);
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
+
+	// ---- Controls sub-screen (Arc 4.1, SS7.32) ----
+	bool IsRebindOpen() const { return bRebindOpen; }
+	AODRebindMenu* GetRebindMenu() const { return RebindMenu; }
+	void OpenRebind();
+	void CloseRebind() { bRebindOpen = false; }
 
 private:
 	void ApplyResolution(int32 Dir);
@@ -84,7 +101,13 @@ private:
 	int32 CurrentResolutionIdx() const;
 	int32 CurrentWindowModeIdx() const;
 
+	AODRebindMenu* EnsureRebindMenu();
+
 	int32 Selected = 0;
+
+	bool bRebindOpen = false;
+	UPROPERTY()
+	TObjectPtr<AODRebindMenu> RebindMenu;
 
 	/** 0 = Off (plain TAA), 1 = TSR. FSR isn't offered - no FidelityFX Super
 	 *  Resolution plugin is enabled in OpenDriveUE.uproject (checked, see

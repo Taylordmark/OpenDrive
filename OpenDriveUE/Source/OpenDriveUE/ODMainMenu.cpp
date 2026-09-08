@@ -12,6 +12,7 @@
 #include "ODCreditsMenu.h"
 #include "ODEngineSynth.h"
 #include "ODGarageEnvironment.h"
+#include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
 #include "ODTerrainManager.h"
@@ -504,9 +505,21 @@ void AODMainMenu::Activate()
 	{
 		if (SettingsMenu)
 		{
-			if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
+			if (SettingsMenu->IsRebindOpen())
+			{
+				if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu();
+					Rebind && Rebind->ActivateSelected())   // true == "Back" row selected
+				{
+					SettingsMenu->CloseRebind();
+				}
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
 			{
 				bSettingsOpen = false;
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->ControlsRowIndex())   // "Controls" row
+			{
+				SettingsMenu->OpenRebind();
 			}
 			else
 			{
@@ -558,6 +571,18 @@ void AODMainMenu::Back()
 {
 	if (bSettingsOpen)
 	{
+		if (SettingsMenu && SettingsMenu->IsRebindOpen())
+		{
+			if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu(); Rebind && Rebind->IsCapturing())
+			{
+				Rebind->CancelCapture();
+			}
+			else
+			{
+				SettingsMenu->CloseRebind();
+			}
+			return;
+		}
 		bSettingsOpen = false;
 		return;
 	}

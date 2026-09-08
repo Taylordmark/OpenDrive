@@ -10,9 +10,11 @@
 #include "GameFramework/PlayerController.h"
 #include "ODCreditsMenu.h"
 #include "ODGhost.h"
+#include "ODInputConfig.h"
 #include "ODMainMenu.h"
 #include "ODPauseMenu.h"
 #include "ODRaceManager.h"
+#include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
 #include "ODTuningManager.h"
@@ -29,15 +31,44 @@ void AODRaceHUD::BeginPlay()
 	if (APlayerController* PC = GetOwningPlayerController())
 	{
 		EnableInput(PC);
-		if (InputComponent)
+		RefreshODManagedKeyBindings();
+	}
+}
+
+void AODRaceHUD::RefreshODManagedKeyBindings()
+{
+	if (!InputComponent)
+	{
+		return;
+	}
+	if (LastODManagedKeys.Num() > 0)
+	{
+		InputComponent->KeyBindings.RemoveAll([this](const FInputKeyBinding& B)
 		{
-			InputComponent->BindKey(EKeys::M, IE_Pressed, this,
-				&AODRaceHUD::ToggleMiniMap);
-			InputComponent->BindKey(EKeys::LeftBracket, IE_Pressed, this,
-				&AODRaceHUD::ZoomOut);
-			InputComponent->BindKey(EKeys::RightBracket, IE_Pressed, this,
-				&AODRaceHUD::ZoomIn);
+			return LastODManagedKeys.Contains(B.Chord.Key);
+		});
+	}
+	LastODManagedKeys.Reset();
+
+	struct FActionFn
+	{
+		EODInputAction Action;
+		void (AODRaceHUD::*Fn)();
+	};
+	const FActionFn Binds[] = {
+		{EODInputAction::ToggleMap, &AODRaceHUD::ToggleMiniMap},
+		{EODInputAction::ZoomMapOut, &AODRaceHUD::ZoomOut},
+		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn},
+	};
+	for (const FActionFn& B : Binds)
+	{
+		const FKey Key = FODInputConfig::GetKeyboardKey(B.Action);
+		if (!Key.IsValid())
+		{
+			continue;
 		}
+		InputComponent->BindKey(Key, IE_Pressed, this, B.Fn);
+		LastODManagedKeys.AddUnique(Key);
 	}
 }
 
@@ -612,6 +643,72 @@ void AODRaceHUD::DrawSettingsMenu(AODSettingsMenu* Menu) const
 	}
 	Text(TEXT("arrows change    enter select    esc close"), Mx, My + 20.0f, 1.0f,
 		FLinearColor(0.55f, 0.6f, 0.65f));
+
+	if (Menu->IsRebindOpen())
+	{
+		DrawRebindMenu(Menu->GetRebindMenu());
+	}
+}
+
+void AODRaceHUD::DrawRebindMenu(AODRebindMenu* Menu) const
+{
+	if (!Canvas || !Menu)
+	{
+		return;
+	}
+	UFont* Font = GEngine->GetLargeFont();
+
+	// second dim layer on top of the Settings panel already drawn behind us
+	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
+		FLinearColor(0, 0, 0, 0.55f));
+	Dim.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Dim);
+
+	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
+		T.Scale = FVector2D(Sc, Sc);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
+
+	const float PanelW = 640.0f;
+	const float PanelH = AODRebindMenu::VisibleLines * 32.0f + 130.0f;
+	const float Mx = (Canvas->SizeX - PanelW) * 0.5f;
+	const float PanelTop = (Canvas->SizeY - PanelH) * 0.5f;
+
+	FCanvasTileItem Panel(FVector2D(Mx, PanelTop), FVector2D(PanelW, PanelH),
+		FLinearColor(0.02f, 0.03f, 0.05f, 0.92f));
+	Panel.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Panel);
+
+	float My = PanelTop + 24.0f;
+	Text(TEXT("CONTROLS"), Mx + 24.0f, My, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
+	My += 52.0f;
+
+	const int32 Start = Menu->GetScrollOffset();
+	const int32 End = FMath::Min(Start + AODRebindMenu::VisibleLines, Menu->NumRows());
+	for (int32 Row = Start; Row < End; ++Row)
+	{
+		FString Label, Value;
+		Menu->GetRow(Row, Label, Value);
+		const bool bSel = Row == Menu->GetSelected();
+		const bool bCapturingThisRow = Menu->IsCapturing() && Row == Menu->GetCapturingRow();
+		const FLinearColor Col = bCapturingThisRow
+			? FLinearColor(1.0f, 0.35f, 0.3f)
+			: bSel ? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
+		Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx + 24.0f, My, 1.15f, Col);
+		if (!Value.IsEmpty())
+		{
+			Text(Value, Mx + 380.0f, My, 1.15f, Col);
+		}
+		My += 32.0f;
+	}
+
+	Text(Menu->IsCapturing()
+			? TEXT("press a key or gamepad button... esc cancels")
+			: TEXT("arrows navigate    enter select/capture    esc back"),
+		Mx + 24.0f, PanelTop + PanelH - 30.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
 }
 
 void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const

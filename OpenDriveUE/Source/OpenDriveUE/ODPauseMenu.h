@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "InputCoreTypes.h"
 #include "ODPauseMenu.generated.h"
 
 class UODVehicleMovement;
@@ -56,6 +57,15 @@ private:
 	void Right();
 	void Activate();
 	void Adjust(int32 Dir);
+
+public:
+	/** Re-derives the Pause key from FODInputConfig and rebuilds it - called
+	 *  at BeginPlay and again live by AODRebindMenu after a rebind (Arc 4.1,
+	 *  SS7.32). Escape is untouched (fixed, not rebindable). */
+	void RefreshPauseKeyBinding();
+
+private:
+	FKey LastPauseKey;
 
 	UODVehicleMovement* FindMovement() const;
 	/** One-time Sport-gearbox shift params at BeginPlay - preserves the

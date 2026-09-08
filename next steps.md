@@ -314,6 +314,16 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   for that gap).
 
 ### 4.1 Control rebinding (#9)
+- **v1 ✅** *(2026-09-08, see §7.32)* — implemented as a project-level
+  indirection layer over the existing legacy `BindKey`/`BindAxisKey` path
+  (NOT a real Enhanced Input migration — decision + reasoning in §7.32),
+  since no actual mapping-context data assets existed to migrate from
+  despite the unused `EnhancedInput` module dependency. Canvas-drawn
+  rebinding screen off Settings; deadzone/sensitivity sliders feeding a
+  future Arc 6 wheel; persists to `GameUserSettings.ini`
+  (`OpenDrive.Input`), not a `SaveGame`, matching this project's existing
+  `OpenDrive.Exhaust`/`OpenDrive.Graphics`/`OpenDrive.Audio` idiom instead
+  of introducing a new persistence mechanism.
 - Migrate to Enhanced Input (if template hasn't); mapping contexts for
   keyboard/gamepad; rebinding settings screen writing to a user config
   `SaveGame`. Include deadzone/sensitivity sliders (feeds Arc 6 wheel).
@@ -5836,3 +5846,200 @@ Committed: `OpenDriveUE/Source/OpenDriveUE/ODSettingsMenu.h/.cpp`,
 `OpenDriveUE.Build.cs` (`ApplicationCore` dependency),
 `pipeline/build_credits.py` (new), `OpenDriveUE/Content/OpenDrive/Masks/
 credits.txt` (generated), this note. Not pushed.
+
+### 7.32 Arc 4.1: control rebinding — indirection layer over legacy input, deadzone/sensitivity sliders (2026-09-08)
+
+Implements §4.1: rebindable driving controls (keyboard + gamepad), a
+canvas-drawn rebinding screen off Settings (no UMG), and deadzone/
+sensitivity sliders applied where analog input enters the pawn — the exact
+point a future Arc 6 wheel axis would also plug into. Offline only, per the
+standing testing protocol (no `-game`/PIE/screenshots — code-path
+inspection + a green `Build.bat` run, no engine launch); gamepad hardware
+capture is therefore unverified live (see caveats).
+
+**Migration decision: NOT a real Enhanced Input migration.** `Config/
+DefaultInput.ini` sets `DefaultPlayerInputClass=EnhancedPlayerInput` and
+`OpenDriveUE.Build.cs` depends on the `EnhancedInput` module, but neither
+was ever actually load-bearing — a full-project grep found zero
+`UInputAction`/`UInputMappingContext` assets or IMC-based binding anywhere;
+every bind site (`AODVehiclePawn::SetupPlayerInputComponent`/
+`SetupGamepadAndWheelInput`, `AODPauseMenu::BeginPlay`,
+`AODRaceHUD::BeginPlay`, `AODRaceManager::BeginPlay`,
+`AODTuningManager::BeginPlay`, `AODMainMenu`) uses
+`UInputComponent::BindKey`/`BindAxisKey` directly against hardcoded `FKey`
+literals. A real migration means adding mapping-context data assets and
+IMC-based binding at all seven of those sites for a keyboard+gamepad-only
+game with hand-drawn canvas menus and no chorded/contextual input need —
+high churn, no behavior change, and against this project's stated
+no-framework preference (canvas over UMG, C++ over MetaSounds — see
+`ODVehiclePawn.h`'s own comments on why mouse-look is polled rather than
+bound). Per the task brief's explicit allowance, rebinding is instead a
+project-level indirection layer, `FODInputConfig` (new
+`ODInputConfig.h/.cpp`, pure static data, no UObject/actor): every bind
+site asks it for the current `FKey` instead of using a literal, and each
+affected actor gained a small `RefreshODManagedKeyBindings()`/
+`RefreshPauseKeyBinding()` method that surgically removes+rebuilds just its
+own tracked keys from `InputComponent->KeyBindings` (`RemoveAll` matching
+`B.Chord.Key`, confirmed public via an engine-source grep) — called at
+`BeginPlay` and again live by the rebind screen after any assignment, so a
+rebind takes effect immediately without a restart.
+
+**Action inventory — 10 rebindable actions** (`EODInputAction`,
+`ODInputConfig.h:44-57`), defaults in `ActionTable[]`
+(`ODInputConfig.cpp:15-25`), consumed at:
+`Throttle`/`Brake`/`SteerLeft`/`SteerRight`/`Handbrake`/`ResetVehicle`
+(`ODVehiclePawn.cpp:888-893`, keyboard defaults W/S/A/D/SpaceBar/R;
+Handbrake also has gamepad default `Gamepad_FaceButton_Bottom`),
+`Pause` (`ODPauseMenu.cpp:126`, default P), `ToggleMap`/`ZoomMapOut`/
+`ZoomMapIn` (`ODRaceHUD.cpp:59-61`, defaults M/`[`/`]`). Gamepad
+Steer/Throttle/Brake are the left-stick-X and trigger axes — fixed analog
+inputs, not meaningfully "rebindable" the way a button is; what's
+newly configurable there is the deadzone/sensitivity conditioning (below),
+which is the concrete form of "rebinding" an analog axis actually takes.
+Explicitly out of scope: **V** (dev-facing `CycleVehicle` hotkey, hardcoded
+outside `FODInputConfig` and excluded from the rebind screen's capture
+candidate list so it can never be silently double-bound); **Camera** (no
+discrete camera key exists anywhere in the codebase today — mouse-look is
+polled every `Tick`, not bound — nothing to rebind); **Gear up/down**
+(project is automatic-transmission only, no manual-shift input path
+exists); `AODRaceManager`'s own `R` (`RespawnAtLastGate`) and
+`AODTuningManager`'s `T` (cycle tuning preset) binds, both independent
+per-actor binds outside the pawn's input path, left untouched.
+
+**Rebind screen (`AODRebindMenu`, new `ODRebindMenu.h/.cpp`), reached via a
+new "Controls" row on `AODSettingsMenu` (row 10, `ControlsRowIndex()`).**
+Same "driven by whichever parent has it open" idiom as
+`AODSettingsMenu`/`AODCreditsMenu` (§7.31), nested one level deeper:
+`AODSettingsMenu::MoveSelection`/`AdjustSelected` check their own
+`bRebindOpen` flag and forward straight into `AODRebindMenu`, so
+`AODPauseMenu`/`AODMainMenu`'s existing blind Up/Down/Left/Right
+forwarding needed no changes; `Activate()`/`Toggle()`-or-`Back()` each
+needed one new branch in both parents (mirroring their existing "Close
+row" special case), since Enter/Escape can't be blindly forwarded the same
+way. 25 rows: 10 actions × 2 device slots (keyboard/gamepad) + 3 sliders +
+Reset-to-Defaults + Back, drawn by `ODRaceHUD::DrawRebindMenu` (new
+function, same bordered-panel/scroll-window pattern as
+`DrawSettingsMenu`/`DrawCreditsMenu`).
+
+**Capture-mode state machine — the one exception to "driven by the
+parent."** Selecting a binding row calls `AODRebindMenu::BeginCapture`,
+which uses `AActor::EnableInput` to push a fresh, real `InputComponent` to
+the TOP of the `PlayerController`'s input stack (highest priority),
+`bConsumeInput=true`, bound to a broad fixed candidate-key list
+(`KeyboardCandidates[]`/`GamepadCandidates[]`, deliberately excluding
+Escape/Up/Down/Left/Right/Enter — the menu's own nav keys — and V) plus a
+separate always-consuming Escape bind that cancels. `BindKey`'s
+`FKey`-parameter handler signature (`OnCaptureKey(FKey)`) identifies which
+key fired without per-key lambdas. On a valid press:
+`FODInputConfig::AssignKeyboardKey`/`AssignGamepadKey`, then
+`RefreshAllLiveInputBindings` (pushes the change to the live pawn/pause-
+menu/race-HUD instances via `TActorIterator`, same idiom as
+`AODSettingsMenu::ApplyAudioVolumes`), then `EndCapture`
+(`DisableInput`, pops the stack). `MoveSelection`/`AdjustSelected`/
+`ActivateSelected` all no-op while capturing.
+
+**Conflict policy: SWAP**, not clear-and-warn.
+`FODInputConfig::AssignKeyboardKey`/`AssignGamepadKey` (`ODInputConfig.cpp`)
+give a displaced action the key being bumped, so two actions can never
+point at the same physical key in the same device slot and nothing is ever
+left in a stuck unbound state needing a warning UI. Rejected clear-and-warn
+as worse UX for this game's small, mostly disjoint action set with no
+failure mode to display.
+
+**Deadzone/sensitivity sliders (feeds Arc 6 wheel).** Three persisted
+values in `FODInputConfig`: `SteeringDeadzone` (default 0.15),
+`SteeringSensitivity` (default 2.0, response exponent),
+`ThrottleBrakeDeadzone` (default 0.15). Applied via
+`FODInputConfig::ConditionSteering`/`ConditionThrottleBrake`
+(`ODInputConfig.cpp`) inside `AODVehiclePawn::GamepadSteerAxis`/
+`GamepadThrottleAxis`/`GamepadBrakeAxis` — the exact point raw
+gamepad-stick/trigger values enter the pawn's input path, upstream of
+`ODVehicleMovement`/vehicle physics (never touched, per the hard
+constraint against altering what actions DO). At the defaults,
+`ConditionSteering` reproduces the old hardcoded gamepad-steer curve
+bit-for-bit (deadzone-clamp + `x*|x|`, now `Pow(Rescaled, 2.0)` with
+`Deadzone=0.15`) — a like-for-like refactor at default settings, not a
+feel change. `ConditionThrottleBrake` fixes one real behavior gap versus
+the old code: the old throttle/brake deadzone was a hard cutoff with no
+rescale (value jumped straight from 0 to 0.15 the instant the deadzone
+cleared); the new conditioning rescales continuously across the deadzone
+edge (no jump), matching the task brief's explicit ask. Proven numerically
+in `scratchpad/verify_input_curves.png` (matplotlib plot of both transfer
+functions at 5 steering settings / 3 throttle-brake settings, old-curve
+overlay for comparison) and `scratchpad/verify_input_curves_sanity.txt`
+(all gates pass: f(0)=0, f(x)=0 for |x|≤deadzone, continuity at the
+deadzone edge via shrinking-offset convergence, f(1)=1, monotonic
+non-decreasing on [0,1], and exact equivalence to the old hardcoded
+gamepad-steer curve at default settings).
+
+**Persistence:** GConfig section `"OpenDrive.Input"` in
+`GameUserSettings.ini`, same `SetInt/GetInt`/`SetFloat/GetFloat` +
+`GConfig->Flush(false, GGameUserSettingsIni)` idiom as
+`AODMainMenu::Save/LoadExhaustConfig`'s `"OpenDrive.Exhaust"` (§7.30) and
+`AODSettingsMenu`'s `"OpenDrive.Graphics"`/`"OpenDrive.Audio"` (§7.31) —
+not the `SaveGame` originally suggested in §4.1's spec, deliberately, to
+stay consistent with this project's one existing persistence mechanism
+rather than introduce a second. Saves on every assignment/adjustment, same
+"save on every adjustment" idiom as §7.31. `FODInputConfig::Load()` seeds
+every binding/slider from its default BEFORE attempting the GConfig read
+and only overwrites on a successful, valid-`FKey`-parsing read, so a
+missing `"OpenDrive.Input"` section (fresh install, or an ini predating
+this change) reproduces today's defaults exactly — same guarantee as
+§7.30/§7.31.
+
+**QA-hook / menu-key non-interference — verified by grep, not by
+launching the game:** the `-odrev`/`-odlift`/`-odsteer`/`-odbrake`/`-odveh`/
+`-odsetvat`/`-odsetv`/`-odvehidx`/`-odcar` hooks (`ODVehiclePawn.cpp:452-
+472` and their consuming Tick-time reads) all go through
+`FParse::Value(FCommandLine::Get(), ...)` directly into pawn member floats
+— entirely independent of `UInputComponent`/`FODInputConfig`, confirmed by
+grep finding zero references to either in that parsing code.
+`-odmenu`/`-odmenumap`/`-odpick` drive `AODPauseMenu`/`AODMainMenu`'s
+`Toggle()`/`OpenMenu()`/`StartAt()` functions directly via `FTSTicker`,
+never through `InputComponent` — those function bodies were not changed by
+this task, only which physical key *calls* them (`Pause`'s key is now
+config-driven; `AODPauseMenu`'s Escape/Up/Down/Left/Right/Enter navigation
+binds and `AODMainMenu`'s own nav-key binds were not touched at all).
+Full grep evidence and per-hook citations in
+`scratchpad/verify_rebinding.txt` §8-9.
+
+**Build:** `Build.bat OpenDriveUEEditor Win64 Development` succeeded on the
+first attempt (all fixes below made pre-emptively, before ever building):
+plain `enum class EODInputAction` instead of `UENUM(BlueprintType)` (
+`ODInputConfig.h` has no `.generated.h` — not a UCLASS/USTRUCT file, so UHT
+processing would have failed); `EKeys::Gamepad_LeftTrigger`/
+`Gamepad_RightTrigger` (the actual UE 5.8 digital-trigger `FKey` names,
+confirmed via engine-header grep) rather than the nonexistent
+`*TriggerThreshold` names first guessed for `GamepadCandidates[]`.
+
+**Offline verification:** `scratchpad/verify_rebinding.txt` (input-path
+findings, migration-decision reasoning, full action inventory with
+file/line cites, capture-mode state machine, conflict policy, persistence
+round-trip paths, QA-hook non-interference evidence),
+`scratchpad/verify_input_curves.png` + `verify_input_curves_sanity.txt`
+(transfer-function plots + numeric gates, described above) — all in this
+session's scratchpad, not committed (offline working notes, not shipping
+artifacts).
+
+**Caveats — Taylor's live calls, not machine-verifiable offline:**
+- Gamepad button/axis capture cannot be hardware-tested in this
+  environment (no controller attached). The capture code path for a
+  gamepad key is structurally identical to the keyboard path (same
+  `OnCaptureKey(FKey)` handler, same device-class guard via the engine's
+  own `FKey::IsGamepadKey()`), but an actual button press through
+  `BeginCapture`'s gamepad candidate list was never exercised live.
+- Slider step sizes (0.05 deadzone step, 0.25 sensitivity step) and the
+  resulting steering/throttle FEEL at non-default settings — only the
+  underlying math is verified here (continuity, monotonicity, default-
+  equivalence to the old curve); how it feels to actually turn the sliders
+  and drive is Taylor's call, per the standing "run the build live" rule
+  for input/audio tuning.
+- Whether the 25-row rebind panel's scroll window reads well at real
+  screen resolutions — row spacing follows the same
+  `NumRows()*RowHeight+padding` formula as the proven-working
+  `AODCreditsMenu` panel, but "does it look right" needs eyes on it.
+
+Committed: `OpenDriveUE/Source/OpenDriveUE/ODInputConfig.h/.cpp`,
+`ODRebindMenu.h/.cpp` (both new), `ODVehiclePawn.h/.cpp`,
+`ODPauseMenu.h/.cpp`, `ODRaceHUD.h/.cpp`, `ODSettingsMenu.h/.cpp`,
+`ODMainMenu.cpp` (routing/live-refresh plumbing), this note. Not pushed.

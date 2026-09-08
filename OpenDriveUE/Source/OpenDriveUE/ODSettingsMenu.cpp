@@ -8,6 +8,7 @@
 #include "Kismet/GameplayStatics.h"
 
 #include "ODAmbientSoundManager.h"
+#include "ODRebindMenu.h"
 #include "ODVehicleAudio.h"
 #include "ODVehiclePawn.h"
 
@@ -88,8 +89,29 @@ void AODSettingsMenu::BeginPlay()
 
 // ---- selection / adjust ---------------------------------------------------
 
+void AODSettingsMenu::MoveSelection(int32 Dir)
+{
+	if (bRebindOpen)
+	{
+		if (RebindMenu)
+		{
+			RebindMenu->MoveSelection(Dir);
+		}
+		return;
+	}
+	Selected = (Selected + Dir + NumRows()) % NumRows();
+}
+
 void AODSettingsMenu::AdjustSelected(int32 Dir)
 {
+	if (bRebindOpen)
+	{
+		if (RebindMenu)
+		{
+			RebindMenu->AdjustSelected(Dir);
+		}
+		return;
+	}
 	switch (Selected)
 	{
 	case 0: ApplyResolution(Dir); break;
@@ -114,8 +136,32 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 		SaveAudioConfig();
 		break;
 	case 9: ApplyInputDevice(Dir); break;
-	default: break;   // row 10, "Close" - no value, handled by the parent menu's Activate()
+	default: break;   // row 10 "Controls" / row 11 "Close" - no value, handled by the parent menu's Activate()
 	}
+}
+
+void AODSettingsMenu::OpenRebind()
+{
+	EnsureRebindMenu();
+	bRebindOpen = true;
+}
+
+AODRebindMenu* AODSettingsMenu::EnsureRebindMenu()
+{
+	if (RebindMenu)
+	{
+		return RebindMenu;
+	}
+	if (AODRebindMenu* Found = FindActor<AODRebindMenu>(GetWorld()))
+	{
+		RebindMenu = Found;
+		return RebindMenu;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		RebindMenu = World->SpawnActor<AODRebindMenu>();
+	}
+	return RebindMenu;
 }
 
 // ---- graphics ---------------------------------------------------------
@@ -395,6 +441,10 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		break;
 	}
 	case 10:
+		OutLabel = TEXT("Controls");
+		OutValue.Empty();
+		break;
+	case 11:
 		OutLabel = TEXT("Close");
 		OutValue.Empty();
 		break;
