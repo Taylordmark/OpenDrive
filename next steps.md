@@ -4059,3 +4059,157 @@ transition's 1.0 blizzard peak - the one non-smoothstep step in the whole
 param set; fixed in `ODSeasonController.cpp` by easing it down via
 smoothstep over the first `WinterSnowfallDecaySeconds` (300s) of the hold
 instead, re-verified via `scratchpad/verify_snowfall_fix.py`.
+
+### 7.18 Junction unification: shared elevation + lane-marking suppression (2026-09-04, finished/committed 2026-09-08)
+
+Finishes and commits the five road/junction files that sat uncommitted in
+the working tree through the entire seasons arc above (7.17's two passes,
+the deciduous follow-up, the snowfall fix) - `pipeline/build_road_network.py`,
+`pipeline/build_road_stations.py`, `pipeline/road_mesh_common.py`,
+`pipeline/build_road_guardrails.py`, `unreal/apply_road_material.py`. A
+prior agent had implemented and in-game-verified the fix (two junction
+screenshots) but was stopped before its negative-control check and never
+committed; this pass audited the diff, found it complete and correct,
+reconciled the on-disk bake (which had drifted out of sync with the
+uncommitted code - see below), and ran the offline verification gate this
+project now requires in place of `-game` launches.
+
+**The bug (Taylor's report):** at real road junctions (e.g. Blue River
+Parkway x 3rd Street, Silverthorne) crossing roads baked as independent
+stacked ribbons at different elevations with a visible step face, and lane
+markings ran straight through the junction box - because every road is
+baked as an independent ribbon with its own per-road elevation profile and
+nothing previously reconciled two DIFFERENTLY NAMED roads against each
+other (the existing `reconcile_junction_elevations()` only ever compares a
+road against itself - same `seg_idx` or same `road_name`).
+
+**The fix, as found in the diff (pipeline/build_road_stations.py, `main()`):**
+real junction NODES are detected straight from `merge_way_chains()`'s own
+OSM graph degree (`node_degree`, now also returned by that function) - a
+node with 3+ incident ways is a real junction by the exact rule that
+function already uses to decide where to break a chain, so a plain
+same-road continuation through a degree-2 node is never misflagged. Each
+kept segment's chain-start/chain-end node id is threaded through
+(`node_start`/`node_end`) so every real junction a baked segment actually
+touches is found via the graph, not geometric/proximity guessing. For each
+junction node with 2+ surviving participant segments: an outlier exclusion
+drops any participant more than `JUNCTION_MAX_DISAGREEMENT_M` (10 m) from
+the others' median (a segment truncated mid-descent by
+`MAX_SEGMENTS`/`MIN_SEGMENT_STATIONS` must not drag correctly-agreeing
+roads up to its own stranded elevation - caught live via a "48 hits, all
+near junctions" survey); the highest surviving approach wins as the shared
+target elevation (same "only ever raise, never lower" doctrine as the
+existing same-road pass); each participant segment's OWN elevation is then
+blended toward that target using ITS OWN arc-length distance from ITS OWN
+endpoint (never network-wide XY-nearest, which a first cut of this pass
+did and which `verify_terrain_fit.py`'s pre-bake consistency check caught
+failing at 108.91 m max deviation - see the code comment trail for the
+full bug story) - flush (fully replaced) within `JUNCTION_BOX_MARGIN_M`
+(4 m) beyond the pavement half-width, smoothstep-easing back to the
+road's own profile over `JUNCTION_APPROACH_M` (20 m). Bridge/tunnel
+endpoints are excluded from participating entirely (a 51-jump,
+all-bridge-adjacent survey found forcing a structurally-pinned bridge deck
+elevation toward an unrelated surface road's target produced a 34 m jump
+at one overpass - this is the "known side issue" flagged for a future pass,
+deliberately NOT touched here). The resulting per-station 0..1
+`junction_suppress` weight (1.0 deep in the box, smoothstep to 0.0 over the
+approach zone) and boolean `in_junction_box` flag are written into
+`road_stations.json`, threaded through `build_road_network.py` into
+`road_mesh_common.build_road_chunks()`'s ODR3 `uv1.y` channel (repurposed
+from an unused "reserved (0.0)"), which `unreal/apply_road_material.py`
+reads to multiply lane-marking opacity down to zero inside the junction box
+(never gating the base asphalt/gravel look) - see that file's updated
+`M_Road` graph docstring. `build_road_guardrails.py` already skipped
+guardrail placement near `reconcile_junction_elevations()`'s own `touched`
+mask (7.16); this pass additionally passes an `is_bridge` mask into that
+same reconciliation call in both `build_road_stations.py` and
+`build_road_guardrails.py` so a bridge deck's pinned elevation can't get
+matched by XY proximity against an unrelated same-named-road station
+elsewhere (the same bridge exclusion the graph-junction pass needed, applied
+to the older same-road pass too).
+
+**Assessment of the diff:** complete and internally consistent; no
+incomplete/broken code found. One piece of dead code left in place rather
+than touched (minimal-diff instruction, and it's harmless): a first cut of
+the elevation-flatten logic was implemented as two standalone
+`road_mesh_common.py` functions, `compute_junction_influence()` and
+`flatten_junction_elevations()` (network-wide XY-nearest matching) - the
+final, committed logic replaced this with the inline per-segment
+arc-length version directly in `build_road_stations.py.main()` (see that
+function's own bug-story comment), but the two superseded functions were
+never deleted. They are unused (grep-confirmed - referenced only in
+comments), harmless, and documented; flagged here rather than silently
+removed or silently left unmentioned.
+
+**Baked-data consistency:** the on-disk `summit_county` bake had drifted -
+`road_stations.json`'s mtime (Sep 7 16:31) was NEWER than `road_mesh.json`/
+`road_guardrails.json` (Sep 6 11:1x) but did NOT contain the
+`junction_suppress`/`in_junction_box` fields at all, meaning some
+intervening run had regenerated stations without this fix's code (likely
+whatever produced `junction_pads_final.json` at 16:43). Reran, in order,
+against the currently-committed code and the existing cached
+`data/raw/summit_county_test/` (osm.json, dem_tiles.npz - no refetch
+needed): `build_road_stations.py` (362 real junction nodes detected, 6180/
+274644 stations with `junction_suppress`>0, 2060 `in_junction_box`) ->
+`build_road_network.py` -> `export_road_mesh_bin.py` (809/2758 chunks
+nonzero `uv1.y`) -> `build_road_guardrails.py` (5887 stations flagged near a
+junction, 3494 guardrail stations skipped for junction proximity) ->
+`export_road_guardrails_bin.py`. Then ran the `apply_road_material.py`
+`M_Road` rebuild commandlet (`UnrealEditor-Cmd.exe ... -run=pythonscript`,
+`-nullrhi -unattended`) since its expression graph changed - completed with
+0 errors, `ROADMAT built + saved M_Road`. Did NOT rerun the rest of
+`rebuild_area.py`'s ~23 stages (terrain/buildings/walls/biomes/labels/
+water) - out of scope for this fix (those stages don't consume
+`junction_suppress`/`in_junction_box`), and re-carving terrain against the
+now-slightly-different junction-area elevations was explicitly not asked
+for and risks compounding the separately-known bridge-adjacent elevation
+issue flagged above.
+
+**Drift vs. the prior (uncommitted) progress report's own numbers:** 362
+junction nodes / 809 nonzero-uv1.y chunks this run vs. the earlier report's
+366 / 856. Same code against the same cached OSM/DEM inputs - the earlier
+figures came from a never-committed run whose exact `MAX_SEGMENTS`/
+`MIN_SEGMENT_STATIONS`-driven `kept`-segment set can differ by a handful of
+short/filtered chain fragments that leave only one surviving participant at
+a given junction node (skipped per `len(incident) < 2`); not evidence of a
+logic change. Noted honestly in `verify_junction_stats.txt` rather than
+silently reconciled to match the old numbers.
+
+**Offline verification (scratchpad, no `-game` launch per current
+project-wide protocol):**
+- `verify_junction_elevation.png` - two real junctions (Blue River Parkway
+  x 3rd Street, Silverthorne; Ski Hill Rd/N+S Main St/Lincoln Ave,
+  Breckenridge, a real 4-way), each road's own elevation profile vs.
+  distance-from-junction-center, before (a pre-rerun backup of
+  `road_stations.json`, dashed) vs. after (the freshly-reconciled bake,
+  solid). Elevation spread among participants within 15 m of the junction
+  center: Silverthorne 0.48 m -> 0.04 m; Breckenridge 1.30 m -> 0.01 m -
+  both collapse to within a few cm, the flush-pavement goal.
+- `verify_junction_map.png` - ~300 m top-down box around each junction,
+  stations colored by `junction_suppress` (0..1) with the actual
+  `JUNCTION_BOX_MARGIN_M`+half-width (8.5 m) and approach-zone-end
+  (28.5 m) circles overlaid: suppression is 1.0 (yellow) tightly inside the
+  box circle, fades smoothly to 0 by the approach circle, and reads exactly
+  0 everywhere else on the same roads - including at OTHER, unrelated real
+  junctions caught incidentally inside the same 300 m box, which correctly
+  show their own independent suppression halos.
+- `verify_junction_stats.txt` - the counts above, cross-checked against the
+  prior uncommitted-work report's figures with the drift explanation.
+
+**What this offline pass cannot prove** (per the project's current
+verification protocol, no `-game` launch performed): whether the junction
+actually READS as flush/unified pavement in-engine (lighting, texture
+continuity, the z-bias tiebreaker's visual effect at a real crossing camera
+angle) and whether lane markings visibly stop at the junction box edge
+rather than merely having their opacity mask zeroed in data. The prior
+agent's own two in-game screenshots (referenced in its handoff, not
+re-verified here) are the only visual evidence to date; Taylor's own
+drive-test is the remaining gate, particularly at Blue River Parkway x 3rd
+Street and at least one other multi-way junction of his choosing. The
+known bridge-adjacent elevation-jump interaction (where
+`reconcile_junction_elevations()` meets bridge-flagged stations) remains
+unfixed by design - flagged for a future, separately-scoped pass.
+
+Committed: `pipeline/build_road_network.py`, `pipeline/build_road_stations.py`,
+`pipeline/road_mesh_common.py`, `pipeline/build_road_guardrails.py`,
+`unreal/apply_road_material.py`. Not pushed.

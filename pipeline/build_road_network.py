@@ -133,6 +133,13 @@ def main():
         is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
         is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
         highway_full = seg.get("highway_class")   # absent in older files - defaults to unknown class
+        # junction_suppress (2026-09-04, Arc 7.17): absent in older
+        # road_stations.json -> zeros (no junction influence, same as the
+        # pre-fix behavior). See build_road_stations.py's module docstring
+        # and road_mesh_common.build_road_chunks()'s uv1.y doc for the full
+        # path this feeds: ODR3 marking-suppression channel + z-bias.
+        junction_suppress_full = np.array(
+            seg.get("junction_suppress", [0.0] * len(s_full)), dtype=np.float64)
         runs = list(split_excluding_tunnels(is_tunnel))
         if len(runs) > 1:
             n_tunnel_truncated += 1
@@ -146,10 +153,12 @@ def main():
             z = road_ue_z_m(h, ROAD_LIFT, ORIGIN_HEIGHT_M)
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_classes = highway_full[lo:hi] if highway_full else None
+            junction_suppress = junction_suppress_full[lo:hi]
             name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
             chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
                                                    spacing=STATION_SPACING, is_oneway=is_oneway,
-                                                   highway_classes=highway_classes)
+                                                   highway_classes=highway_classes,
+                                                   junction_suppress=junction_suppress)
             segments.append({"name": name, "chunks": chunks})
             segment_geoms.append((cx, cy, cz))
             length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0

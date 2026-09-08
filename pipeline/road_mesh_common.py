@@ -525,7 +525,8 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        chunk_stations=CHUNK_STATIONS,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
-                       bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None):
+                       bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
+                       junction_suppress=None):
     """Build banked, skirted road mesh chunks from station arrays.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
@@ -561,7 +562,15 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     full pavement width = 2 * uv1.x; currently constant per chunk since
     road_half_width doesn't vary by class yet, but written per-vertex so a
     future variable-width profile doesn't need another format bump),
-    uv1.y = reserved (0.0).
+    uv1.y = junction-suppress weight, 0..1 (Arc 7.17, 2026-09-04 - repurposed
+    from the former "reserved (0.0)"; still 0.0 when `junction_suppress` is
+    not supplied, so old callers/data are unaffected). 1.0 means "inside a
+    real junction's flush footprint" - unreal/apply_road_material.py reads
+    this to stop drawing lane markings through the junction box; it never
+    gates the base asphalt/gravel look, only the painted-line mask. Also
+    drives a tiny deterministic per-road-class Z nudge here
+    (JUNCTION_ZBIAS_PER_CLASS_M) so two roads flattened to the same target
+    elevation at a crossing don't z-fight - see that constant's docstring.
 
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
     {"name","vertices","uvs","uv1","triangles","oneway","road_class_id",
@@ -596,13 +605,33 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                (road_half_width + skirt_extra, -skirt_drop)]
     n_prof = len(profile)
 
+    # junction_suppress (Arc 7.17): 0..1 per station from build_road_
+    # stations.py's junction-flatten pass (road_mesh_common.
+    # flatten_junction_elevations/compute_junction_influence). Feeds the
+    # ODR3 uv1.y marking-suppression channel below AND a tiny per-class Z
+    # nudge (JUNCTION_ZBIAS_PER_CLASS_M) - see that constant's docstring for
+    # why coplanar flattened ribbons need a deterministic z-bias tiebreaker.
+    if junction_suppress is not None:
+        junction_suppress_arr = np.asarray(junction_suppress, dtype=np.float64)
+        if highway_classes is not None:
+            station_class_id = np.array(
+                [ROAD_CLASS_ID.get(c, DEFAULT_ROAD_CLASS_ID) for c in highway_classes],
+                dtype=np.float64)
+        else:
+            station_class_id = np.zeros(len(s))
+        zbias_m = JUNCTION_ZBIAS_PER_CLASS_M * station_class_id * junction_suppress_arr
+    else:
+        junction_suppress_arr = np.zeros(len(s))
+        zbias_m = np.zeros(len(s))
+
     def station_verts(i):
         out = []
+        zb_cm = zbias_m[i] * 100.0
         for off, dz in profile:
             lift = bank_tan[i] * max(0.0, off * raise_side[i])  # outer-edge raise
             out.append((cx[i] + rx[i] * off * 100.0,
                         cy[i] + ry[i] * off * 100.0,
-                        cz[i] + (dz + lift) * 100.0))
+                        cz[i] + (dz + lift) * 100.0 - zb_cm))
         return out
 
     # u-coordinate per profile column, normalized to the PAVEMENT edges
@@ -620,7 +649,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             verts.extend(station_verts(i))
             v = s[i]   # meters, continuous - see build_road_chunks docstring
             uvs.extend([(prof_u[j], v) for j in range(n_prof)])
-            uv1.extend([(road_half_width, 0.0) for _ in range(n_prof)])
+            uv1.extend([(road_half_width, float(junction_suppress_arr[i])) for _ in range(n_prof)])
         for irow in range(c1 - c0):
             b = irow * n_prof
             for j in range(n_prof - 1):
@@ -643,6 +672,181 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             "lane_count": lane_count,
         })
     return chunks, cx, cy, cz
+
+
+# --------------------------------------------------- junction unification
+# Arc 7.17 (2026-09-04, Taylor's Blue River Parkway / Silverthorne
+# screenshot): crossing roads baked as independent stacked ribbons at
+# different heights, with lane markings running straight through the
+# junction box. Root cause confirmed: reconcile_junction_elevations() above
+# only reconciles a SINGLE road's own switchback/chain-break disagreement
+# (its `in_scope` test requires matching seg_idx OR matching road_name) -
+# two DIFFERENTLY NAMED roads crossing at a real OSM junction node never
+# enter that pass at all, so nothing anywhere previously made two different
+# roads' ribbons agree on elevation where they meet, and nothing suppressed
+# lane markings near a crossing. build_road_stations.py detects real
+# junction NODES straight from merge_way_chains()'s own OSM graph degree
+# (>=3 incident ways at a shared node - the same test that function already
+# uses to decide where to BREAK a chain, so a plain "two edges of the same
+# road continuing through a degree-2 node" is never misflagged as a
+# junction) and builds a `junctions` list this module's functions consume.
+JUNCTION_BOX_MARGIN_M = 4.0     # extra radius beyond a road's pavement half-
+                                  # width for the flush "box" zone - within
+                                  # this radius of a junction center, a
+                                  # station's elevation is fully replaced by
+                                  # the junction's shared elevation (pavement
+                                  # meets flush, no step) and lane markings
+                                  # are fully suppressed (open junction
+                                  # pavement, no centerline running through
+                                  # an intersection).
+JUNCTION_APPROACH_M = 20.0      # beyond the box radius, elevation/markings
+                                  # blend smoothly back to each road's own
+                                  # profile over this additional distance (a
+                                  # smoothstep ease, not a hard edge) so
+                                  # there's no visible kink/pop where the
+                                  # junction's influence ends - within
+                                  # Taylor's requested 15-25 m range.
+JUNCTION_MAX_DISAGREEMENT_M = 10.0   # = WALL_MIN_GRADE (0.50, defined below -
+                                  # can't reference it directly yet at this
+                                  # point in the module) * JUNCTION_APPROACH_M
+                                  # (2026-09-04, bug #3 in this same pass -
+                                  # Taylor's "48 hits, all near junctions"
+                                  # survey after the bridge-exclusion fix
+                                  # above): build_road_stations.py's "highest
+                                  # incident approach wins" doctrine assumed
+                                  # any disagreement at a real junction node
+                                  # means one side just hasn't grade-smoothed
+                                  # down to the shared point yet (true for the
+                                  # original Lake Hughes case) - but a KEPT
+                                  # segment can also get cut short by MAX_
+                                  # SEGMENTS/MIN_SEGMENT_STATIONS mid-descent,
+                                  # leaving its own endpoint stranded well
+                                  # above the real ground its neighbors
+                                  # correctly agree on. Naively taking max()
+                                  # over ALL incident elevations then drags
+                                  # the CORRECT, mutually-agreeing roads up to
+                                  # match that stranded outlier instead of the
+                                  # other way around (seg043/seg234 agreed
+                                  # within 1m at 2552m; a truncated seg150
+                                  # sat at 2627m and won anyway, tearing a 74m
+                                  # cliff into two blameless roads over just
+                                  # JUNCTION_APPROACH_M). Since every incident
+                                  # road meets at the SAME node (plan-view
+                                  # distance ~0), any real at-grade
+                                  # disagreement has to be small; reusing
+                                  # WALL_MIN_GRADE (the "not a single
+                                  # heightfield/profile transition any more"
+                                  # ceiling classify_wall_stations/
+                                  # reconcile_junction_elevations already use
+                                  # elsewhere in this file) over the
+                                  # JUNCTION_APPROACH_M blend distance gives
+                                  # the same "steepest a real approach ramp
+                                  # could plausibly be" bound here: a
+                                  # participant more than this far from the
+                                  # OTHERS' median is excluded from the node
+                                  # entirely (neither contributes to the
+                                  # target elevation nor gets flattened) -
+                                  # same "leave it alone, don't manufacture
+                                  # new geometry from it" treatment already
+                                  # given to bridge/tunnel endpoints above.
+JUNCTION_ZBIAS_PER_CLASS_M = 0.02   # tiny deterministic per-road-class Z
+                                  # nudge (2 cm/class step below the major
+                                  # road), scaled by junction influence
+                                  # weight - once every road touching a
+                                  # junction is flattened to the SAME target
+                                  # elevation their ribbons become coplanar
+                                  # right at the crossing and can z-fight;
+                                  # nudging the lower-priority (higher
+                                  # road_class_id - see ROAD_CLASS_ID) road
+                                  # very slightly below the major one, only
+                                  # inside the junction's own influence zone,
+                                  # resolves it deterministically without
+                                  # reading as a visible step.
+
+
+def compute_junction_influence(east_m, north_m, junctions,
+                                half_width_m=ROAD_HALF_WIDTH,
+                                box_margin_m=JUNCTION_BOX_MARGIN_M,
+                                approach_m=JUNCTION_APPROACH_M):
+    """For every station, finds its NEAREST junction (if any within the
+    combined box+approach influence radius) and returns three parallel
+    arrays:
+
+      elev_m   - the junction's shared target elevation to blend this
+                 station's own profile toward (nan where no junction is in
+                 range of this station at all).
+      blend_t  - 0.0 within the flush "box" radius (this station's own
+                 profile should be entirely REPLACED by elev_m) smoothstep-
+                 rising to 1.0 at the outer approach radius (this station's
+                 own original profile/markings are entirely kept, no
+                 junction influence at all). 1.0 (full original profile,
+                 zero influence) wherever no junction is in range.
+      in_box   - bool, True within the flush box radius itself - the "open
+                 junction pavement" zone: no lane markings, no roadside
+                 guardrail/barrier placement (an intersection's own
+                 footprint is never a drop-off/edge condition those care
+                 about).
+
+    `junctions` is a list of {"east_m", "north_m", "elev_m"} dicts (see
+    build_road_stations.py's junction-detection block). Grid-bucketed (cell
+    = box+approach radius, 3x3 neighborhood per query) so this stays roughly
+    linear across hundreds of thousands of stations - same pattern as
+    detect_elevation_conflict_pairs() above."""
+    n = len(east_m)
+    east_m = np.asarray(east_m, dtype=np.float64)
+    north_m = np.asarray(north_m, dtype=np.float64)
+    elev_out = np.full(n, np.nan, dtype=np.float64)
+    blend_t = np.ones(n, dtype=np.float64)
+    in_box = np.zeros(n, dtype=bool)
+    if not junctions:
+        return elev_out, blend_t, in_box
+    box_r = half_width_m + box_margin_m
+    outer_r = box_r + approach_m
+    cell = max(outer_r, 1e-6)
+    jx = [float(j["east_m"]) for j in junctions]
+    jy = [float(j["north_m"]) for j in junctions]
+    jz = [float(j["elev_m"]) for j in junctions]
+    buckets = defaultdict(list)
+    for k in range(len(junctions)):
+        buckets[(int(math.floor(jx[k] / cell)), int(math.floor(jy[k] / cell)))].append(k)
+    for i in range(n):
+        scx = int(math.floor(east_m[i] / cell))
+        scy = int(math.floor(north_m[i] / cell))
+        best_d = outer_r
+        best_k = -1
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for k in buckets.get((scx + dx, scy + dy), ()):
+                    d = math.hypot(jx[k] - east_m[i], jy[k] - north_m[i])
+                    if d < best_d:
+                        best_d = d
+                        best_k = k
+        if best_k < 0:
+            continue
+        elev_out[i] = jz[best_k]
+        if best_d <= box_r:
+            blend_t[i] = 0.0
+            in_box[i] = True
+        else:
+            t = (best_d - box_r) / (outer_r - box_r)
+            blend_t[i] = t * t * (3 - 2 * t)   # smoothstep
+    return elev_out, blend_t, in_box
+
+
+def flatten_junction_elevations(east_m, north_m, elev_m, junctions,
+                                 half_width_m=ROAD_HALF_WIDTH,
+                                 box_margin_m=JUNCTION_BOX_MARGIN_M,
+                                 approach_m=JUNCTION_APPROACH_M):
+    """Blends every station's elevation toward its nearest junction's shared
+    elevation via compute_junction_influence() above - goal 2 of the
+    junction-unification fix (flush pavement, no stacked-ribbon step face).
+    Returns a NEW array (input not mutated)."""
+    elev_out = np.array(elev_m, dtype=np.float64)
+    target, t, _in_box = compute_junction_influence(
+        east_m, north_m, junctions, half_width_m, box_margin_m, approach_m)
+    has = ~np.isnan(target)
+    elev_out[has] = target[has] + t[has] * (elev_out[has] - target[has])
+    return elev_out
 
 
 def road_ue_z_m(elev_m, road_lift_m, origin_height_m):
@@ -978,7 +1182,7 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
                                    radius_m=CONFLICT_RADIUS_M, max_grade=CONFLICT_MAX_GRADE,
                                    min_gap_m=CONFLICT_MIN_GAP_M,
                                    same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
-                                   wall_min_grade=WALL_MIN_GRADE):
+                                   wall_min_grade=WALL_MIN_GRADE, is_bridge=None):
     """The reusable road-road junction smoothing pass (Taylor, 2026-08-24: two
     roads meeting/crossing at grade were disagreeing on elevation by meters
     at the same physical spot - Lake Hughes near spawn, one road's pavement
@@ -1028,6 +1232,23 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
     back), the sign is flipped so both sides still climb/descend together
     rather than mirror-imaging each other.
 
+    `is_bridge` (optional bool array parallel to the input stations) drops
+    any pair where EITHER side is a bridge/tunnel station from `keep`
+    entirely (2026-09-04, mirrors the exclusion build_road_stations.py's
+    graph-junction flatten pass applies for the same reason - see that
+    pass's own comment above `junction_incident`). Found via a 51-jump,
+    all-bridge-adjacent survey of road_stations.json (up to 34 m over one
+    5 m station spacing, e.g. seg208): this pass's `in_scope` test is only
+    "same seg_idx or same road_name" - it has no notion of physical
+    connectivity, so a bridge deck's own DEM-independent, span-interpolated
+    elevation (fill_structure_gaps/is_struct_s) can get matched, purely by
+    XY proximity within radius_m, against an unrelated same-named-road
+    station elsewhere in the network that the bridge doesn't actually
+    connect to, and get snapped toward it - a near-vertical pop right at
+    the deck's abutment. Left `None` (the default) preserves the original
+    2026-08-24 Lake Hughes same-road behavior unchanged for callers that
+    don't have a bridge flag handy.
+
     Returns (elev_m, touched, pinned_grade): a NEW array (input is not
     mutated) with these snaps applied, a parallel bool mask of which
     stations changed, and a parallel float array (nan where unset) of the
@@ -1051,9 +1272,12 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
     if len(pairs_i) == 0:
         return elev_m, touched, pinned_grade
 
+    is_bridge_arr = None if is_bridge is None else np.asarray(is_bridge, dtype=bool)
     keep = []
     for k in range(len(pairs_i)):
         i, j = int(pairs_i[k]), int(pairs_j[k])
+        if is_bridge_arr is not None and (is_bridge_arr[i] or is_bridge_arr[j]):
+            continue
         in_scope = (seg_idx[i] == seg_idx[j]) or (
             bool(road_name[i]) and road_name[i] == road_name[j])
         if not in_scope:

@@ -213,8 +213,15 @@ def main():
         np.full(len(seg["east_m"]), i, dtype=np.int32) for i, seg in enumerate(data["segments"])])
     all_station_idx = np.concatenate([np.arange(len(seg["east_m"])) for seg in data["segments"]])
     all_road_name = [name for seg in data["segments"] for name in seg["road_name"]]
+    # is_bridge here is road_stations.json's own carve-exclusion flag (bridge/
+    # tunnel span, dilated) - same 2026-09-04 exclusion build_road_stations.py
+    # applies when it first runs this pass, so a structure station's pinned
+    # elevation can't get matched by XY proximity against an unrelated
+    # same-named-road station and break a guardrail run on a spurious pop.
+    all_is_bridge = np.concatenate([np.array(seg["is_bridge"], dtype=bool) for seg in data["segments"]])
     _reconciled, junction_touched, _pinned = reconcile_junction_elevations(
-        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
+        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name,
+        is_bridge=all_is_bridge)
     offsets = np.concatenate([[0], np.cumsum([len(seg["east_m"]) for seg in data["segments"]])])
     print(f"{int(junction_touched.sum())} station(s) flagged near a road-road junction "
           f"(guardrail runs will break there)")
