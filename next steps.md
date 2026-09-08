@@ -6043,3 +6043,114 @@ Committed: `OpenDriveUE/Source/OpenDriveUE/ODInputConfig.h/.cpp`,
 `ODRebindMenu.h/.cpp` (both new), `ODVehiclePawn.h/.cpp`,
 `ODPauseMenu.h/.cpp`, `ODRaceHUD.h/.cpp`, `ODSettingsMenu.h/.cpp`,
 `ODMainMenu.cpp` (routing/live-refresh plumbing), this note. Not pushed.
+
+### 7.33 Embankment/bridge station-data audit: residual reconcile_junction_elevations() corruption after §7.20 - two findings, both left for Taylor's decision (2026-09-08)
+
+**Task:** §7.20 fixed the two false-pair-match classes that inflated
+"bridge" 76.7% (57,222 -> 13,723 stations), but explicitly left the
+surviving embankment/bridge population unverified at smaller magnitude -
+"pairs inside the new 20m radius or within 5 edge stations could still be
+false... hiking or sinking elevations by a few meters." This audit
+(ANALYSIS-FIRST, offline only, no `-game` launch) closes that caveat.
+
+**Method:** rebuilt `road_stations.json` end-to-end via `build_road_
+stations.py`'s own `main()` (output redirected to a scratchpad dir, never
+touching the committed `data/` tree), with a scratchpad-local monkeypatch
+capturing the exact PRE-reconciliation arrays passed into `reconcile_
+junction_elevations()` - i.e. what the un-reconciled elevation would be.
+Re-derived the function's own in-scope/keep filtering against that
+captured state at the CURRENT shipped parameters (`JUNCTION_RECONCILE_
+RADIUS_M=20.0`, `JUNCTION_SAME_NAME_EDGE_STATIONS=5`) to enumerate every
+pair that fires TODAY and the elevation delta it imposes. Separately
+reran `build_road_embankments.py` fresh for the drop-population
+cross-check and the §7.22/§7.23 regression gate. No pipeline files edited.
+
+**Finding 1 (in scope - reconcile_junction_elevations residual gap,
+confirmed real, not fixed here):** 295 pairs fire at the current
+parameters (of 32,305 raw 20m-radius candidates, 274,644 stations
+countywide) - 196 stations / 28 segments / ~14 named roads actually get
+snapped. Of the 295: 242 (82%) are SAME-SEGMENT ("switchback-class")
+pairs - the branch §7.20 left completely unrestricted beyond the radius
+tightening, with no analog to `JUNCTION_SAME_NAME_EDGE_STATIONS`. Its own
+docstring assumed this branch was "already correctly scoped by seg_idx
+equality"; the data says otherwise: 0 of 295 firing pairs sit anywhere
+near the only documented genuine same-spot precedent's distance range
+(Lake Hughes, 1.1-2.4m) - 66% sit in the outermost 5m of the 20m radius,
+right at the truncation boundary, and 88% touch no real graph-detected
+junction at all. Imposed elevation-snap magnitude: median 4.60m, p95
+7.77m, max 9.60m - NOT the "smaller-magnitude, hides under 7m" corruption
+originally anticipated; 10% of firing pairs individually impose a
+bridge-threshold-comparable (>=7m) change on their own. Worst offender:
+Robbers Nest Drive seg347, two points 19.8m apart in plan view but 16
+stations (~80m) apart along the road - a real ~10m elevation change over
+an ordinary switchback climb, forcibly flattened together, artificially
+raising the lower station's apparent height above terrain (same bias
+direction as §7.20's original bug). Two of the worst-hit roads (Robbers
+Nest Drive, County Road 4) are roads §7.22 independently already flagged
+as unpaved/switchback-bench roads for a different reason (false bridge
+sub-classification) - same physical road class, second independent false
+signal. By contrast, the 4 firing pairs on "I 70;CO 9" (the Silverthorne
+interchange) look genuine: smaller (2.8-3.4m), at a named ramp junction,
+consistent with the fix's actual intent.
+Full data: `scratchpad/verify_embank_audit.png` (suspect-pair county map,
+imposed-error histogram, current drop-magnitude distribution, worst-pair
+profile), `scratchpad/verify_embank_audit_stats.txt` (full pair inventory,
+percentile tables, worst-offender lists, per-branch breakdown).
+**Not fixed in this pass** - per this audit's own hard rule against
+tuning thresholds on a hunch, and because the correct fix isn't a revert
+to an established value the way §7.20's own two constants were: it needs
+a NEW same-segment analog to `JUNCTION_SAME_NAME_EDGE_STATIONS` (e.g. a
+station-index-gap restriction), which - like `REBOUND_WINDOW_M` in §7.22 -
+would need empirical tuning against real switchback data, not a hunch.
+**Decision for Taylor:** approve a same-segment restriction design (this
+audit's data is enough to start from - see the stats file) and a follow-up
+pass to implement + rebake, or accept the current ~14-road/9.6m-max
+residual as tolerable given §7.20 already fixed the overwhelming majority
+(145,742 -> 295 firing pairs) of the original bug.
+
+**Finding 2 (adjacent, out of this audit's declared scope - §7.22/§7.23
+boundary regression, unrelated root cause, also not fixed here):** the
+audit's own deliverable #5 (cheap regression check against §7.22/§7.23's
+documented numbers) does NOT hold on current data. Documented (2026-09-07):
+23 genuine bridge runs / 1.775 km, water-crossing trigger firing 0 new
+stations. Actual (this fresh bake, later the same day): 122 genuine runs /
+2.69 km, water-crossing trigger firing on 485 stations (384 via the
+UNCONDITIONAL both-edges-in-water case §7.23's own doc measured at zero).
+Root cause, verified not guessed: §7.26/§7.27 (same day, AFTER §7.23) fed
+river/stream waterway ribbon polygons into the SAME "lakes" list §7.23's
+water-crossing test reads (`build_water_tiles.py`'s own docstring: "fed
+into the SAME 'lakes' list"). §7.23's discriminator (both pavement edges
+inside one polygon = unconditionally genuine, no clearance guard, no
+paved/rebound gate) was calibrated only against real lake/reservoir
+polygons, where that geometry genuinely implies open water. A narrow
+river/stream ribbon is a different shape entirely - any ordinary road
+crossing a named creek (culvert or real bridge, no distinction) can
+trivially have both 9m-apart pavement edges land inside a several-meter
+ribbon, no elevation gap required. §7.27's gap-cutting only protects
+crossings that were NOT already reading as bridge at water-tile-bake time;
+crossings that already were are deliberately left ribbon-spanning-straight-
+across (so a real deck renders over open water) - which the now-
+unconditional water trigger reads back as proof of a genuine crossing, in
+a self-reinforcing loop across ordinary highway creek culverts (23
+separate "Gerald R. Ford Memorial Highway"/I-70 runs alone). This is a
+real, material issue but touches `build_water_tiles.py`'s ribbon-into-
+lakes design and §7.23's own discriminator, neither of which this audit's
+scope (reconcile_junction_elevations corruption) authorized changing.
+**Decision for Taylor:** needs its own scoped pass (likely: the
+unconditional both-edges-in-water case should require a minimum polygon
+width/area, or ribbons should carry a distinct type from lake rings so the
+water-crossing test can tell them apart) - not attempted here.
+
+Verdict: NOT "no material residual corruption." Bound (Finding 1): 196
+stations / 28 segments / ~14 named roads directly touched county-wide
+(0.07% of 274,644 stations), imposed magnitude up to 9.6m, median 4.6m -
+small in count (§7.20 fixed the overwhelming majority), not small in
+per-station magnitude, mechanism not resolved, only narrowed to the
+same-segment branch. Both findings are the audit brief's own "in-between"
+case (real, evidenced mechanism gaps; the concrete fixes need threshold-
+tuning judgment or scoped follow-up work, not a hunch) - documented here
+per that brief's own instruction, no pipeline code changed by this audit.
+
+Committed: this note only (`next steps.md`). Bakes/scratchpad analysis
+outputs are gitignored/scratchpad-local, not committed, matching
+§7.18-7.23 precedent. Not pushed.
