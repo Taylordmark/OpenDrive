@@ -5383,3 +5383,101 @@ ambient/manifest.json` (doc/comment updates reflecting both), this note.
 Normalized WAVs and the regenerated `.bin` sidecar are gitignored, same as
 7.28 — regenerated locally by re-running `normalize_ambient_audio.py` /
 `build_ambient_zones.py`, not committed. Not pushed.
+
+**Correction (2026-09-08, post-review): two defects found in the above,
+both fixed.**
+
+1. **Waterway raster was effectively empty.** The "scattered isolated
+   points... not a registration or rasterization bug" call above was
+   wrong — it *was* a rasterization bug. `rasterize_water()`'s waterway
+   loop only marked a cell when the CELL CENTER fell within
+   `WATERWAY_HALFWIDTH_M` (3.0m) of the segment. Cells are 100m
+   (`CELL_SIZE_CM`) wide, so a polyline threading the grid mostly clips
+   cell EDGES, not centers — almost every cell it geometrically passed
+   through was silently dropped, leaving 542 near-random hits for an
+   ~870km network instead of a connected trace, which killed the
+   distance-transform (and therefore the 60m Creek fade) along nearly the
+   whole river network. The same class of bug hit the lake polygon
+   rasterizer too, worse: `osm_water.json`'s ~1,600 polygons have a
+   *median* bbox of ~30-40m — smaller than one 100m cell — so pure
+   cell-center point-in-polygon testing missed 1,239/1,600 (77%) of them
+   outright. (The "lake count is tiny" assumption in the old docstring
+   was true of the count, not the size.)
+
+   Fixed both, keeping the existing per-feature bbox limiting (a naive
+   full-grid version was previously killed after >15min — that constraint
+   is preserved, not regressed):
+   - `waterway_mask`: hit threshold widened from `d <= halfwidth_cm` to
+     `d <= halfwidth_cm + CELL_SIZE_CM*0.5*sqrt(2)` (the cell's own
+     half-diagonal), so every cell footprint a segment actually crosses is
+     registered, not just the ones its center happens to land in. bbox pad
+     widened to match.
+   - `lake_mask`: switched from cell-center point-in-polygon
+     (`matplotlib.path`) to exact polygon-vs-cell-square intersection
+     (`shapely`), still bbox-limited per polygon so it stays fast (~1s for
+     the whole file, not a full-grid scan).
+
+   Result (same input data, `<=60m` band): lake-adjacent cells 2,852 →
+   6,688; waterway-adjacent cells 542 → 12,470 (now a visibly connected
+   dendritic trace of the Blue River/Snake River/Tenmile Creek network,
+   not a scatter — see `verify_ambient_split2.png`); confluence overlap 46
+   → 1,695. Regenerated the sidecar: same 307,726 cells/2,154,122 bytes/
+   `ODA2` layout, generation id `e26dcbfb2f64c684` (byte-for-byte format
+   unchanged, only the water-distance *values* changed, so no C++/loader
+   changes were needed and none were made). Caveat: even fixed, 100m cells
+   are still coarse relative to a 3m creek half-width — the field is now
+   geometrically *correct* (every cell the line crosses is marked, and the
+   distance transform propagates from a connected mask instead of
+   scattered dots) but still resolves a creek's location to only ±~70m at
+   the finest; that's the module's deliberate "coarse uniform grid, not a
+   streaming-tile format" scoping call, not something this fix changes.
+
+2. **`town_hum` loop-seam regression from Part A's trim.** Part A's fix
+   correctly trimmed `town_hum`'s 48ms *head* encoder padding, and
+   correctly left its genuine 211ms *tail* fade alone (over the 150ms
+   cap). But the two together made the loop objectively worse: pre-trim
+   the loop went quiet-tail-into-quiet-head (jump +8.44dB); post-trim it
+   went quiet-tail-into-full-level-head (jump +29.52dB) — an audible pop
+   every ~161s loop that did not exist before Part A. `creek_babble`'s
+   fix was fine; this one asset's specific combination (trimmable head +
+   untrimmable tail) wasn't checked against its own *before* state.
+
+   Fixed by measuring the seam after trimming and, only if it still
+   exceeds a 6dB gate, applying a 225ms equal-power crossfade that blends
+   the tail into a *reversed* copy of the clip's own head (so the file's
+   very last sample lands on `head[0]` — the actual sample the loop wraps
+   to next — rather than on whatever the head sounds like 225ms in; an
+   initial non-reversed version overshot to -8.0dB because `town_hum`'s
+   head has its own ~300ms attack ramp, so blending against same-offset
+   head content targeted the wrong point). `creek_babble` doesn't trigger
+   the gate (already ~0.7dB post-trim) and is untouched.
+
+   Result (seam jump, pre-trim `68d6340^` → post-trim `68d6340` →
+   post-fix now): `forest_wind` -1.25 → -1.25 → -1.25 (untouched),
+   `creek_babble` +49.91 → -0.69 → -0.69 (preserved), `lake_shore` -4.57 →
+   -4.57 → -4.57 (untouched), `town_hum` +8.44 → +29.52 → **+0.04**
+   (fixed, well inside the pre-trim gate), `alpine_wind` +1.08 → +1.08 →
+   +1.08 (untouched). All 5 SoundWaves re-imported clean via
+   `unreal/import_ambient_audio.py`. Caveat: the crossfade is a level/
+   spectral-envelope match, not a waveform-phase match — it should read
+   as seamless (`verify_ambient_seams3_zoom.png`'s stitched waveform is
+   visually continuous through the loop point) but whether it's audibly
+   perfect is Taylor's live-listen call, not a number this pass can settle.
+
+   Also relevant to defect 1's caveat above and worth flagging together:
+   both defects came from the same root mistake — treating a coarse-grid/
+   small-feature or trim/no-symmetric-guarantee edge case as "verified"
+   because the aggregate numbers looked plausible, without checking the
+   specific asset/feature that combination actually breaks.
+
+Fixed in: `pipeline/build_ambient_zones.py` (`rasterize_water()`),
+`content_src/audio/ambient/normalize_ambient_audio.py`
+(`loop_seam_jump_db()` / `apply_loop_crossfade()`, wired into `main()`).
+Re-ran `normalize_ambient_audio.py` → re-imported all 5 SoundWaves →
+re-ran `build_ambient_zones.py` (same order as Part A/B originally).
+Verification: scratchpad `verify_ambient_split2.png`/`_stats.txt` (waterway
+panel now a connected trace, before/after cell counts) and
+`verify_ambient_seams3.png`/`.txt`/`_zoom.png` (3-column seam history table
++ zoomed loop-point plots for all 5 assets, town_hum/creek_babble detail).
+No C++ changes; `Build.bat` not re-run (ODA2 layout unchanged, loader reads
+whatever the sidecar says). Not pushed.
