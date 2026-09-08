@@ -221,7 +221,16 @@ per_instance_random = MEL.create_material_expression(
     m_fol, unreal.MaterialExpressionPerInstanceRandom, -700, 1050)
 desync = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -500, 1050)
 desync_lo = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -700, 1200)
-desync_lo.set_editor_property("r", 0.55)
+# 2026-09-07 polish pass: raised from 0.55 - the winter QA shot
+# (season_winter.png) showed conifers still reading plain green at driving
+# distance, only detectable as frosted in a zoomed pixel crop. 0.55 meant the
+# laggiest instance only ever reached a 55% blend toward snow_color even at
+# full SnowCover=1, which the two-sided-foliage subsurface term's still-green
+# MP_SUBSURFACE_COLOR (see snowed_subsurface below, added this same pass)
+# fights against at grazing/backlit angles. 0.82 keeps SOME per-instance
+# desync (a laggiest tree is still visibly behind the leaders) while making
+# every conifer read as clearly frosted, not just tinted, once winter holds.
+desync_lo.set_editor_property("r", 0.82)
 desync_hi = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -700, 1300)
 desync_hi.set_editor_property("r", 1.0)
 if not MEL.connect_material_expressions(desync_lo, "", desync, "A"):
@@ -231,11 +240,29 @@ if not MEL.connect_material_expressions(desync_hi, "", desync, "B"):
 if not MEL.connect_material_expressions(per_instance_random, "", desync, "Alpha"):
     raise RuntimeError("could not connect PerInstanceRandom -> desync Lerp.Alpha")
 
-snow_amount = MEL.create_material_expression(m_fol, unreal.MaterialExpressionMultiply, -200, 1050)
-if not MEL.connect_material_expressions(snow_cover_param, "", snow_amount, "A"):
-    raise RuntimeError("could not connect SnowCover param -> snow_amount.A")
-if not MEL.connect_material_expressions(desync, "", snow_amount, "B"):
-    raise RuntimeError("could not connect desync -> snow_amount.B")
+snow_amount_raw = MEL.create_material_expression(m_fol, unreal.MaterialExpressionMultiply, -200, 1050)
+if not MEL.connect_material_expressions(snow_cover_param, "", snow_amount_raw, "A"):
+    raise RuntimeError("could not connect SnowCover param -> snow_amount_raw.A")
+if not MEL.connect_material_expressions(desync, "", snow_amount_raw, "B"):
+    raise RuntimeError("could not connect desync -> snow_amount_raw.B")
+
+# 2026-09-07 polish pass: steepen the response curve so canopies reach a
+# strongly-frosted look well before SnowCover hits 1.0 (Crew 2's winter
+# conifers are boldly white-topped, not a subtle tint) instead of a slow
+# linear crawl. SnowCover=0 is untouched - Multiply/Clamp of 0 is still 0, so
+# the byte-for-byte zero-regression baseline holds.
+snow_boost_const = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -200, 1150)
+snow_boost_const.set_editor_property("r", 1.45)
+snow_amount_boosted = MEL.create_material_expression(m_fol, unreal.MaterialExpressionMultiply, -100, 1100)
+if not MEL.connect_material_expressions(snow_amount_raw, "", snow_amount_boosted, "A"):
+    raise RuntimeError("could not connect snow_amount_raw -> snow_amount_boosted.A")
+if not MEL.connect_material_expressions(snow_boost_const, "", snow_amount_boosted, "B"):
+    raise RuntimeError("could not connect snow_boost_const -> snow_amount_boosted.B")
+snow_amount = MEL.create_material_expression(m_fol, unreal.MaterialExpressionClamp, 0, 1100)
+snow_amount.set_editor_property("min_default", 0.0)
+snow_amount.set_editor_property("max_default", 1.0)
+if not MEL.connect_material_expressions(snow_amount_boosted, "", snow_amount, ""):
+    raise RuntimeError("could not connect snow_amount_boosted -> snow_amount Clamp input")
 
 snow_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant3Vector, -350, 0)
 snow_color.set_editor_property("constant", unreal.LinearColor(0.92, 0.94, 0.97, 1.0))
@@ -249,10 +276,30 @@ if not MEL.connect_material_expressions(snow_amount, "", snowed_base_color, "Alp
 # Re-point BaseColor at the snow-blended result (was `ts` "RGB" directly above).
 must_connect_property(snowed_base_color, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
+# 2026-09-07 polish pass: MSM_TWO_SIDED_FOLIAGE's wrapped-transmission term
+# tints backlit/grazing-angle canopy faces with MP_SUBSURFACE_COLOR
+# regardless of BaseColor - `sss` above stays a fixed dark green year-round,
+# which was silently fighting the BaseColor snow blend above and reading as
+# "still plain green" at driving distance even where BaseColor itself was
+# heavily blended toward snow_color. Fade it toward a pale winter subsurface
+# tint on the same snow_amount curve so backlit needles read frosted too.
+snow_subsurface_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant3Vector, -400, 500)
+snow_subsurface_color.set_editor_property("constant", unreal.LinearColor(0.75, 0.80, 0.86, 1.0))
+snowed_subsurface = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -200, 450)
+if not MEL.connect_material_expressions(sss, "", snowed_subsurface, "A"):
+    raise RuntimeError("could not connect base subsurface color -> canopy-snow-subsurface Lerp.A")
+if not MEL.connect_material_expressions(snow_subsurface_color, "", snowed_subsurface, "B"):
+    raise RuntimeError("could not connect snow subsurface color -> canopy-snow-subsurface Lerp.B")
+if not MEL.connect_material_expressions(snow_amount, "", snowed_subsurface, "Alpha"):
+    raise RuntimeError("could not connect snow_amount -> canopy-snow-subsurface Lerp.Alpha")
+# Re-point MP_SUBSURFACE_COLOR at the snow-blended result (was `sss` directly above).
+must_connect_property(snowed_subsurface, "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
+
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage", only_if_is_dirty=False)
 log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_FoliageAtlas, "
-    "seasons params SnowCover [wired, uniform per-instance tint x PerInstanceRandom desync] / "
+    "seasons params SnowCover [wired, boosted+clamped uniform per-instance tint x "
+    "PerInstanceRandom desync [0.82,1.0], drives BaseColor AND MP_SUBSURFACE_COLOR] / "
     "FallBlend [exposed, unwired])")
 
 unreal.EditorAssetLibrary.save_directory(MAT_DIR, only_if_is_dirty=False)

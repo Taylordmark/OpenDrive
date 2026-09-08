@@ -3786,6 +3786,102 @@ the working tree before this task (`pipeline/build_road_network.py`,
 `pipeline/build_road_guardrails.py`, `unreal/apply_road_material.py`) -
 confirmed via their on-disk mtimes predating this session.
 
+**Polish pass (2026-09-08) - three defects fixed, no redesign:**
+
+1. **Melt was not gradual - fixed, two root causes.** At
+   `-odseason=winter -odseasonphase=0.5` the ground rendered as
+   already-fully-green instead of a genuine patchy half-and-half, and the
+   same compression showed up at every checkpoint in both directions
+   (accumulation and melt). Two independent bugs, both in the
+   `SnowLineLowZCm`/`HighZCm` sweep:
+   - **Wrong reference elevation.** `SnowLineLowForCover`'s identity-ramp
+     solve (`Low(S) = (RefZ - S*High(S)) / (1-S)`, chosen so the raw
+     crossing fraction at `RefZ` equals `SnowCover` exactly, keeping the
+     snow line's *visible* progress proportional to `S` regardless of
+     where the low/high band actually sits) used a hardcoded guessed
+     "valley floor" constant for `RefZ` that didn't match the real terrain
+     elevation at the QA vantage - so the crossing window landed off-screen
+     (saturated white or green) at every tested `SnowCover` value instead
+     of centered on the camera. Fixed in `ODSeasonController.cpp` by
+     computing `RefZ` dynamically each push from
+     `UGameplayStatics::GetPlayerPawn(this, 0)->GetActorLocation().Z` (the
+     old constant survives only as `SnowValleyRefZFallbackCm`, used before
+     a pawn exists). `SnowLineLowIdentity`/`SnowLineLowForCover` now both
+     take `RefZ` as a parameter instead of reading a file-scope constant.
+     A one-shot `-odtrace`-gated diagnostic log (`bLoggedSnowDebugOnce`,
+     `ODSeasonController.h/.cpp`) prints `SnowCover/RefZ/Low/High/Band`
+     once per run for future debugging of this path - left in place since
+     it's harmless, gated, and one-shot.
+   - **Degenerate noise hash at this area's world coordinates.** Even with
+     the crossing window correctly centered, the transition looked like a
+     uniform pale wash, not chunky patches. `apply_ground_material.py`'s
+     `value_noise()` uses the classic `frac(sin(dot(cell, (12.9898,
+     78.233))) * 43758.5453)` hash trick, which is only numerically stable
+     for small dot-product inputs. This area's absolute world coordinates,
+     divided by `SNOW_NOISE_SCALE_CM`, land the lattice cell index around
+     (183, -202) - large enough that the hash's own dot product lands in
+     five-figure radians, where GPU `sin()` precision collapses and the
+     hash goes near-degenerate/near-constant. Confirmed empirically:
+     raising `SNOW_NOISE_STRENGTH` alone from 0.5 to an extreme 4.0 barely
+     moved rendered ground-coverage in a controlled test (1.24% ->
+     2.38% green pixels) - the fingerprint of a saturated hash input, not
+     "not enough amplitude." Real fix: a new `wrap_lattice_uv()` helper
+     wraps the lattice-space UV into a small repeating `[0, 97)` cell
+     range (via `frac(uv/period)*period`) *before* it reaches the hash,
+     keeping the hash's input small and stable while still varying at the
+     same ~40 m cell size. Combined with a moderate `SNOW_NOISE_STRENGTH =
+     1.3` (up from 0.5), this produced genuine, noise-broken,
+     roughly-proportional coverage: at `SnowCover=0.5` measured ground
+     green-pixel coverage went 1.24% (broken) -> 2.38% (extreme strength
+     alone, still broken) -> 17.09% (with the lattice wrap), with a
+     visibly wavy/textured snowline under a 2x crop, not a hard edge.
+   - Verified via `-odseason=winter -odseasonphase=0.25/0.5/0.75` (melt
+     direction) and `-odseason=fall -odseasonphase=0.25/0.75` (accumulation
+     direction, `SnowCover` 0.156/0.844 respectively - the same two values
+     melt hits at phase 0.75/0.25 by construction) from the Dillon Dam Road
+     vantage: phase 0.25 reads mostly snowy with patches opening, phase 0.5
+     is a genuine half-and-half with a noise-broken boundary, phase 0.75
+     reads mostly green with white drifts surviving near the treeline: all
+     four screenshots (`polish_melt_25/50/75.png`, `polish_accum_25.png`)
+     plus the accumulation-direction mirror (`polish_accum_75.png`, mostly
+     snowy with a little green surviving near a foreground bush) match the
+     qualitative spec.
+2. **Canopy snow strengthened.** Conifers read plain green at driving
+   distance despite `SnowCover` reaching the foliage MID correctly.
+   `build_flora_materials.py`: widened the `PerInstanceRandom` desync
+   floor from 0.55 to 0.82 (instances start visibly snowing sooner in the
+   transition while keeping per-instance desync), added a
+   `snow_amount_boosted` step that multiplies the per-instance snow amount
+   by 1.45x before clamping to `[0, 1]`, and added a matching winter blend
+   into `MP_SUBSURFACE_COLOR` (`snowed_subsurface`, gated the same way as
+   the base-color blend) so two-sided foliage's own green subsurface
+   scatter stops fighting the white base-color tint from behind/backlit
+   angles. `SnowCover=0` still drives every one of these blends to exactly
+   the unmodified summer/spring asset default. Verified via
+   `polish_winter_trees.png`: far/background conifers are dramatically
+   white-capped at a glance, close conifers show natural
+   instance-to-instance variation (some heavily frosted, some still mostly
+   green) consistent with the intentional desync, and
+   `polish_summer_baseline.png` re-confirms zero change at `SnowCover=0`.
+3. **Lake freeze visually verified** (previously an open gap - the Dillon
+   Dam Road vantage never has the lake in frame). Found a shoreline vantage
+   that does: `-odspawnx=1374341 -odspawny=-846975` (Swan Mountain Road,
+   Keystone). No material code changes were needed - `apply_water_material
+   .py`'s existing `FreezeBlend` mechanics (pale desaturated ice color,
+   raised roughness, ripple-flattening) were already correct. `polish_lake_
+   winter.png` shows the lake unmistakably frozen (pale gray-white, flat,
+   no visible ripples); `polish_lake_summer.png` at the same vantage and
+   spawn shows unmistakably liquid water (blue-teal, visible ripple
+   texture) at `FreezeBlend=0`, confirming no regression.
+
+Files touched this pass: `OpenDriveUE/Source/OpenDriveUE/
+ODSeasonController.h/.cpp` (dynamic RefZ + one-shot debug trace),
+`unreal/apply_ground_material.py` (`wrap_lattice_uv`, `SNOW_NOISE_STRENGTH`
+0.5 -> 1.3), `unreal/build_flora_materials.py` (desync floor, snow-amount
+boost, subsurface-color winter blend). `unreal/apply_water_material.py`
+reviewed, not modified. Vehicle physics, `cars_manifest.json`, and the
+uncommitted road/junction files listed above remain untouched.
+
 **Follow-up task for a second agent:** build the deciduous-tree fall-color
 arc on top of `FallBlend`, which is already computed by the season clock
 and already pushed to `M_Foliage`'s MID every tick

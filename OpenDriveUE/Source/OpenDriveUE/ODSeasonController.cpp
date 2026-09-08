@@ -36,6 +36,87 @@ namespace
 	constexpr float SnowLineLowFloorCm = -125000.0f;
 	constexpr float SnowLineHighFloorCm = -80000.0f;
 
+	// ---- 2026-09-07 polish pass: melt-compression fix -------------------
+	// Bug found via -odseason=winter -odseasonphase=0.5: with SnowLineLowZCm/
+	// HighZCm both swept LINEARLY in SnowCover from their baked baseline
+	// straight to the floor above, the valley floor (world Z ~= -67030 cm,
+	// same reference used to place the floor) only enters the ~45000 cm-wide
+	// band's crossing window once SnowCover has already fallen to ~0.56 -
+	// below that the whole visible valley reads pure baseline (raw altitude
+	// term clamped to 0), and it re-saturates to fully-covered by ~0.90. That
+	// squeezes the ENTIRE visible ground transition into SnowCover's narrow
+	// [0.56, 0.90] sub-range, so a melt/accumulation phase that lands outside
+	// it (e.g. -odseasonphase=0.5, SnowCover=0.5) shows either full green or
+	// full white instead of the required patchwork - the reported defect.
+	//
+	// Fix: keep SnowLineHighZCm's simple baseline->floor lerp (unchanged -
+	// it never rises above SnowLineHighBaseCm, so anything genuinely above
+	// treeline - e.g. Quandary Peak - always stays clamped to fully-covered
+	// throughout the sweep, no regression there). Replace ONLY the LOW edge's
+	// mapping with one solved so that, evaluated at SnowValleyRefZCm, the
+	// raw altitude coverage term comes out equal to SnowCover itself (an
+	// identity ramp) across the middle of the sweep - i.e. SnowCover=0.25
+	// visibly reads as ~25% ground coverage at the vantage, 0.5 as a genuine
+	// half-and-half patchwork, 0.75 as ~75%, instead of being compressed into
+	// a third of the range. Solved from snow_t_raw's own formula in
+	// apply_ground_material.py: clamp01((z - Low) / (High - Low)) = SnowCover
+	// => Low = (z - SnowCover * High) / (1 - SnowCover), evaluated with the
+	// SAME High(SnowCover) lerp already used below.
+	//
+	// The identity solve has two structural edge cases, both handled by
+	// blending it away over a narrow margin rather than using it raw:
+	//  - Near SnowCover=0 it demands Low jump instantly from
+	//    SnowLineLowBaseCm to a value far lower (the gap between the baked
+	//    treeline snowline and RefZ) - an actual pop, which is exactly what
+	//    this fix exists to remove. Blended back to SnowLineLowBaseCm at
+	//    SnowCover=0 over [0, SnowMeltBlendInEnd] via smoothstep so the value
+	//    is continuous and starts exactly at the baked default (byte-identical
+	//    SnowCover=0 baseline preserved).
+	//  - As SnowCover approaches the point where High(SnowCover) itself
+	//    equals RefZ, the identity solve's implied band width collapses
+	//    toward zero (High-Low -> 0), which would read as a hard cliff right
+	//    at that SnowCover value. Blended over to the original fixed floor
+	//    (SnowLineLowFloorCm - already proven safe/complete-coverage at
+	//    SnowCover=1) starting at SnowMeltBlendOutStart, comfortably before
+	//    RefZ values in the plausible on-road range ever reach the collapse
+	//    point (High(0.85) = -60280 cm; RefZ would have to sit below that -
+	//    i.e. below the winter floor's own high edge - to still be
+	//    mid-collapse there, which no drivable road surface does).
+	//
+	// RefZ ITSELF is NOT a hardcoded constant (a 2026-09-07 same-day fix -
+	// see the polish-pass QA notes): the first version of this fix pinned it
+	// to SnowValleyRefZFallbackCm (Dillon Reservoir's lake-bed Z), which is
+	// only correct for a camera actually standing at lake level. Dillon Dam
+	// Road itself runs along the dam crest, well above the lake bed, so the
+	// embankment visible at that (and every other) QA vantage sat far enough
+	// above the lake-bed reference that the identity solve's crossing window
+	// was still off-screen for most of the sweep - the SAME compression bug,
+	// just re-triggered by a wrong reference elevation instead of a wrong
+	// travel distance. Fix: read the actual player pawn's world Z each push
+	// and use THAT as RefZ, so the crossing window is always centered on
+	// wherever the camera/car actually is, at every vantage, not just the one
+	// this pass happened to be tuned against. Falls back to the lake-bed
+	// constant only if no pawn exists yet (e.g. the very first push before
+	// the vehicle has spawned).
+	constexpr float SnowValleyRefZFallbackCm = -67030.0f;   // Dillon Reservoir lake-bed world Z (~2765 m ASL) - BeginPlay-time fallback only, see above.
+	constexpr float SnowMeltBlendInEnd = 0.15f;     // below this, blend from SnowLineLowBaseCm into the identity curve
+	constexpr float SnowMeltBlendOutStart = 0.85f;  // above this, blend from the identity curve down to SnowLineLowFloorCm (well short of the collapse point)
+
+	float SnowLineHighForCover(float SnowCover)
+	{
+		return FMath::Lerp(SnowLineHighBaseCm, SnowLineHighFloorCm, SnowCover);
+	}
+
+	// Identity-ramp solve (see comment block above) - valid away from the
+	// SnowCover=1 singularity, which the caller keeps clear of via
+	// SnowMeltBlendOutStart.
+	float SnowLineLowIdentity(float SnowCover, float RefZ)
+	{
+		const float High = SnowLineHighForCover(SnowCover);
+		const float Denom = FMath::Max(1.0f - SnowCover, 0.01f);
+		return (RefZ - SnowCover * High) / Denom;
+	}
+
 	// "Light" continuous snowfall level held through the whole winter hold -
 	// spec: "snowing during fall->winter transition, light within winter, off
 	// elsewhere".
@@ -45,6 +126,25 @@ namespace
 	{
 		T = FMath::Clamp(T, 0.0f, 1.0f);
 		return T * T * (3.0f - 2.0f * T);
+	}
+
+	// Piecewise SnowLineLowZCm(SnowCover) - see the "melt-compression fix"
+	// comment block above: identity ramp in the middle, smoothly blended back
+	// to the exact baked baseline at SnowCover=0 and to the exact proven-safe
+	// floor at SnowCover=1 so both endpoints stay byte-identical to before.
+	float SnowLineLowForCover(float SnowCover, float RefZ)
+	{
+		if (SnowCover <= SnowMeltBlendInEnd)
+		{
+			const float W = SmoothStep01(SnowCover / SnowMeltBlendInEnd);
+			return FMath::Lerp(SnowLineLowBaseCm, SnowLineLowIdentity(SnowMeltBlendInEnd, RefZ), W);
+		}
+		if (SnowCover >= SnowMeltBlendOutStart)
+		{
+			const float W = SmoothStep01((SnowCover - SnowMeltBlendOutStart) / (1.0f - SnowMeltBlendOutStart));
+			return FMath::Lerp(SnowLineLowIdentity(SnowMeltBlendOutStart, RefZ), SnowLineLowFloorCm, W);
+		}
+		return SnowLineLowIdentity(SnowCover, RefZ);
 	}
 }
 
@@ -238,8 +338,28 @@ void AODSeasonController::PushParamsToMIDs()
 	{
 		if (UMaterialInstanceDynamic* GroundMID = Terrain->GetGroundMID())
 		{
-			const float Low = FMath::Lerp(SnowLineLowBaseCm, SnowLineLowFloorCm, SnowCover);
-			const float High = FMath::Lerp(SnowLineHighBaseCm, SnowLineHighFloorCm, SnowCover);
+			// Reference elevation for the melt-compression fix's identity
+			// ramp: the player pawn's own current world Z, not a fixed
+			// guessed constant (see the big comment above SnowLineLowIdentity).
+			// This keeps the visible altitude-band crossing centered on
+			// wherever the camera/car actually is, at any QA vantage or any
+			// real drive, instead of only working near one hardcoded
+			// elevation. Falls back to the lake-bed constant before the
+			// pawn exists yet (e.g. the very first param push at BeginPlay).
+			float RefZ = SnowValleyRefZFallbackCm;
+			if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+			{
+				RefZ = Player->GetActorLocation().Z;
+			}
+			const float Low = SnowLineLowForCover(SnowCover, RefZ);
+			const float High = SnowLineHighForCover(SnowCover);
+			if (FParse::Param(FCommandLine::Get(), TEXT("odtrace")) && !bLoggedSnowDebugOnce)
+			{
+				bLoggedSnowDebugOnce = true;
+				UE_LOG(LogTemp, Display,
+					TEXT("ODSeasonController: [snowdbg] SnowCover=%.3f RefZ=%.1f Low=%.1f High=%.1f Band=%.1f"),
+					SnowCover, RefZ, Low, High, High - Low);
+			}
 			GroundMID->SetScalarParameterValue(TEXT("SnowLineLowZCm"), Low);
 			GroundMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), High);
 			GroundMID->SetScalarParameterValue(TEXT("SpringGreen"), SpringGreen);

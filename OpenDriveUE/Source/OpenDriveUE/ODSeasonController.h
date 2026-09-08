@@ -118,6 +118,7 @@ private:
 
 	bool bFrozen = false;   // true once a -odseason= QA flag has fixed the clock
 	float PushAccumSeconds = 0.0f;
+	bool bLoggedSnowDebugOnce = false;   // one-shot -odtrace ground-snow diagnostic (see PushParamsToMIDs)
 
 	TWeakObjectPtr<AODTerrainManager> TerrainMgr;
 	TWeakObjectPtr<AODWaterManager> WaterMgr;
