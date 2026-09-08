@@ -2795,10 +2795,17 @@ def main():
     # Genuinely structural stations only (real bridges/tunnels) - NOT
     # btmt's broader terrain-carve `exclude`, which also flags ordinary
     # cross-road grade disagreements that are often real at-grade
-    # junctions. See find_crossings()'s docstring.
+    # junctions. See find_crossings()'s docstring. The shipped `is_bridge`
+    # is itself carve-flavored (buffer-expanded AND OR'd with wall-conflict
+    # stations - see build_road_stations.py line ~843), so it silently
+    # disabled junction detection anywhere near switchback terrain (US 6 /
+    # Tennis Club tee); `is_struct` (2026-09-07) is the honest narrow flag.
+    # The is_bridge|is_tunnel fallback only serves stations files baked
+    # before is_struct existed.
     structural = np.concatenate([
-        np.array(seg.get("is_bridge", [False] * len(seg["east_m"])), dtype=bool)
-        | np.array(seg.get("is_tunnel", [False] * len(seg["east_m"])), dtype=bool)
+        np.array(seg["is_struct"], dtype=bool) if "is_struct" in seg
+        else (np.array(seg.get("is_bridge", [False] * len(seg["east_m"])), dtype=bool)
+              | np.array(seg.get("is_tunnel", [False] * len(seg["east_m"])), dtype=bool))
         for seg in raw["segments"]])
     bounds = segment_bounds(seg_ids)
 

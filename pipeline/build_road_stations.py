@@ -35,6 +35,20 @@ Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
                                # tagged span, regardless of this flag - DEM
                                # under a bridge is whatever's really there
                                # (river, valley), not deck height.
+         "is_struct": [...],  # bool per station (2026-09-07) - the HONEST
+                               # narrow bridge/tunnel flag: True only across
+                               # the genuinely tagged structure span
+                               # (is_struct_s), with NO carve-buffer
+                               # expansion and NO wall-conflict stations
+                               # OR'd in. Consumers deciding "is this road
+                               # really a structure here?" (junction
+                               # detection, dangling-endpoint welds) must
+                               # use THIS, not is_bridge - is_bridge's
+                               # conflict contamination was silently
+                               # disabling all junction machinery across
+                               # ordinary at-grade intersections that
+                               # merely sit in switchback/hairpin terrain
+                               # (e.g. the US 6 / Tennis Club tee).
          "is_tunnel": [...],  # bool per station (2026-07-28, AUDIT.md item 3)
                                # - the tunnel subset of is_bridge's "structure"
                                # bit, kept separate so a consumer can tell a
@@ -846,6 +860,7 @@ def main():
             "lat": [round(float(v), 7) for v in seg["lat_s"]],
             "lon": [round(float(v), 7) for v in seg["lon_s"]],
             "is_bridge": [bool(v) for v in is_bridge_out],
+            "is_struct": [bool(v) for v in seg["is_struct_s"]],
             "is_tunnel": [bool(v) for v in seg["is_tunnel_s"]],
             "road_name": seg["road_name_s"],
             "oneway": seg["is_oneway_s"],
