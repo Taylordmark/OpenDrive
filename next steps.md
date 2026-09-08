@@ -4213,3 +4213,163 @@ unfixed by design - flagged for a future, separately-scoped pass.
 Committed: `pipeline/build_road_network.py`, `pipeline/build_road_stations.py`,
 `pipeline/road_mesh_common.py`, `pipeline/build_road_guardrails.py`,
 `unreal/apply_road_material.py`. Not pushed.
+
+### 7.19 Embankment skirts (2026-09-07)
+
+Where the road rides above surrounding terrain but not so high a bridge is
+warranted, the raw side-extrusion previously showed as a bare beveled wedge
+(worst near I-70/Silverthorne). Adds a sloped earthen skirt from the
+pavement edge down to terrain for the moderate-drop case, and extends the
+existing binary road-above-terrain detection (7.16's guardrails) into a
+3-way classification so a later, separately-scoped bridge task has real
+per-station data to consume.
+
+**Design, mirroring 7.16's guardrail feature almost exactly** (same
+"pipeline ships points, C++ extrudes at runtime" split as
+`AODGuardrailManager`/`AODBarrierManager`): `pipeline/build_road_embankments.py`
+reuses `build_road_guardrails.py`'s own DEM-probe drop detection, lake
+exclusion (`load_lake_beds`/`_point_in_polygon`), and junction exclusion
+(`reconcile_junction_elevations()`'s `touched` mask) essentially verbatim,
+classifying each side/station by drop depth:
+
+    drop <= 2.5 m            -> none        (terrain meets road acceptably)
+    2.5 m < drop <= 7.0 m    -> embankment  (this pass's actual deliverable)
+    drop > 7.0 m, or a       -> bridge      (data only - a later task's job;
+    qualifying drop over                     classified now so that task has
+    open water                               real data without re-detection)
+
+A per-side Schmitt-trigger hysteresis state machine (`classify_with_
+hysteresis()`, 0.3 m band at each threshold) prevents station-to-station
+class flicker near the 2.5 m/7 m boundaries, and `demote_short_runs()`
+(mirroring guardrails' `GUARDRAIL_MIN_RUN_M`) discards any surviving run
+under 10 m as a DEM-noise blip rather than a real embankment/bridge. Runs
+are written to `road_embankments.json` (`{"runs":[{"tile","side","cls",
+"station_xyzd_cm"}]}` - x,y,z,drop per station); `export_road_embankment_
+bin.py` packs only "embankment"-class runs into a new ODE1 binary tile
+format (bridge stays JSON-only, no runtime consumer yet). A new
+`AODEmbankmentManager` (`OpenDriveUE/Source/OpenDriveUE/ODEmbankmentManager.
+{h,cpp}`), spawned via `EnsureEmbankmentManager()` in `ODGameMode::
+BeginPlay()`, clones `AODGuardrailManager`'s tile-streaming shape verbatim
+(ring load/despawn around the pawn, async file I/O, shared `ODBinSidecarUtil.
+h` binary-parsing helpers) but differs in two deliberate ways: the
+cross-section isn't a fixed profile table (each station's own shipped drop
+value sizes the slope on the fly, three layer points top/toe/apron per
+station at a 1.5:1 horizontal:vertical `SlopeRatio`), and the mesh is
+visual-only with `ECollisionEnabled::NoCollision` - the guardrail sheet at
+the same drop already provides containment, so a second collision mesh
+would be redundant. `unreal/apply_embankment_material.py` builds `M_Embankment`
+reusing an already-imported ambientCG texture (`Ground037` dirt, no new
+download) at 850 cm world-space planar XY tiling, with toe-darkening via a
+`TextureCoordinate` green channel (the skirt mesh's own UV.Y, 0 at top / 0.6
+at toe / 1.0 at apron) lerped toward black.
+
+**Junction exclusion, corrected mid-pass:** a first draft used only the
+newer per-station `in_junction_box` field (Arc 7.18), reasoning it was a
+strict shortcut around re-deriving `reconcile_junction_elevations()`'s own
+mask a second time. Live verification against this session's own acceptance
+sanity check ("flat town grids nearly empty") caught this as wrong -
+`in_junction_box` only covers the literal flush-pavement box at each real
+junction node, far narrower than guardrails' `touched` mask, and Frisco/
+Breckenridge's dense street grids sit on genuine hillside grades (not flat),
+so the gap between boxes is exactly where a probe point 7.5 m off a town
+street can land on a neighboring lot's own cut/fill grade and register a
+spurious multi-meter "drop." Switched to reusing `touched` as the primary
+mechanism (OR'd with `in_junction_box`, which is free and strictly correct
+for the literal box) - confirmed correct because the resulting count (5887
+stations) matches SS7.18's own reported figure for this area exactly.
+
+**Toe-apron gap risk, also caught mid-pass:** the idealized straight 1.5:1
+slope is not a terrain-follow toe - it's a single DEM probe sample plus a
+straight line. `verify_embank_profile.png`'s first render (with the
+initial 30 cm embed / 100 cm overlap) showed the mid-drop (~5 m) case's toe
+apron could sit up to ~1 m ABOVE the real sampled DEM profile - a genuine
+gap risk, not a rendering artifact. Fixed cheaply in `ODEmbankmentManager.h`
+by raising `ApronEmbedCm`/`ApronOverlapCm` to 150/200 cm (the apron is
+buried by construction - nothing renders below the terrain surface it
+embeds into - so embedding deeper costs nothing visually and buys real
+margin); rebuilt and reran the profile plot, which now shows the apron
+crossing clearly below the real terrain line in all four panels. A genuine
+terrain-following toe remains out of scope for this pass (documented in the
+header's own comment) - this is a safety margin around the idealized slope,
+not a replacement for one.
+
+**Classification numbers** (summit_county, full stdout in
+`verify_embank_runs.txt`): 1165 lake beds loaded; 5887 stations flagged near
+a junction (3624 of those had a qualifying drop that would otherwise have
+started a run); 2151 tile-chunked runs (86,469 stations) written -
+embankment 1082 contiguous runs / 29,792 stations / ~143.55 km, bridge (data
+only) 420 contiguous runs / 56,677 stations / ~281.28 km. Exported 1232
+embankment runs (31,409 stations, 1-station tile-seam overlap) into 177
+`.bin` tiles, 514,184 bytes total (~0.49 MB).
+
+**The bridge-count caveat, disclosed honestly rather than hidden:** the
+"bridge" figure above is inflated by a real, pre-existing upstream data
+issue, not by this pass's own logic. Root-caused via a spot-check on
+Potato Patch Drive (an 87 m computed drop that persisted even sampled at
+the pavement centerline itself, 0 m offset) to a mismatch between the
+pipeline's stored road elevation profile and raw DEM at the identical
+coordinate - most likely the same-road-name cross-matching issue
+`reconcile_junction_elevations()`'s own docstring already flags as unfixed,
+which is out of scope here per this task's brief ("don't touch the junction
+fix files beyond consuming their outputs"). Confirmed this does NOT
+disproportionately hit town grids (settlement-tile density ~21.3% in-town
+vs. ~31.5% county-wide - town is not worse) and, more importantly, does NOT
+affect the actual embankment geometry that ships to players: hysteresis
+construction caps a real embankment run's max drop at ~7.3 m regardless,
+and bridge-class runs are JSON-only with no current runtime/visual
+consequence. Only the data-only bridge count is inflated; flagging this for
+whoever picks up the bridge task next, since they'll be consuming
+`road_embankments.json`'s "bridge" runs directly.
+
+**Dillon Dam Road causeway note** (task-required, actual measured numbers):
+all four runs found along Dillon Dam Road classify as **embankment**, not
+bridge - 530.0 m/3.29 m max drop, 625.0 m/3.17 m, 55.0 m/6.22 m, 85.0 m/
+3.70 m. This is correct: every max drop sits inside the 2.5-7 m embankment
+band, and none of these stations test as "in a lake" because the lake-bed
+polygon represents the reservoir's open water surface, not the paved top of
+the dam structure itself - which is not open water, it IS already a large
+engineered earthen/rockfill embankment. Forcing this to "bridge" would have
+been the wrong call even though it's a literal water crossing in the broad
+sense; a real dam access road runs on compacted fill, not a deck. This is
+the same narrower point-in-polygon-only lake test `build_road_guardrails.py`
+already uses rather than `build_road_barrier.py`'s wider shore-margin
+version, which that module's own docstring notes would incorrectly eat
+Dillon Dam Road.
+
+**Offline verification (scratchpad, no `-game` launch per current
+project-wide protocol):**
+- `verify_embank_classes.png` - county-wide map, road network in gray with
+  embankment (orange) and bridge (red) runs overlaid; embankments visibly
+  hug hillside/elevated segments and the I-70 corridor shows both classes
+  along its length; flat town grids read comparatively sparse relative to
+  the mountainous county as a whole (see the bridge-count caveat above for
+  the honest caveat on why town grids aren't perfectly empty).
+- `verify_embank_profile.png` - cross-sections at four representative
+  stations (shallow ~3 m, mid ~5 m, near-threshold ~7 m, and a hillside case
+  where only one side needs a skirt): pavement edge, the 1.5:1 skirt slope,
+  the toe-apron overlap, and the real DEM-sampled terrain profile along the
+  same line. After the apron-margin fix, the toe apron crosses clearly
+  below the real terrain line in all four panels - the geometry lands on
+  terrain with margin, not a bare hairline touch.
+- `verify_embank_runs.txt` - full run/station/km counts per class,
+  junction/lake skip counts, a worked hysteresis example demonstrating the
+  Schmitt-trigger latching through repeated sub-threshold dips near 2.5 m,
+  and the tile/bin-size accounting.
+
+**What this offline pass cannot prove:** whether the skirt mesh actually
+reads correctly in-engine - material/texture appearance at real scale and
+lighting, LOD/streaming behavior as the player pawn moves, and whether the
+no-collision choice feels right against the guardrail sheet's own
+containment at speed. These are in-game checks Taylor must do himself per
+this session's testing protocol; the toe-apron gap risk in particular was
+only caught by comparing idealized geometry against sampled DEM data
+offline; whether the buried apron's real-terrain overlap looks right
+in-engine (versus merely computing correctly) is unverified.
+
+Committed: `pipeline/build_road_embankments.py`,
+`pipeline/export_road_embankment_bin.py`, `pipeline/rebuild_area.py`,
+`OpenDriveUE/Source/OpenDriveUE/ODEmbankmentManager.h`,
+`OpenDriveUE/Source/OpenDriveUE/ODEmbankmentManager.cpp`,
+`OpenDriveUE/Source/OpenDriveUE/ODGameMode.h`,
+`OpenDriveUE/Source/OpenDriveUE/ODGameMode.cpp`,
+`unreal/apply_embankment_material.py`. Not pushed.

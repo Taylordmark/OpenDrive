@@ -64,6 +64,15 @@ private:
 	 *  pipeline/build_road_guardrails.py. */
 	void EnsureGuardrailManager();
 
+	/** Embankment skirts (2026-09-07) - same "find or spawn" shape as
+	 *  EnsureGuardrailManager above, deriving AODEmbankmentManager's tile
+	 *  prefix from the level's own AODRoadManager the same way. Streams
+	 *  runtime-extruded sloped earthen skirts wherever the road rides
+	 *  2.5-7m above the surrounding terrain (below that the terrain meets
+	 *  the road on its own; above that is the later bridge-deck task's
+	 *  job) - see pipeline/build_road_embankments.py. */
+	void EnsureEmbankmentManager();
+
 	/** Seasons feature (2026-09-07) - same "find or spawn" shape as
 	 *  EnsureAtmosphereController above (no per-level tile-prefix needed,
 	 *  applies identically everywhere): spawns AODSeasonController, which in

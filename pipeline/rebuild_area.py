@@ -128,6 +128,12 @@ STAGES = [
     # constraint against barrier/buildings.
     ("build_road_guardrails.py", "build road_guardrails.json (road-vs-terrain drop detection)"),
     ("export_road_guardrails_bin.py", "export guardrail tiles -> Content/OpenDrive/Masks/guardrail_*.bin"),
+    # EMBANKMENTS (2026-09-07): reuses road_stations.json's own in_junction_box
+    # field (Arc 7.18) plus the same DEM-probe drop detection guardrails use -
+    # sits right after guardrails for the same "needs terrain's sample_dem
+    # helper, no other ordering constraint" reason.
+    ("build_road_embankments.py", "build road_embankments.json (3-way drop classification: none/embankment/bridge)"),
+    ("export_road_embankment_bin.py", "export embankment tiles -> Content/OpenDrive/Masks/embankment_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),
