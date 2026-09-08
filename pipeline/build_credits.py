@@ -130,10 +130,12 @@ def build_lines():
     add("DATA SOURCES")
     add("=" * 60)
     add()
-    # OSM ODbL attribution is legally required - kept verbatim and prominent,
-    # matching README.md's own "Road geometry: (C) OpenStreetMap contributors,
-    # ODbL." line so this screen and the repo's own documentation agree.
-    add("Road geometry: (C) OpenStreetMap contributors.")
+    # OSM ODbL attribution is legally required - kept verbatim and prominent.
+    # OSM data drives more than road geometry in this project (water
+    # polygons, waterways, buildings, settlement classification, and place
+    # labels all come from the same OSM extract), so the line covers map
+    # data generally rather than singling out roads.
+    add("Map data (roads, water, buildings, places): (C) OpenStreetMap contributors.")
     add("Licensed under the Open Database License (ODbL) v1.0.")
     add("https://www.openstreetmap.org/copyright")
     add("https://opendatacommons.org/licenses/odbl/1-0/")
