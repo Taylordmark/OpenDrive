@@ -197,7 +197,7 @@ void AODSeasonController::BeginPlay()
 		TimeScale = Rate;
 	}
 
-	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen);
+	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
 	PushParamsToMIDs();
 }
 
@@ -245,7 +245,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 	if (!bFrozen)
 	{
 		ClockSeconds = FMath::Fmod(ClockSeconds + DeltaSeconds * TimeScale, LoopSeconds());
-		ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen);
+		ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
 	}
 
 	PushAccumSeconds += DeltaSeconds;
@@ -262,7 +262,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 }
 
 void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, float& OutSnow,
-	float& OutSnowfall, float& OutFreeze, float& OutSpringGreen) const
+	float& OutSnowfall, float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const
 {
 	const float S0 = 0.0f;
 	const float S1 = HoldSeconds;                       // summer hold end / summer->fall transition start
@@ -275,6 +275,7 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 	// S7 + TransitionSeconds == LoopSeconds() (== S0 of the next lap)
 
 	OutFall = 0.0f; OutSnow = 0.0f; OutSnowfall = 0.0f; OutFreeze = 0.0f; OutSpringGreen = 0.0f;
+	OutLeafDrop = 0.0f;
 
 	if (Clock < S1)
 	{
@@ -282,30 +283,39 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 	}
 	else if (Clock < S2)
 	{
-		// summer -> fall transition
+		// summer -> fall transition: deciduous canopies patch-turn orange
+		// (see M_Foliage's FallBlend wiring in build_flora_materials.py).
 		const float T = SmoothStep01((Clock - S1) / TransitionSeconds);
 		OutFall = T;
 	}
 	else if (Clock < S3)
 	{
-		// fall hold
+		// fall hold: fully orange, canopy still full (no drop yet).
 		OutFall = 1.0f;
 	}
 	else if (Clock < S4)
 	{
-		// fall -> winter transition: leaves fade out (deciduous arc lands
-		// later, this is just a graceful FallBlend handoff so the exposed
-		// param doesn't hang at 1.0 forever), snow grows in, lake starts to
-		// skin over, snow starts falling.
+		// fall -> winter transition (deciduous arc, 2026-09 follow-up):
+		// leaves that remain STAY orange (FallBlend held at 1 - they don't
+		// fade back toward green on the way out, they fall off orange) while
+		// LeafDrop ramps 0->1, progressively dissolving the canopy cards
+		// down to bare twig geometry (see M_Foliage's LeafDrop wiring).
+		// Snow grows in, lake starts to skin over, snow starts falling, and
+		// the same SnowCover ramp also builds "bunches of snow" onto the
+		// now-exposed twigs via the deciduous bark MID.
 		const float T = SmoothStep01((Clock - S3) / TransitionSeconds);
-		OutFall = 1.0f - T;
+		OutFall = 1.0f;
+		OutLeafDrop = T;
 		OutSnow = T;
 		OutFreeze = T;
 		OutSnowfall = T;   // ramps 0->1 as winter arrives
 	}
 	else if (Clock < S5)
 	{
-		// winter hold: closed snow cover, frozen lake, light continuous snow.
+		// winter hold: closed snow cover, frozen lake, light continuous snow,
+		// deciduous canopies fully bare (LeafDrop=1) and snow-capped.
+		OutFall = 1.0f;
+		OutLeafDrop = 1.0f;
 		OutSnow = 1.0f;
 		OutFreeze = 1.0f;
 		OutSnowfall = WinterLightSnowfall;
@@ -313,17 +323,23 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 	else if (Clock < S6)
 	{
 		// winter -> spring transition: reverse patchy retreat + thaw, snowfall
-		// tapers off with the melt, fresh-green ramps in.
+		// tapers off with the melt, fresh-green ramps in. Deciduous canopies
+		// reverse-dissolve back in (LeafDrop 1->0) as fresh GREEN growth, not
+		// the fall orange - FallBlend eases back to 0 over the same span so
+		// the re-budding leaves render green under SpringGreen's fresh tint.
 		const float T = SmoothStep01((Clock - S5) / TransitionSeconds);
 		OutSnow = 1.0f - T;
 		OutFreeze = 1.0f - T;
 		OutSnowfall = WinterLightSnowfall * (1.0f - T);
 		OutSpringGreen = T;
+		OutFall = 1.0f - T;
+		OutLeafDrop = 1.0f - T;
 	}
 	else if (Clock < S7)
 	{
 		// spring hold: melted, fresh-green easing back to summer's baseline
-		// over the course of the hold.
+		// over the course of the hold. Deciduous canopy already fully
+		// re-leafed (LeafDrop=0) and green (FallBlend=0) by S6.
 		const float T = SmoothStep01((Clock - S6) / HoldSeconds);
 		OutSpringGreen = 1.0f - T;
 	}
@@ -377,7 +393,32 @@ void AODSeasonController::PushParamsToMIDs()
 		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
 		{
 			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
-			FoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
+			// FallBlend is deliberately NOT pushed here (2026-09 deciduous-arc
+			// follow-up): this MID is the Conifer/evergreen species batch
+			// (see ConiferSpeciesIndex in ODForestManager.cpp), and
+			// build_flora_materials.py's fall-color wiring now actually
+			// blends toward orange when FallBlend > 0 on WHATEVER MID it's
+			// set on - the shared M_Foliage graph can't tell species apart,
+			// only per-MID parameter values can. Leaving this MID's
+			// FallBlend at its material default (0.0) is what keeps
+			// conifers evergreen; only DeciduousFoliageMID below gets a
+			// real FallBlend push. (Before this follow-up wired FallBlend
+			// into the graph, pushing it here was a harmless no-op; it isn't
+			// anymore.)
+		}
+		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): the
+		// Blob/tree_blob-only MIDs get FallBlend/LeafDrop as well as
+		// SnowCover (canopy dissolve + twig snow) - the Conifer MID above
+		// never receives LeafDrop, so evergreen canopies can't dissolve.
+		if (UMaterialInstanceDynamic* DeciduousFoliageMID = Forest->GetDeciduousFoliageMID())
+		{
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("LeafDrop"), LeafDrop);
+		}
+		if (UMaterialInstanceDynamic* DeciduousBarkMID = Forest->GetDeciduousBarkMID())
+		{
+			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
 		}
 	}
 }

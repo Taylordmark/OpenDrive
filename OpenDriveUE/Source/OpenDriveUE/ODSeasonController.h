@@ -96,14 +96,24 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Season|Debug")
 	float SpringGreen = 0.0f;
 
+	/** Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): 0 = full
+	 *  canopy, 1 = fully bare twigs. Ramps 0->1 across the fall->winter
+	 *  transition (leaves - already orange, FallBlend=1 - progressively
+	 *  dissolve off the canopy cards) and back 1->0 across winter->spring
+	 *  (reverse dissolve = re-budding), in lockstep with FallBlend easing
+	 *  back to 0 over the same span so regrown leaves render green, not
+	 *  orange. Pushed to the deciduous-only foliage MID as "LeafDrop". */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Season|Debug")
+	float LeafDrop = 0.0f;
+
 private:
 	/** Pure function of a loop-position clock (seconds, [0, LoopSeconds)) to
-	 *  the five season blends - see the .cpp definition for the segment
+	 *  the six season blends - see the .cpp definition for the segment
 	 *  breakdown. Static/const-only so it's trivially unit-testable and so
 	 *  the -odseason=/-odseasonphase= QA path and the normal ticking path
 	 *  can share the exact same math. */
 	void ComputeParamsForClock(float Clock, float& OutFall, float& OutSnow,
-		float& OutSnowfall, float& OutFreeze, float& OutSpringGreen) const;
+		float& OutSnowfall, float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const;
 
 	/** loop-position seconds where season X's HOLD begins - see the .cpp's
 	 *  QA-flag parsing for how -odseason=/-odseasonphase= use these. */

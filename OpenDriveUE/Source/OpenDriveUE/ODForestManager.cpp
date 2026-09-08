@@ -44,6 +44,15 @@ constexpr int32 NumTreeSpecies = NumExtendedTreeSpecies;   // local alias, keeps
 // the one tree species batch that gets the canopy-snow MID in BuildTile().
 constexpr int32 ConiferSpeciesIndex = 2;
 
+// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): index of
+// "Blob" (tree_blob, the aspen mesh make_tree_meshes.py gives a bare-twig
+// branch structure to) in the same fixed SpeciesWeight order as
+// ConiferSpeciesIndex above. tree_scrub_oak (index 3, also built from
+// build_aspen()) is deliberately NOT included - it has no branch geometry
+// and is out of this task's explicit scope ("tree_blob = the deciduous
+// species").
+constexpr int32 DeciduousSpeciesIndex = 0;
+
 /** Shrub-class meshes (2026-08-27) - never get trunk collision. Index 0 is
  *  the original plain bush; index 1 is sagebrush, added so biomes that
  *  should read as dry scrub (Chaparral, DesertScrub) don't just fall back
@@ -180,6 +189,26 @@ void AODForestManager::BeginPlay()
 			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage")))
 	{
 		FoliageSeasonMID = UMaterialInstanceDynamic::Create(FoliageBase, this);
+
+		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): a SECOND
+		// MID off the same M_Foliage base material, applied only to the
+		// deciduous (Blob/tree_blob) species batch in BuildTile(). Same base
+		// material asset as FoliageSeasonMID above (the graph now also
+		// consumes FallBlend/LeafDrop - see build_flora_materials.py) but a
+		// separate MID instance so this species' FallBlend/LeafDrop pushes
+		// never touch the Conifer batch's snow-only MID, and vice versa -
+		// this is the "per-species MIDs" routing option from that task's
+		// spec (the shared material can't tell species apart by itself).
+		DeciduousFoliageMID = UMaterialInstanceDynamic::Create(FoliageBase, this);
+	}
+	// Same deciduous-only routing for the trunk/branch bark material - twig
+	// snow (SnowCover-driven, see build_flora_materials.py's M_Bark_Aspen
+	// wiring) must not affect tree_scrub_oak, which also uses M_Bark_Aspen's
+	// STATIC (non-dynamic) reference and is out of this task's scope.
+	if (UMaterialInterface* BarkBase = LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen")))
+	{
+		DeciduousBarkMID = UMaterialInstanceDynamic::Create(BarkBase, this);
 	}
 
 	// Base-pivot offsets for ground cover (2026-08-27) - see
@@ -1775,6 +1804,24 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 			// foliage cards (the geometry that actually needs SnowCover/
 			// FallBlend) at slot 1 for every two-slot tree mesh.
 			Hism->SetMaterial(1, FoliageSeasonMID);
+		}
+		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): Blob/
+		// tree_blob only (DeciduousSpeciesIndex) - the mesh make_tree_meshes.
+		// py now gives a bare-twig branch structure to, so it's the one
+		// species batch that can actually show FallBlend/LeafDrop's dissolve
+		// progression instead of just going invisible where a card clips.
+		// Both slots get a dynamic MID: slot 1 (foliage cards) for the
+		// orange/dissolve, slot 0 (bark, trunk+branches) for twig snow.
+		else if (bIsTree && m == DeciduousSpeciesIndex)
+		{
+			if (DeciduousBarkMID)
+			{
+				Hism->SetMaterial(0, DeciduousBarkMID);
+			}
+			if (DeciduousFoliageMID)
+			{
+				Hism->SetMaterial(1, DeciduousFoliageMID);
+			}
 		}
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
