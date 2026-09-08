@@ -122,6 +122,19 @@ namespace
 	// elsewhere".
 	constexpr float WinterLightSnowfall = 0.2f;
 
+	// ---- 2026-09-07 snowfall-snap fix ------------------------------------
+	// Bug: the fall->winter transition ramps SnowfallIntensity 0->1 (a
+	// blizzard peak right at the transition's end, S4), but the winter-hold
+	// branch used to hard-set it to WinterLightSnowfall (0.2) the instant the
+	// hold began - a hard step from 1.0 to 0.2 at exactly S4 (~3.2/s
+	// derivative at 4 Hz), the one discontinuity in an otherwise all-
+	// smoothstep param set. Fix: continue easing DOWN from the transition's
+	// peak to the hold level over the first WinterSnowfallDecaySeconds of the
+	// winter hold (smoothstep, same shape every other ramp in this function
+	// uses) instead of snapping - "a driver at that moment would see the
+	// blizzard cut out instantly" is exactly the case this closes.
+	constexpr float WinterSnowfallDecaySeconds = 300.0f;   // ~5 in-game minutes
+
 	float SmoothStep01(float T)
 	{
 		T = FMath::Clamp(T, 0.0f, 1.0f);
@@ -312,13 +325,21 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 	}
 	else if (Clock < S5)
 	{
-		// winter hold: closed snow cover, frozen lake, light continuous snow,
-		// deciduous canopies fully bare (LeafDrop=1) and snow-capped.
+		// winter hold: closed snow cover, frozen lake, deciduous canopies
+		// fully bare (LeafDrop=1) and snow-capped. SnowfallIntensity is NOT a
+		// flat hold value here - see the "snowfall-snap fix" comment above -
+		// it eases down from the fall->winter transition's blizzard peak
+		// (1.0 at S4) to the light continuous-snow level over the first
+		// WinterSnowfallDecaySeconds of the hold, then stays flat for the
+		// remainder (SmoothStep01 clamps its input, so this is exactly
+		// WinterLightSnowfall for the rest of the hold with no further code
+		// needed).
 		OutFall = 1.0f;
 		OutLeafDrop = 1.0f;
 		OutSnow = 1.0f;
 		OutFreeze = 1.0f;
-		OutSnowfall = WinterLightSnowfall;
+		const float SnowfallDecayT = SmoothStep01((Clock - S4) / WinterSnowfallDecaySeconds);
+		OutSnowfall = FMath::Lerp(1.0f, WinterLightSnowfall, SnowfallDecayT);
 	}
 	else if (Clock < S6)
 	{

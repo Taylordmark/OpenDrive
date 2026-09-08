@@ -4051,3 +4051,11 @@ Committed locally only, `pipeline/make_tree_meshes.py`,
 `OpenDriveUE/Source/OpenDriveUE/ODSeasonController.h/.cpp` (commit
 `1b39ada`); not pushed. The five pre-existing uncommitted road/junction
 files were left alone as instructed.
+
+**Snowfall-snap fix (2026-09-07):** `ComputeParamsForClock`'s winter-hold
+branch used to hard-set `SnowfallIntensity` to `WinterLightSnowfall` (0.2)
+the instant the hold began, snapping instantly from the fall->winter
+transition's 1.0 blizzard peak - the one non-smoothstep step in the whole
+param set; fixed in `ODSeasonController.cpp` by easing it down via
+smoothstep over the first `WinterSnowfallDecaySeconds` (300s) of the hold
+instead, re-verified via `scratchpad/verify_snowfall_fix.py`.
