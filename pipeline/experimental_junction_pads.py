@@ -136,6 +136,14 @@ PAD_RADIUS_MAX_M = ROAD_HALF_WIDTH * 4.0
 # land up to half a station short of the true circle, which read as "roads
 # .1m apart... dont actually connect" (2026-08-25, Taylor).
 PAD_OVERLAP_MARGIN_M = 2.0
+# How far INSIDE a pad's bare (margin-0) keep-out rim a ribbon's terminal
+# station is placed, and how close to a proximity fill disc's center - see
+# rim_point()/prox_point() in main(): the ribbon-end cut is a straight,
+# full-ROAD_HALF_WIDTH line, so cutting flush with a curved rim leaves
+# lens-shaped bare slivers at the cut's lateral corners; tucking the cut
+# past the rim buries those corners under the drawn pad/disc.
+PAD_RIM_TUCK_M = 2.0
+PROX_TUCK_M = 2.5
 PAD_MIN_ANGLE_DEG = 20.0           # floor for the sin() in the radius formula
                                     # so a near-parallel crossing doesn't blow
                                     # the pad radius up toward infinity
@@ -3264,23 +3272,117 @@ def main():
             for i in range(len(e)):
                 if inside_prox[i] and not inside_circle[i]:
                     fill_pads.append((f"{name}_fill{i:04d}", (e[i], nn[i]), regraded[goff + lo + i]))
+            # Ribbon cuts land ON the pad rim, not at whole stations
+            # (2026-09-07, Taylor: "all junctions look broken" - top-down
+            # tile renders showed 1-5m of bare ground at nearly every
+            # junction mouth). Omission is per-STATION, so the ribbon used
+            # to end at the last station outside the margin-0 keep-out
+            # circle - up to a full STATION_SPACING short of it - while the
+            # drawn pad only extends PAD_OVERLAP_MARGIN_M past that same
+            # rim. Bisect the boundary edge for the exact rim crossing and
+            # emit an interpolated terminal station there, so every mouth
+            # tucks PAD_OVERLAP_MARGIN_M under the drawn pad by
+            # construction.
+            def rim_point(oi, ii):
+                # oi outside / ii inside (margin-0) adjacent stations;
+                # returns an interpolated terminal station TUCKED
+                # PAD_RIM_TUCK_M inside the bare keep-out rim (so the
+                # ribbon's straight, full-width end cut sits well under the
+                # curved drawn pad even at its lateral corners - a cut flush
+                # with the rim still left lens-shaped slivers where the
+                # circle recedes from the cut line). If the inside station
+                # itself sits within the tuck annulus the bisection
+                # degrades to cutting at that station, which is deeper
+                # still - fine either way.
+                t_lo, t_hi = 0.0, 1.0
+                for _ in range(20):
+                    t = 0.5 * (t_lo + t_hi)
+                    px = e[oi] + t * (e[ii] - e[oi])
+                    py = nn[oi] + t * (nn[ii] - nn[oi])
+                    if any(point_in_pad(px, py, j, margin=-PAD_RIM_TUCK_M)
+                           for j in junctions):
+                        t_hi = t
+                    else:
+                        t_lo = t
+                t = t_lo
+                # skip a rim station that would sit degenerately close to
+                # the real terminal station (sub-0.5m edge = garbage frame)
+                if t * math.hypot(e[ii] - e[oi], nn[ii] - nn[oi]) < 0.5:
+                    return None
+                lerp = lambda arr: float(arr[oi] + t * (arr[ii] - arr[oi]))
+                return (lerp(s), lerp(e), lerp(nn), lerp(z),
+                        float(half_width_run[oi] + t * (half_width_run[ii] - half_width_run[oi]))
+                        if half_width_run is not None else None)
+
+            def prox_point(oi, ii):
+                # A proximity-omitted neighbor is patched by a FILL_RADIUS_M
+                # disc centered ON it; extend the ribbon to within
+                # PROX_TUCK_M of that center so the full-width end cut
+                # (corners at ROAD_HALF_WIDTH laterally) lands inside the
+                # disc instead of leaving corner slivers just past its arc.
+                edge = math.hypot(e[ii] - e[oi], nn[ii] - nn[oi])
+                t = 1.0 - PROX_TUCK_M / edge if edge > PROX_TUCK_M else 0.0
+                if t * edge < 0.5:
+                    return None
+                lerp = lambda arr: float(arr[oi] + t * (arr[ii] - arr[oi]))
+                return (lerp(s), lerp(e), lerp(nn), lerp(z),
+                        float(half_width_run[oi] + t * (half_width_run[ii] - half_width_run[oi]))
+                        if half_width_run is not None else None)
             p0 = 0
             sub_idx = 0
             for p1 in range(1, len(e) + 1):
                 if p1 == len(e) or inside[p1] != inside[p0]:
                     if p1 - p0 >= 2 and not inside[p0]:
                         sub_name = name if len(e) == p1 - p0 else f"{name}_s{sub_idx:03d}"
-                        sub_oneway = is_oneway[p0:p1] if is_oneway is not None else None
+                        s_r, e_r, n_r, z_r = s[p0:p1], e[p0:p1], nn[p0:p1], z[p0:p1]
+                        hw_r = half_width_run[p0:p1] if half_width_run is not None else None
+                        ow_r = list(is_oneway[p0:p1]) if is_oneway is not None else None
+                        hc_r = list(highway_run[p0:p1]) if highway_run else None
+                        ln_r = list(lanes_run[p0:p1]) if lanes_run else None
+                        # categorical per-station tags at an interpolated rim
+                        # station copy the adjacent real station's values
+                        head = tail = None
+                        if p0 > 0:
+                            head = (rim_point(p0, p0 - 1) if inside_circle[p0 - 1]
+                                    else prox_point(p0, p0 - 1))
+                        if p1 < len(e):
+                            tail = (rim_point(p1 - 1, p1) if inside_circle[p1]
+                                    else prox_point(p1 - 1, p1))
+                        if head is not None:
+                            s_r = np.concatenate([[head[0]], s_r])
+                            e_r = np.concatenate([[head[1]], e_r])
+                            n_r = np.concatenate([[head[2]], n_r])
+                            z_r = np.concatenate([[head[3]], z_r])
+                            if hw_r is not None:
+                                hw_r = np.concatenate([[head[4]], hw_r])
+                            if ow_r is not None:
+                                ow_r = [ow_r[0]] + ow_r
+                            if hc_r is not None:
+                                hc_r = [hc_r[0]] + hc_r
+                            if ln_r is not None:
+                                ln_r = [ln_r[0]] + ln_r
+                        if tail is not None:
+                            s_r = np.concatenate([s_r, [tail[0]]])
+                            e_r = np.concatenate([e_r, [tail[1]]])
+                            n_r = np.concatenate([n_r, [tail[2]]])
+                            z_r = np.concatenate([z_r, [tail[3]]])
+                            if hw_r is not None:
+                                hw_r = np.concatenate([hw_r, [tail[4]]])
+                            if ow_r is not None:
+                                ow_r = ow_r + [ow_r[-1]]
+                            if hc_r is not None:
+                                hc_r = hc_r + [hc_r[-1]]
+                            if ln_r is not None:
+                                ln_r = ln_r + [ln_r[-1]]
                         chunks, cx, cy, cz = build_road_chunks(
-                            s[p0:p1], e[p0:p1], nn[p0:p1], z[p0:p1], name_prefix=sub_name,
-                            spacing=STATION_SPACING, is_oneway=sub_oneway,
+                            s_r, e_r, n_r, z_r, name_prefix=sub_name,
+                            spacing=STATION_SPACING, is_oneway=ow_r,
                             skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP,
-                            highway_classes=(highway_run[p0:p1] if highway_run else None),
-                            osm_lanes=(lanes_run[p0:p1] if lanes_run else None),
-                            half_width_s=(half_width_run[p0:p1]
-                                          if half_width_run is not None else None))
+                            highway_classes=hc_r,
+                            osm_lanes=ln_r,
+                            half_width_s=hw_r)
                         all_chunks.extend(chunks)
-                        total_km += float(s[p1 - 1] - s[p0]) / 1000.0
+                        total_km += float(s_r[-1] - s_r[0]) / 1000.0
                         sub_idx += 1
                     p0 = p1
         goff += len(seg["east_m"])
