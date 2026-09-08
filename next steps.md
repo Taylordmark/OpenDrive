@@ -4674,3 +4674,130 @@ road_bridges.json, bridge_subclass_report.json, and the exported .bin tiles
 under `OpenDriveUE/Content/OpenDrive/Masks`) are all gitignored per
 `.gitignore` (`data/` and `OpenDriveUE/Content/`) - regenerated locally, not
 committed, matching 7.18/7.19/7.20 precedent. Not pushed.
+
+### 7.22 Bridge sub-classification: tighten discriminator against unpaved roads and sidehill benches (2026-09-07)
+
+**Reviewer verdict on 7.21 (commit `74aa93d`):** the two-condition
+discriminator (water crossing OR short+both-sided) is necessary but not
+sufficient - it's satisfied just as well by a switchback bench or a fill
+crest (both edges of the roadbed dip briefly at a bench turn with no real
+gap underneath) as by a real span. Result: 92 runs/9.93 km "genuine",
+including 20 spans on Boreas Pass Road (an unpaved 4x4 pass) and clusters on
+CO-9/Hoosier Pass, County Road 4, Homestake Creek Road, and Robbers Nest
+Drive - all dirt/gravel roads. Not credible; real Summit County has on the
+order of 2-4 km of actual bridge deck.
+
+**Two new AND conditions**, added on top of 7.21's existing short+both-sided
+test (`subclassify_bridge_runs()`, `pipeline/build_road_embankments.py`).
+The water-crossing OR stays unconditional - a real water crossing already
+implies a real gap under the deck, so neither new condition applies to it.
+
+1. **Paved-road test** (`build_road_surface_index()`) - a dirt/gravel/
+   track/service road never gets a concrete deck regardless of drop shape.
+   `road_stations.json` ships per-station `highway_class` but not OSM
+   `surface` - there's no `surface()` counterpart to `build_road_network.
+   py`'s `highway_class()`/`way_name()` helpers, and adding one was out of
+   scope (this pass touches `build_road_embankments.py` only). Instead this
+   joins back to the cached `data/raw/summit_county_test/osm.json` by road
+   NAME, length-weighting every way sharing that name/ref into a per-road
+   paved/unpaved/minor-highway/no-surface-tag tally, then votes: >=50%
+   paved-tagged wins outright; else >=50% track/path/service-class or >40%
+   explicit unpaved-surface-tagged demotes; else an unreviewed/unmarked
+   TIGER-import fallback (residential/unclassified, no surface tag at all,
+   `tiger:reviewed` not "yes"/"aerial") demotes if it's >=50% of the road's
+   length. Deliberately does NOT blanket-demote `highway=unclassified`
+   despite being one of the task brief's own suggested tags - inspecting
+   the actual county data first found unclassified is majority-PAVED here
+   (176/323 ways asphalt-surfaced).
+   **Caught and fixed during this pass:** the TIGER fallback's first cut
+   checked `tiger:reviewed == "no"` literally, which silently missed the
+   more common case (231 of 965 tiger-tagged ways vs. 734 marked "no") where
+   the tag is simply ABSENT rather than explicitly "no" - County Road 4
+   itself (both its OSM ways) has no `tiger:reviewed` tag at all, so the
+   first cut left it un-demoted, directly failing the task's own named
+   requirement. Fixed by checking "not affirmatively reviewed" (`not in
+   ("yes", "aerial")`) instead of "explicitly no".
+2. **Terrain-rebound (abutment plausibility) test** (`rebound_shape_ok()`)
+   - a real span's drop profile is a bowl: the terrain climbs back to near
+   road level (`REBOUND_DROP_M` = 3 m) within `REBOUND_WINDOW_M` beyond BOTH
+   ends of the run, checked against the FULL side's station array outside
+   the run's own hysteresis-drawn boundary (a run's own edge stations are,
+   by construction, already at-or-above threshold, so the rebound has to be
+   checked in the stations the classifier excluded). A bench/fill-crest
+   instead holds a plateau - it's really one long sustained cut, not a
+   short real gap.
+   **Window tuned empirically, not from the task brief's own ~30-50 m
+   guess** - the brief's own lower estimate clips the real, named-genuine
+   Silverthorne I-70/CO-9 interchange overpass (its drop doesn't reach 3 m
+   until ~65 m past each run end, then keeps falling to ~0 by ~60-65 m - a
+   real if slightly wide abutment approach grade, not a plateau). Tuning
+   run: `OD_DEBUG_REBOUND=1 python build_road_embankments.py` dumps every
+   water-excluded/paved/short/both-sided candidate's full drop profile out
+   to 250 m past each run end to `bridge_rebound_debug.json`; `scratchpad/
+   plot_rebound_tuning.py` sweeps window sizes against it. Total genuine km
+   among those candidates: 0.59 km @ 40 m -> 1.78 km @ 70 m -> 2.24 km @
+   100 m -> 3.18 km @ 250 m - climbing slowly and monotonically rather than
+   leveling off, i.e. widening the window mostly keeps re-admitting more of
+   the CO-9/Hoosier switchback-bench population the test exists to reject,
+   not recovering "real" mileage. `REBOUND_WINDOW_M = 70` is picked as the
+   smallest window that clears Silverthorne on both sides (passes at 65 m)
+   - the specific, named reason it's needed - while 40 of 42 CO-9-named
+   candidates still correctly fail at that window. `REBOUND_DROP_M` stays
+   at the brief's own 3 m guess (not tuned - the window was the binding
+   constraint). See `verify_bridge_rebound.png` (bowl-vs-plateau profile
+   overlay plus the window-vs-km tuning curve, both panels).
+
+**Result:** 23 genuine runs / 1.78 km (down from 74aa93d's 92 runs / 9.93
+km) / 134 demoted runs / 66.06 km, of the same pre-subclassification 157
+runs / 67.83 km pool 7.21 started from. Of the 69 runs/8.15 km demoted by
+the two new conditions: 27 runs/3.44 km hit the unpaved-road rule (all of
+which also failed rebound independently - Boreas Pass Road x15, County Road
+4 x6, Robbers Nest Drive x3, Homestake Creek Road x1, Garnet Road x1, East
+Fork Eagle x1), 42 runs/4.71 km failed only the rebound test on an
+otherwise-paved-eligible road (mostly CO-9/GRFMH sidehill benches). Named
+validation, all correct: Boreas Pass Road 0/28 runs genuine, County Road 4
+0/8, Homestake Creek Road 0/2, Robbers Nest Drive 0/4, Garnet Road 0/2,
+I-70 East Portal long sidehill run stays demoted, and the I-70/CO-9
+Silverthorne interchange (135 m/130 m spans, both-sides rebound min
+-0.87/-0.59 m - comfortably below threshold, not a marginal pass) stays
+genuine. The remaining genuine list is dominated by I-70/"Gerald R. Ford
+Memorial Highway" interchange-area structures plus a handful of paved
+highway creek crossings (CO 91, US 6, Water Street, Tenth Mountain Division
+Memorial Highway) - CO-9's own Hoosier Pass switchback population is almost
+entirely demoted now (1 of ~22 candidates survives), matching the reviewer's
+specific complaint.
+
+Total genuine mileage (1.78 km) landed below the task's own "~2-5 km"
+expectation. Not adjusted further to chase that number - see
+`verify_bridge_rebound.png`'s tuning curve: every threshold loosening tried
+recovers km almost entirely by re-admitting CO-9/Hoosier bench candidates,
+not by any named-plausible structure, and the two hard named requirements
+(Silverthorne genuine, Boreas Pass/County Road 4/Homestake Creek/Robbers
+Nest Drive all zero) are both satisfied at the chosen thresholds.
+
+Full bake chain re-run to completion: `build_road_embankments.py` ->
+`export_road_embankment_bin.py` -> `build_road_bridges.py` ->
+`export_road_bridge_bin.py`. 23 bridge runs / 378 stations / 86 piers
+exported to 11 `.bin` tiles.
+
+**Offline verification (scratchpad, no `-game` launch per current
+project-wide protocol):**
+- `verify_bridge_subclass2.png` - county map, genuine (red) vs demoted
+  (purple) spans, before/after km in the title, Boreas Pass Rd (0/28) and
+  the Silverthorne interchange (stays genuine) annotated.
+- `verify_bridge_rebound.png` - REBOUND_WINDOW_M tuning: total-genuine-km-
+  vs-window curve (with the Silverthorne first-pass window marked) plus
+  overlaid drop profiles for bowl-shaped genuine spans vs. plateau-shaped
+  demoted benches, at the chosen 3 m/70 m thresholds.
+- `verify_bridge_stats2.txt` - discriminator in plain language, full
+  genuine-span list (23 rows), a demotion-reason sample (unpaved vs.
+  rebound vs. both), named-geography validation checks, and honest caveats
+  (name-based OSM join risk, TIGER-fallback heuristic risk, threshold
+  tuned-to-this-county risk, and 7.21's still-unresolved Swan Mountain
+  Road/water-signal-never-fires caveat).
+
+Committed: `pipeline/build_road_embankments.py` only (this pass touches no
+other pipeline module). Bakes (road_embankments.json, road_bridges.json,
+bridge_subclass_report.json, bridge_rebound_debug.json, and the exported
+.bin tiles) are all gitignored per `.gitignore` - regenerated locally, not
+committed, matching 7.18-7.21 precedent. Not pushed.

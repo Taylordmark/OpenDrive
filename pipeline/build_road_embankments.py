@@ -84,6 +84,67 @@ attributes and the accept/demote reason are written to
 bridge_subclass_report.json (verification input for pipeline/build_road_
 bridges.py and the offline verification plots) regardless of outcome.
 
+§7.22 refinement (2026-09-07, this pass): 7.21's own "short + both-sided"
+signal turned out to be necessary but NOT sufficient - it's also satisfied
+by a switchback bench or a fill crest (both edges of the roadbed dip briefly
+at a bench turn without any real gap underneath), which is exactly why
+7.21's shipped "genuine" list included 20 spans on Boreas Pass Road (an
+unpaved 4x4 pass) and clusters on CO-9/Hoosier Pass and several dirt county
+roads (County Road 4, Homestake Creek Road, Robbers Nest Drive) - not
+credible: real Summit County has on the order of 2-4 km of actual bridge
+deck (I-70 interchange/overpass structures, a handful of US-6/Blue River/
+Tenmile Creek crossings), not the 92 runs/9.93 km 7.21 shipped. Two new AND
+conditions were added on top of the existing short+both-sided test (the
+water-crossing OR stays unconditional - a real water crossing already
+implies a real gap under the deck):
+  1. **paved-road test** (`build_road_surface_index()`/`is_unpaved`) - a
+     dirt/gravel/track/service road never gets a concrete deck regardless of
+     drop shape. `road_stations.json` ships `highway_class` per station but
+     not the OSM `surface` tag (build_road_network.py's `highway_class()`
+     has no `surface()` counterpart), so this joins back to the cached
+     `data/raw/<AREA>_test/osm.json` by road name, length-weighting every
+     OSM way sharing that name/ref. Deliberately does NOT blanket-demote
+     highway=unclassified despite the task brief's own suggested tag list -
+     inspecting the actual county data first (per the brief's own
+     instruction) found unclassified is majority-PAVED here (176/323 ways
+     asphalt-surfaced), so a per-name length-weighted `surface` tag vote is
+     used instead of a per-class blanket rule. A residual ambiguous case
+     (plain "County Road 4"/"Willow Creek": highway=residential, no surface
+     tag, `tiger:reviewed` absent or "no" - not affirmatively reviewed as
+     "yes"/"aerial") falls back to a documented, honestly-caveated
+     heuristic - see that function's own docstring.
+  2. **terrain-rebound (abutment plausibility) test** (`rebound_shape_ok()`)
+     - a real span's drop profile is a bowl: the terrain climbs back to near
+     road level (drop <= REBOUND_DROP_M, 3 m) within REBOUND_WINDOW_M (70 m)
+     beyond BOTH ends of the run. A bench/fill-crest instead holds a
+     plateau - the drop stays elevated well past the run's own hysteresis-
+     drawn boundary, because it's really one long sustained cut, not a short
+     real gap. Checked against the FULL side's station array beyond the
+     run's own slice (a run's own edge stations are, by construction of the
+     hysteresis classifier, already at-or-above threshold, so the terrain
+     has to be checked outside the run, not inside it).
+     Window tuned empirically against the actual county data (OD_DEBUG_
+     REBOUND=1 dump of every water-excluded/paved/short/both-sided
+     candidate's full drop profile out to 250 m past each run end - see
+     `_DEBUG_REBOUND_DUMP` below and scratchpad/plot_rebound_tuning.py):
+     the task brief's own suggested ~30-50 m guess is too tight - it clips
+     the real, named-genuine Silverthorne I-70/CO-9 interchange (its drop
+     doesn't fall to 3 m until ~65 m out, then keeps falling to ~0 by ~60-65
+     m - a real, if slightly wide, abutment approach grade, not a plateau).
+     70 m is the smallest window that admits Silverthorne on both sides
+     while total genuine km among those 65 candidates is still climbing
+     slowly (0.59 km at 40 m -> 1.78 km at 70 m -> 2.24 km at 100 m -> 3.18
+     km at 250 m) rather than having already leveled off - i.e. 70 m is
+     picked for the specific, named reason it's needed (Silverthorne), not
+     because a bigger window recovers more total mileage; going further
+     mostly keeps re-admitting more of the CO-9/Hoosier switchback-bench
+     population the discriminator exists to reject; 40 of the 42 CO-9-named
+     candidates still correctly fail at 70 m. See verify_bridge_rebound.png
+     and "next steps.md" §7.22 for the tuning plot and before/after numbers.
+Both new conditions are AND'd onto the existing short+both-sided test (which
+stays necessary but not sufficient, per the task brief); they do not apply
+to the unconditional water-crossing OR.
+
 Exclusions, reused from build_road_guardrails.py's own precedent:
   - junction proximity: FIRST DRAFT of this module used only the newer
     per-station `in_junction_box` field (Arc 7.18) directly, reasoning that
@@ -142,6 +203,7 @@ Outputs data/road_tiles/<AREA_NAME>_test/road_embankments.json
 
 import json
 import math
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -179,6 +241,17 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
 OUT_PATH = STATIONS_PATH.parent / "road_embankments.json"
 REPORT_PATH = STATIONS_PATH.parent / "bridge_subclass_report.json"
+OSM_CACHE_PATH = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm.json"
+
+# --- §7.22 refinement thresholds (see module docstring addendum) ---
+MINOR_HIGHWAY_CLASSES = {"track", "path", "bridleway", "cycleway", "footway", "steps", "service"}
+UNPAVED_SURFACE_TAGS = {"dirt", "gravel", "unpaved", "ground", "compacted", "grass", "sand", "earth", "mud"}
+PAVED_SURFACE_TAGS = {"asphalt", "paved", "concrete", "paving_stones", "sett", "cobblestone"}
+UNPAVED_LENGTH_FRAC = 0.4        # named-road demoted if this much of its OSM length is unpaved-tagged
+MINOR_HIGHWAY_LENGTH_FRAC = 0.5  # named-road demoted if this much of its OSM length is track/path/service/etc.
+TIGER_UNREVIEWED_LENGTH_FRAC = 0.5  # fallback: unreviewed TIGER import, no surface tag anywhere, resi/unclassified
+REBOUND_WINDOW_M = 70.0          # look this far past each run end for terrain to rebound
+REBOUND_DROP_M = 3.0             # "back to near road level" - must fall at/below this within the window
 
 
 def contiguous_runs(mask):
@@ -242,6 +315,204 @@ def demote_short_runs(cls_arr, s_m):
         if run_len_m < EMBANK_MIN_RUN_M:
             out[start:end] = NONE_CLS
     return out
+
+
+_ROAD_SURFACE_INDEX = None   # lazy-built, module-level cache (see build_road_surface_index())
+
+# §7.22 rebound-threshold tuning instrumentation: OFF by default (None), only
+# populated when OD_DEBUG_REBOUND=1 is set in the environment - dumps wide-
+# window drop profiles for every water/unpaved-filtered short+both-sided
+# candidate to scratchpad-owned bridge_rebound_debug.json so a one-off tuning
+# script can plot bowl-vs-plateau shapes without re-running the bake. Not a
+# normal-path feature; the threshold values it informed (REBOUND_WINDOW_M/
+# REBOUND_DROP_M above) are what actually ships.
+_DEBUG_REBOUND_DUMP = [] if os.environ.get("OD_DEBUG_REBOUND") == "1" else None
+
+
+def _way_length_m(way, node_latlon):
+    nds = way.get("nodes", [])
+    total = 0.0
+    for a, b in zip(nds, nds[1:]):
+        pa, pb = node_latlon.get(a), node_latlon.get(b)
+        if pa is None or pb is None:
+            continue
+        lat1, lon1 = pa
+        lat2, lon2 = pb
+        dlat = (lat2 - lat1) * M_PER_DEG_LAT
+        dlon = (lon2 - lon1) * M_PER_DEG_LAT * math.cos(math.radians(lat1))
+        total += math.hypot(dlat, dlon)
+    return total
+
+
+def build_road_surface_index():
+    """§7.22: road_stations.json ships per-station `highway_class` (OSM
+    highway= value) but NOT `surface` - build_road_network.py never carries
+    that tag through (see that module's `highway_class()`/`way_name()`
+    helpers - there's no `surface()` counterpart). Rather than add a new
+    per-station field upstream (out of scope - this pass touches
+    build_road_embankments.py only), join back to the cached OSM source the
+    pipeline already reads (`data/raw/<AREA>_test/osm.json`) by road NAME,
+    length-weighting each way's surface/highway tag over every way sharing
+    that name/ref - the same granularity a sub-classified run is already
+    decided at (one road_name_top per run, via Counter in
+    subclassify_bridge_runs()).
+
+    Inspected the actual tag data before picking a rule (see "next steps.md"
+    §7.22): highway=unclassified is NOT a reliable unpaved signal in this
+    county's OSM data (176/323 unclassified ways are asphalt-surfaced) so it
+    is deliberately NOT used as a blanket demotion rule despite being one of
+    the task brief's own suggested tags - the `surface` tag and the
+    track/path/service highway classes are far more reliable here, and are
+    the ones actually used below. A residual ambiguous case (a plain
+    "County Road 4"/"Willow Creek"-style TIGER import: highway=residential,
+    NO surface tag at all, `tiger:reviewed` absent or "no" - i.e. not
+    affirmatively reviewed as "yes"/"aerial") is treated as unpaved by a
+    documented, honestly-caveated fallback - real Summit/Park/Eagle County
+    unreviewed-or-unmarked TIGER residential ways with no surveyed surface
+    tag are overwhelmingly unpaved rural roads in this data (spot-checked:
+    County Road 4 - `tiger:reviewed` tag absent entirely on both its ways -
+    and Willow Creek - `tiger:reviewed=no` - both match), but this is a
+    heuristic, not a certainty - see verify_bridge_stats2.txt's caveats.
+    NOTE: an earlier version of this rule only matched `tiger:reviewed=="no"`
+    literally, which silently missed the (more common, 231 vs 734 ways)
+    case where the tag is absent entirely rather than explicitly "no" -
+    County Road 4 itself has no `tiger:reviewed` tag on either of its ways
+    and was NOT demoted until this was corrected.
+
+    Returns: dict road_name -> (is_unpaved: bool, reason: str, stats dict).
+    Names not present in the OSM cache (e.g. "(unnamed)") are absent - callers
+    treat missing names as "unknown -> not unpaved" (fail open, matching this
+    module's existing default-to-eligible posture elsewhere).
+    """
+    global _ROAD_SURFACE_INDEX
+    if _ROAD_SURFACE_INDEX is not None:
+        return _ROAD_SURFACE_INDEX
+
+    index = {}
+    if not OSM_CACHE_PATH.exists():
+        print(f"  WARNING: {OSM_CACHE_PATH} not found - unpaved-road demotion rule "
+              f"will not fire (fails open, treating all roads as pavable)")
+        _ROAD_SURFACE_INDEX = index
+        return index
+
+    raw = json.loads(OSM_CACHE_PATH.read_text(encoding="utf-8"))
+    elements = raw.get("elements", [])
+    node_latlon = {e["id"]: (e["lat"], e["lon"]) for e in elements if e["type"] == "node"}
+    ways = [e for e in elements if e["type"] == "way"]
+
+    from collections import defaultdict
+    by_name = defaultdict(lambda: {"paved_m": 0.0, "unpaved_m": 0.0, "minor_m": 0.0,
+                                    "tiger_no_surface_m": 0.0, "other_m": 0.0, "total_m": 0.0})
+    for w in ways:
+        tags = w.get("tags", {})
+        name = tags.get("name") or tags.get("ref") or ""
+        if not name:
+            continue
+        highway = tags.get("highway", "")
+        surface = tags.get("surface", "")
+        length_m = _way_length_m(w, node_latlon)
+        if length_m <= 0:
+            continue
+        rec = by_name[name]
+        rec["total_m"] += length_m
+        has_tiger = any(k.startswith("tiger:") for k in tags)
+        if highway in MINOR_HIGHWAY_CLASSES:
+            rec["minor_m"] += length_m
+        elif surface in UNPAVED_SURFACE_TAGS:
+            rec["unpaved_m"] += length_m
+        elif surface in PAVED_SURFACE_TAGS:
+            rec["paved_m"] += length_m
+        elif not surface and has_tiger and tags.get("tiger:reviewed") not in ("yes", "aerial") and \
+                highway in ("residential", "unclassified"):
+            rec["tiger_no_surface_m"] += length_m
+        else:
+            rec["other_m"] += length_m
+
+    for name, rec in by_name.items():
+        total = rec["total_m"]
+        if total <= 0:
+            continue
+        if rec["paved_m"] / total >= 0.5:
+            # Explicit paved-surface tag dominates - never demote even if a
+            # minority stretch is unpaved/unknown (e.g. Boreas Pass Road's
+            # own lower, in-town, actually-paved segment doesn't save the
+            # 79% gravel/compacted majority above it, but a road that's
+            # mostly paved shouldn't demote over a minor unpaved fraction).
+            unpaved, reason = False, "OSM surface tag mostly paved"
+        elif rec["minor_m"] / total >= MINOR_HIGHWAY_LENGTH_FRAC:
+            unpaved = True
+            reason = (f"highway=track/path/service/etc. over {rec['minor_m']/total*100:.0f}% "
+                      f"of this road's OSM length - not a road decks are built for")
+        elif rec["unpaved_m"] / total > UNPAVED_LENGTH_FRAC:
+            unpaved = True
+            reason = (f"OSM surface tag unpaved (dirt/gravel/etc.) over "
+                      f"{rec['unpaved_m']/total*100:.0f}% of this road's OSM length")
+        elif rec["tiger_no_surface_m"] / total >= TIGER_UNREVIEWED_LENGTH_FRAC:
+            unpaved = True
+            reason = ("unreviewed TIGER import, no surface tag anywhere on this road "
+                      "(fallback heuristic - see build_road_surface_index() docstring)")
+        else:
+            unpaved, reason = False, "no unpaved signal found (default eligible)"
+        index[name] = (unpaved, reason, dict(rec))
+
+    _ROAD_SURFACE_INDEX = index
+    return index
+
+
+def rebound_shape_ok(s_full, drop_full, run_start, run_end,
+                      window_m=REBOUND_WINDOW_M, thresh_m=REBOUND_DROP_M):
+    """§7.22 abutment-plausibility test: a real span's terrain profile is a
+    bowl - the drop shrinks back down to near road level within `window_m`
+    beyond BOTH ends of the run (a real abutment sits on solid ground, not
+    mid-slope). A sidehill-cut bench/fill-crest instead holds a plateau - the
+    drop stays elevated well past the run's own (hysteresis-drawn) boundary.
+
+    Looks at the FULL side's station arrays beyond the run's own [run_start,
+    run_end) slice (a run's own edge stations are, by construction, already
+    at-or-above the classification threshold, so the rebound has to be
+    checked in the stations the hysteresis machine excluded, not inside the
+    run itself).
+
+    A run that touches the very start/end of a segment's station array (no
+    further stations to check - the road chain itself ends or hands off to a
+    different OSM way there) is treated as passing on that side: there's
+    nothing to disprove a real abutment with, and demoting solely because a
+    segment boundary was reached would penalize spans at the edge of the
+    pipeline's per-chain station data rather than a real geometric signal.
+
+    Returns (passes: bool, before_min_m: float|None, after_min_m: float|None)
+    - the raw minimums are returned for the tuning histogram even when the
+    run demotes on this rule, so verify_bridge_rebound.png can show the full
+    distribution, not just the pass/fail cut.
+    """
+    n = len(s_full)
+
+    def side_min(is_before):
+        if is_before:
+            if run_start <= 0:
+                return None
+            s_edge = s_full[run_start]
+            lo = run_start - 1
+            while lo >= 0 and s_edge - s_full[lo] <= window_m:
+                lo -= 1
+            window_slice = drop_full[lo + 1:run_start]
+        else:
+            if run_end >= n:
+                return None
+            s_edge = s_full[run_end - 1]
+            hi = run_end
+            while hi < n and s_full[hi] - s_edge <= window_m:
+                hi += 1
+            window_slice = drop_full[run_end:hi]
+        if len(window_slice) == 0:
+            return None
+        return float(np.min(window_slice))
+
+    before_min = side_min(True)
+    after_min = side_min(False)
+    before_ok = before_min is None or before_min <= thresh_m
+    after_ok = after_min is None or after_min <= thresh_m
+    return (before_ok and after_ok), before_min, after_min
 
 
 def build_station_runs(ox_cm, oy_cm, z_cm, drop_cm, tile_size_cm):
@@ -343,6 +614,7 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
     drop_m = d["drop_m"]
     drop_cm = d["drop_cm"]
     s = d["s"]
+    surface_index = build_road_surface_index()
     for run_start, run_end in contiguous_runs(cls_arr == BRIDGE_CLS):
         run_len_m = float(s[run_end - 1] - s[run_start]) if run_end > run_start else 0.0
         water_frac = float(d["in_lake"][run_start:run_end].mean())
@@ -353,9 +625,54 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
         edge_drop = float(0.5 * (drop_m[run_start] + drop_m[run_end - 1]))
         rise_ratio = (max_drop - edge_drop) / max_drop if max_drop > 1e-6 else 0.0
 
+        names = [nm for nm in d["road_name"][run_start:run_end] if nm]
+        road_name_top = Counter(names).most_common(1)[0][0] if names else "(unnamed)"
+
+        # §7.22 rule 1: unpaved/minor roads never get a concrete deck,
+        # regardless of drop shape (checked before rule 2's short+both-sided
+        # test, since it demotes independently of it).
+        surf_entry = surface_index.get(road_name_top)
+        is_unpaved = bool(surf_entry[0]) if surf_entry else False
+        unpaved_reason = surf_entry[1] if surf_entry else "road not found in OSM surface index (fail open)"
+
+        # §7.22 rule 2: terrain-rebound (abutment plausibility) - a real span's
+        # drop profile is a bowl (rebounds near both ends), a sidehill
+        # bench/fill-crest is a plateau (still dropping steadily past the
+        # run's own boundary).
+        rebound_ok, rebound_before_min, rebound_after_min = rebound_shape_ok(s, drop_m, run_start, run_end)
+
+        if _DEBUG_REBOUND_DUMP is not None and water_frac < BRIDGE_WATER_MIN_FRAC and \
+                run_len_m <= BRIDGE_GENUINE_MAX_LEN_M and both_sided_frac >= BRIDGE_BOTH_SIDED_MIN_FRAC and \
+                not is_unpaved:
+            # threshold-tuning dump (gated on OD_DEBUG_REBOUND env var, see
+            # scratchpad/plot_rebound_tuning.py) - wide window (250 m) so the
+            # tuning plot can see well past REBOUND_WINDOW_M in both directions.
+            dbg_window = 250.0
+            s_edge0 = s[run_start]
+            lo = run_start
+            while lo > 0 and s_edge0 - s[lo - 1] <= dbg_window:
+                lo -= 1
+            s_edge1 = s[run_end - 1]
+            hi = run_end
+            while hi < len(s) and s[hi] - s_edge1 <= dbg_window:
+                hi += 1
+            _DEBUG_REBOUND_DUMP.append({
+                "road_name": road_name_top, "run_len_m": run_len_m,
+                "seg": int(seg_i), "side": int(side),
+                "s_rel": [float(v - s[run_start]) for v in s[lo:hi]],
+                "drop_m": [float(v) for v in drop_m[lo:hi]],
+                "run_start_s_rel": 0.0, "run_end_s_rel": float(s[run_end - 1] - s[run_start]),
+                "rebound_before_min_m": rebound_before_min, "rebound_after_min_m": rebound_after_min,
+            })
+
         reasons = []
         genuine = False
         if water_frac >= BRIDGE_WATER_MIN_FRAC:
+            # Unconditional OR - a water crossing always gets a deck, per the
+            # task brief, regardless of the paved/rebound rules below (a
+            # genuine reservoir/creek crossing IS the abutment-plausibility
+            # signal already - there's a real gap under the deck by
+            # definition of "over open water").
             genuine = True
             reasons.append(f"water crossing ({water_frac * 100:.0f}% of run over mapped open water)")
         # NOTE: osm_frac is measured and reported (see module docstring) but
@@ -373,22 +690,42 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
         # sibling mask. Using it as a discriminator would have kept the East
         # Portal run "genuine" at 58-100% "OSM" coverage for exactly the wrong
         # reason. Left in the report for the record, not the decision.
-        if run_len_m <= BRIDGE_GENUINE_MAX_LEN_M and both_sided_frac >= BRIDGE_BOTH_SIDED_MIN_FRAC:
+        elif (run_len_m <= BRIDGE_GENUINE_MAX_LEN_M and both_sided_frac >= BRIDGE_BOTH_SIDED_MIN_FRAC
+                and not is_unpaved and rebound_ok):
             genuine = True
             reasons.append(f"short span ({run_len_m:.0f} m) with drop on both sides "
-                            f"({both_sided_frac * 100:.0f}% opposite-side overlap)")
+                            f"({both_sided_frac * 100:.0f}% opposite-side overlap), paved road, "
+                            f"terrain rebounds near both ends (bowl shape, not a plateau)")
 
         if not genuine:
-            reasons.append(
-                f"sidehill cut: one-sided ({both_sided_frac * 100:.0f}% opposite-side overlap), "
-                f"{run_len_m:.0f} m run (either exceeds the {BRIDGE_GENUINE_MAX_LEN_M:.0f} m "
-                f"genuine-span length or fails the both-sided test), no water/OSM-tag signal")
+            demote_reasons = []
+            if water_frac < BRIDGE_WATER_MIN_FRAC:
+                if run_len_m > BRIDGE_GENUINE_MAX_LEN_M or both_sided_frac < BRIDGE_BOTH_SIDED_MIN_FRAC:
+                    demote_reasons.append(
+                        f"sidehill cut: one-sided ({both_sided_frac * 100:.0f}% opposite-side "
+                        f"overlap), {run_len_m:.0f} m run (exceeds the {BRIDGE_GENUINE_MAX_LEN_M:.0f} m "
+                        f"genuine-span length or fails the both-sided test)")
+                if is_unpaved:
+                    demote_reasons.append(f"unpaved/minor road: {unpaved_reason}")
+                if not rebound_ok:
+                    below = []
+                    if rebound_before_min is not None and rebound_before_min > REBOUND_DROP_M:
+                        below.append(f"before-end min drop {rebound_before_min:.1f} m")
+                    if rebound_after_min is not None and rebound_after_min > REBOUND_DROP_M:
+                        below.append(f"after-end min drop {rebound_after_min:.1f} m")
+                    demote_reasons.append(
+                        f"no terrain rebound within {REBOUND_WINDOW_M:.0f} m of run end(s) "
+                        f"(plateau, not a bowl: {'; '.join(below)}, threshold {REBOUND_DROP_M:.1f} m)")
+                if not demote_reasons:
+                    # both-sided+short+paved+rebound all passed individually
+                    # but genuine stayed False - shouldn't happen given the
+                    # elif above, kept as a defensive fallback message.
+                    demote_reasons.append("failed combined genuine test")
+            reasons.extend(demote_reasons)
             cls_arr[run_start:run_end] = EMBANK_CLS
             cap_cm = DEMOTED_BRIDGE_DROP_CAP_M * 100.0
             drop_cm[run_start:run_end] = np.minimum(drop_cm[run_start:run_end], cap_cm)
 
-        names = [nm for nm in d["road_name"][run_start:run_end] if nm]
-        road_name_top = Counter(names).most_common(1)[0][0] if names else "(unnamed)"
         mid = (run_start + run_end) // 2
         mid_lat = lat0 + d["north"][mid] / M_PER_DEG_LAT
         mid_lon = lon0 + d["east"][mid] / m_per_deg_lon
@@ -399,6 +736,10 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
             "mean_drop_m": round(float(drop_m[run_start:run_end].mean()), 2),
             "water_frac": round(water_frac, 3), "osm_frac": round(osm_frac, 3),
             "both_sided_frac": round(both_sided_frac, 3), "rise_ratio": round(rise_ratio, 3),
+            "is_unpaved": is_unpaved, "unpaved_reason": unpaved_reason,
+            "rebound_ok": bool(rebound_ok),
+            "rebound_before_min_m": None if rebound_before_min is None else round(rebound_before_min, 2),
+            "rebound_after_min_m": None if rebound_after_min is None else round(rebound_after_min, 2),
             "genuine": genuine, "reasons": reasons,
             "mid_lat": round(float(mid_lat), 6), "mid_lon": round(float(mid_lon), 6),
         })
@@ -509,6 +850,11 @@ def main():
             "water_min_frac": BRIDGE_WATER_MIN_FRAC,
             "osm_tag_min_frac": BRIDGE_OSM_TAG_MIN_FRAC,
             "demoted_drop_cap_m": DEMOTED_BRIDGE_DROP_CAP_M,
+            "unpaved_length_frac": UNPAVED_LENGTH_FRAC,
+            "minor_highway_length_frac": MINOR_HIGHWAY_LENGTH_FRAC,
+            "tiger_unreviewed_length_frac": TIGER_UNREVIEWED_LENGTH_FRAC,
+            "rebound_window_m": REBOUND_WINDOW_M,
+            "rebound_drop_m": REBOUND_DROP_M,
         },
     }, indent=1))
 
@@ -529,6 +875,11 @@ def main():
             print(f"    {cls_name}: {run_len_m:.1f} m run, max drop {max_drop:.2f} m")
     else:
         print("  Dillon Dam Road: no qualifying run found on this side/segment pass")
+
+    if _DEBUG_REBOUND_DUMP is not None:
+        dbg_path = REPORT_PATH.parent / "bridge_rebound_debug.json"
+        dbg_path.write_text(json.dumps(_DEBUG_REBOUND_DUMP))
+        print(f"  OD_DEBUG_REBOUND: {len(_DEBUG_REBOUND_DUMP)} candidate profile(s) -> {dbg_path}")
 
 
 if __name__ == "__main__":
