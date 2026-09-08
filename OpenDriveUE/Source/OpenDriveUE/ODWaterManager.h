@@ -6,6 +6,7 @@
 
 class UDynamicMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 
 /** One parsed lake - plain data, safe to build off the game thread. Mirrors
  *  the ODL1 sidecar's per-lake payload layout (pipeline/build_water_tiles.py). */
@@ -100,6 +101,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Water")
 	int32 MaxNewLoadsPerTick = 2;
 
+	/** Seasons feature (2026-09-07) - see AODTerrainManager::GetGroundMID's
+	 *  identical reasoning. AODSeasonController drives FreezeBlend on this. */
+	UMaterialInstanceDynamic* GetWaterMID() const { return WaterMID; }
+
 private:
 	static bool ParseWaterTileFile(const FString& Path, FParsedWaterTile& Out);
 
@@ -130,6 +135,9 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> WaterMat;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> WaterMID;
 
 	double LastDiagTime = 0.0;
 };

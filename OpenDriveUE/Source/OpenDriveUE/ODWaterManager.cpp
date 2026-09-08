@@ -8,6 +8,7 @@
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -31,6 +32,15 @@ void AODWaterManager::BeginPlay()
 			TEXT("ODWaterManager: could not load /Game/OpenDrive/Materials/M_Water - "
 			     "lakes will render with the engine default material until "
 			     "unreal/apply_water_material.py has been run"));
+	}
+	else
+	{
+		// Seasons feature (2026-09-07): one shared MID every lake renders
+		// with instead of the raw asset - AODSeasonController drives
+		// FreezeBlend on this directly. See AODTerrainManager::TerrainMID's
+		// header comment for the identical reasoning (one instance for every
+		// resident component, not one per lake).
+		WaterMID = UMaterialInstanceDynamic::Create(WaterMat, this);
 	}
 }
 
@@ -220,9 +230,9 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& L
 	// rather than left at the DynamicMeshComponent default so this reads as
 	// a deliberate choice, not an oversight, if the default ever changes.
 	Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	if (WaterMat)
+	if (WaterMID)
 	{
-		Comp->SetMaterial(0, WaterMat);
+		Comp->SetMaterial(0, WaterMID);
 	}
 
 	Tile.Lakes.Add(Comp);

@@ -162,6 +162,15 @@ RIPPLE_B_TILE_CM = 260.0
 RIPPLE_B_SPEED = (-0.028, 0.019)
 NORMAL_BLEND_ALPHA = 0.5   # even mix - both layers contribute (large rolling shape + fine chop)
 
+# ---- seasons: lake freeze (2026-09-07, seasons feature part 1) ----------
+# AODSeasonController drives FreezeBlend (0 baseline - byte-for-byte the
+# pre-seasons look, same "unconnected param defaults to the old behavior"
+# convention as M_GroundStylized's SnowLineLowZCm/HighZCm). Pale blue-white
+# ice color, rougher (matte ice, not glossy open water), ripple normal
+# strength faded toward flat (a frozen surface doesn't show wind chop).
+ICE_COLOR = (0.62, 0.68, 0.72)
+ICE_ROUGHNESS = 0.75
+
 
 def log(msg):
     # unreal.log() doesn't reliably surface in this project's headless
@@ -224,6 +233,11 @@ class G:
 
     def add(self, a, b, a_out="", b_out=""):
         return self.binop(unreal.MaterialExpressionAdd, a, b, a_out, b_out)
+
+    def scalar_param(self, name, default):
+        n = self.node(unreal.MaterialExpressionScalarParameter, parameter_name=name)
+        n.set_editor_property("default_value", default)
+        return n
 
     def lerp(self, a, b, alpha, a_out="", b_out="", al_out=""):
         n = self.node(unreal.MaterialExpressionLinearInterpolate)
@@ -345,21 +359,30 @@ ripple_normal_raw = g.lerp(ripple_a, ripple_b, g.const(NORMAL_BLEND_ALPHA), a_ou
 # deliberately left at 1x - only X/Y encode the actual ripple direction/
 # steepness, scaling Z would just dim the overall normal length.
 ripple_normal_amplified = g.mul(ripple_normal_raw, g.const3(NORMAL_STRENGTH, NORMAL_STRENGTH, 1.0))
+
+# seasons: fade the ripple perturbation toward a flat normal (0,0,1) as the
+# lake freezes over - ice doesn't show wind-driven surface chop.
+freeze_blend = g.scalar_param("FreezeBlend", 0.0)
+flat_normal = g.const3(0.0, 0.0, 1.0)
+ripple_normal_frozen = g.lerp(ripple_normal_amplified, flat_normal, freeze_blend, a_out="", b_out="")
+
 # flip Z on backfaces (see two_sided_sign_vec() docstring) - fixes the
 # unlit-black backface wedge a two-sided flat water plane otherwise shows
 # from below/behind its shoreline edge.
-ripple_normal = g.mul(ripple_normal_amplified, g.two_sided_sign_vec())
+ripple_normal = g.mul(ripple_normal_frozen, g.two_sided_sign_vec())
 
 # ---------------------------------------------------------------- fresnel-driven color/specular
 fresnel = g.fresnel(FRESNEL_EXPONENT, FRESNEL_BASE_REFLECT)
 
-deep_color = g.const3(*WATER_COLOR)
+deep_color_liquid = g.const3(*WATER_COLOR)
+ice_color = g.const3(*ICE_COLOR)
+deep_color = g.lerp(deep_color_liquid, ice_color, freeze_blend, b_out="")
 sky_color = g.const3(*SKY_TINT_COLOR)
 base_fresnel = g.clamp(fresnel, 0.0, BASE_COLOR_FRESNEL_CAP)
 base_color = g.lerp(deep_color, sky_color, base_fresnel)
 
 specular = g.lerp(g.const(SPECULAR_BASE), g.const(SPECULAR_GRAZING), fresnel)
-roughness = g.const(ROUGHNESS)
+roughness = g.lerp(g.const(ROUGHNESS), g.const(ICE_ROUGHNESS), freeze_blend)
 
 MEL.connect_material_property(base_color, "", unreal.MaterialProperty.MP_BASE_COLOR)
 MEL.connect_material_property(roughness, "", unreal.MaterialProperty.MP_ROUGHNESS)
@@ -403,4 +426,5 @@ log(f"built + saved {MAT_NAME} (color={WATER_COLOR}, sky_tint={SKY_TINT_COLOR}, 
     f"fresnel_cap={BASE_COLOR_FRESNEL_CAP}, roughness={ROUGHNESS}, "
     f"specular={SPECULAR_BASE}-{SPECULAR_GRAZING}, fresnel_exp={FRESNEL_EXPONENT}, "
     f"normal_strength={NORMAL_STRENGTH}, two_sided=True+TwoSidedSign normal fix, "
-    f"blend=Opaque, ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm)")
+    f"blend=Opaque, ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm, "
+    f"seasons_param=FreezeBlend)")

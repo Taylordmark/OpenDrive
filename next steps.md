@@ -3625,3 +3625,182 @@ Committed locally only (`ODGuardrailManager.cpp`, `ODGuardrailManager.h`,
 `ODGameMode.cpp`, `ODGameMode.h`, `pipeline/build_road_guardrails.py`,
 `pipeline/export_road_guardrails_bin.py`, `pipeline/rebuild_area.py`,
 `unreal/apply_guardrail_assets.py`); not pushed.
+
+### 7.17 Seasons, first half: clock + ground/lake/foliage winter (2026-09-07)
+
+Builds a continuous, looping season **clock** (not a picker) per The Crew
+2's stylized-realistic direction: a 4-real-time-hour "year" loops
+summer -> fall -> winter -> spring -> summer, each season holding stable
+for 45 min then blending gradually into the next over 15 min (nothing
+snaps - every parameter is a smoothstep-eased ramp). This pass covers
+ground snow, falling-snow weather, evergreen canopy snow, lake freeze, and
+spring melt/green-up. Deciduous-tree fall color/drop is explicitly **out
+of scope** for this pass - `FallBlend` is computed by the clock and pushed
+to the foliage MID every tick, but nothing consumes it yet; it's left
+wired and ready for a follow-up task to build the deciduous arc on top of
+without touching the clock again.
+
+**Architecture** - `AODSeasonController` (`OpenDriveUE/Source/OpenDriveUE/
+ODSeasonController.h/.cpp`), a runtime-spawned singleton actor following
+the same "find-or-spawn from `AODGameMode`" shape as
+`AODDayNightController`/`AODAtmosphereController`
+(`AODGameMode::EnsureSeasonController`, `ODGameMode.h/.cpp`). Its `Tick`
+advances a `ClockSeconds` position around a 14400 s loop (`4 *
+(HoldSeconds + TransitionSeconds)`, both `EditAnywhere` and both default
+to their documented values), runs it through the pure function
+`ComputeParamsForClock` to get five blends (`FallBlend`, `SnowCover`,
+`SnowfallIntensity`, `FreezeBlend`, `SpringGreen`), and pushes them
+(`PushParamsToMIDs`, throttled to `ParamPushHz` = 3 Hz - see the perf note
+below) into MIDs the ground/water/foliage managers already own:
+`AODTerrainManager::GetGroundMID`, `AODWaterManager::GetWaterMID`,
+`AODForestManager::GetFoliageSeasonMID`. No new
+`MaterialParameterCollection` - the project has never had one, and only
+three materials/one HISM batch need reaching, which the established
+per-manager-MID + C++-setter convention already covers fine.
+
+A `MaterialParameterCollection` was considered and rejected for the same
+reason `ODSeasonController.h`'s own class comment gives: not enough
+distinct materials to justify the project's first MPC.
+
+**QA flags** (mirrors the existing `-odseason`/day-night QA-flag idiom):
+- `-odseason=summer|fall|winter|spring` - freezes the clock at the START
+  of that season's 45-min hold (`bFrozen = true`, `Tick` stops advancing
+  it). `SeasonHoldStartSeconds()` maps the name to its loop-position.
+- `-odseasonphase=<0..1>` - only meaningful combined with `-odseason=`;
+  offsets further into that season's hold-then-transition span (0 = start
+  of hold, ~0.75 = start of hold + most of the transition into the next
+  season - used for `season_fall_to_winter_25`/`_75` at phase 0.25/0.75,
+  and `season_melt_50` at `-odseason=winter -odseasonphase=0.5`, which
+  lands mid-transition into spring).
+- `-odseasonrate=<x>` - `TimeScale` multiplier on the un-frozen clock (1.0
+  = real time), for accelerating a live/interactive session instead of
+  freezing it.
+
+**What each material/MID consumes:**
+- Ground (`unreal/apply_ground_material.py`, `M_GroundStylized`) - ground
+  snow deliberately **reuses the existing** `SnowLineLowZCm`/
+  `SnowLineHighZCm` scalar params rather than adding a new one: sweeping
+  both down together (same band width, so the material's own ~40 m
+  value-noise patchiness comes along for free) from their baked defaults
+  down to a floor well below the area's real valley floor IS the winter
+  ground-snow mechanic. Leaving them at the baked defaults (`SnowCover=0`)
+  is byte-for-byte the pre-existing altitude snow band - the summer
+  baseline this task requires to be an exact zero-regression match. Also
+  consumes `SpringGreen` for a fresh-green tint ramped in during the
+  spring transition.
+- Water (`unreal/apply_water_material.py`, lake material) - consumes
+  `FreezeBlend` (opacity/color/roughness shift toward an icy look).
+  **Not visually confirmed this pass** - the required Dillon vantage
+  (`-odspawnx=733226 -odspawny=-807394`) never has the lake in frame (it's
+  occluded by the guardrail/embankment/treeline in every screenshot at
+  every season), so `FreezeBlend`'s wiring is code-reviewed and pushed
+  correctly (same `PushParamsToMIDs` pattern as everything else) but has
+  no photographic proof from this vantage. A future pass should verify it
+  from a lake-facing spawn point.
+- Foliage (`unreal/build_flora_materials.py`, `M_Foliage`) - consumes
+  `SnowCover` for canopy snow (Conifer species only,
+  `ConiferSpeciesIndex` in `ODForestManager.cpp`) via a `Lerp` into
+  `BaseColor` between the atlas color and a pale
+  `LinearColor(0.92,0.94,0.97,1)`, gated by `SnowCover *
+  desync(PerInstanceRandom)` so different tree instances pick up snow at
+  slightly different points in the transition rather than all snapping
+  together - `desync` lerps `PerInstanceRandom` into `[0.55, 1.0]` so
+  no instance is fully snow-free once winter is under way, but some are
+  visibly "ahead" of others. Also exposes `FallBlend` as an
+  unconnected `MaterialExpressionScalarParameter` for the follow-up
+  deciduous task.
+- Falling snow (`unreal/apply_snow_particle_material.py`, `M_SnowFlake`,
+  plus `AODSeasonController`'s own `SnowFxHism`) - a plain camera-attached
+  HISM of tiny spheres the controller animates by hand in `Tick`, not
+  Niagara (headless Niagara-asset creation from python is finicky in UE
+  5.8, and a from-scratch C++ Niagara system still needs an authored data
+  asset - a HISM the controller owns directly needed no editor session or
+  asset pipeline step). `M_SnowFlake` must be `MSM_DEFAULT_LIT`, not
+  `MSM_UNLIT` - unlit renders solid black in this project's lighting
+  setup, a gotcha hit and fixed before this continuation.
+
+**Bug found and fixed this pass - canopy-snow material-slot mismatch:**
+canopy snow initially showed *zero* visible effect despite every other
+part of the pipeline (MID creation, `SnowCover` push, Conifer-species
+targeting, MID-to-HISM assignment, Base-Color/Emissive graph wiring - each
+independently confirmed via debug logging and an emissive-bypass
+diagnostic) checking out correct. Root cause: `import_biome_flora.py`'s
+material-slot contract puts opaque bark at slot 0 and the alpha-cutout
+foliage cards at slot 1 for every two-slot tree mesh
+(`BARK_SLOT, FOLIAGE_SLOT = 0, 1`, see that file's module docstring), but
+`ODForestManager.cpp`'s Conifer branch was hardcoded to
+`Hism->SetMaterial(0, FoliageSeasonMID)` - slot 0, i.e. the **bark**
+slot. The MID was landing on bark (invisible under the tree's own crown
+draw order) while the actually-rendered foliage cards at slot 1 kept using
+the original static `M_Foliage` reference with `SnowCover` stuck at its
+0.0 asset default. Fixed by changing the call to
+`Hism->SetMaterial(1, FoliageSeasonMID)`. Two other now-ruled-out HISM
+vertex-factory gotchas surfaced while chasing this, worth recording for
+future foliage work: `MaterialExpressionLocalPosition.Z` evaluates as a
+flat/uniform value for this crossed-billboard-card HISM vertex factory
+(unusable as a per-vertex height metric), and `WorldPosition().Z -
+ObjectPositionWS().Z` does not resolve to a genuine per-instance pivot
+either (patchy, HISM-occlusion-cluster-shaped banding, not per-tree-crown
+shaped) - both ruled out a per-vertex "only the crown top gets snow"
+design in favor of the simpler uniform-per-instance-tint approach
+described above.
+
+**Perf note:** `ParamPushHz = 3.0f` keeps the MID pushes to 3/sec rather
+than every tick, since per `docs/perf_after_art_overhaul.md` volumetric
+fog and foliage overdraw have the least headroom in this project's frame
+budget. A sanity `-odtrace` pass (ODDrivetrain heartbeat, spring render,
+~215 s span) showed consistent ~15-18 ms/frame (55-67 fps), no stalls, in
+line with the project's existing baseline - no perf regression evident
+from the season system.
+
+**Screenshots (Dillon Dam Road vantage, `-odspawnx=733226
+-odspawny=-807394`, `-odgo=5`), honest per-shot verdicts:**
+- `season_summer.png` (`-odseason=summer`) - baseline: green canopy, no
+  ground snow, no falling snow. Matches pre-season behavior exactly (the
+  zero-regression requirement).
+- `season_fall_to_winter_25.png` / `_75.png`
+  (`-odseason=fall -odseasonphase=0.25`/`0.75`) - falling snow visible and
+  intensifying between the two; ground snow line creeping down. Canopy
+  color itself doesn't change here (deciduous fall-color is next task's
+  scope; conifers don't change color in fall).
+- `season_winter.png` (`-odseason=winter`) - ground snow-cover fully in,
+  falling snow, **and now genuine canopy snow** after the slot-mismatch
+  fix above: close-in conifers show visible pale/gray-white patches mixed
+  into the green canopy, varying instance-to-instance per the
+  `PerInstanceRandom` desync. Confirmed via a tight pixel-crop zoom, not
+  just eyeballing the full frame.
+- `season_melt_50.png` (`-odseason=winter -odseasonphase=0.5`) - ground
+  snow fully retreated to bare grass with a visible fresh-green tint,
+  falling snow still present but visibly tapering. Reads correctly as
+  "mid-thaw."
+- `season_spring.png` (`-odseason=spring`) - ground fully melted and
+  green, no falling snow, green canopy. Matches the intended spring
+  baseline.
+- Lake freeze - **not verified**, see the water bullet above; the lake
+  never enters frame at this vantage in any season.
+
+**Not touched:** vehicle physics/driving surfaces, `cars_manifest.json`
+(byte-identical), and the five uncommitted road/junction files already in
+the working tree before this task (`pipeline/build_road_network.py`,
+`pipeline/build_road_stations.py`, `pipeline/road_mesh_common.py`,
+`pipeline/build_road_guardrails.py`, `unreal/apply_road_material.py`) -
+confirmed via their on-disk mtimes predating this session.
+
+**Follow-up task for a second agent:** build the deciduous-tree fall-color
+arc on top of `FallBlend`, which is already computed by the season clock
+and already pushed to `M_Foliage`'s MID every tick
+(`AODSeasonController::PushParamsToMIDs`) - it's exposed as a
+`MaterialExpressionScalarParameter` named `FallBlend` in `M_Foliage`
+(`unreal/build_flora_materials.py`) but deliberately left unconnected.
+That task should also decide whether to extend the slot-1 foliage-MID
+approach to the other (non-Conifer) tree species batches, which currently
+have no MID assigned at all (`ODForestManager.cpp`'s conditional is
+Conifer-only).
+
+Committed locally only (`OpenDriveUE/Source/OpenDriveUE/
+ODSeasonController.h`, `ODSeasonController.cpp`, `ODGameMode.h`,
+`ODGameMode.cpp`, `ODTerrainManager.h`, `ODTerrainManager.cpp`,
+`ODWaterManager.h`, `ODWaterManager.cpp`, `ODForestManager.h`,
+`ODForestManager.cpp`, `unreal/apply_ground_material.py`,
+`unreal/apply_water_material.py`, `unreal/build_flora_materials.py`,
+`unreal/apply_snow_particle_material.py`); not pushed.

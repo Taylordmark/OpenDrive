@@ -442,6 +442,20 @@ veg_albedo = g.lerp(grass_tinted, forest_tinted, forest_weight)
 veg_normal = g.lerp(grass["normal"], forest["normal"], forest_weight, a_out="RGB", b_out="RGB")
 veg_rough = g.lerp(rough_scalar(grass["rough"]), rough_scalar(forest["rough"]), forest_weight)
 
+# ---------------------------------------------------------------- seasons: spring fresh-green tint
+# (2026-09-07, seasons feature part 1) - AODSeasonController drives this
+# scalar param (0 baseline, unconnected to anything else so SnowCover=0/
+# SpringGreen=0 is a byte-for-byte no-op back to the pre-seasons look).
+# Deliberately capped low (SPRING_GREEN_MAX_BLEND) and only applied to the
+# vegetated base, never the steep/rock/scree layers - a subtle, temporary
+# "new growth" brightening of the existing biome-tinted grass/forest-floor
+# color, not a texture swap or a full-saturation cartoon green.
+SPRING_GREEN_COLOR = (0.32, 0.52, 0.16)
+SPRING_GREEN_MAX_BLEND = 0.35
+spring_green_param = g.scalar_param("SpringGreen", 0.0)
+spring_green_color = g.const3(*SPRING_GREEN_COLOR)
+spring_green_amount = g.mul(spring_green_param, g.const(SPRING_GREEN_MAX_BLEND))
+
 # large-scale (120 m) position noise picks organic dirt-trail patches -
 # texture-variety only, not tied to any biome/road signal (the C++ tint's
 # own road-verge blend already handles the "near road" cue as a color shift;
@@ -451,6 +465,8 @@ dirt_amount = g.mul(patch_noise, g.const(DIRT_PATCH_STRENGTH))
 veg_albedo = g.lerp(veg_albedo, dirt["albedo"], dirt_amount, b_out="RGB")
 veg_normal = g.lerp(veg_normal, dirt["normal"], dirt_amount, b_out="RGB")
 veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), dirt_amount)
+
+veg_albedo = g.lerp(veg_albedo, spring_green_color, spring_green_amount, b_out="")
 
 # ---- above treeline, blend the vegetated base toward scree even on FLAT
 # ground (real alpine tundra is patchy rock/gravel, not solid grass) - same
@@ -541,4 +557,5 @@ if not all_ok:
 log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"treeline={TREELINE_LOW_M:.0f}-{TREELINE_HIGH_M:.0f}m ({TREELINE_LOW_CM:.0f}-{TREELINE_HIGH_CM:.0f}cm), "
     f"snowline={SNOW_START_M:.0f}-{SNOW_FULL_M:.0f}m ({SNOW_LOW_CM:.0f}-{SNOW_HIGH_CM:.0f}cm), "
-    f"layers={list(LAYERS.keys())}, triplanar=rock")
+    f"layers={list(LAYERS.keys())}, triplanar=rock, "
+    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen]")

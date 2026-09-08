@@ -63,4 +63,13 @@ private:
 	 *  rides high above the surrounding terrain - see
 	 *  pipeline/build_road_guardrails.py. */
 	void EnsureGuardrailManager();
+
+	/** Seasons feature (2026-09-07) - same "find or spawn" shape as
+	 *  EnsureAtmosphereController above (no per-level tile-prefix needed,
+	 *  applies identically everywhere): spawns AODSeasonController, which in
+	 *  turn finds AODTerrainManager/AODWaterManager/AODForestManager (spawned
+	 *  by the Ensure* calls above, in order, earlier in this same BeginPlay)
+	 *  and drives their ground/water/foliage MIDs through a looping season
+	 *  clock. */
+	void EnsureSeasonController();
 };

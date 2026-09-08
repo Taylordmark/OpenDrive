@@ -6,6 +6,7 @@
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
+#include "ODSeasonController.h"
 #include "ODVehiclePawn.h"
 #include "ODParkingManager.h"
 #include "ODWaterManager.h"
@@ -24,6 +25,7 @@ void AODGameMode::BeginPlay()
 	EnsureParkingManager();
 	EnsureGuardrailManager();
 	EnsureAtmosphereController();
+	EnsureSeasonController();
 }
 
 void AODGameMode::EnsureForestManager()
@@ -305,4 +307,21 @@ void AODGameMode::EnsureAtmosphereController()
 
 	World->SpawnActor<AODAtmosphereController>();
 	UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned AODAtmosphereController"));
+}
+
+void AODGameMode::EnsureSeasonController()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AODSeasonController> It(World); It; ++It)
+	{
+		return;
+	}
+
+	World->SpawnActor<AODSeasonController>();
+	UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned AODSeasonController"));
 }
