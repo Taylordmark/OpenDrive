@@ -2627,7 +2627,9 @@ What landed, in order:
 - Of the five car silhouettes, Super reads weakest against its supercar
   reference.
 - `-odrev` scripted drives still veer off-road at some towns (pre-existing,
-  reported during the road work above, not re-investigated here).
+  reported during the road work above, not re-investigated here). Diagnosed
+  in §7.25 below: expected behavior of an open-loop straight-throttle test
+  hook with no steering, not a controller bug - not fixed, reclassified.
 - Taylor's own live drive-test of the whole art pass is still pending — the
   final look verdict is his, this pass only closes the two defects an
   in-game review already flagged.
@@ -4956,3 +4958,53 @@ command output in `verify_deadcode_cleanup.txt` (scratchpad).
 
 Committed: `pipeline/road_mesh_common.py` (dead code removal) and this
 note. The VSM investigation touched no repo files. Not pushed.
+
+### 7.25 `-odrev` "veers off-road at towns": diagnosed, reclassified as
+expected behavior, not a bug (2026-09-07)
+
+Picked up the 7.24-listed leftover from line 2629 above. Read
+`ODVehiclePawn.h`/`.cpp` before touching anything: `-odrev=T` is one of a
+family of straight open-loop test hooks (`-odrev`/`-odlift`/`-odsteer`/
+`-odbrake`), explicitly designed (per the class comment, `ODVehiclePawn.h`
+lines 26-39) to isolate single variables in headless verification without
+"fighting the key input." `SmSteer`'s target comes only from
+`bRightKey`/`bLeftKey` (real keyboard only) - nothing in the `-odrev`/
+`-odlift`/`-odbrake` path ever sets them, so a bare `-odrev=T` run (no
+`-odsteer`) drives dead straight for its entire duration, by construction.
+Grepped the whole repo (`OpenDriveUE/Source`, `pipeline/*.py`) for
+pure-pursuit/lookahead/route-follow/autodrive/autopilot: there is no
+road-graph or station-polyline follower anywhere. The one "LOOKAHEAD" hit
+is unrelated (yaw-smoothing in the road MESH generator,
+`build_road_network.py:204`).
+
+So "veers off-road at towns" isn't a controller defect to fix - it's the
+deterministic geometric result of driving straight from a point on a
+curving road, and it happens faster at a tight town-corner radius than a
+gentle highway bend. Confirmed against real baked data
+(`data/road_tiles/summit_county_test/road_stations.json`, ROAD_HALF_WIDTH
+= 4.5 m): a straight line from three sharp town corners (Main Gore Drive,
+North Park Ave/CO-9, Ski Hill Road switchback - curvature up to ~0.068
+rad/m, radius ~15 m) leaves the pavement in 2.8-6.2 s of simulated travel,
+while the same test against a gentle mountain corridor (French Gulch Road,
+curvature ~0.02 rad/m - the same shape of corridor as the Vail
+`-odrev=20` perf run noted above at line 2637, which was never flagged as
+veering) takes ~13 s. Full numbers, method, and caveats (the longitudinal
+speed profile is an approximate stand-in for `UODVehicleMovement`'s real
+torque-curve integration; no tire slip/suspension/contact-patch model) in
+`verify_odrev_stats.txt`; before/after-style plots of the straight path vs.
+the real centerline and the cross-track-error blowup in
+`verify_odrev_diagnosis.png` (both scratchpad, not committed).
+
+**No code or data fix applied.** Making `-odrev` follow the road would mean
+building a route-following steering system (road-graph selection +
+pure-pursuit/lookahead) that doesn't exist in this project at all - that's
+a new feature, not a fix, and it would defeat the actual purpose of these
+hooks as isolated single-variable tests (reintroducing exactly the
+folded-together confounders the project's diagnostic convention says to
+avoid). `cars_manifest.json`, vehicle physics tuning, and season files
+untouched; no C++ changed, so no rebuild needed. If Taylor wants an actual
+scripted whole-town review-drive capability later, that's worth scoping as
+its own feature - it isn't "fixing" anything that currently exists.
+
+Committed: this note only (reclassifies the line 2629 backlog item from an
+open defect to a diagnosed non-issue). Not pushed.
