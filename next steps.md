@@ -5008,3 +5008,102 @@ its own feature - it isn't "fixing" anything that currently exists.
 
 Committed: this note only (reclassifies the line 2629 backlog item from an
 open defect to a diagnosed non-issue). Not pushed.
+
+### 7.26 Linear waterways (rivers/named streams) baked as water ribbons (2026-09-07)
+
+Closes the 7.23 caveat directly: `build_water_tiles.py` explicitly did not
+bake linear `waterway=river|stream` features, so real CO-9/Blue River and
+I-70/Tenmile-Straight Creek crossings never showed water. This pass adds
+that (`pipeline/build_water_tiles.py` only - no runtime/terrain code
+changes were needed, see below).
+
+**Selection:** `waterway=river` always; `waterway=stream` only if named
+(the Overpass query itself excludes unnamed streams server-side -
+`fetch_waterways()`). Result on this county's data: 2064 raw OSM ways ->
+382 chained centerlines (10 river, 372 named stream) after joining
+same-name/same-class segments that share an OSM node
+(`chain_waterways()`). Two named waterways (e.g. Blue River, split into a
+2365-segment group and a separate 1205-segment group) did not fully merge
+into one chain because the raw OSM way graph itself isn't node-contiguous
+across the whole county - reported honestly, not silently merged/fudged.
+
+**Geometry:** centerlines resampled every 20 m, buffered into ribbon
+quads (`offset_polyline()`, simple average-tangent miter, no explicit
+miter-limit clamp - no visible spike found in this data, not exhaustively
+checked), width from OSM `width=` tag where present and sane (none tagged
+in this county's data - 0/382 tagged, all 382 used the class default:
+river 10 m, named stream 3.5 m) else the class default. Each ribbon
+segment is fed through `build_lake_mesh()` - the SAME mesh builder lakes
+already use - and appended to the SAME per-tile "lakes" list
+`build_terrain_mesh_tiles.load_lake_beds()`/`apply_water_depression()` and
+`ODWaterManager.cpp`'s `CreateLakeComponent` already iterate over
+generically (verified by reading both: `load_lake_beds()` extracts
+boundary rings per mesh entry via `_extract_boundary_rings(tris)`, with no
+lake-specific assumption; the runtime loop is a plain `for l in
+0..LakeCount`). So M_Water + seasonal freeze apply for free, and no
+runtime/terrain code changed.
+
+**Elevation:** flow direction derived by comparing mean DEM elevation of
+the first vs. last fifth of each chain (reverses the array so index 0 is
+always the upstream/high end), then a centered moving-average smooth
+followed by a running-minimum clamp (`monotonic_flow_profile()`) so the
+water surface is guaranteed non-increasing along flow even if smoothing
+reintroduces a bump. Water surface sits a flat 0.4 m below that smoothed
+"bank" reading (`WATERWAY_DEPTH_M`) - a judgment call, not a surveyed bank
+height, since DEM resolution (~9 m ground sample) can't resolve a true
+channel separately from its banks at these widths (documented caveat).
+
+**Roads:** a per-vertex nearest-road-point check (`cKDTree` over every
+road station, `build_road_point_index()`) classifies each ribbon segment
+crossing a road corridor as either a "crossing" (>= 45 deg between
+waterway and road tangent - left alone, bridge deck + terrain carve
+already separate them vertically) or a "parallel run" (clipped off
+pavement via `clip_corner_to_road()`, a one-shot corner pull-back to
+`ROAD_HALF_WIDTH + 1.0 m` clearance). Result: 449 crossings found (317
+coincide with an existing bridge station; the other 132 do NOT - water
+will render crossing the road at grade there, an honest caveat, not
+silently hidden), 135 parallel-run clips applied (pavement never gets a
+ribbon corner closer than the clearance margin).
+
+**Perf:** lakes alone touch 313 tiles (1185 lakes, 1602 OSM polygons
+fetched, 417 skipped as slivers); adding 43,912 ribbon segments (870.6 km
+total) brings it to 509 tiles total (196 new), 215,037 verts / 124,879
+tris across all water tiles - proportionate to, not an order of magnitude
+beyond, the lake bake.
+
+**Full bake chain re-run to completion, in the foreground:**
+`build_water_tiles.py` (Overpass fetch + lake/ribbon bake, clean run, one
+Overpass mirror timeout/fallback, no errors) then
+`build_terrain_mesh_tiles.py` (~38 min, 1221/1221 tiles built, 0 errors,
+now loading 45,097 lake beds from 509 water tiles - up from the pre-pass
+lake-only count - confirming ribbon polygons now feed
+`apply_water_depression()` identically to lakes; 6,895,831 verts /
+12,967,397 tris, 305 tiles used the coarse fallback same as before this
+pass). No other pipeline stage (`build_road_stations.py`,
+`build_road_embankments.py`, `build_road_bridges.py`, etc.) consumes
+water-tile output, so nothing else needed rerunning; §7.18-7.23 station/
+bridge numbers are unaffected (no road/station code touched) and were not
+re-verified since nothing they depend on changed.
+
+**Offline verification (scratchpad, no `-game` launch):**
+- `verify_waterways_map.png` - county map: lakes + ribbons by class
+  (river/stream), named annotations (Blue River, Tenmile Creek, Straight
+  Creek, Snake River, Swan River where present), insets for a confluence
+  union, the Breckenridge Blue River/CO-9 corridor, and a representative
+  road crossing.
+- `verify_waterways_profile.png` - longitudinal profiles (raw DEM vs.
+  smoothed monotonic "bank" vs. final water surface) for Blue River and
+  one named creek, plus a schematic cross-section at a road crossing
+  (deck above, water below).
+- `verify_waterways_stats.txt` - full selection/width/crossing/tile-count
+  numbers and the honest caveats listed above (miter join, confluence
+  handling, DEM resolution, the 35 m lake shore-blend now also applying to
+  narrow ribbons - unretuned, in-engine look is Taylor's to confirm on a
+  drive-test).
+
+Committed: `pipeline/build_water_tiles.py` only. `cars_manifest.json`,
+`apply_water_material.py`, `ODSeasonController`,
+`build_flora_materials.py`, `apply_ground_material.py`, and all vehicle
+physics untouched. Bakes (water tiles, terrain tiles, and the raw
+Overpass/summary caches) are gitignored - regenerated locally, not
+committed. Not pushed.
