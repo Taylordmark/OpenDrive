@@ -4513,3 +4513,164 @@ road_embankments.json, road_guardrails.json, and the exported .bin tiles
 under `OpenDriveUE/Content/OpenDrive/Masks`) are all gitignored per
 `.gitignore` (`data/` and `OpenDriveUE/Content/`) - regenerated locally, not
 committed, matching 7.18/7.19 precedent. Not pushed.
+
+### 7.21 Bridges: genuine-span sub-classification + deck/pier geometry (2026-09-07)
+
+**Goal:** 7.20 left "bridge" as a raw drop-threshold class (157 runs, 67.83 km)
+that mixes genuine short spans with long mountainside sidehill cuts (a single
+terrain heightmap can't represent two independently-benched carriageways on
+the same slope - the same DEM limitation `is_structure_way()`'s own docstring
+already documents for I-5/Skagit). This pass splits that class into real
+bridges (get deck+pier geometry) and sidehill cuts (demoted back into the
+7.19 embankment skirt bake, not left naked), then ships runtime geometry for
+the real ones.
+
+**Discriminator** (`pipeline/build_road_embankments.py`, new
+`subclassify_bridge_runs()`, runs per-segment after both sides' drop/hysteresis
+passes so it can see cross-side agreement): a bridge-threshold run is kept
+GENUINE if either -
+1. **water crossing**: ≥3% of its stations sample inside a mapped lake
+   polygon at the pavement edge (`BRIDGE_WATER_MIN_FRAC`), or
+2. **short + both-sided**: run length ≤300 m (`BRIDGE_GENUINE_MAX_LEN_M`) AND
+   the opposite side of the road also carries a qualifying drop over ≥50% of
+   the same stretch (`BRIDGE_BOTH_SIDED_MIN_FRAC`) - real spans clear both
+   edges of the roadbed; a sidehill cut only drops on the downhill side.
+
+Otherwise the run is DEMOTED to `embankment` class in `cls_arr` (fed straight
+into 7.19's existing skirt bake, same as any other embankment run) with its
+shipped drop value capped at `DEMOTED_BRIDGE_DROP_CAP_M = 12.0` m - purely so
+the skirt's own 1.5:1 side geometry doesn't produce a degenerate 45 m
+horizontal run for a real 30 m sidehill drop (see
+`verify_bridge_geometry.png`'s rightmost panel).
+
+A third candidate signal - OSM `bridge=yes` structure-tag coverage on the run
+- was measured (`osm_frac`, still written to `bridge_subclass_report.json`
+for the record) but deliberately **not** used to decide genuine/demoted.
+`road_stations.json`'s per-station `is_bridge` field is
+`expand_carve_exclusion(is_struct_s) | conflict_s`, and `conflict_s` comes
+from `classify_wall_stations()`'s own separate 150 m same-road-name conflict
+mask - a different call from `reconcile_junction_elevations()`, which 7.20
+fixed, and this one 7.20 explicitly left untouched (correctly sized for
+`classify_wall_stations()`'s own wall-geometry purpose). I-70/"Gerald R. Ford
+Memorial Highway" runs parallel same-named carriageways for kilometers -
+exactly the geometry that caused 7.20's own pre-fix false-match bug - so a
+first pass using OSM-tag coverage as a sufficiency condition kept the 8.64 km
+I-70 East Portal run "genuine" at 58-100% coverage, for exactly the wrong
+reason. Caught by the brief's own validation requirement (this run must NOT
+be genuine) before it shipped; removed as a discriminator, kept measured.
+
+**Result:** 92 genuine runs (2,077 stations) / 9.93 km kept as bridges; 65
+runs / 57.91 km demoted to embankment (of the pre-subclass 157 runs / 67.83
+km). Embankment grows from 7.20's 1,135 runs/196.39 km to 1,073 runs/52,059
+stations/~254.93 km (the demoted sidehill mileage lands there, net run-count
+drop because some adjoining embankment+demoted-bridge runs merge). Genuine
+list is short and geographically credible - mostly 5-285 m spans on CO-9
+(Hoosier Pass switchbacks), Boreas Pass Road, Gerald R. Ford Memorial Highway
+short cuts, and county/local roads; the two named "should demote" targets
+(I-70 East Portal, 8.64 km/30.4 m max drop; Boreas Pass Road's long run,
+6.68 km/14.2 m max drop) both demote correctly, and the named "should stay
+genuine" target (I-70/CO-9 interchange overpass near Silverthorne,
+lat≈39.6266/lon≈-106.0711) survives at 130-135 m/100% both-sided overlap.
+The third named target (Dillon Reservoir causeway / Swan Mountain Road
+crossing) could not be validated either way - see caveats below.
+
+**Geometry** (visual-only, `ECollisionEnabled::NoCollision`, same
+pipeline-ships-points/C++-derives-mesh split as embankments/guardrails):
+- `pipeline/build_road_bridges.py` (new): reads the now-genuine-only "bridge"
+  runs out of `road_embankments.json`, places piers every
+  `PIER_SPACING_STATIONS` (5 stations = 25 m) wherever deck-underside-to-
+  terrain clearance ≥ `MIN_PIER_CLEARANCE_M` (1.0 m), writes
+  `road_bridges.json` (deck station points + pier positions/heights). 92 runs
+  → 451 piers, 0 runs got zero piers (short spans stay under clearance the
+  whole way and read as abutment-to-abutment with no mid-span support, which
+  is correct).
+- `pipeline/export_road_bridge_bin.py` (new): new `ODB1` binary sidecar
+  format (magic + 16-byte generation id + per-run station/pier arrays),
+  bucketed per world tile exactly like `export_road_embankment_bin.py`. 92
+  runs → 32 tile `.bin` files under
+  `OpenDriveUE/Content/OpenDrive/Masks/bridge_summit_county_test_tile_*.bin`.
+- `OpenDriveUE/Source/OpenDriveUE/ODBridgeManager.h/.cpp` (new): clones
+  `AODEmbankmentManager`'s ring-based tile-streaming `Tick()` verbatim
+  (`TileSizeCm`/`SpawnRadius`/`DespawnMarginCm`/`MaxNewLoadsPerTick`,
+  `ODBinSidecarUtil.h` parse helpers, generation-id mismatch warnings per
+  `AUDIT-RELIABILITY.md §3.1/§5.1`). Per run: one `UDynamicMeshComponent`
+  deck fascia (top/bottom-outer/bottom-inner-underside-flap 3-layer quad
+  strip, `DeckDepthCm = 125` matching Python's `DECK_DEPTH_M`, UV0.V =
+  0/0.7/1.0 for the material's underside-darken read), plus one
+  `UHierarchicalInstancedStaticMeshComponent` of `/Engine/BasicShapes/
+  Cylinder` instances for piers (scaled per-instance from the unit 50 cm-
+  radius/100 cm-height primitive). Abutments are implied naturally at span
+  ends (deck simply meets the terrain there) rather than modeled separately.
+- `OpenDriveUE/Source/OpenDriveUE/ODGameMode.h/.cpp`: new
+  `EnsureBridgeManager()`, same find-or-spawn shape as
+  `EnsureEmbankmentManager()`, called from `BeginPlay()` right after it.
+- `unreal/apply_bridge_material.py` (new): builds `M_Bridge` reusing the
+  already-imported `Concrete034` texture set (`unreal/apply_road_material.py`'s
+  existing "junction pad concrete" role, already in
+  `content_src/textures/road/manifest.json` - no new download, no new
+  manifest entry needed). World-space planar XY UV, underside darkened via
+  `Lerp(albedo, black, UV0.V * 0.35)` reading the same V-coordinate layering
+  the C++ manager writes - same "shaded concrete" cue `M_Embankment`'s toe-
+  darkening already uses, applied to the deck's underside instead. Ran via
+  `-run=pythonscript` commandlet: built + saved cleanly, 0 errors.
+- `pipeline/rebuild_area.py`: two new stages inserted right after
+  `export_road_embankment_bin.py` (`build_road_bridges.py`,
+  `export_road_bridge_bin.py`), embankment stage description updated to
+  mention the sub-classification pass.
+
+**Build:** `Build.bat OpenDriveUEEditor Win64 Development` succeeded (24.1 s;
+compiled `ODGameMode.cpp`, `ODBridgeManager.cpp`, `Module.OpenDriveUE.cpp`,
+linked clean).
+
+**Offline verification (scratchpad, no `-game` launch per current
+project-wide protocol):**
+- `verify_bridge_subclass.png` - county map, genuine spans (red) vs demoted
+  sidehill runs (purple, sized by length) over the road network, with km
+  totals per class in the title and the three named validation cases
+  annotated.
+- `verify_bridge_geometry.png` - longitudinal profile (deck/underside/terrain/
+  piers) and mid-span cross-section for the Silverthorne I-70/CO-9 overpass,
+  a short Boreas Pass Road genuine span, and a CO-9 genuine span, plus the
+  demoted I-70 East Portal run's capped-vs-uncapped skirt-toe comparison
+  justifying `DEMOTED_BRIDGE_DROP_CAP_M`.
+- `verify_bridge_stats.txt` - discriminator in plain language, genuine-span
+  list (92 rows: road name/length/max drop/reason), top demoted runs, pier
+  counts, and the caveats below.
+
+**What this offline pass cannot prove:**
+- Whether all 92 "genuine" runs are truly real bridges vs. a handful of short
+  benched-shoulder artifacts that happen to read short-and-briefly-both-sided
+  (e.g. a tight switchback where both edges dip momentarily) - station data
+  alone can't fully separate a real 40 m culvert-crossing span from a 40 m
+  two-sided bench.
+- The named Dillon Reservoir causeway / Swan Mountain Road validation target:
+  the water-crossing signal never fired on any of the 157 candidate runs
+  countywide. Direct check of Swan Mountain Road (`seg023`, `road_stations.
+  json`) shows its max drop peaks at 6.0 m (one side) / 2.7 m (other) -
+  both under the classifier's pre-existing 7 m bridge threshold from 7.19/
+  7.20, so it never becomes a bridge-threshold candidate for this pass to
+  see at all. This is a limitation of the upstream drop/water detector
+  (out of scope here - the brief's own instruction was not to touch
+  elevation code, and this pass didn't), not of the sub-classification
+  discriminator built in 7.21. A real reservoir-crossing structure on Swan
+  Mountain Road may exist but isn't surfaced by this pipeline's current DEM
+  sampling/resolution.
+- In-engine visual read (material tiling/scale, pier silhouette against the
+  real carved terrain mesh, deck fascia depth at driving speed/camera
+  angles) - no `-game` launch performed, per this task's testing protocol.
+  `verify_bridge_geometry.png` uses the same idealized drop-interpolation
+  approximation `build_road_bridges.py` itself uses for pier placement, not
+  a fresh DEM re-sample, so it confirms internal consistency, not ground
+  truth.
+
+Committed: `pipeline/build_road_embankments.py`, `pipeline/build_road_
+bridges.py` (new), `pipeline/export_road_bridge_bin.py` (new), `pipeline/
+export_road_embankment_bin.py`, `pipeline/rebuild_area.py`,
+`OpenDriveUE/Source/OpenDriveUE/ODBridgeManager.h` (new), `OpenDriveUE/
+Source/OpenDriveUE/ODBridgeManager.cpp` (new), `OpenDriveUE/Source/
+OpenDriveUE/ODGameMode.h`, `OpenDriveUE/Source/OpenDriveUE/ODGameMode.cpp`,
+`unreal/apply_bridge_material.py` (new). Bakes (road_embankments.json,
+road_bridges.json, bridge_subclass_report.json, and the exported .bin tiles
+under `OpenDriveUE/Content/OpenDrive/Masks`) are all gitignored per
+`.gitignore` (`data/` and `OpenDriveUE/Content/`) - regenerated locally, not
+committed, matching 7.18/7.19/7.20 precedent. Not pushed.

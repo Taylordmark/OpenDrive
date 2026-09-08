@@ -73,6 +73,17 @@ private:
 	 *  job) - see pipeline/build_road_embankments.py. */
 	void EnsureEmbankmentManager();
 
+	/** Bridge decks (2026-09-07, §7.21) - same "find or spawn" shape as
+	 *  EnsureEmbankmentManager above, deriving AODBridgeManager's tile prefix
+	 *  from the level's own AODRoadManager the same way. Streams runtime-
+	 *  extruded concrete deck fascia + pier columns wherever pipeline/
+	 *  build_road_embankments.py's own §7.21 sub-classification pass kept a
+	 *  "bridge"-class run as a genuine short span (most of the raw >7m-drop
+	 *  classification is actually a mountainside sidehill cut and gets
+	 *  demoted to the embankment skirt above instead - see that module's
+	 *  docstring). */
+	void EnsureBridgeManager();
+
 	/** Seasons feature (2026-09-07) - same "find or spawn" shape as
 	 *  EnsureAtmosphereController above (no per-level tile-prefix needed,
 	 *  applies identically everywhere): spawns AODSeasonController, which in

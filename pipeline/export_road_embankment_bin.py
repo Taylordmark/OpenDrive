@@ -6,9 +6,11 @@ baked mesh - AODEmbankmentManager extrudes the sloped skirt cross-section at
 runtime from these points, sized per-station by the shipped drop value).
 
 "bridge"-class runs in road_embankments.json are deliberately NOT packed
-here - no runtime consumer exists yet (the bridge deck/pier task is a later,
-separately-scoped pass per "next steps.md" §7.19); they stay in the JSON for
-that future task to read directly.
+here - by §7.21, that class only contains genuine short spans (build_road_
+embankments.py's own sub-classification pass already demoted every sidehill-
+cut run back to "embankment"), and build_road_bridges.py/export_road_bridge_
+bin.py is their own separate consumer (adds pier placement, packs ODB1 -
+AODBridgeManager, not AODEmbankmentManager, streams those).
 
 Usage:  python export_road_embankment_bin.py   (needs road_embankments.json first)
 
@@ -83,8 +85,8 @@ def main():
     print(f"deleted {n_stale} stale embankment tile(s) from a previous run")
     total_stations = sum(len(r["station_xyzd_cm"]) // 4 for r in runs)
     print(f"{len(runs)} embankment run(s) ({total_stations} stations) -> {len(run_buckets)} tile(s) -> {OUT_DIR}")
-    print(f"  ({n_bridge_skipped} bridge-class run(s) in road_embankments.json left unpacked - "
-          f"no runtime consumer yet, see module docstring)")
+    print(f"  ({n_bridge_skipped} genuine bridge run(s) in road_embankments.json left unpacked here - "
+          f"see build_road_bridges.py, their own consumer)")
 
 
 if __name__ == "__main__":

@@ -132,8 +132,16 @@ STAGES = [
     # field (Arc 7.18) plus the same DEM-probe drop detection guardrails use -
     # sits right after guardrails for the same "needs terrain's sample_dem
     # helper, no other ordering constraint" reason.
-    ("build_road_embankments.py", "build road_embankments.json (3-way drop classification: none/embankment/bridge)"),
+    ("build_road_embankments.py", "build road_embankments.json (3-way drop classification: none/embankment/bridge) "
+                                   "+ §7.21 bridge sub-classification (demotes sidehill-cut runs back to embankment)"),
     ("export_road_embankment_bin.py", "export embankment tiles -> Content/OpenDrive/Masks/embankment_*.bin"),
+    # BRIDGES (2026-09-07, §7.21): consumes the now-genuine-only "bridge"
+    # class build_road_embankments.py just wrote (its own sub-classification
+    # pass demotes every sidehill-cut run), adding pier placement - sits
+    # right after the embankment export for the same "no other ordering
+    # constraint, needs road_embankments.json first" reason.
+    ("build_road_bridges.py", "build road_bridges.json (genuine-span deck points + pier placement)"),
+    ("export_road_bridge_bin.py", "export bridge tiles -> Content/OpenDrive/Masks/bridge_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),
