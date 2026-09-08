@@ -5587,3 +5587,69 @@ structurally, but crowding is a look, not a number).
 Committed: `OpenDriveUE/Source/OpenDriveUE/ODEngineSynth.h/.cpp` (pop
 mechanism + `FODExhaustConfig`), `ODMainMenu.h/.cpp` (presets, sliders,
 persistence), this note. Not pushed.
+
+**Correction addendum (2026-09-08): the "reuses the jitter RNG draw" line
+above described a real defect, not just an implementation choice.** A
+reviewer reading `verify_exhaust_pops.png` flagged that Open's simulated
+lift-off showed a solid ~0.45s *all-skip* block (zero relight bangs) right
+after the throttle lift, while the empirical rolling skip fraction pegged
+at 1.0 even though theoretical `EffP(t)` started at 0.75 — a ~25% survival
+rate should have produced scattered relight bangs from the first instant,
+not total silence. Diagnosed against the actual `ODEngineSynth.cpp`, not
+just the mirror:
+
+- **Root cause was a divisor bug, not RNG serial correlation** (the
+  reviewer's working hypothesis). The per-firing `R1`/`R2` draws
+  (`ODEngineSynth.cpp`, then ~178-180) computed
+  `(NoiseSeed >> 9) / 8388608.0f - 1.0f`. `NoiseSeed` is a `uint32`; `>>9`
+  leaves a 23-bit value in `[0, 2^23-1]`. Dividing that by `8388608.0f`
+  (`2^23`, the *width* of the shifted range) instead of `4194304.0f`
+  (`2^22`, *half* the width — what the file's own `Noise` line a few dozen
+  lines down already did correctly with its `(int32)` cast) silently
+  confined `R1`/`R2` to `[-1, 0)` — never positive, despite the `// [-1,1)`
+  comment on the line. Confirmed empirically (Python, 20000-draw stream):
+  100% of draws were negative, mean ≈ -0.50, exactly the `[-1,0)`-not-
+  `[-1,1)` signature. Since the pop path used `PopRoll = (R1+1)*0.5`, the
+  roll was uniform on `[0, 0.5)`, not `[0,1)`: any `EffP >= 0.5` (Open
+  starts at `PopProbability=0.75`) skipped **every** firing with certainty
+  (100%, not 75%) until the decaying `EffP` fell under 0.5. That's the
+  solid deterministic block the reviewer saw, and why it carried zero
+  relight bangs (skips never fire, so never carry the boosted-firing bang;
+  the bang lands on the first *real* firing after, which the whole point of
+  the bug was to delay).
+- **Fix, two parts, both landed:**
+  1. Corrected the `R1`/`R2` divisor to `4194304.0f` (restores the
+     documented `[-1,1)` range for `AmpJit`/`JitterAngle` too, which were
+     silently biased the same way).
+  2. The pop roll now draws its **own** independent LCG advance (`R3`,
+     `ODEngineSynth.cpp` ~209-211) instead of reusing `R1` — even with
+     `R1`'s range now correct, sharing one draw across two unrelated
+     consumers (`AmpJit` and the pop roll) was fragile: a future change to
+     either one would silently bias the other. `R3` uses the same
+     corrected `4194304.0f` mapping.
+  3. Defense in depth per the task brief: `MaxConsecutivePopSkips = 3`
+     (new design constant, `ODEngineSynth.h`, same tier as `PopMinRpm`) and
+     `ConsecutivePopSkips` (new audio-thread state, `ODEngineSynth.cpp`)
+     hard-cap the pop mechanism to at most 3 skipped firings in a row —
+     after that the next firing always fires, with its relight bang,
+     regardless of `PopProbability`/`PopDecay`/RNG behavior. Resets to 0 on
+     any firing that actually sounds; a real ignition cut (`bCutNow`)
+     doesn't touch it, since that's a separate deliberate-silence
+     mechanism, not the pop path.
+- **Preset table, `FODExhaustConfig`, garage menu, and persistence are all
+  unchanged** — this was a firing-loop bug, not a tuning or UI issue.
+- `Build.bat` succeeded post-fix (`ODEngineSynth.cpp` recompiled clean,
+  link OK).
+- **Verification (offline):** `verify_exhaust_pops2.png` +
+  `verify_exhaust_pops2_sanity.txt` (scratchpad) — same three-preset
+  lift-off timeline/decay-curve layout as before, re-run against the fixed
+  mirror, plus four numeric acceptance gates, all passing: (1) Open's
+  25-firing rolling skip fraction now peaks at 0.654 in-window (gate
+  `<=0.92`, was pegged at 1.0) and its first relight bang lands 9ms after
+  the lift (gate `<=0.1s`); (2) worst max-consecutive-skip run over 250
+  simulated lifts per preset, different RNG states each: Stock 1, Sport 3,
+  Open 3 — all `<= MaxConsecutivePopSkips` (3); (3) Stock in-window skip
+  1.2% (`<10%`), Open 35.4% (`>30%`) — both still hold; (4) empirical mean
+  skip fraction (150-trial average per preset) tracks theoretical `EffP(t)`
+  within 0.0044/0.0173/0.0354 absolute (Stock/Sport/Open respectively,
+  gate `<=0.12`).

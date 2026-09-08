@@ -196,4 +196,17 @@ private:
 	static constexpr float PopLiftHighThrottle = 0.35f;  // was above this...
 	static constexpr float PopLiftLowThrottle = 0.15f;   // ...now below this = a lift
 	static constexpr float PopMinRpm = 2200.0f;          // floor so idle blips don't pop
+
+	/** Running count of pop-mechanism skips in a row (NOT counting real
+	 *  ignition-cut silence, which is a separate deliberate mechanism - see
+	 *  bCutNow). Reset to 0 by any firing that actually sounds. Post-mortem
+	 *  fix (2026-09-08, corrects 5d1e594): defense in depth alongside the R1
+	 *  range-bug fix below - caps how long the pop roll can go the audio-thread
+	 *  RNG's way. */
+	int32 ConsecutivePopSkips = 0;
+	/** Hard ceiling on ConsecutivePopSkips: after this many skipped firings in
+	 *  a row, the next firing always fires (with its relight bang), so no
+	 *  probability setting can produce a sustained engine dropout. Design
+	 *  constant, same tier as PopMinRpm above - not garage-exposed. */
+	static constexpr int32 MaxConsecutivePopSkips = 3;
 };
