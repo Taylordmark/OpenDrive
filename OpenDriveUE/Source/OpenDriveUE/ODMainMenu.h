@@ -85,8 +85,11 @@ public:
 	bool IsActive() const { return Stage != EODMenuStage::Playing; }
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
-	// Car, Engine, Drivetrain, Tuning, Input Device, Drive
-	int32 NumRows() const { return 6; }
+	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
+	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Drive (5.2:
+	// exhaust preset row + 4 slider rows, same value-cycling idiom as the
+	// rows above them - see Adjust()/GetRow() in the .cpp).
+	int32 NumRows() const { return 11; }
 	int32 GetSelected() const { return Selected; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
@@ -135,7 +138,16 @@ private:
 	void ApplyEngine();
 	void ApplyDrivetrain();
 	void ApplyTuning();
+	void ApplyExhaust();     // pushes current Exhaust* fields to the synth
 	void ChangeCar(int32 Dir);
+
+	// persistence (Arc 5.2) - GConfig into GameUserSettings.ini, same
+	// mechanism/pattern as AODVehiclePawn::Save/LoadInputDeviceMode (no
+	// SaveGame object exists yet in this project; see that class's comment).
+	// Tuning/Engine/Drivetrain picks do NOT persist today - only Input
+	// Device and now Exhaust do; see ODMainMenu.cpp for the noted gap.
+	void SaveExhaustConfig() const;
+	void LoadExhaustConfig();
 
 	AODVehiclePawn* FindPawn() const;
 	UODVehicleMovement* FindMovement() const;
@@ -155,6 +167,17 @@ private:
 	int32 DriveIdx = 0;      // index into the Layouts[] table
 	int32 TuneIdx = 0;       // index into AODTuningManager::Presets
 	int32 HoveredTownIdx = INDEX_NONE;
+
+	// Exhaust (Arc 5.2): ExhaustPresetIdx picks a baseline from ExhaustPresets[]
+	// (ODMainMenu.cpp); the four slider fields are the CURRENT effective
+	// values, seeded from the preset on pick and then independently nudgeable
+	// - same relationship real cars have between "exhaust kit" and "how open
+	// you actually left the valve". Persisted (see Save/LoadExhaustConfig).
+	int32 ExhaustPresetIdx = 0;
+	float ExhaustLoudness = 0.65f;
+	float ExhaustRasp = 0.35f;
+	float ExhaustMufflerCutoff = 2200.0f;
+	float ExhaustPop = 0.02f;
 
 	bool bEntered = false;   // EnterCarConfig() has run (pawn was ready)
 

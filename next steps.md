@@ -413,10 +413,15 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   noise-transient bang on every relight. Shift cuts get the same crack for
   free.)*
 
-### 5.2 Exhaust customization (#13)
+### 5.2 Exhaust customization (#13) — ✅ built, see §7.30 (2026-09-08)
 - `Loudness` / `Rasp` / `MufflerCutoff` already exposed on the synth; add
   pop/burble probability on lift-off; per-car "exhaust" struct; garage sliders
-  (4.3); persisted.
+  (4.3); persisted. Shipped as `FODExhaustConfig` on `UODEngineSynth`
+  (pop/burble reuses the 5.1v2 ignition-cut relight machinery) +
+  `AODMainMenu` Stock/Sport/Open presets with 4 garage sliders + GConfig
+  persistence — full design, params, and what's Taylor's to judge live are
+  in §7.30. Preset-level not per-car-def (UODVehicleDef carries no audio
+  fields — noted, not expanded).
 
 ### 5.3 Simulated engine sample banks (#12c, later upgrade)
 - Offline: open-source physical engine simulator (Engine Simulator /
@@ -2966,7 +2971,7 @@ independently, plan-view half-width narrower than the tire's outer edge
 | 10 | wheel/sim rig | Arc 6 (FFB deferred) | — |
 | 11 | road elevation ÷2 | 1.3 (+1.3b cut wall) | ✅ |
 | 12 | realistic engine sound | 5.1 ✅, 5.3 upgrade later | ✅ v1 |
-| 13 | exhaust editing | 5.2 (params live, UI in 4.3) | params ✅ |
+| 13 | exhaust editing | 5.2 (params + garage UI + persistence), see §7.30 | ✅ |
 | 14 | tree collision (added) | 1.6 | ✅ |
 
 **Recommended next (revised 2026-07-28 — § 7.10):** items 0–3 (barrier-seed
@@ -5481,3 +5486,104 @@ panel now a connected trace, before/after cell counts) and
 + zoomed loop-point plots for all 5 assets, town_hum/creek_babble detail).
 No C++ changes; `Build.bat` not re-run (ODA2 layout unchanged, loader reads
 whatever the sidecar says). Not pushed.
+
+### 7.30 Arc 5.2: exhaust customization — lift-off pop/burble, presets, garage sliders, persistence (2026-09-08)
+
+Implements the 5.2 spec (§5.2 above): lift-off pop/burble on the engine
+synth, a per-preset "exhaust" struct, garage sliders beyond the Stock/
+Sport/Open cycle, and persistence. Offline only, per the standing testing
+protocol (no `-game`/PIE/screenshots — Python re-implementation of the
+firing-skip schedule instead, mirroring the exact C++ constants).
+
+**Pop/burble mechanism reuses 5.1v2's ignition-cut machinery, not a
+parallel one**, per the task brief. `UODEngineSynth::OnGenerateAudio`
+(`ODEngineSynth.cpp`) already skips firings outright and arms a
+`ResumeBoost`/`NoiseBurst` relight bang (1.9x amplitude + ~8ms noise tail)
+when a real limiter/shift ignition cut ends. The pop mechanism is the same
+branch, gated differently: a raw (unsmoothed) throttle-target transition
+from above 0.35 to below 0.15 with rpm above 2200 and no active real cut
+(`PopLiftHighThrottle`/`PopLiftLowThrottle`/`PopMinRpm`, `ODEngineSynth.h`)
+re-arms a `PopWindowRemainSec` countdown; every firing while that window is
+open rolls against a decaying probability `PopProbability * (remaining/
+window)^PopDecay` (reusing the jitter RNG draw already made that firing,
+no extra RNG call) and, on a hit, skips that firing and arms
+`ResumeBoost = 1` — so the very next real firing gets the identical
+relight bang a limiter cut would give it. That bang landing on an
+otherwise-normal firing IS the audible pop; no separate crackle/bang code
+exists.
+
+**`FODExhaustConfig`** (`ODEngineSynth.h`) gathers Loudness/Rasp/
+MufflerCutoff (already existed) plus the three new pop params
+(PopProbability/PopWindowSec/PopDecay) into one struct, with
+`SetExhaustConfig()`/`GetExhaustConfig()` on the synth. Checked
+`UODVehicleDef` first — it carries no audio fields (engine character
+already lives on the menu's own `Engines[]` table, not the def) — so this
+is preset-level, not per-car-def; noted rather than expanding scope, and
+`UODVehicleDef`/`cars_manifest.json` were never touched (rule 6, audio/UI/
+persistence only).
+
+**Presets** (`ODMainMenu.cpp`'s `ExhaustPresets[]`, same table-of-defs
+idiom as the pre-existing `Engines[]`/`Layouts[]`): Stock (Loudness 0.65,
+Rasp 0.35, Muffler 2200Hz, Pop 0.02/0.25s/2.0 — near-silent overrun), Sport
+(0.80/0.55/3200Hz, Pop 0.35/0.55s/1.5 — occasional crackle), Open
+(0.95/0.75/4600Hz, Pop 0.75/1.10s/1.1 — dense crackle). All six params
+climb together per preset so each reads as one coherent character rather
+than "the same pipe with pops turned up".
+
+**Garage sliders**: `AODMainMenu`'s `NumRows()` went 6→11, same canvas-
+drawn, no-UMG, arrow-key value-cycling idiom as every existing row (`ODRaceHUD::
+DrawMainMenu` needed zero changes — it already loops generically over
+`NumRows()`/`GetRow()`). New rows: "Exhaust" (cycles Stock/Sport/Open,
+reseeding all four slider fields from the picked preset's baseline), then
+"  Loudness"/"  Rasp"/"  Muffler"/"  Pop" sub-rows adjustable independently
+of the preset (±0.05/±0.05/±200Hz/±0.05, clamped to the synth's own
+ClampMin/Max). `PopWindowSec`/`PopDecay` stay preset-only tuning constants
+— same tier as `LimiterBounceHz`/`CutRpmSag`, not garage-exposed — matching
+which params were already precedented as player-tunable (Loudness/Rasp/
+MufflerCutoff) plus the one new one the spec calls out (pop rate/
+probability). All `Selected == 5`/`Selected = 5` literals for the "Drive"
+row were changed to `NumRows() - 1` so the row-count change didn't leave a
+stale magic number.
+
+**Persistence**: checked first and found Engine/Drivetrain/Tuning do NOT
+persist today (no GConfig/SaveGame calls anywhere in `AODTuningManager` or
+the menu's own Engine/Drivetrain index fields) — only Input Device did, via
+`AODVehiclePawn::Save/LoadInputDeviceMode` (GConfig into
+`GameUserSettings.ini`; no SaveGame object exists anywhere in this
+project). Per the task's own scoping rule, exhaust now persists through
+that SAME mechanism (`AODMainMenu::Save/LoadExhaustConfig`, section
+`"OpenDrive.Exhaust"`) rather than introducing a second persistence system,
+and Engine/Drivetrain/Tuning's non-persistence remains a known, untouched
+gap. `LoadExhaustConfig()` runs from `BeginPlay()` before the menu ever
+paints; `SaveExhaustConfig()` runs after every preset pick or slider nudge,
+flushed immediately.
+
+`Build.bat` succeeded (`ODEngineSynth.cpp`, `ODMainMenu.cpp` recompiled
+clean, link OK; no stray `UnrealEditor` process found before building).
+
+**Verification (offline):** scratchpad `verify_exhaust_pops.png` — an
+independent Python re-implementation of the firing-skip schedule (same
+LCG constants/thresholds/decay formula, file/line-cited in the script),
+simulating a V8 at 5000rpm lifting off throttle, for all three presets:
+firing/skip timelines (Stock: 1 skip in the whole window; Sport: scattered;
+Open: dense) plus the theoretical vs. empirical pop-rate decay curve.
+Numeric sanity checks (also in `verify_exhaust_pops_sanity.txt`): Stock
+in-window skip fraction 1.2% (<10% gate), Open 64.3% (>30% gate, >3x
+Stock) — all pass. `verify_exhaust_stats.txt` has the full parameter table,
+every field's file/line, and the persistence read/write-path inspection
+(code-path inspection, not an executed round trip — no SaveGame/commandlet
+exists to drive this without a disallowed game launch).
+
+**What's Taylor's to judge live (not verified here, by design):**
+subjective crackle character (pop vs. glitchy dropout — same caveat as
+5.1v2's rev-limiter work); slider step-size feel from the keyboard/gamepad;
+mix level of the pop against the base pulse-train/road noise; whether
+PopWindowSec/PopDecay's specific per-preset values feel right (re-tunable
+later exactly like LimiterBounceHz/CutRpmSag were, no code-shape change
+needed); and whether 11 rows still reads well on the garage panel visually
+(the panel height already scales with `NumRows()` so nothing overflows
+structurally, but crowding is a look, not a number).
+
+Committed: `OpenDriveUE/Source/OpenDriveUE/ODEngineSynth.h/.cpp` (pop
+mechanism + `FODExhaustConfig`), `ODMainMenu.h/.cpp` (presets, sliders,
+persistence), this note. Not pushed.

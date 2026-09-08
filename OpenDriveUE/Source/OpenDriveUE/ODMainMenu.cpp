@@ -48,6 +48,35 @@ const FLayoutDef Layouts[] = {
 	{TEXT("AWD"), EODDriveLayout::AWD},
 };
 
+// Exhaust presets (Arc 5.2) - Stock/Sport/Open, same table-of-defs idiom as
+// Engines[]/Layouts[] above. PopProbability/PopWindowSec/PopDecay feed
+// UODEngineSynth's lift-off pop mechanism (see ODEngineSynth.cpp's
+// OnGenerateAudio firing loop): Stock is near-silent overrun, Sport gets an
+// occasional crackle, Open is dense. Loudness/Rasp/MufflerCutoff climb the
+// same direction (louder + raspier + more open muffler) so the preset reads
+// as one coherent character, not just "pops turned up".
+// Plain POD fields (not a nested USTRUCT), same aggregate-init convention as
+// FEngineDef/FLayoutDef above - converted to FODExhaustConfig on demand by
+// ApplyExhaust().
+struct FExhaustDef
+{
+	const TCHAR* Name;
+	float Loudness, Rasp, MufflerCutoff;
+	float PopProbability, PopWindowSec, PopDecay;
+};
+const FExhaustDef ExhaustPresets[] = {
+	{TEXT("Stock"), 0.65f, 0.35f, 2200.0f, 0.02f, 0.25f, 2.0f},
+	{TEXT("Sport"), 0.80f, 0.55f, 3200.0f, 0.35f, 0.55f, 1.5f},
+	{TEXT("Open"),  0.95f, 0.75f, 4600.0f, 0.75f, 1.1f,  1.1f},
+};
+
+// Garage slider step sizes/bounds - mirror UODEngineSynth's own ClampMin/Max
+// on these same properties (Loudness/Rasp/MufflerCutoff/PopProbability).
+constexpr float ExhaustLoudnessStep = 0.05f;
+constexpr float ExhaustRaspStep = 0.05f;
+constexpr float ExhaustMufflerStep = 200.0f;
+constexpr float ExhaustPopStep = 0.05f;
+
 template <typename T>
 T* FindActor(UWorld* World)
 {
@@ -71,6 +100,7 @@ AODMainMenu::AODMainMenu()
 void AODMainMenu::BeginPlay()
 {
 	Super::BeginPlay();
+	LoadExhaustConfig();   // restore last session's exhaust pick before ApplyExhaust() ever runs
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
 	{
@@ -393,9 +423,12 @@ void AODMainMenu::EnterCarConfig()
 		Garage->SetActive(true);
 	}
 	// sync the displayed engine/drivetrain with reality (leave tuning at stock
-	// until the player picks one, same as the pause menu)
+	// until the player picks one, same as the pause menu); exhaust reapplies
+	// the persisted/current values every entry since the synth is recreated
+	// per-car (AODVehicleAudio::EnsureSynths) and wouldn't otherwise remember.
 	ApplyEngine();
 	ApplyDrivetrain();
+	ApplyExhaust();
 	bEntered = true;
 }
 
@@ -437,7 +470,7 @@ void AODMainMenu::Activate()
 {
 	if (Stage == EODMenuStage::CarConfig)
 	{
-		if (Selected == 5)          // "Drive" / "Resume Driving" row
+		if (Selected == NumRows() - 1)          // "Drive" / "Resume Driving" row
 		{
 			if (bGarageMode)
 			{
@@ -464,7 +497,7 @@ void AODMainMenu::Back()
 	if (Stage == EODMenuStage::MapSelect)
 	{
 		Stage = EODMenuStage::CarConfig;   // back to the car screen
-		Selected = 5;
+		Selected = NumRows() - 1;
 	}
 	else if (Stage == EODMenuStage::CarConfig && bGarageMode)
 	{
@@ -504,6 +537,41 @@ void AODMainMenu::Adjust(int32 Dir)
 		}
 		break;
 	case 4:
+		// Exhaust preset row (Arc 5.2): cycles Stock/Sport/Open, same idiom
+		// as Engine/Drivetrain/Tuning above - picking a preset seeds ALL four
+		// slider fields below from it (a fresh baseline), then persists.
+		ExhaustPresetIdx = (ExhaustPresetIdx + Dir + UE_ARRAY_COUNT(ExhaustPresets)) % UE_ARRAY_COUNT(ExhaustPresets);
+		ExhaustLoudness = ExhaustPresets[ExhaustPresetIdx].Loudness;
+		ExhaustRasp = ExhaustPresets[ExhaustPresetIdx].Rasp;
+		ExhaustMufflerCutoff = ExhaustPresets[ExhaustPresetIdx].MufflerCutoff;
+		ExhaustPop = ExhaustPresets[ExhaustPresetIdx].PopProbability;
+		ApplyExhaust();
+		SaveExhaustConfig();
+		break;
+	case 5:
+		// Exhaust Loudness slider - individually adjustable beyond the preset
+		// baseline (5.2 spec), bounds matching UODEngineSynth's own ClampMin/Max.
+		ExhaustLoudness = FMath::Clamp(ExhaustLoudness + Dir * ExhaustLoudnessStep, 0.0f, 1.0f);
+		ApplyExhaust();
+		SaveExhaustConfig();
+		break;
+	case 6:
+		ExhaustRasp = FMath::Clamp(ExhaustRasp + Dir * ExhaustRaspStep, 0.0f, 1.0f);
+		ApplyExhaust();
+		SaveExhaustConfig();
+		break;
+	case 7:
+		ExhaustMufflerCutoff = FMath::Clamp(ExhaustMufflerCutoff + Dir * ExhaustMufflerStep, 200.0f, 8000.0f);
+		ApplyExhaust();
+		SaveExhaustConfig();
+		break;
+	case 8:
+		// Exhaust Pop slider - lift-off pop/burble probability (5.2's new param).
+		ExhaustPop = FMath::Clamp(ExhaustPop + Dir * ExhaustPopStep, 0.0f, 1.0f);
+		ApplyExhaust();
+		SaveExhaustConfig();
+		break;
+	case 9:
 		// Input Device row (2026-08-27): Auto/Keyboard/Gamepad/Wheel, cycling
 		// the same way the other value rows do. Persisted on the pawn itself
 		// (SetInputDeviceMode writes it to GameUserSettings.ini) rather than
@@ -579,6 +647,75 @@ void AODMainMenu::ApplyTuning()
 	{
 		Tuning->ApplyPresetByIndex(TuneIdx);
 	}
+}
+
+void AODMainMenu::ApplyExhaust()
+{
+	if (AODVehicleAudio* Audio = FindActor<AODVehicleAudio>(GetWorld()))
+	{
+		if (UODEngineSynth* Synth = Audio->GetEngineSynth())
+		{
+			// PopWindowSec/PopDecay stay at the current preset's tuning-constant
+			// values (not garage sliders - see FODExhaustConfig's comment); only
+			// the four slider fields below are player-adjustable.
+			const FExhaustDef& Preset = ExhaustPresets[ExhaustPresetIdx];
+			FODExhaustConfig Config;
+			Config.Loudness = ExhaustLoudness;
+			Config.Rasp = ExhaustRasp;
+			Config.MufflerCutoff = ExhaustMufflerCutoff;
+			Config.PopProbability = ExhaustPop;
+			Config.PopWindowSec = Preset.PopWindowSec;
+			Config.PopDecay = Preset.PopDecay;
+			Synth->SetExhaustConfig(Config);
+		}
+	}
+}
+
+namespace
+{
+const TCHAR* ExhaustConfigSection = TEXT("OpenDrive.Exhaust");
+}
+
+void AODMainMenu::SaveExhaustConfig() const
+{
+	// GConfig into GameUserSettings.ini - same mechanism as AODVehiclePawn::
+	// SaveInputDeviceMode (no SaveGame object exists yet in this project).
+	// Engine/Drivetrain/Tuning picks do NOT persist today (session-only,
+	// like the input-device row's comment on the pawn side notes for itself)
+	// - this is deliberately scoped to exhaust only per the 5.2 task, not a
+	// general persistence pass; noted as a gap for the others.
+	GConfig->SetInt(ExhaustConfigSection, TEXT("PresetIdx"), ExhaustPresetIdx, GGameUserSettingsIni);
+	GConfig->SetFloat(ExhaustConfigSection, TEXT("Loudness"), ExhaustLoudness, GGameUserSettingsIni);
+	GConfig->SetFloat(ExhaustConfigSection, TEXT("Rasp"), ExhaustRasp, GGameUserSettingsIni);
+	GConfig->SetFloat(ExhaustConfigSection, TEXT("MufflerCutoff"), ExhaustMufflerCutoff, GGameUserSettingsIni);
+	GConfig->SetFloat(ExhaustConfigSection, TEXT("Pop"), ExhaustPop, GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+}
+
+void AODMainMenu::LoadExhaustConfig()
+{
+	// defaults = Stock preset's baseline (matches the member initializers
+	// above), so a config with no saved section yet reproduces today's
+	// silent-overrun behavior exactly.
+	ExhaustPresetIdx = 0;
+	GConfig->GetInt(ExhaustConfigSection, TEXT("PresetIdx"), ExhaustPresetIdx, GGameUserSettingsIni);
+	if (ExhaustPresetIdx < 0 || ExhaustPresetIdx >= (int32)UE_ARRAY_COUNT(ExhaustPresets))
+	{
+		ExhaustPresetIdx = 0;
+	}
+	const FExhaustDef& Base = ExhaustPresets[ExhaustPresetIdx];
+	ExhaustLoudness = Base.Loudness;
+	ExhaustRasp = Base.Rasp;
+	ExhaustMufflerCutoff = Base.MufflerCutoff;
+	ExhaustPop = Base.PopProbability;
+	GConfig->GetFloat(ExhaustConfigSection, TEXT("Loudness"), ExhaustLoudness, GGameUserSettingsIni);
+	GConfig->GetFloat(ExhaustConfigSection, TEXT("Rasp"), ExhaustRasp, GGameUserSettingsIni);
+	GConfig->GetFloat(ExhaustConfigSection, TEXT("MufflerCutoff"), ExhaustMufflerCutoff, GGameUserSettingsIni);
+	GConfig->GetFloat(ExhaustConfigSection, TEXT("Pop"), ExhaustPop, GGameUserSettingsIni);
+	ExhaustLoudness = FMath::Clamp(ExhaustLoudness, 0.0f, 1.0f);
+	ExhaustRasp = FMath::Clamp(ExhaustRasp, 0.0f, 1.0f);
+	ExhaustMufflerCutoff = FMath::Clamp(ExhaustMufflerCutoff, 200.0f, 8000.0f);
+	ExhaustPop = FMath::Clamp(ExhaustPop, 0.0f, 1.0f);
 }
 
 void AODMainMenu::ChangeCar(int32 Dir)
@@ -775,6 +912,26 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		}
 		break;
 	case 4:
+		OutLabel = TEXT("Exhaust");
+		OutValue = ExhaustPresets[ExhaustPresetIdx].Name;
+		break;
+	case 5:
+		OutLabel = TEXT("  Loudness");
+		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustLoudness * 100.0f));
+		break;
+	case 6:
+		OutLabel = TEXT("  Rasp");
+		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustRasp * 100.0f));
+		break;
+	case 7:
+		OutLabel = TEXT("  Muffler");
+		OutValue = FString::Printf(TEXT("%.0f Hz"), ExhaustMufflerCutoff);
+		break;
+	case 8:
+		OutLabel = TEXT("  Pop");
+		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustPop * 100.0f));
+		break;
+	case 9:
 	{
 		OutLabel = TEXT("Input Device");
 		OutValue = TEXT("Auto");
@@ -792,7 +949,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		}
 		break;
 	}
-	case 5:
+	case 10:
 		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
 		OutValue.Empty();
 		break;
