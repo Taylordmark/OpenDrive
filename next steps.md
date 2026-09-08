@@ -4898,3 +4898,61 @@ Committed: `pipeline/build_road_embankments.py` only (this pass touches no
 other pipeline module). Bakes (road_embankments.json, road_bridges.json,
 bridge_subclass_report.json, and the exported .bin tiles) are gitignored -
 regenerated locally, not committed. Not pushed.
+
+### 7.24 Two small backlog cleanups: VSM overflow warning + 7.18 dead code (2026-09-07)
+
+Two unrelated items pulled off the backlog together, one commit each.
+
+**VSM "Non-Nanite Marking Job Queue overflow" warning:** researched (not
+fixed). The game logs `[VSM] Non-Nanite Marking Job Queue overflow.
+Performance may be affected...` from Virtual Shadow Maps under heavy
+non-nanite HISM use (forests, guardrails, embankments, bridges, falling
+snow). Grepped the installed UE 5.8 engine source
+(`VirtualShadowMapCacheManager.cpp:1081`) for the exact warning string and
+traced its trigger back through
+`VirtualShadowMapBuildPerPageDrawCommands.usf` to `MARKING_JOB_QUEUE_SIZE
+= NUM_THREADS_PER_GROUP * 2` (= 128 groupshared slots) and
+`MAX_SINGLE_THREAD_MARKING_AREA = 8` - both hard-coded compile-time
+constants (`NUM_THREADS_PER_GROUP` comes from a C++ `static constexpr
+int32 = 64` in `VirtualShadowMapArray.cpp`, injected as a shader
+`#define`), not backed by any `TAutoConsoleVariable`/`.ini`-settable cvar
+anywhere in the engine source. The two candidate cvars guessed up front
+(`r.Shadow.Virtual.NonNanite.NumPageAreaDiagSlots` and
+`...LargeInstancePageAreaThreshold`) both turned out to be
+`#if !UE_BUILD_SHIPPING` diagnostics-only controls (an on-screen "worst
+offenders" readout), unrelated to the queue's actual capacity - confirmed
+by reading their only call sites. Per "no guessing without evidence," did
+**not** add either cvar to `OpenDriveUE/Config/DefaultEngine.ini`, since
+neither would change the overflow behavior at all. Practical notes for
+whoever picks this back up: the warning is purely informational (it
+explicitly does NOT cause visual artifacts, unlike the Page Pool/Visible
+Instances overflow messages in the same switch statement) and is logged at
+most once per session (its `LoggedOverflowFlags` bit is latched and never
+cleared, unlike the Page Pool one). The only real levers are content-side
+(fewer/smaller simultaneous large non-nanite shadow footprints - e.g.
+converting the heaviest HISM sets to Nanite meshes) or globally lowering
+VSM resolution via the existing `r.Shadow.Virtual.ResolutionLodBias{Local,
+Directional}` cvars, which was judged out of scope for a one-line config
+cleanup. Full source citations and call-site tracing in
+`verify_vsm_fix.txt` (scratchpad, not committed - nothing to commit for
+this half of the task).
+
+**7.18 dead code removal:** `pipeline/road_mesh_common.py`'s
+`compute_junction_influence()` and `flatten_junction_elevations()` -
+flagged as unused-but-left-in-place in 7.18's own assessment above (lines
+4131-4142) - are now actually deleted. Re-confirmed grep-clean across the
+whole repo (`pipeline/`, `unreal/`, `OpenDriveUE/`): zero call sites, only
+the same historical comments 7.18 already catalogued (which describe the
+superseded approach, not calls, and were left as-is). Removed both
+function bodies (85 lines) from `road_mesh_common.py`; left
+`reconcile_junction_elevations()`, `classify_wall_stations()`, and all the
+`JUNCTION_*` constants (still consumed by live code) untouched. Verified
+with `python -m compileall` on the module and its `build_road_embankments.py`
+consumer, an explicit `hasattr()` check proving the two functions are gone
+while `reconcile_junction_elevations`/`classify_wall_stations` remain, and
+a passing run of `pipeline/tests/test_sample_mesh_height.py` (4 passed) as
+the fast consumer-stage check. Full before/after `git diff --stat` and
+command output in `verify_deadcode_cleanup.txt` (scratchpad).
+
+Committed: `pipeline/road_mesh_common.py` (dead code removal) and this
+note. The VSM investigation touched no repo files. Not pushed.
