@@ -3900,3 +3900,154 @@ ODSeasonController.h`, `ODSeasonController.cpp`, `ODGameMode.h`,
 `ODForestManager.cpp`, `unreal/apply_ground_material.py`,
 `unreal/apply_water_material.py`, `unreal/build_flora_materials.py`,
 `unreal/apply_snow_particle_material.py`); not pushed.
+
+**Deciduous-arc follow-up, delivered (2026-09-08, commit `1b39ada`):**
+completes the task flagged above - `FallBlend` is now actually wired, and
+tree_blob (aspen) runs the full summer -> orange -> bare-twig-with-snow ->
+green-rebud cycle. Deciduous-only, by design: conifers (`tree_olive`,
+`tree_conifer`, `tree_yucca`, `tree_canyon_oak`, `tree_manzanita`) never
+turn orange or drop leaves; `tree_scrub_oak` (also aspen-derived) was
+explicitly left out of scope too, since it has no branch geometry to
+dissolve down to.
+
+*What changed:*
+- `pipeline/make_tree_meshes.py` - `tree_blob` (`build_aspen(...,
+  with_branches=True)`) gets a real bare-twig branch structure
+  (`add_deciduous_branches()`/`Mesh.branch()`): 7 tapered 4-sided tube
+  branches fanned from the trunk top up into the crown volume, sharing the
+  trunk's own bark material (no new material slot). +84 tris/tree
+  (116 bark tris total vs. 32 for the branch-less `tree_scrub_oak`,
+  well under the <100-tri budget for this feature) - see
+  `verify_tree_mesh.png`.
+- `unreal/build_flora_materials.py` - wires the previously-inert
+  `FallBlend` scalar param into `M_Foliage`'s graph, and adds a new
+  `LeafDrop` param: both are driven by a shared "turn threshold" =
+  `PerInstanceRandom * 0.5 + patch_value_noise(WorldPosition, 180cm
+  cells) * 0.5`, soft-thresholded over a 0.30-wide band, so patches turn
+  orange/drop at different points rather than the whole canopy flipping at
+  once (see `verify_fall_tint.png`, `verify_canopy_dissolve.png`).
+  `FallBlend` lerps the sampled atlas color toward a stylized aspen-orange
+  and feeds the pre-existing canopy-snow lerp's "before snow" input;
+  `LeafDrop` multiplies down the alpha-cutout opacity so the
+  `opacity_mask_clip_value=0.35` cutout progressively discards more of the
+  card, revealing the bare branch mesh underneath. `M_Bark_Aspen` gets a
+  matching chunky patch-threshold `SnowCover` wiring (~35cm noise cells) so
+  snow reads as "bunches" on the twigs, not a flat coat - opaque bark
+  materials for every other species are untouched.
+- `OpenDriveUE/Source/OpenDriveUE/ODForestManager.h/.cpp` - two new
+  dynamic MIDs, `DeciduousFoliageMID` (off `M_Foliage`) and
+  `DeciduousBarkMID` (off `M_Bark_Aspen`), assigned to the `tree_blob`
+  species batch only (`DeciduousSpeciesIndex = 0`) at both HISM material
+  slots (0 = bark/branches, 1 = foliage cards) in `BuildTile()`. The
+  Conifer batch keeps its own separate `FoliageSeasonMID` instance off the
+  same `M_Foliage` base material.
+- `OpenDriveUE/Source/OpenDriveUE/ODSeasonController.h/.cpp` - adds
+  `LeafDrop` as a sixth computed param (`ComputeParamsForClock` signature
+  extended) and sequences it against the existing five: `FallBlend` ramps
+  0->1 across the summer->fall transition and HOLDS at 1 through the
+  fall->winter transition (leaves fall off orange, they don't fade back to
+  green first); `LeafDrop` ramps 0->1 across that same fall->winter
+  transition (bare by the start of winter hold); both `FallBlend` and
+  `LeafDrop` reverse together across the winter->spring transition (bare ->
+  green re-bud, in lockstep with the melt/`SpringGreen` ramp so re-budding
+  leaves render green, never orange). See `verify_year_params.png` for the
+  full 4-hour timeline and the sequencing checks (orange-turn completes
+  before leaf-drop starts; leaf-drop completes at/before the fall->winter
+  transition's snowfall peak; winter->spring starts from `LeafDrop=1.0`).
+
+*Bug found and fixed in this pass:* `ODSeasonController::PushParamsToMIDs`
+was still pushing `FallBlend` onto the Conifer batch's `FoliageSeasonMID`
+- harmless under the first seasons pass (the param was unwired), but with
+`FallBlend` now actually driving an orange color-blend in the shared
+`M_Foliage` graph, that stray push would have made evergreens turn orange
+too. Fixed by removing that one push line; the conifers-never-turn-orange
+guarantee now lives entirely in "which MID gets which parameter pushed,"
+documented inline at that call site and in `verify_material_wiring.txt`.
+
+**New verification protocol for this pass - offline only, no game launch.**
+Per updated project direction, this task's acceptance gate is entirely
+offline (matplotlib/numpy re-implementations and asset-data dumps, no
+`-game` launches or gameplay screenshots), saved under `scratchpad/`:
+- `verify_year_params.png` - numpy port of `ComputeParamsForClock`, all six
+  params over the 4-hour loop plus a per-sample derivative plot. Confirms
+  smooth ramps, correct season sequencing, and no discontinuities
+  (max |d(param)/dt| bounded and finite at 4 Hz sampling).
+- `verify_tree_mesh.png` - parses the regenerated `tree_blob.obj` directly:
+  trunk+branch wireframe under canopy-card outlines from 3 angles, bbox
+  dims in cm (12.2 m tall, in the expected meters-range), tri counts per
+  material, and a branch-envelope check (branch tips fall inside the
+  canopy's own Z span).
+- `verify_canopy_dissolve.png` / `verify_fall_tint.png` - numpy ports of
+  the exact material-graph noise/threshold math (value-noise hash,
+  turn-threshold, soft-clamp), rendered as image grids across
+  `LeafDrop`/`FallBlend` x 3 `PerInstanceRandom` values. Confirm patchy,
+  desynced turn/drop and near-complete convergence at the 0/1 endpoints.
+- `verify_material_wiring.txt` - a python dump (via
+  `unreal.MaterialEditingLibrary`) of `M_Foliage`/`M_Bark_Aspen`/
+  `M_Bark_Conifer`/`M_Bark_Willow`'s actual rebuilt graphs after running
+  the real `build_flora_materials.py` commandlet: confirms `LeafDrop`/
+  `FallBlend`/`SnowCover` exist as params on `M_Foliage`, `SnowCover`
+  exists on `M_Bark_Aspen` only (not the other bark materials), and that
+  `BaseColor`/`OpacityMask` are wired to computed nodes rather than the
+  raw texture sample - plus the quoted `BuildTile()` MID-routing lines.
+- `cars_manifest.json` confirmed byte-identical (unmodified in git status);
+  the five uncommitted road/junction files from before this task
+  (`pipeline/build_road_network.py`, `build_road_stations.py`,
+  `road_mesh_common.py`, `build_road_guardrails.py`,
+  `unreal/apply_road_material.py`) were left exactly as found and are not
+  part of this commit.
+
+**Honest verdict - what offline verification can and cannot prove:** the
+math checks out exactly (the numpy ports are literal 1:1 translations of
+the C++ segment logic and the material graph's noise/threshold nodes, not
+approximations), and the rebuilt material graphs on disk demonstrably have
+the params/wiring/isolation the code implies. What this CANNOT prove:
+actual in-engine visual read (does the stylized orange look right, does the
+dissolve read as "leaves falling" rather than "leaves fading," does the
+twig-snow density look right at real camera distance, does the branch
+geometry look convincing rather than sparse/spiky, is the transition pacing
+good at real gameplay speed) - all of that needs an actual drive-test,
+which is explicitly deferred per this task's protocol. One minor
+quantitative wrinkle the verification DID catch and is worth knowing about:
+at the extreme corners of the noise+desync space (e.g. `PerInstanceRandom`
+near 1.0 combined with the patch-noise field's own max value), the 0.30-
+wide soft-threshold band means a tiny sliver of canopy area (<0.2%) doesn't
+finish quite as fast as the nominal 0/1 endpoints - e.g. mean drop/turn
+amount of 0.9988 instead of an exact 1.0 in the worst-case row tested.
+Imperceptible at normal viewing distance and not something this pass
+attempted to rebalance (would mean touching the inherited 0.5/0.5 blend
+weights or the 0.30 band width), but flagged here rather than silently
+rounded away.
+
+**Drive-test flags for Taylor** (each freezes the clock at a specific
+point so the deciduous arc can be inspected live, same `-odseason=`/
+`-odseasonphase=` idiom as the rest of the season system; combine with
+`-odspawnx=733226 -odspawny=-807394 -odgo=5` for the Dillon Dam Road
+vantage used throughout this feature, or any vantage with `tree_blob`
+aspens in view):
+- `-odseason=summer` - baseline: green canopy, no visible branches
+  (leaves fully cover them), zero tint. Should be pixel-identical to
+  pre-this-task summer.
+- `-odseason=fall` - fully orange canopy, still full leaf coverage (no
+  drop yet). Look for patchiness tree-to-tree (some fully orange, a few
+  still transitioning if caught early via `-odseasonphase`).
+- `-odseason=fall -odseasonphase=0.25` / `-odseasonphase=0.75` - mid
+  fall->winter transition at 25%/75%: orange leaves progressively
+  dissolving away, light dusting of twig snow starting to build at the
+  higher phase.
+- `-odseason=winter` - bare orange-less twigs (branches fully exposed),
+  snow bunches visible on the branch structure, closed ground snow.
+- `-odseason=winter -odseasonphase=0.5` - mid winter->spring transition:
+  reverse-dissolve underway, fresh green re-budding rather than orange,
+  snow melting off both ground and twigs together.
+- `-odseason=spring` - canopy back to full green coverage, branches
+  hidden again, easing toward the summer baseline over the hold.
+- `-odseasonrate=20` (or similar) unfrozen, to watch a full transition
+  play out live instead of jumping between fixed phases.
+
+Committed locally only, `pipeline/make_tree_meshes.py`,
+`unreal/build_flora_materials.py`,
+`OpenDriveUE/Source/OpenDriveUE/ODForestManager.h/.cpp`,
+`OpenDriveUE/Source/OpenDriveUE/ODSeasonController.h/.cpp` (commit
+`1b39ada`); not pushed. The five pre-existing uncommitted road/junction
+files were left alone as instructed.
