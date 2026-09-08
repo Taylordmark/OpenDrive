@@ -1,0 +1,66 @@
+{
+  "_comment": "Arc 5.4 ambient biome/city audio (next steps.md SS7.28) - CC0-licensed looping field recordings from freesound.org, one per ambient layer AODAmbientSoundManager crossfades (pipeline/build_ambient_zones.py). Same content_src/<category>/manifest.json + download script convention as content_src/textures/ground/ (download script + manifest.json ARE committed, fetched audio is NOT - see repo .gitignore). IMPORTANT LICENSE NOTE: each sound's ORIGINAL lossless file (wav/m4a) requires a logged-in freesound.org account to download - this project does not create accounts or store credentials (see repo safety policy), so every entry here is freesound's own public CC0 PREVIEW rendition instead (the same 'preview' audio the sound's page itself streams before any login) - MP3, ~128kbps 'hq' variant, mono/stereo per source. This is a lossy transcode of the CC0 original, not the original bytes, but the CC0 license, authorship and source URL are unchanged and fully attributable; re-running download_ambient_audio.py against these same CDN URLs is deterministic. If a future pass has an authenticated freesound account available, re-fetching the true originals (linked via source_url) would be a strict quality upgrade with no license change.",
+  "format": "MP3 (freesound.org 'hq' preview rendition, ~128kbps) -> converted to WAV 48kHz on import, see unreal/import_ambient_audio.py",
+  "sounds": [
+    {
+      "role": "forest_wind",
+      "display_name": "wind_forest_08_strong_l_01.wav",
+      "author": "teadrinker",
+      "source_url": "https://freesound.org/people/teadrinker/sounds/403051/",
+      "preview_url": "https://cdn.freesound.org/previews/403/403051_338690-hq.mp3",
+      "license": "Creative Commons 0 (CC0 1.0) - freesound.org",
+      "original_format": "WAV, 44100 Hz stereo, 16 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
+      "duration_s": 81.362,
+      "local_file": "content_src/audio/ambient/raw/forest_wind.mp3",
+      "notes": "AODAmbientSoundManager::ForestSound - Forest-zone wind/rustling bed (classify_biomes.py Deciduous/Evergreen/Chaparral/Rainforest archetypes). Replaced an earlier pick ('Wind through trees' by NomadApe, freesound id 444921) after verify_ambient_audio.png's waveform showed it was mostly near-silence with one loud 3s gust around 50s - a bad fit for a continuous ambient bed despite being a valid CC0 loop; this asset's waveform/spectrogram are visibly continuous instead."
+    },
+    {
+      "role": "creek_babble",
+      "display_name": "Creek 06 (loop)",
+      "author": "VKProduktion",
+      "source_url": "https://freesound.org/people/VKProduktion/sounds/231536/",
+      "preview_url": "https://cdn.freesound.org/previews/231/231536_4034520-hq.mp3",
+      "license": "Creative Commons 0 (CC0 1.0) - freesound.org",
+      "original_format": "WAV, 44100 Hz stereo, 32 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
+      "duration_s": 35.990,
+      "local_file": "content_src/audio/ambient/raw/creek_babble.mp3",
+      "notes": "AODAmbientSoundManager::WaterSound (primary assignment) - waterway-ribbon proximity layer, fades in within WaterFadeInStartM (60 m) of a creek/river/lake edge (pipeline/build_ambient_zones.py's water-distance grid, sourced from build_water_tiles.py's own osm_water.json/osm_waterways.json). Picked over lake_shore as the default WaterSound because Summit County's road corridor runs along river/creek valleys (Blue River, Tenmile Creek, Snake River) far more than lake shoreline - see lake_shore entry below for the alternate."
+    },
+    {
+      "role": "lake_shore",
+      "display_name": "wave loop 1.wav",
+      "author": "klangfabrik",
+      "source_url": "https://freesound.org/people/klangfabrik/sounds/428088/",
+      "preview_url": "https://cdn.freesound.org/previews/428/428088_181941-hq.mp3",
+      "license": "Creative Commons 0 (CC0 1.0) - freesound.org",
+      "original_format": "WAV, 44100 Hz stereo, 16 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
+      "duration_s": 212.614,
+      "local_file": "content_src/audio/ambient/raw/lake_shore.mp3",
+      "notes": "Sourced and objectively verified (loop-seam/LUFS below) as the lake-specific alternate for AODAmbientSoundManager::WaterSound, per the brief's 'lapping/shore ambience near lakes' ask - NOT wired to a distinct C++ layer this pass (the manager holds one generic Water layer, not a lake-vs-waterway split - see class header comment and next steps.md SS7.28 'what's left'). Swap WaterSound to this asset on Dillon Reservoir-focused drives, or add a second lake-specific layer later, without any pipeline change."
+    },
+    {
+      "role": "town_hum",
+      "display_name": "traffic-cars-ambience.wav",
+      "author": "DotAfter",
+      "source_url": "https://freesound.org/people/DotAfter/sounds/610978/",
+      "preview_url": "https://cdn.freesound.org/previews/610/610978_13474286-hq.mp3",
+      "license": "Creative Commons 0 (CC0 1.0) - freesound.org",
+      "original_format": "WAV, 48000 Hz stereo, 16 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
+      "duration_s": 161.211,
+      "local_file": "content_src/audio/ambient/raw/town_hum.mp3",
+      "notes": "AODAmbientSoundManager::SettlementHumSound - Settlement-zone distant-traffic hum, mix level scaled by classify_settlements.py's archetype (City=255/255, AmericanTown=140/255 - see pipeline/build_ambient_zones.py's SETTLEMENT_DENSITY)."
+    },
+    {
+      "role": "alpine_wind",
+      "display_name": "Rolling Wind - looping",
+      "author": "ERR0",
+      "source_url": "https://freesound.org/people/ERR0/sounds/210220/",
+      "preview_url": "https://cdn.freesound.org/previews/210/210220_2610425-hq.mp3",
+      "license": "Creative Commons 0 (CC0 1.0) - freesound.org",
+      "original_format": "WAV, 44100 Hz mono, 16 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
+      "duration_s": 30.0,
+      "local_file": "content_src/audio/ambient/raw/alpine_wind.mp3",
+      "notes": "AODAmbientSoundManager::AlpineWindSound - the base wind bed played under EVERY zone (Open/Alpine both target this layer at full volume; Forest/Settlement layer their own sound on top of it, not instead of it - see class header comment)."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 #include "ODGameMode.h"
 
 #include "EngineUtils.h"
+#include "ODAmbientSoundManager.h"
 #include "ODAtmosphereController.h"
 #include "ODBridgeManager.h"
 #include "ODEmbankmentManager.h"
@@ -30,6 +31,7 @@ void AODGameMode::BeginPlay()
 	EnsureBridgeManager();
 	EnsureAtmosphereController();
 	EnsureSeasonController();
+	EnsureAmbientSoundManager();
 }
 
 void AODGameMode::EnsureForestManager()
@@ -424,4 +426,52 @@ void AODGameMode::EnsureSeasonController()
 
 	World->SpawnActor<AODSeasonController>();
 	UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned AODSeasonController"));
+}
+
+void AODGameMode::EnsureAmbientSoundManager()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Same "already hand-placed, leave it alone" guard as EnsureEmbankmentManager.
+	for (TActorIterator<AODAmbientSoundManager> It(World); It; ++It)
+	{
+		return;
+	}
+
+	// Same AODRoadManager-derived area-name convention as EnsureEmbankmentManager.
+	AODRoadManager* Road = nullptr;
+	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	{
+		Road = *It;
+		break;
+	}
+	if (!Road)
+	{
+		return;
+	}
+
+	FString Area = Road->RoadTilePrefix;
+	Area.RemoveFromStart(TEXT("road_"));
+	Area.RemoveFromEnd(TEXT("_test"));
+	if (Area.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
+			     "'%s' - skipping ambient sound manager spawn"), *Road->RoadTilePrefix);
+		return;
+	}
+
+	AODAmbientSoundManager* Ambient = World->SpawnActor<AODAmbientSoundManager>();
+	if (!Ambient)
+	{
+		return;
+	}
+	Ambient->AmbientZoneFile = FString::Printf(TEXT("ambient_zones_%s_test"), *Area);
+	UE_LOG(LogTemp, Display,
+		TEXT("ODGameMode: spawned AODAmbientSoundManager for open-world area '%s' "
+		     "(AmbientZoneFile='%s')"), *Area, *Ambient->AmbientZoneFile);
 }

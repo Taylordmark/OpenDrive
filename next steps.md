@@ -425,19 +425,12 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   interface. Exhaust edits = re-render bank with different muffler geometry.
 - The "accurately simulate" tier; the 5.1 synth stays as fallback.
 
-### 5.4 Ambient biome/city audio (backlog — Taylor asked 2026-07-27, nothing
-built yet)
+### 5.4 Ambient biome/city audio — ✅ built, see §7.28 (2026-09-08)
 - Wind/rustling in trees for forested biomes, water sound along
-  beaches/coastline, general traffic/city ambience in dense urban tiles
-  (Honolulu downtown and similar). Just logging the ask here — no pipeline or
-  runtime work started.
-- Likely hook: the same tile-level biome/settlement classification data
-  `pipeline/classify_biomes.py` (14-archetype terrain biome per tile) and
-  `pipeline/classify_settlements.py` (populated-tile archetype — American
-  Town/City/etc.) already produce for `AODForestManager`/`AODBuildingManager`.
-  Ambient sound zones should follow the same tile grid the rest of world-gen
-  already keys off, rather than inventing a separate from-scratch spatial
-  system.
+  creeks/rivers/lake shores, town hum in settlement tiles, base wind bed
+  elsewhere. Shipped as `AODAmbientSoundManager` + `pipeline/
+  build_ambient_zones.py` — full architecture, assets/licenses, objective
+  checks, and what's left for Taylor to judge live are in §7.28.
 
 
 **Size:** 5.2 = small (garage-gated); 5.3 = separate multi-session project;
@@ -5184,3 +5177,108 @@ smaller ribbon fragments).
 Committed: `pipeline/build_water_tiles.py` and this note only.
 `cars_manifest.json` and all road/station/bridge pipeline code untouched.
 Bakes are gitignored - regenerated locally, not committed. Not pushed.
+
+### 7.28 Ambient biome/city audio (2026-09-08) — closes the 5.4 backlog item
+
+Tile-keyed ambient sound crossfades as the player drives, per the 5.4 ask:
+forest wind/rustling, water babble near creeks/rivers/lake shores, town hum
+scaled by settlement density, and a base wind bed under everything else
+(open/alpine terrain). Day/night and season coupling deliberately NOT wired
+this pass — `SetTimeOfDayHint()`/`SetSeasonHint()` are unused no-op seams for
+later, per the brief ("keep hooks simple").
+
+**Architecture:** `AODAmbientSoundManager` (`OpenDriveUE/Source/OpenDriveUE/
+ODAmbientSoundManager.h/.cpp`) — same find-or-spawn singleton shape as
+`AODEmbankmentManager`/`AODSeasonController`, wired via
+`ODGameMode::EnsureAmbientSoundManager()` at the end of `BeginPlay()`.
+Deliberately diverges from the per-2km-tile streaming pattern every other
+manager in this project uses: the ambient-zone grid is small enough (100 m
+cells, a few hundred KB for the whole county) to load once as a flat
+whole-map grid and index with arithmetic, no async tile load/unload plumbing
+earns its keep here. Four `AudioComponent`s (Forest/Alpine-wind-bed/
+Settlement/Water) are spawned once via `UGameplayStatics::SpawnSound2D`
+(non-spatialized — these are ambience beds, not point sources) and held
+permanently; only their volumes crossfade (`FMath::FInterpTo` toward a
+per-layer target, `CrossfadeSeconds`=4s) as the player's position is
+re-sampled against the grid at a low rate (`SampleHz`=2). Alpine doubles as
+the base "open" wind bed under every zone; Forest/Settlement layer on top of
+it rather than replacing it; Water is an independent layer driven by
+`SampleWaterDistM()` (bilinearly interpolated, fades in over the last
+`WaterFadeInStartM`=60 m of approach) rather than the zone class.
+
+**Zone bake:** new `pipeline/build_ambient_zones.py` bakes a compact
+`ODA1`-tagged binary sidecar (`OpenDriveUE/Content/OpenDrive/Masks/
+ambient_zones_<area>.bin`, generation-id stamped same convention as every
+other sidecar) from `classify_biomes.py`/`classify_settlements.py`'s
+existing tile classification data plus a new water-proximity raster
+(`scipy.ndimage.distance_transform_edt` over waterway/lake geometry from
+`build_water_tiles.py`'s own `osm_water.json`/`osm_waterways.json`,
+bounding-box-limited per segment — a naive full-grid vectorization over
+~41,000 segments didn't finish in 15+ minutes and had to be killed; the
+bbox-limited rewrite runs in seconds). Coarse 100 m grid, explicitly allowed
+by the brief ("keep it SIMPLE"). Baked for Summit County: 307,726 cells,
+1.47 MB, generation id `e26dcbfb2f64c684`.
+
+**Assets:** 5 CC0 loops from freesound.org (4 wired, 1 sourced-but-spare —
+see `content_src/audio/ambient/manifest.json` for full source URLs/authors/
+licenses):
+- `forest_wind` — teadrinker, "wind_forest_08_strong_l_01.wav" (id 403051)
+- `creek_babble` — VKProduktion, "Creek 06 (loop)" (id 231536) — primary Water layer
+- `lake_shore` — klangfabrik, "wave loop 1.wav" (id 428088) — sourced/verified alternate for lake-heavy drives, not wired to a distinct C++ layer this pass (manager has one generic Water layer, not a lake-vs-creek split)
+- `town_hum` — DotAfter, "traffic-cars-ambience.wav" (id 610978)
+- `alpine_wind` — ERR0, "Rolling Wind - looping" (id 210220)
+
+All CC0 1.0. Fetched from freesound's public preview CDN rather than each
+sound's login-gated original (this project doesn't create accounts) — see
+manifest `_comment` for the honest disclosure that these are lossy preview
+transcodes, not the original bytes, though license/authorship/source are
+unaffected. `content_src/audio/ambient/download_ambient_audio.py` +
+`manifest.json` are tracked (raw MP3s gitignored, deterministic re-fetch);
+`normalize_ambient_audio.py` loudness-matches them to a common LUFS target
+with peak-safe headroom into `normalized/*.wav` (also gitignored,
+deterministic re-run); `unreal/import_ambient_audio.py` imports those as
+looping (`bLooping=True`) SoundWave assets under `/Game/OpenDrive/Audio/
+Ambient/`, which `AODAmbientSoundManager::BeginPlay()` `LoadObject()`s by
+fixed path (same convention as `AODEmbankmentManager::EmbankMat`) — an
+initial pick (NomadApe's "Wind through trees", id 444921) was swapped out
+for the current `forest_wind` after objective analysis showed it was mostly
+near-silence with one loud gust, a bad fit for a continuous bed.
+
+**Objective checks (offline, no `-game`):** waveform + spectrogram +
+loop-seam-zoom plot and a LUFS/RMS table per asset. No clipping in any of
+the 5. Loop-seam jump/RMS ratios all in the same 0.0001–0.53 range (town_hum
+lowest at 0.0001, creek_babble highest at 0.53 — a babbling-water asset
+having a less pristine sample-level seam is expected and not evidence of a
+bad loop by itself, no isolated hard click visible in the zoomed plot).
+Post-normalization LUFS: forest/creek/lake/alpine all land at exactly the
+-23.0 target; town_hum lands at -26.4 (peak-ceiling-limited — its own true
+peak was already close to -1 dBFS pre-gain, so pushing further would have
+clipped it) — the four crossfaded layers are level-matched enough that no
+one layer will read as wildly louder than another, per the brief's ask
+("loudness normalized across the set").
+
+**Build:** `Build.bat` (`OpenDriveUEEditor Win64 Development`) succeeded —
+`ODAmbientSoundManager.cpp`, `ODGameMode.cpp` compiled clean, link OK.
+`unreal/import_ambient_audio.py` run headless (`-run=pythonscript
+-nullrhi`), 5/5 SoundWave assets imported successfully.
+
+**What's unprovable offline / Taylor's live-session job:** the actual
+subjective character of each loop (whether the wind sounds right, whether
+the town hum is too loud/quiet relative to engine/road noise once real
+gameplay audio is mixed in, whether the crossfade timing feels natural at
+driving speed) — none of that can be judged from waveform/spectrogram data,
+per this project's testing protocol. Also unprovable offline: whether
+`SampleHz`=2/`CrossfadeSeconds`=4/`WaterFadeInStartM`=60 are the right
+tuning constants in practice (they're reasonable defaults, not derived from
+any measurement) and whether `lake_shore` should get its own distinct layer
+instead of staying an unwired spare, which depends on how often Taylor's
+drives actually hug Dillon Reservoir vs. river/creek corridors.
+
+Committed: `ODAmbientSoundManager.h/.cpp` (new), `ODGameMode.h/.cpp`
+(edited — `EnsureAmbientSoundManager()` hookup), `pipeline/
+build_ambient_zones.py` (new), `content_src/audio/ambient/manifest.json` +
+`download_ambient_audio.py` + `normalize_ambient_audio.py` (new),
+`unreal/import_ambient_audio.py` (new), `.gitignore` (raw/normalized audio
+ignore rules), this note. `cars_manifest.json` and all season/vehicle/road
+pipeline code untouched. Content/ and pipeline bakes are gitignored —
+regenerated locally, not committed. Not pushed.

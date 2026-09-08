@@ -92,4 +92,12 @@ private:
 	 *  and drives their ground/water/foliage MIDs through a looping season
 	 *  clock. */
 	void EnsureSeasonController();
+
+	/** Ambient biome/city audio (Arc 5.4 / next steps.md SS7.28, 2026-09-07) -
+	 *  same "find or spawn" shape as EnsureEmbankmentManager above, deriving
+	 *  AODAmbientSoundManager's zone-file name from the level's own
+	 *  AODRoadManager the same way. Crossfades wind/forest/settlement/water
+	 *  ambient loops against pipeline/build_ambient_zones.py's baked zone
+	 *  grid as the player drives - see that class for the full design. */
+	void EnsureAmbientSoundManager();
 };
