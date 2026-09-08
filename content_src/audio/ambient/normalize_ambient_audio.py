@@ -13,8 +13,12 @@ as raw/ - see repo .gitignore and manifest.json's _comment.
 
 Each file is:
   1. downmixed to mono, resampled to 48kHz
-  2. measured for integrated loudness (ITU-R BS.1770 via pyloudnorm)
-  3. gained toward TARGET_LUFS, but capped so its true peak never exceeds
+  2. head/tail encoder-padding silence trimmed (Part A fix, next steps.md
+     SS7.29 - see trim_edge_silence() below; catches creek_babble's ~30ms
+     near-silence loop-tail dropout, a lossy-transcode artifact, without
+     touching genuine quiet passages mid-asset)
+  3. measured for integrated loudness (ITU-R BS.1770 via pyloudnorm)
+  4. gained toward TARGET_LUFS, but capped so its true peak never exceeds
      PEAK_CEILING_DBFS (a naturally quiet, wide-dynamic-range clip - e.g. a
      wind bed with one loud gust - would otherwise get pushed into clipping
      trying to hit the same LUFS as a consistently loud one)
@@ -45,6 +49,67 @@ TARGET_SR = 48000
 TARGET_LUFS = -23.0
 PEAK_CEILING_DBFS = -1.0
 
+# Part A (next steps.md SS7.29): the freesound preview MP3s are a lossy
+# transcode of the CC0 originals, and at least one (creek_babble) carries a
+# ~30ms near-silence tail immediately before the loop point - classic
+# encoder padding from the transcode, not a real fade in the source
+# recording. Since these WAVs are played back looping (bLooping=True, see
+# unreal/import_ambient_audio.py), that tail reads as a periodic dropout
+# every loop. Trim it here, generically, for all 5 assets - conservative
+# enough not to touch a genuine quiet passage:
+#   - only a CONTIGUOUS run touching sample 0 (head) or the last sample
+#     (tail) counts, never a quiet stretch in the middle (forest_wind's
+#     lulls are untouched)
+#   - the run must be entirely below EDGE_SILENCE_DBFS relative to full
+#     scale, measured on an EDGE_SILENCE_HOP-sample RMS envelope (not
+#     per-sample, so a single near-zero-crossing sample doesn't trip it)
+#   - capped at EDGE_SILENCE_MAX_MS: if the near-silence run is longer than
+#     that, it's treated as a real quiet passage/fade (e.g. town_hum's
+#     ~211ms tail into background quiet) and left alone
+EDGE_SILENCE_DBFS = -60.0
+EDGE_SILENCE_MAX_MS = 150.0
+EDGE_SILENCE_HOP = 64  # samples per envelope bin, ~1.33ms @ 48kHz
+
+
+def trim_edge_silence(mono, sr):
+    """Returns (trimmed_mono, head_trimmed_ms, tail_trimmed_ms)."""
+    hop = EDGE_SILENCE_HOP
+    n_hops = len(mono) // hop
+    if n_hops == 0:
+        return mono, 0.0, 0.0
+
+    frames = mono[: n_hops * hop].reshape(n_hops, hop).astype(np.float64)
+    env_dbfs = 20 * np.log10(np.sqrt(np.mean(frames ** 2, axis=1)) + 1e-12)
+    below = env_dbfs < EDGE_SILENCE_DBFS
+    max_hops = int(EDGE_SILENCE_MAX_MS * sr / 1000.0 / hop)
+
+    # Measure the FULL contiguous run first (uncapped) - only trim it at all
+    # if the whole run is short. A run longer than EDGE_SILENCE_MAX_MS reads
+    # as a genuine quiet passage/fade (town_hum's ~211ms tail into
+    # background quiet), not lossy-transcode encoder padding, and per the
+    # brief is left untouched entirely rather than partially trimmed down
+    # to the cap.
+    head_hops_full = 0
+    for v in below:
+        if not v:
+            break
+        head_hops_full += 1
+    head_hops = head_hops_full if head_hops_full < max_hops else 0
+
+    tail_hops_full = 0
+    for v in below[::-1]:
+        if not v:
+            break
+        tail_hops_full += 1
+    tail_hops = tail_hops_full if tail_hops_full < max_hops else 0
+
+    start = head_hops * hop
+    end = len(mono) - tail_hops * hop
+    trimmed = mono[start:end]
+    head_ms = head_hops * hop / sr * 1000.0
+    tail_ms = tail_hops * hop / sr * 1000.0
+    return trimmed, head_ms, tail_ms
+
 
 def to_mono48k(data, sr):
     if data.ndim > 1:
@@ -68,6 +133,11 @@ def main():
 
         data, sr = sf.read(str(raw_path), always_2d=False)
         mono = to_mono48k(data, sr)
+
+        mono, head_trim_ms, tail_trim_ms = trim_edge_silence(mono, TARGET_SR)
+        if head_trim_ms or tail_trim_ms:
+            print(f"  {entry['role']}: trimmed head={head_trim_ms:.1f}ms "
+                  f"tail={tail_trim_ms:.1f}ms encoder-padding silence")
 
         loudness = meter.integrated_loudness(mono.astype(np.float64))
         peak_dbfs = 20 * np.log10(np.max(np.abs(mono)) + 1e-12)
