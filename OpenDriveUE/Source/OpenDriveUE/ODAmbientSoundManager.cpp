@@ -277,7 +277,7 @@ void AODAmbientSoundManager::Tick(float DeltaSeconds)
 		}
 		L->CurrentVolume = FMath::FInterpTo(L->CurrentVolume, L->TargetVolume, DeltaSeconds,
 			1.0f / FMath::Max(CrossfadeSeconds, 0.01f));
-		L->Comp->SetVolumeMultiplier(L->CurrentVolume);
+		L->Comp->SetVolumeMultiplier(L->CurrentVolume * VolumeScale);
 		if (!L->Comp->IsPlaying() && L->Sound)
 		{
 			L->Comp->Play();

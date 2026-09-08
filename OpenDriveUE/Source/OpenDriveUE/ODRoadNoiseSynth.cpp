@@ -73,7 +73,7 @@ int32 UODRoadNoiseSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 			ImpactEnv *= ImpactDecay;
 		}
 
-		OutAudio[i] = (TireLp * TireGain + Wind * WindGain + Impact) * Volume;
+		OutAudio[i] = (TireLp * TireGain + Wind * WindGain + Impact) * Volume * VolumeScale;
 	}
 	return NumSamples;
 }

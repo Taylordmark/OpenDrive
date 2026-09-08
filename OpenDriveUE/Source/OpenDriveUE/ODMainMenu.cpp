@@ -9,9 +9,11 @@
 #include "Misc/CommandLine.h"
 #include "UnrealClient.h"
 
+#include "ODCreditsMenu.h"
 #include "ODEngineSynth.h"
 #include "ODGarageEnvironment.h"
 #include "ODRoadManager.h"
+#include "ODSettingsMenu.h"
 #include "ODTerrainManager.h"
 #include "ODTuningManager.h"
 #include "ODVehicleAudio.h"
@@ -436,6 +438,16 @@ void AODMainMenu::EnterCarConfig()
 
 void AODMainMenu::Up()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->MoveSelection(-1); }
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		if (CreditsMenu) { CreditsMenu->Scroll(-1); }
+		return;
+	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
 		Selected = (Selected + NumRows() - 1) % NumRows();
@@ -444,6 +456,16 @@ void AODMainMenu::Up()
 
 void AODMainMenu::Down()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->MoveSelection(+1); }
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		if (CreditsMenu) { CreditsMenu->Scroll(+1); }
+		return;
+	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
 		Selected = (Selected + 1) % NumRows();
@@ -452,6 +474,11 @@ void AODMainMenu::Down()
 
 void AODMainMenu::Left()
 {
+	if (bSettingsOpen || bCreditsOpen)
+	{
+		Adjust(-1);
+		return;
+	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
 		Adjust(-1);
@@ -460,6 +487,11 @@ void AODMainMenu::Left()
 
 void AODMainMenu::Right()
 {
+	if (bSettingsOpen || bCreditsOpen)
+	{
+		Adjust(+1);
+		return;
+	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
 		Adjust(+1);
@@ -468,6 +500,26 @@ void AODMainMenu::Right()
 
 void AODMainMenu::Activate()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
+		{
+			if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
+			{
+				bSettingsOpen = false;
+			}
+			else
+			{
+				SettingsMenu->AdjustSelected(+1);
+			}
+		}
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;   // no rows to activate - Enter also just backs out
+		return;
+	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
 		if (Selected == NumRows() - 1)          // "Drive" / "Resume Driving" row
@@ -480,6 +532,16 @@ void AODMainMenu::Activate()
 			{
 				GoToMap();
 			}
+		}
+		else if (Selected == NumRows() - 3)     // Settings
+		{
+			EnsureSettingsMenu();
+			bSettingsOpen = true;
+		}
+		else if (Selected == NumRows() - 2)     // Credits
+		{
+			EnsureCreditsMenu();
+			bCreditsOpen = true;
 		}
 		else
 		{
@@ -494,6 +556,16 @@ void AODMainMenu::Activate()
 
 void AODMainMenu::Back()
 {
+	if (bSettingsOpen)
+	{
+		bSettingsOpen = false;
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;
+		return;
+	}
 	if (Stage == EODMenuStage::MapSelect)
 	{
 		Stage = EODMenuStage::CarConfig;   // back to the car screen
@@ -508,6 +580,10 @@ void AODMainMenu::Back()
 
 void AODMainMenu::OnClick()
 {
+	if (bSettingsOpen || bCreditsOpen)
+	{
+		return;
+	}
 	if (Stage == EODMenuStage::MapSelect && HoveredTownIdx != INDEX_NONE)
 	{
 		StartAt(HoveredTownIdx);
@@ -516,6 +592,15 @@ void AODMainMenu::OnClick()
 
 void AODMainMenu::Adjust(int32 Dir)
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->AdjustSelected(Dir); }
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		return;   // credits has no adjustable rows, only scroll (Up/Down above)
+	}
 	switch (Selected)
 	{
 	case 0:
@@ -950,6 +1035,14 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		break;
 	}
 	case 10:
+		OutLabel = TEXT("Settings");
+		OutValue.Empty();
+		break;
+	case 11:
+		OutLabel = TEXT("Credits");
+		OutValue.Empty();
+		break;
+	case 12:
 		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
 		OutValue.Empty();
 		break;
@@ -958,4 +1051,40 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	}
+}
+
+AODSettingsMenu* AODMainMenu::EnsureSettingsMenu()
+{
+	if (SettingsMenu)
+	{
+		return SettingsMenu;
+	}
+	if (AODSettingsMenu* Found = FindActor<AODSettingsMenu>(GetWorld()))
+	{
+		SettingsMenu = Found;
+		return SettingsMenu;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		SettingsMenu = World->SpawnActor<AODSettingsMenu>();
+	}
+	return SettingsMenu;
+}
+
+AODCreditsMenu* AODMainMenu::EnsureCreditsMenu()
+{
+	if (CreditsMenu)
+	{
+		return CreditsMenu;
+	}
+	if (AODCreditsMenu* Found = FindActor<AODCreditsMenu>(GetWorld()))
+	{
+		CreditsMenu = Found;
+		return CreditsMenu;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		CreditsMenu = World->SpawnActor<AODCreditsMenu>();
+	}
+	return CreditsMenu;
 }

@@ -204,6 +204,13 @@ public:
 	void SetTimeOfDayHint(float Hour01) { /* not wired yet */ }
 	void SetSeasonHint(int32 SeasonIndex) { /* not wired yet */ }
 
+	/** Settings-shell-facing (Arc 4.4): Master*Ambient volume, multiplied
+	 *  into every layer's SetVolumeMultiplier() call in Tick() - the one
+	 *  place all five layers' volumes are ever pushed to their
+	 *  UAudioComponent (see Tick()'s own comment). Default 1.0 = no change
+	 *  from today's behavior. */
+	void SetVolumeScale(float Scale) { VolumeScale = FMath::Clamp(Scale, 0.0f, 1.0f); }
+
 private:
 	bool LoadZoneGrid();
 	void EnsureLayers();
@@ -225,4 +232,5 @@ private:
 
 	float TimeSinceSample = 0.0f;
 	double LastDiagTime = 0.0;
+	float VolumeScale = 1.0f;
 };

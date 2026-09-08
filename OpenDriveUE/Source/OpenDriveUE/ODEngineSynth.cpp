@@ -279,7 +279,7 @@ int32 UODEngineSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 		const float Shaped = FMath::Tanh((S * 0.28f + Noise) * Drive);
 		LpState += (Shaped - LpState) * LpCoeff;
 
-		OutAudio[i] = LpState * Amp;
+		OutAudio[i] = LpState * Amp * VolumeScale;
 	}
 	(void)FiringHz;
 

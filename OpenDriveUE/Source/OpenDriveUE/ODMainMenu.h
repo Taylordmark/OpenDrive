@@ -7,6 +7,8 @@
 class AODVehiclePawn;
 class UODVehicleMovement;
 class AODGarageEnvironment;
+class AODSettingsMenu;
+class AODCreditsMenu;
 
 /** Which screen of the front-end the player is on. */
 UENUM()
@@ -86,12 +88,18 @@ public:
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
 	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
-	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Drive (5.2:
-	// exhaust preset row + 4 slider rows, same value-cycling idiom as the
-	// rows above them - see Adjust()/GetRow() in the .cpp).
-	int32 NumRows() const { return 11; }
+	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Settings,
+	// Credits, Drive (5.2: exhaust preset row + 4 slider rows, same
+	// value-cycling idiom as the rows above them; Settings/Credits added
+	// Arc 4.4, next steps.md SS4.4/SS7.31 - see Adjust()/GetRow() in the .cpp).
+	int32 NumRows() const { return 13; }
 	int32 GetSelected() const { return Selected; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
+
+	bool IsSettingsOpen() const { return bSettingsOpen; }
+	bool IsCreditsOpen() const { return bCreditsOpen; }
+	AODSettingsMenu* GetSettingsMenu() const { return SettingsMenu; }
+	AODCreditsMenu* GetCreditsMenu() const { return CreditsMenu; }
 
 	/** Loading-screen progress numbers (2026-08-27, spawn-loading-screen task) -
 	 *  ODRaceHUD reads these while Stage == Loading to draw a "terrain N/M ·
@@ -159,6 +167,18 @@ private:
 	// BeginPlay, to avoid racing pawn/level discovery at boot.
 	AODGarageEnvironment* EnsureGarageEnvironment();
 	TWeakObjectPtr<AODGarageEnvironment> GarageEnv;
+
+	// Settings/Credits (Arc 4.4): same lazy-spawn/plain-logic-object pattern
+	// as EnsureGarageEnvironment() above - see AODSettingsMenu's class
+	// comment for why these aren't independent input-owning actors.
+	AODSettingsMenu* EnsureSettingsMenu();
+	AODCreditsMenu* EnsureCreditsMenu();
+	bool bSettingsOpen = false;
+	bool bCreditsOpen = false;
+	UPROPERTY()
+	TObjectPtr<AODSettingsMenu> SettingsMenu;
+	UPROPERTY()
+	TObjectPtr<AODCreditsMenu> CreditsMenu;
 
 	EODMenuStage Stage = EODMenuStage::CarConfig;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()

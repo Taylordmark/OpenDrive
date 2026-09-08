@@ -360,7 +360,7 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   per vehicle (accept it). Cosmetics v1 (paint color/wrap) not started.
 - Acceptance: 4–6 drivable cars, color choice, preset choice, all persisted.
 
-### 4.4 Release settings shell
+### 4.4 Release settings shell ✅ *(2026-09-08, see §7.31 — canvas-drawn, no UMG)*
 - Graphics (resolution/quality/upscaler), audio volumes, input, credits screen
   with the full data-attribution list. Required for the public release.
 
@@ -5653,3 +5653,186 @@ just the mirror:
   skip fraction (150-trial average per preset) tracks theoretical `EffP(t)`
   within 0.0044/0.0173/0.0354 absolute (Stock/Sport/Open respectively,
   gate `<=0.12`).
+
+### 7.31 Arc 4.4: release settings shell — graphics/audio/input settings + generated credits (2026-09-08)
+
+Implements §4.4: a canvas-drawn Settings screen (resolution/window mode/
+quality/upscaler/screen %/vsync/volumes/input device) and a Credits screen
+(full data-attribution list), reachable from both the in-game pause menu and
+the front-end car-config menu. No UMG anywhere, per the existing AODMainMenu/
+AODPauseMenu/ODRaceHUD architecture. Offline only, per the standing testing
+protocol (no `-game`/PIE/screenshots — code-path inspection + a green
+`Build.bat` run, no engine launch).
+
+**Two new plain logic/state actors, `AODSettingsMenu`/`AODCreditsMenu`
+(`ODSettingsMenu.h/.cpp`, `ODCreditsMenu.h/.cpp`), deliberately NOT
+independent input-owning actors.** A second actor binding its own Up/Down/
+Left/Right/Enter/Escape would race `AODPauseMenu`'s/`AODMainMenu`'s existing
+bindings for input-stack priority with no reliable ordering guarantee — so
+instead these are driven entirely by whichever parent menu currently has
+them open: both parents check a `bSettingsOpen`/`bCreditsOpen` flag FIRST, at
+the top of their own already-bound `Up()/Down()/Left()/Right()/Activate()/
+Toggle()`-or-`Back()`, and route straight into
+`MoveSelection()/AdjustSelected()`/`Scroll()` instead of running their normal
+row logic — one input-binding stack in the game at any time, never two.
+Lazily spawned (`EnsureSettingsMenu()`/`EnsureCreditsMenu()` in both
+`ODPauseMenu.cpp` and `ODMainMenu.cpp`), same lazy-spawn-on-first-use idiom
+as `AODMainMenu::EnsureGarageEnvironment()` (falls back to a
+`TActorIterator` scan first, so both parent menus share one instance if both
+happen to exist on a level).
+
+**Reachable from both menus, new rows inserted before each terminal action
+row:** `AODPauseMenu` rows 4 "Settings"/5 "Credits" (`NumRows()` 6→8, Main
+Menu/Quit shifted 4/5→6/7); `AODMainMenu` (car-config) rows 10 "Settings"/11
+"Credits" (`NumRows()` 11→13, "Drive"/"Resume Driving" shifted 10→12).
+Drawing is generic over whichever parent has them open —
+`ODRaceHUD::DrawSettingsMenu(AODSettingsMenu*)`/`DrawCreditsMenu
+(AODCreditsMenu*)` are two new functions, each called from both of
+`DrawHUD()`'s existing menu blocks (front-end and pause-menu) rather than
+duplicated per parent.
+
+**Settings row list (`AODSettingsMenu::NumRows() == 11`):** Resolution
+(cycles 5 fixed 16:9 modes + a synthesized "Native" entry read live via
+`FDisplayMetrics::RebuildDisplayMetrics()`), Window Mode (Fullscreen/
+Windowed/Borderless), Quality (Low/Medium/High/Epic via
+`UGameUserSettings::SetOverallScalabilityLevel`), Upscaler, Screen %, VSync,
+Master/Vehicle/Ambient Volume, Input Device (reuses
+`AODVehiclePawn::SetInputDeviceMode` directly rather than reimplementing it —
+that row already self-persists on the pawn), Close. Resolution/Window Mode/
+Quality/VSync are deliberately NOT shadow-copied into `AODSettingsMenu`
+fields — they're read LIVE from `UGameUserSettings::GetGameUserSettings()`
+on every draw call, so there's exactly one source of truth and no
+state-sync bug is possible; only Upscaler/ScreenPercent/the three volumes
+get their own fields, since `UGameUserSettings` has no native equivalent for
+any of those four.
+
+**Upscaler finding (key decision):** no FSR/FidelityFX plugin is enabled in
+this project (checked `.uproject` and `Config/` — no match on FSR/
+FidelityFX/Upscal). Per the task brief's explicit fallback, the row offers
+exactly two options: Off (plain TAA) and TSR (built into UE 5.8 core, no
+plugin needed), driven via the `r.AntiAliasingMethod` console variable
+(`IConsoleManager::FindConsoleVariable`) since `UGameUserSettings` has no
+scalability-group equivalent for AA method specifically. Persisted manually
+through GConfig alongside Screen % (see persistence below), since the engine
+doesn't auto-save cvars.
+
+**Audio volume routing — single-application-point requirement, verified by
+grep against every `OnGenerateAudio`/`SetVolumeMultiplier` write site in the
+project (exactly three matches, all covered):**
+`AODSettingsMenu::ApplyAudioVolumes()` pushes `MasterVolume*VehicleVolume`
+into `AODVehicleAudio::SetVehicleVolumeScale()` (new method — caches the
+scale and forwards it to both `UODEngineSynth`/`UODRoadNoiseSynth`'s new
+`SetVolumeScale()`, re-applied in `EnsureSynths()` so a car swap mid-session
+doesn't reset it) and `MasterVolume*AmbientVolume` into
+`AODAmbientSoundManager::SetVolumeScale()` (new method). Each synth's
+`OnGenerateAudio()` output line gained exactly one extra `* VolumeScale`
+multiply (`ODEngineSynth.cpp`: `OutAudio[i] = LpState * Amp * VolumeScale;`;
+`ODRoadNoiseSynth.cpp`: `... * Volume * VolumeScale;`); `Tick()`'s existing
+per-layer loop in `AODAmbientSoundManager.cpp` gained the same on its one
+`SetVolumeMultiplier()` call (`L->CurrentVolume * VolumeScale`) — no new
+loop, no per-frame cost beyond the float multiply, `ApplyAudioVolumes()`
+itself only runs on load and on a slider nudge, never per-tick. All four
+scale setters clamp to `[0,1]` inline.
+
+**Persistence:** Resolution/Window Mode/Quality/VSync persist through
+`UGameUserSettings`'s own native path (`SaveSettings()`/
+`ApplyResolutionSettings(false)`), no code here duplicates that. Upscaler +
+Screen % round-trip through GConfig section `"OpenDrive.Graphics"`; the
+three audio volumes round-trip through `"OpenDrive.Audio"` — both new
+sections, same `SetInt/GetInt`/`SetFloat/GetFloat` + `GConfig->Flush(false,
+GGameUserSettingsIni)` idiom as `AODMainMenu::Save/LoadExhaustConfig`'s
+`"OpenDrive.Exhaust"` (§7.30). Both save on every adjustment, not just on
+close, matching that precedent.
+
+**Credits screen (`pipeline/build_credits.py`, new script) — GENERATED, not
+hand-typed.** Walks every `content_src/**/manifest.json` (both license-record
+schemas found in the repo: array-of-objects with `display_name`/`author`/
+`source_url`/`license`, and the flat filename-keyed dict `content_src/
+textures/flora/manifest.json` uses) plus `data/cars/*/LICENSE.txt`, and
+prepends a small hand-maintained header block (title, "by Taylor Markham",
+Unreal Engine trademark notice) plus OSM ODbL and USGS/DEM attribution lines
+matching README.md's existing wording. `cars_manifest.json` (`data/cars/
+procedural/obj/cars_manifest.json`) is explicitly excluded by name in the
+script's own docstring, per this task's hard rule against touching vehicle
+physics/manifest data. Output is one plain UTF-8 text sidecar,
+`OpenDriveUE/Content/OpenDrive/Masks/credits.txt` (163 lines, 5610 bytes) —
+plain text rather than one of the project's packed binary sidecar formats,
+since this file is machine-regenerated on every pipeline run, not
+hand-authored, so packing buys nothing. `AODCreditsMenu::BeginPlay()` loads
+it via `FFileHelper::LoadFileToStringArray` from the same `Content/
+OpenDrive/Masks/` directory every other sidecar uses.
+
+**Coverage: 30/30 entries (100%)** — 6 manifest.json files (ambient audio 5,
+building textures 6, flora textures 4, ground textures 6, road textures 5,
+water textures 1) + 3 vehicle-placeholder LICENSE.txt files (gt/
+placeholder/procedural, 1 entry each), every one present in the generated
+output. Re-running the script against an unchanged repo reproduces the
+identical byte count, confirming the generator is deterministic.
+
+**DEM/imagery attribution finding:** USGS 3DEP (via AWS Terrain Tiles,
+Terrarium format — confirmed from `pipeline/terrain_common.py`'s own module
+docstring and its `TERRAIN_URL` constant) and USGS imagery are U.S.
+Government works and public domain in the United States — unlike OSM's
+ODbL, there is no attribution *requirement* documented anywhere in this repo
+for the DEM/imagery beyond README's existing wording, which credits.txt
+mirrors exactly ("public domain" rather than inventing ODbL-style license
+terms for it). Flagging this as-read rather than asserting a requirement
+that isn't documented: if the AWS Open Data `elevation-tiles-prod` bucket
+carries additional terms beyond USGS's own public-domain status, that isn't
+captured anywhere in this repo and isn't reflected in credits.txt.
+
+**Build:** `Build.bat OpenDriveUEEditor Win64 Development` succeeded after
+three fixes surfaced during the process (none design-level, all mechanical):
+(1) `ODCreditsMenu.h`'s doc comment contained a literal `**/` (inside
+`content_src/**/manifest.json`) that closed the `/** */` block comment
+early, leaving the rest — including an apostrophe a few lines down — parsed
+as raw code (`Unterminated character constant`); reworded to avoid the
+literal sequence. (2) `FDisplayMetrics::GetDisplayMetrics` isn't a real API
+in UE 5.8 (compile error) — switched to the actual API,
+`FDisplayMetrics::RebuildDisplayMetrics()`. (3) That call is exported from
+the `ApplicationCore` module, which `OpenDriveUE.Build.cs` didn't depend on
+(link error) — added `"ApplicationCore"` to `PublicDependencyModuleNames`.
+Also renamed two local `r.AntiAliasingMethod`-value constants
+(`AAM_TemporalAA`/`AAM_TSR` → `CvarAA_TemporalAA`/`CvarAA_TSR`) after the
+build flagged them as ambiguous against the engine's own
+`EAntiAliasingMethod` enumerators of the same names, pulled in transitively
+via `Engine`/`SceneUtils.h`.
+
+**Offline verification:** `scratchpad/verify_settings_shell.txt` (row/screen
+inventory with file/line cites for every row, the three audio-volume
+routing points, persistence write/read paths, the upscaler-availability
+finding) and `scratchpad/verify_credits.txt` (full generated credits.txt
+content verbatim, the 30/30 coverage table, OSM/DEM/engine attribution line
+checks) — both in this session's scratchpad, not committed (offline
+working notes, not shipping artifacts).
+
+**Caveats — Taylor's live calls, not machine-verifiable offline (hard rule
+3 forbids launching the game/editor to check these):**
+- Layout/readability of the Settings and Credits panels at actual screen
+  resolutions — row spacing, whether long values (e.g. "Native
+  (3840x2160)") overflow the panel width — is unverified; the panel sizing
+  math scales with `NumRows()`/`VisibleLines` the same way the existing
+  garage panel does, but "does it look right" needs eyes on it.
+- Credits scroll feel (`AODCreditsMenu::Scroll()`'s clamp math is verified
+  correct by inspection — never scrolls past the last page — but pacing/
+  feel of Up/Down scrolling through 163 lines wasn't tested live).
+- Slider step sizes (10-unit screen-% steps, 5% volume steps, the five
+  fixed resolution entries) are reasonable-looking choices, not validated
+  against how they feel to actually turn.
+- Whether the four quality presets (Low/Medium/High/Epic) visibly differ on
+  this project's content: the row correctly reads/writes
+  `UGameUserSettings::GetOverallScalabilityLevel()`, the correct existing
+  engine API, but whether the buckets look meaningfully different depends
+  on this project's `Scalability.ini` (or the engine's own defaults if
+  unset) — not something readable from static code.
+- Whether TSR vs Off is visually distinguishable at the offered
+  screen-percentage range, on this project's content, is untested live.
+
+Committed: `OpenDriveUE/Source/OpenDriveUE/ODSettingsMenu.h/.cpp`,
+`ODCreditsMenu.h/.cpp` (new), `ODPauseMenu.h/.cpp`, `ODMainMenu.h/.cpp`,
+`ODRaceHUD.h/.cpp` (routing/drawing), `ODVehicleAudio.h/.cpp`,
+`ODEngineSynth.h/.cpp`, `ODRoadNoiseSynth.h/.cpp`,
+`ODAmbientSoundManager.h/.cpp` (volume-scale plumbing),
+`OpenDriveUE.Build.cs` (`ApplicationCore` dependency),
+`pipeline/build_credits.py` (new), `OpenDriveUE/Content/OpenDrive/Masks/
+credits.txt` (generated), this note. Not pushed.

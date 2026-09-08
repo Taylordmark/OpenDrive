@@ -7,6 +7,8 @@
 class AODRaceManager;
 class AODRoadManager;
 class AODMainMenu;
+class AODSettingsMenu;
+class AODCreditsMenu;
 
 /**
  * Canvas race HUD: timer, best, gate progress, speed — plus the stage map
@@ -79,4 +81,13 @@ private:
 	 *  instead of the in-game HUD, not on top of it. */
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
+
+	/** Settings/Credits panels (Arc 4.4) - drawn full-screen over whatever's
+	 *  behind them (pause menu or front-end), same dim-and-panel shape as
+	 *  DrawMainMenu's car-config panel above; generic over AODSettingsMenu's/
+	 *  AODCreditsMenu's own row-list APIs so both AODPauseMenu and AODMainMenu
+	 *  share one drawing implementation each regardless of which parent has
+	 *  them open. */
+	void DrawSettingsMenu(AODSettingsMenu* Menu) const;
+	void DrawCreditsMenu(AODCreditsMenu* Menu) const;
 };

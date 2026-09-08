@@ -92,9 +92,21 @@ public:
 	void SetExhaustConfig(const FODExhaustConfig& Config);
 	FODExhaustConfig GetExhaustConfig() const;
 
+	/** Settings-shell-facing (Arc 4.4): Master*Vehicle volume, multiplied
+	 *  into the synth's single final-sample write in OnGenerateAudio() (same
+	 *  plain-float-write convention as Loudness/Rasp/MufflerCutoff above -
+	 *  game thread writes at menu-adjust rate, audio thread reads each
+	 *  buffer, no atomics needed). Default 1.0 = no change from today's
+	 *  behavior. */
+	void SetVolumeScale(float Scale) { VolumeScale = FMath::Clamp(Scale, 0.0f, 1.0f); }
+
 	// --- exhaust character (garage sliders later) ---
 	UPROPERTY(EditAnywhere, Category = "Exhaust", meta = (ClampMin = 0, ClampMax = 1))
 	float Loudness = 0.7f;
+
+	/** Master*Vehicle volume from the settings shell - see SetVolumeScale(). */
+	UPROPERTY(EditAnywhere, Category = "Audio", meta = (ClampMin = 0, ClampMax = 1))
+	float VolumeScale = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Exhaust", meta = (ClampMin = 0, ClampMax = 1))
 	float Rasp = 0.45f;

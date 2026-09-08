@@ -8,11 +8,13 @@
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "ODCreditsMenu.h"
 #include "ODGhost.h"
 #include "ODMainMenu.h"
 #include "ODPauseMenu.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
+#include "ODSettingsMenu.h"
 #include "ODTuningManager.h"
 
 static FString FormatTime(float T)
@@ -559,6 +561,107 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		FLinearColor(0.6f, 0.6f, 0.6f));
 }
 
+void AODRaceHUD::DrawSettingsMenu(AODSettingsMenu* Menu) const
+{
+	if (!Canvas || !Menu)
+	{
+		return;
+	}
+	UFont* Font = GEngine->GetLargeFont();
+
+	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
+		FLinearColor(0, 0, 0, 0.7f));
+	Dim.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Dim);
+
+	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
+		T.Scale = FVector2D(Sc, Sc);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
+
+	const float Mx = Canvas->SizeX * 0.5f - 260.0f;
+	float My = Canvas->SizeY * 0.5f - 30.0f * Menu->NumRows() * 0.5f - 70.0f;
+
+	const float PanelW = 560.0f;
+	const float PanelTop = My - 30.0f;
+	const float PanelH = 42.0f * Menu->NumRows() + 130.0f;
+	FCanvasTileItem Panel(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, PanelH),
+		FLinearColor(0.02f, 0.03f, 0.05f, 0.85f));
+	Panel.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Panel);
+
+	Text(TEXT("SETTINGS"), Mx, My, 2.0f, FLinearColor(0.75f, 0.9f, 1.0f));
+	My += 66.0f;
+
+	for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
+	{
+		FString Label, Value;
+		Menu->GetRow(Row, Label, Value);
+		const bool bSel = Row == Menu->GetSelected();
+		const FLinearColor Col = bSel
+			? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
+		Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx, My, 1.4f, Col);
+		if (!Value.IsEmpty())
+		{
+			Text(FString::Printf(TEXT("< %s >"), *Value), Mx + 260.0f, My, 1.4f, Col);
+		}
+		My += 42.0f;
+	}
+	Text(TEXT("arrows change    enter select    esc close"), Mx, My + 20.0f, 1.0f,
+		FLinearColor(0.55f, 0.6f, 0.65f));
+}
+
+void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const
+{
+	if (!Canvas || !Menu)
+	{
+		return;
+	}
+	UFont* Font = GEngine->GetLargeFont();
+
+	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
+		FLinearColor(0, 0, 0, 0.75f));
+	Dim.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Dim);
+
+	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
+		T.Scale = FVector2D(Sc, Sc);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
+
+	const float PanelW = FMath::Min(760.0f, Canvas->SizeX - 120.0f);
+	const float Mx = (Canvas->SizeX - PanelW) * 0.5f;
+	const float PanelTop = Canvas->SizeY * 0.5f - (AODCreditsMenu::VisibleLines * 22.0f + 110.0f) * 0.5f;
+	const float PanelH = AODCreditsMenu::VisibleLines * 22.0f + 130.0f;
+
+	FCanvasTileItem Panel(FVector2D(Mx, PanelTop), FVector2D(PanelW, PanelH),
+		FLinearColor(0.02f, 0.03f, 0.05f, 0.88f));
+	Panel.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Panel);
+
+	float My = PanelTop + 24.0f;
+	Text(TEXT("CREDITS"), Mx + 24.0f, My, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
+	My += 52.0f;
+
+	const TArray<FString>& Lines = Menu->GetLines();
+	const int32 Start = Menu->GetScrollLine();
+	const int32 End = FMath::Min(Start + AODCreditsMenu::VisibleLines, Lines.Num());
+	for (int32 i = Start; i < End; ++i)
+	{
+		Text(Lines[i], Mx + 24.0f, My, 0.95f, FLinearColor(0.85f, 0.87f, 0.88f));
+		My += 22.0f;
+	}
+
+	Text(TEXT("up/down scroll    esc/enter close"), Mx + 24.0f, PanelTop + PanelH - 30.0f, 1.0f,
+		FLinearColor(0.55f, 0.6f, 0.65f));
+}
+
 void AODRaceHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -615,6 +718,17 @@ void AODRaceHUD::DrawHUD()
 		if (It->IsActive())
 		{
 			DrawMainMenu(*It, MapCenterline, MapGates, RoadMgr);
+			// Settings/Credits (Arc 4.4) take over on top of whichever
+			// car-config/map panel DrawMainMenu just drew - same layering as
+			// the pause-menu block below.
+			if (It->IsSettingsOpen())
+			{
+				DrawSettingsMenu(It->GetSettingsMenu());
+			}
+			else if (It->IsCreditsOpen())
+			{
+				DrawCreditsMenu(It->GetCreditsMenu());
+			}
 			return;
 		}
 		break;
@@ -826,6 +940,17 @@ void AODRaceHUD::DrawHUD()
 			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
 				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
 				0.55f, 0.0f, false, RoadMgr);
+		}
+
+		// Settings/Credits (Arc 4.4) take over on top of the pause panel just
+		// drawn, same as the front-end menu block above.
+		if (Menu->IsSettingsOpen())
+		{
+			DrawSettingsMenu(Menu->GetSettingsMenu());
+		}
+		else if (Menu->IsCreditsOpen())
+		{
+			DrawCreditsMenu(Menu->GetCreditsMenu());
 		}
 		break;
 	}
