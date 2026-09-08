@@ -79,6 +79,7 @@ not silently degrade.
 """
 
 import json
+import math
 import struct
 from pathlib import Path
 
@@ -151,21 +152,30 @@ def load_biome_grid_lookup():
 def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
     """Two independent boolean cell masks (next steps.md SS7.29 lake-vs-
     creek split, replaces ODA1's single combined `water` mask):
-      - lake_mask:     True where a grid cell center falls inside an
-                        osm_water.json lake/reservoir polygon.
+      - lake_mask:     True where a grid cell's 100 m FOOTPRINT (not just
+                        its center - see below) intersects an osm_water.json
+                        lake/reservoir/pond polygon.
       - waterway_mask: True where a grid cell center is within
                         WATERWAY_HALFWIDTH_M of a chained osm_waterways.json
-                        centerline.
-    Point-in-polygon test for lakes is done against the whole grid (lake
-    count is tiny). Waterway rasterization is bbox-limited: each segment
-    only ever touches a small local slice of the grid near itself (a creek
-    is a few meters wide), so vectorizing point-to-segment distance against
-    the FULL grid per segment (the first version of this function -
-    thousands of segments x tens of thousands of cells - took >15 minutes
-    and was killed) is wasted work; restricting to each segment's own padded
-    bounding box drops this to seconds. Kept as one function (not split in
-    two) since both masks share the same cell-center grid setup."""
-    from matplotlib.path import Path as MplPath
+                        centerline, widened by the cell's own half-diagonal
+                        so the CELL FOOTPRINT (not just its center) actually
+                        crossed by the line gets marked - see the
+                        hit_threshold_cm comment below (next steps.md SS7.29
+                        correction note).
+    osm_water.json for this area is ~1600 polygons and the median one is
+    ~30-40 m across - SMALLER than one 100 m cell, not "tiny" the way the
+    original comment here assumed. A pure cell-CENTER point-in-polygon test
+    (the original version of this function) missed 1239/1600 of them
+    entirely: a pond has to happen to straddle a cell center to register at
+    all. Fixed by testing actual polygon-vs-cell-square intersection with
+    shapely, bbox-limited to each polygon's own padded extent the same way
+    the waterway loop below is bbox-limited to each segment's extent (lake
+    count is no longer "tiny" but per-polygon cell counts are small, so this
+    stays fast - ~1s for the whole file, not the >15 min full-grid approach
+    the module docstring warns off). Kept as one function (not split in
+    two) since both masks share the same cell grid setup."""
+    from shapely.geometry import Polygon as ShapelyPolygon, box as shapely_box
+    from shapely import prepare
 
     cell_cx = ox_cm + (np.arange(cols) + 0.5) * CELL_SIZE_CM
     cell_cy = oy_cm + (np.arange(rows) + 0.5) * CELL_SIZE_CM
@@ -175,8 +185,6 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
 
     n_lakes = 0
     if WATER_PATH.is_file():
-        gx, gy = np.meshgrid(cell_cx, cell_cy)
-        pts = np.column_stack([gx.ravel(), gy.ravel()])
         polys = json.loads(WATER_PATH.read_text())
         for poly in polys:
             ring = poly.get("nodes")
@@ -186,14 +194,50 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
             x_cm, y_cm = project_latlon(latlon[:, 0], latlon[:, 1], lat0, lon0, m_per_deg_lon)
             verts = np.column_stack([x_cm, y_cm])
             try:
-                inside = MplPath(verts).contains_points(pts)
+                shp = ShapelyPolygon(verts)
+                if not shp.is_valid:
+                    shp = shp.buffer(0)
+                if shp.is_empty:
+                    continue
             except Exception:
                 continue
-            lake_mask |= inside.reshape(rows, cols)
             n_lakes += 1
+
+            # Padded bbox of this one polygon, in grid cell index space -
+            # pad by a full cell so a cell whose square merely clips the
+            # polygon boundary right at the bbox edge isn't dropped.
+            minx, miny, maxx, maxy = shp.bounds
+            c0 = max(0, int((minx - CELL_SIZE_CM - ox_cm) // CELL_SIZE_CM))
+            c1 = min(cols, int((maxx + CELL_SIZE_CM - ox_cm) // CELL_SIZE_CM) + 1)
+            r0 = max(0, int((miny - CELL_SIZE_CM - oy_cm) // CELL_SIZE_CM))
+            r1 = min(rows, int((maxy + CELL_SIZE_CM - oy_cm) // CELL_SIZE_CM) + 1)
+            if c1 <= c0 or r1 <= r0:
+                continue
+
+            prepare(shp)
+            for rr in range(r0, r1):
+                cell_y0 = oy_cm + rr * CELL_SIZE_CM
+                for cc in range(c0, c1):
+                    if lake_mask[rr, cc]:
+                        continue
+                    cell_x0 = ox_cm + cc * CELL_SIZE_CM
+                    cell_box = shapely_box(cell_x0, cell_y0, cell_x0 + CELL_SIZE_CM, cell_y0 + CELL_SIZE_CM)
+                    if shp.intersects(cell_box):
+                        lake_mask[rr, cc] = True
 
     n_waterway_segs = 0
     halfwidth_cm = WATERWAY_HALFWIDTH_M * 100.0
+    # Cells are CELL_SIZE_CM (100 m) wide, so a cell CENTER being within
+    # halfwidth_cm of the centerline is only true for the handful of cells
+    # the line happens to pass almost dead through - a polyline threading a
+    # 100 m grid mostly clips cell EDGES, leaving centers many meters off
+    # even though the segment plainly crosses the cell. Widen the hit test
+    # by the cell's own half-diagonal (worst-case center-to-corner reach)
+    # so every cell footprint the segment actually passes through is
+    # registered - this is what turned a ~542-cell scatter of near-misses
+    # into a connected ~8-9k cell trace of the waterway network (see
+    # next steps.md SS7.29 correction note).
+    hit_threshold_cm = halfwidth_cm + CELL_SIZE_CM * 0.5 * math.sqrt(2.0)
     if WATERWAYS_PATH.is_file():
         raw = json.loads(WATERWAYS_PATH.read_text())
         # Each way already carries resolved [lat,lon] "pts" (see
@@ -217,8 +261,11 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
 
                 # Padded bounding box of this one segment, in grid cell
                 # index space - the ONLY cells this segment can possibly
-                # mark, since halfwidth_cm is a tight creek half-width.
-                pad = halfwidth_cm + CELL_SIZE_CM
+                # mark, since halfwidth_cm is a tight creek half-width. Pad
+                # by the same hit_threshold_cm used below (plus a hair of
+                # slack) so the bbox can't clip a cell the widened center
+                # test would otherwise mark.
+                pad = hit_threshold_cm + CELL_SIZE_CM * 0.01
                 c0 = max(0, int((min(a[0], b[0]) - pad - ox_cm) // CELL_SIZE_CM))
                 c1 = min(cols, int((max(a[0], b[0]) + pad - ox_cm) // CELL_SIZE_CM) + 1)
                 r0 = max(0, int((min(a[1], b[1]) - pad - oy_cm) // CELL_SIZE_CM))
@@ -232,7 +279,7 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
                 t = np.clip(t, 0.0, 1.0)
                 proj = a + t[:, None] * ab
                 d = np.hypot(sub_pts[:, 0] - proj[:, 0], sub_pts[:, 1] - proj[:, 1])
-                hit = (d <= halfwidth_cm).reshape(r1 - r0, c1 - c0)
+                hit = (d <= hit_threshold_cm).reshape(r1 - r0, c1 - c0)
                 waterway_mask[r0:r1, c0:c1] |= hit
             n_waterway_segs += len(seg_pts) - 1
 
