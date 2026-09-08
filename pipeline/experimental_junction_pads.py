@@ -3217,6 +3217,74 @@ def main():
         return False
 
     fill_pads = []   # small discs patching proximity-only overlap, outside any pad circle
+    FILL_RADIUS_M = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
+
+    # One smooth pad per intersection (2026-09-07, Taylor: "there are
+    # clearly several overlapping junctions" in the top-down tile
+    # renders): proximity-omitted stations right AT a junction mouth used
+    # to each get their own FILL_RADIUS_M fan disc next to the junction
+    # pad, so a single intersection rendered as a cluster of overlapping
+    # circles. Precompute the proximity mask, find the discs that would
+    # overlap a drawn junction pad, and GROW that pad's footprint (same
+    # covering-ellipse fit + PAD_MERGE_MAX_SEMI_AXIS_M cap the merge
+    # passes use) to swallow them - the ribbon-omission pass below then
+    # cuts against the grown footprint and never emits those discs at
+    # all. Discs far from any pad (mid-stretch near-parallel runs) are
+    # untouched.
+    prox_mask = np.zeros(len(east), dtype=bool)
+    for gi in range(len(east)):
+        if overlaps_other_road(gi, int(seg_ids[gi])):
+            prox_mask[gi] = True
+    disc_cand = [int(gi) for gi in np.nonzero(prox_mask)[0]
+                 if not any(point_in_pad(east[gi], north[gi], j, margin=0.0)
+                            for j in junctions)]
+    covered = set()
+    n_swallowed, n_grown = 0, 0
+    for j in junctions:
+        near = [gi for gi in disc_cand
+                if gi not in covered
+                and point_in_pad(east[gi], north[gi], j, margin=FILL_RADIUS_M)]
+        if not near:
+            continue
+        if j.get("shape") == "ellipse":
+            old_cx, old_cy = j["ellipse"][0], j["ellipse"][1]
+            pts = list(_ellipse_polygon(j["ellipse"], 0.0, 32))
+        else:
+            old_cx, old_cy = j["xy"]
+            r = j["radius_m"]
+            pts = [(old_cx + r * math.cos(t), old_cy + r * math.sin(t))
+                   for t in np.linspace(0.0, 2.0 * math.pi, 32, endpoint=False)]
+        for gi in near:
+            pts.extend((east[gi] + FILL_RADIUS_M * math.cos(t),
+                        north[gi] + FILL_RADIUS_M * math.sin(t))
+                       for t in np.linspace(0.0, 2.0 * math.pi, 12, endpoint=False))
+        ell = _fit_ellipse_to_points(pts, PAD_RADIUS_MIN_M)
+        if max(ell[2], ell[3]) > PAD_MERGE_MAX_SEMI_AXIS_M:
+            continue   # would balloon past what one intersection can be -
+                       # keep the separate discs there instead
+        gx, gy = j.get("plane", (0.0, 0.0))
+        j["elev"] = float(j["elev"] + gx * (ell[0] - old_cx) + gy * (ell[1] - old_cy))
+        j["shape"] = "ellipse"
+        j["ellipse"] = ell
+        j["xy"] = (ell[0], ell[1])
+        n_grown += 1
+        for gi in disc_cand:
+            if gi not in covered and point_in_pad(east[gi], north[gi], j, margin=0.0):
+                covered.add(gi)
+                n_swallowed += 1
+    print(f"pad-swallow: {n_grown} junction pad(s) grown to absorb "
+          f"{n_swallowed} adjacent fill disc(s)")
+    # final (post-growth) footprints, for offline top-down verification
+    # renders - same schema as --dump-pads
+    (btmt.STATIONS_PATH.parent / "junction_pads_final.json").write_text(json.dumps([{
+        "xy": [float(j["xy"][0]), float(j["xy"][1])],
+        "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
+        "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
+        "plane": [float(v) for v in j.get("plane", (0.0, 0.0))],
+        "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
+        "merged2": bool(j.get("merged2")),
+        "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
+    } for j in junctions], indent=1))
 
     all_chunks = list(connector_chunks)
     total_km = 0.0
@@ -3267,7 +3335,7 @@ def main():
             inside_circle = np.array([
                 any(point_in_pad(e[i], nn[i], j, margin=0.0) for j in junctions)
                 for i in range(len(e))])
-            inside_prox = np.array([overlaps_other_road(goff + lo + i, si) for i in range(len(e))])
+            inside_prox = prox_mask[goff + lo:goff + lo + len(e)]
             inside = inside_circle | inside_prox
             for i in range(len(e)):
                 if inside_prox[i] and not inside_circle[i]:
@@ -3397,7 +3465,6 @@ def main():
     # 2026-08-26: fuse every pad into its nearest already-built ribbon chunk
     # (merge_chunk_into) instead of appending it as its own standalone chunk -
     # see that function's docstring. Was: all_chunks.append(build_pad_chunk(...)).
-    FILL_RADIUS_M = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
     n_merged, n_standalone = 0, 0
     for name, xy, elev_m in fill_pads:
         pad = build_pad_chunk(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M)
