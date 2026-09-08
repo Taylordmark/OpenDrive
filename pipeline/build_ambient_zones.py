@@ -40,20 +40,42 @@ Usage:  python build_ambient_zones.py   (needs road_biomes.json,
 
 Writes  OpenDriveUE/Content/OpenDrive/Masks/ambient_zones_<AREA_NAME>_test.bin
 
-ODA1 format (single file, whole map - no tile suffix):
-    'O','D','A','1'                                    magic (4 bytes)
+ODA2 format (next steps.md SS7.29 - bumped from ODA1, single file, whole
+map, no tile suffix): ODA1 stored ONE water-distance channel, combining lake
+and waterway (creek/river) proximity into a single "distance to nearest
+water feature" number - fine for a single generic Water ambience layer, but
+AODAmbientSoundManager now splits Water into two independently-crossfaded
+layers (CreekSound vs LakeSound, see that class's header comment), which
+need two INDEPENDENT distance fields - a cell can be near a creek and far
+from any lake, or vice versa (e.g. Dillon Reservoir's shoreline is far from
+the nearest free-flowing creek). ODA2 replaces the single WaterDistM field
+with LakeDistM (distance-transform_edt over the same osm_water.json lake/
+reservoir polygons build_water_tiles.py rasterizes) and WaterwayDistM
+(same osm_waterways.json ribbon-chain rasterization as ODA1's WaterDistM
+used) side by side. The magic bump (not a version field) is deliberate -
+this is a field-count AND field-meaning change, not a purely additive one,
+so the C++ loader must refuse to misread an old ODA1 file as ODA2 (a
+straight reinterpret would misalign every field after the old WaterDistM),
+not silently degrade.
+
+    'O','D','A','2'                                    magic (4 bytes)
     16 bytes    generation id (ASCII hex, pipeline/generation_id.py)
     int32 LE    GridOriginXCm, GridOriginYCm            (world cm, cell [0,0]'s
                                                           min corner)
     int32 LE    GridCols, GridRows
     float32 LE  CellSizeCm
     GridCols*GridRows cells, row-major (y outer, x inner), each:
-        uint8   ZoneClass    (0=Open, 1=Forest, 2=Alpine, 3=Settlement)
-        uint8   Density255   (0 unless ZoneClass==Settlement; town-hum mix
-                               scale, City=255 AmericanTown=140)
-        uint16 LE WaterDistM (0..WATER_DIST_CAP_M, meters, capped)
-        uint8   Reserved     (0 - unused, keeps the record word-ish sized
-                               and leaves room for a future flag)
+        uint8   ZoneClass       (0=Open, 1=Forest, 2=Alpine, 3=Settlement)
+        uint8   Density255      (0 unless ZoneClass==Settlement; town-hum mix
+                                  scale, City=255 AmericanTown=140)
+        uint16 LE LakeDistM     (0..WATER_DIST_CAP_M, meters, capped -
+                                  distance to nearest osm_water.json lake/
+                                  reservoir polygon)
+        uint16 LE WaterwayDistM (0..WATER_DIST_CAP_M, meters, capped -
+                                  distance to nearest osm_waterways.json
+                                  creek/river ribbon)
+        uint8   Reserved        (0 - unused, keeps the record word-ish sized
+                                  and leaves room for a future flag)
 """
 
 import json
@@ -127,22 +149,29 @@ def load_biome_grid_lookup():
 
 
 def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
-    """Boolean water-cell mask: True where a grid cell center falls inside a
-    lake polygon or within WATERWAY_HALFWIDTH_M of a chained waterway
-    centerline. Point-in-polygon test for lakes is done against the whole
-    grid (lake count is tiny). Waterway rasterization is bbox-limited: each
-    segment only ever touches a small local slice of the grid near itself
-    (a creek is a few meters wide), so vectorizing point-to-segment distance
-    against the FULL grid per segment (the first version of this function -
+    """Two independent boolean cell masks (next steps.md SS7.29 lake-vs-
+    creek split, replaces ODA1's single combined `water` mask):
+      - lake_mask:     True where a grid cell center falls inside an
+                        osm_water.json lake/reservoir polygon.
+      - waterway_mask: True where a grid cell center is within
+                        WATERWAY_HALFWIDTH_M of a chained osm_waterways.json
+                        centerline.
+    Point-in-polygon test for lakes is done against the whole grid (lake
+    count is tiny). Waterway rasterization is bbox-limited: each segment
+    only ever touches a small local slice of the grid near itself (a creek
+    is a few meters wide), so vectorizing point-to-segment distance against
+    the FULL grid per segment (the first version of this function -
     thousands of segments x tens of thousands of cells - took >15 minutes
     and was killed) is wasted work; restricting to each segment's own padded
-    bounding box drops this to seconds."""
+    bounding box drops this to seconds. Kept as one function (not split in
+    two) since both masks share the same cell-center grid setup."""
     from matplotlib.path import Path as MplPath
 
     cell_cx = ox_cm + (np.arange(cols) + 0.5) * CELL_SIZE_CM
     cell_cy = oy_cm + (np.arange(rows) + 0.5) * CELL_SIZE_CM
 
-    water = np.zeros((rows, cols), dtype=bool)
+    lake_mask = np.zeros((rows, cols), dtype=bool)
+    waterway_mask = np.zeros((rows, cols), dtype=bool)
 
     n_lakes = 0
     if WATER_PATH.is_file():
@@ -160,7 +189,7 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
                 inside = MplPath(verts).contains_points(pts)
             except Exception:
                 continue
-            water |= inside.reshape(rows, cols)
+            lake_mask |= inside.reshape(rows, cols)
             n_lakes += 1
 
     n_waterway_segs = 0
@@ -204,12 +233,12 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
                 proj = a + t[:, None] * ab
                 d = np.hypot(sub_pts[:, 0] - proj[:, 0], sub_pts[:, 1] - proj[:, 1])
                 hit = (d <= halfwidth_cm).reshape(r1 - r0, c1 - c0)
-                water[r0:r1, c0:c1] |= hit
+                waterway_mask[r0:r1, c0:c1] |= hit
             n_waterway_segs += len(seg_pts) - 1
 
-    print(f"  water raster: {n_lakes} lake polygon(s), {n_waterway_segs} waterway segment(s) "
-          f"-> {int(water.sum())}/{water.size} water cell(s)")
-    return water.reshape(rows, cols)
+    print(f"  water raster: {n_lakes} lake polygon(s) -> {int(lake_mask.sum())}/{lake_mask.size} lake cell(s), "
+          f"{n_waterway_segs} waterway segment(s) -> {int(waterway_mask.sum())}/{waterway_mask.size} waterway cell(s)")
+    return lake_mask, waterway_mask
 
 
 def main():
@@ -265,35 +294,43 @@ def main():
         density[r0:r1, c0:c1] = SETTLEMENT_DENSITY.get(archetype, 140)
         n_settlement_cells += (r1 - r0) * (c1 - c0)
 
-    # --- water distance per cell ---
-    water_mask = rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon)
-    if water_mask.any():
-        dist_cells = distance_transform_edt(~water_mask)
-        dist_m = dist_cells * CELL_SIZE_M
-    else:
-        dist_m = np.full((rows, cols), float(WATER_DIST_CAP_M))
-    dist_m = np.clip(dist_m, 0, WATER_DIST_CAP_M)
+    # --- lake and waterway distance per cell (independent channels, ODA2) ---
+    lake_mask, waterway_mask = rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon)
+
+    def dist_from_mask(mask):
+        if mask.any():
+            d = distance_transform_edt(~mask) * CELL_SIZE_M
+        else:
+            d = np.full((rows, cols), float(WATER_DIST_CAP_M))
+        return np.clip(d, 0, WATER_DIST_CAP_M)
+
+    lake_dist_m = dist_from_mask(lake_mask)
+    waterway_dist_m = dist_from_mask(waterway_mask)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     gen_id = compute_generation_id()
     out_path = OUT_DIR / f"ambient_zones_{AREA_NAME}_test.bin"
     with open(out_path, "wb") as f:
-        f.write(b"ODA1")
+        f.write(b"ODA2")
         f.write(pack_generation_id(gen_id))
         f.write(struct.pack("<iiiif", int(ox_cm), int(oy_cm), cols, rows, CELL_SIZE_CM))
         for r in range(rows):
             for c in range(cols):
-                f.write(struct.pack("<BBHB", int(zone[r, c]), int(density[r, c]),
-                                     int(round(dist_m[r, c])), 0))
+                f.write(struct.pack("<BBHHB", int(zone[r, c]), int(density[r, c]),
+                                     int(round(lake_dist_m[r, c])),
+                                     int(round(waterway_dist_m[r, c])), 0))
 
     zone_counts = {int(k): int(v) for k, v in zip(*np.unique(zone, return_counts=True))}
+    file_size = 4 + 16 + 20 + cols * rows * 7
     print(f"generation id: {gen_id}")
-    print(f"wrote {out_path} ({cols * rows} cells, "
-          f"{4 + 16 + 20 + cols * rows * 5} bytes)")
+    print(f"wrote {out_path} ({cols * rows} cells, {file_size} bytes, ODA2)")
     print(f"zone counts: Open={zone_counts.get(0,0)} Forest={zone_counts.get(1,0)} "
           f"Alpine={zone_counts.get(2,0)} Settlement={zone_counts.get(3,0)} "
           f"({n_settlement_cells} cells from {len(settlements)} settlement tile(s))")
-    print(f"water-adjacent cells (<= 60 m): {int((dist_m <= 60).sum())}")
+    print(f"lake-adjacent cells (<= 60 m): {int((lake_dist_m <= 60).sum())}")
+    print(f"waterway-adjacent cells (<= 60 m): {int((waterway_dist_m <= 60).sum())}")
+    print(f"both-adjacent (<= 60 m, confluence overlap): "
+          f"{int(((lake_dist_m <= 60) & (waterway_dist_m <= 60)).sum())}")
 
 
 if __name__ == "__main__":

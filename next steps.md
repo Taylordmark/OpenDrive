@@ -5282,3 +5282,104 @@ build_ambient_zones.py` (new), `content_src/audio/ambient/manifest.json` +
 ignore rules), this note. `cars_manifest.json` and all season/vehicle/road
 pipeline code untouched. Content/ and pipeline bakes are gitignored —
 regenerated locally, not committed. Not pushed.
+
+### 7.29 Ambient audio polish: loop-tail trim + lake-vs-creek Water split (2026-09-08)
+
+Two-part follow-up to 7.28's ambient biome/city audio, both offline
+(no `-game`/PIE — waveform/data checks and a headless import commandlet
+only, per this project's testing protocol).
+
+**Part A — creek_babble loop-tail dropout, fixed.** Reviewing 7.28's
+verify plot found a ~30ms near-silence flat region immediately before
+`creek_babble`'s loop point — classic MP3-encoder padding left over from
+the freesound preview transcode (see manifest `_comment` on why previews,
+not logged-in originals, are what this project fetches). Since the 36s
+`creek_babble` WAV plays looping as the primary Water/Creek layer, that
+tail read as a periodic ~30ms dropout every loop. `normalize_ambient_audio.py`
+now trims contiguous head/tail near-silence (`trim_edge_silence()`:
+-60dBFS RMS-envelope threshold, only a run touching sample 0 or the last
+sample counts — never a quiet stretch mid-asset — and only if the *whole*
+run is under 150ms; a longer run is left untouched entirely rather than
+partially cut to the cap, so it doesn't quietly clip a genuine fade).
+Re-running against all 5 raw previews: `creek_babble` tail 30.7ms → 0.0ms
+(seam jump +49.9dB → -0.7dB), `town_hum` head 48.0ms trimmed (real
+padding) but its tail — 210.7ms, a genuine fade into background quiet —
+correctly left alone since it exceeds the 150ms cap; forest_wind/
+lake_shore/alpine_wind had no edge silence to trim. Re-imported all 5
+SoundWaves via `unreal/import_ambient_audio.py` (headless commandlet, 5/5
+imported clean, `SW_CreekBabble` now 35.96s not 35.99s). Verification:
+scratchpad `verify_ambient_seams2.png`/`.txt` (before/after zoom + jump/RMS
+table per asset, plus a raw-preview-vs-normalized creek_babble overlay).
+
+**Part B — lake_shore wired as a distinct lake-vs-creek Water split.**
+7.28 sourced/normalized/imported `lake_shore` (`SW_LakeShore`) but the
+manager only had one generic Water layer fed by `creek_babble`, faded by a
+single combined water-distance channel. `pipeline/build_ambient_zones.py`
+now bakes TWO independent distance channels — `LakeDistM` (from
+`osm_water.json` lake/reservoir polygons, same source `build_water_tiles.py`
+uses) and `WaterwayDistM` (from `osm_waterways.json` ribbon chains, same
+bbox-limited-per-segment `distance_transform_edt` approach 7.28 already
+proved out — still seconds, not the 15+min naive full-grid version that
+was killed once already) — replacing the sidecar's single `WaterDistM`
+field. Bumped the magic to `ODA2` (a field-count *and* field-meaning
+change, not purely additive, so `ODAmbientSoundManager.cpp::LoadZoneGrid`
+explicitly checks for `'2'` after the `ODA` prefix and refuses/logs-and-
+disables rather than misreading an old `ODA1` file's bytes at the wrong
+offsets). `AODAmbientSoundManager` splits Water into `LayerCreek`
+(`CreekSound`/`SW_CreekBabble`, faded by `SampleWaterwayDistM()`) and
+`LayerLake` (`LakeSound`/`SW_LakeShore`, faded by `SampleLakeDistM()`),
+both keeping the existing 60m `WaterFadeInStartM` linear fade and bilinear
+4-cell sampling (factored into a shared `FParsedAmbientZoneGrid::
+BilinearSample()` helper). No special-casing for a creek-into-reservoir
+confluence — both layers can independently approach full volume there, and
+their existing independent crossfades already produce whatever blend that
+implies. Alpine/Forest/Settlement logic untouched. `Build.bat` succeeded
+(`ODAmbientSoundManager.cpp`, `ODGameMode.cpp` recompiled clean, link OK,
+no stray `UnrealEditor` process found before building). Regenerated the
+Summit County sidecar: 307,726 cells, 2,154,122 bytes (7 bytes/cell now,
+up from 5), generation id `e26dcbfb2f64c684`.
+
+**Verification (offline):** scratchpad `verify_ambient_split.png` — two
+panels, lake-distance ≤60m band vs waterway-distance ≤60m band, with
+Silverthorne/Frisco/Breckenridge/Dillon Reservoir markers. Lake band: 2,852
+cells, visibly hugs Dillon Reservoir (the big contiguous blob right at that
+marker) plus a scatter of small real lakes elsewhere — matches
+expectation. Waterway band: 542 cells, correctly spread across the whole
+bbox rather than clustered at the reservoir, but reads as scattered
+isolated points rather than a visually continuous ribbon when zoomed in —
+a raw `osm_waterways.json` overlay (43,347 points across 2,070 ways)
+confirms the underlying stream network itself is dense and well-registered
+(a normal dendritic drainage pattern), so this is a 100m-grid-vs-60m-band
+resolution artifact (a thin creek's fade band is often narrower than one
+grid cell, so only sporadically-aligned cell centers land inside it), not
+a registration or rasterization bug — same coarse-grid tradeoff 7.28's
+`CELL_SIZE_M=100` already accepted, just more visible once split out from
+the lake signal's much bigger footprint. Overlap (both bands, a creek-into-
+reservoir confluence) = 46 cells. `verify_ambient_split_stats.txt`
+documents the byte-for-byte header/field layout and confirms the Python
+`struct.pack('<BBHHB', ...)` writer and the C++ `Cur[0..6]` parse loop
+agree on field order/widths; file size matches the computed
+`header(40) + cells*7` exactly.
+
+**What's unprovable offline / Taylor's live-session job:** whether the
+lake vs. creek mix balance actually reads as two distinct water characters
+in practice (both are currently at the same `WaterFadeInStartM`=60m/
+`CrossfadeSeconds`=4s defaults as the old single layer — untuned relative
+to each other); whether both playing together at a creek-into-reservoir
+confluence sounds like a coherent blend or a muddy overlap; and the
+trimmed `creek_babble` loop's subjective quality post-fix (the seam jump
+dropped from +49.9dB to -0.7dB and the flat gap is objectively gone, but
+whether the loop point itself sounds seamless is a live-listen call, not a
+number). The waterway band's dotted/sparse look at 100m resolution
+(discussed above) is a real characteristic of the current bake, not fixed
+this pass — flagging in case Taylor's live drives along the Blue River
+reveal the creek layer cutting in and out rather than holding steady.
+
+Committed: `content_src/audio/ambient/normalize_ambient_audio.py` (Part
+A trim fix), `pipeline/build_ambient_zones.py` (Part B ODA2 split),
+`OpenDriveUE/Source/OpenDriveUE/ODAmbientSoundManager.h/.cpp` (Part B
+layer split), `unreal/import_ambient_audio.py` + `content_src/audio/
+ambient/manifest.json` (doc/comment updates reflecting both), this note.
+Normalized WAVs and the regenerated `.bin` sidecar are gitignored, same as
+7.28 — regenerated locally by re-running `normalize_ambient_audio.py` /
+`build_ambient_zones.py`, not committed. Not pushed.

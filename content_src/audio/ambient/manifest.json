@@ -24,7 +24,7 @@
       "original_format": "WAV, 44100 Hz stereo, 32 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
       "duration_s": 35.990,
       "local_file": "content_src/audio/ambient/raw/creek_babble.mp3",
-      "notes": "AODAmbientSoundManager::WaterSound (primary assignment) - waterway-ribbon proximity layer, fades in within WaterFadeInStartM (60 m) of a creek/river/lake edge (pipeline/build_ambient_zones.py's water-distance grid, sourced from build_water_tiles.py's own osm_water.json/osm_waterways.json). Picked over lake_shore as the default WaterSound because Summit County's road corridor runs along river/creek valleys (Blue River, Tenmile Creek, Snake River) far more than lake shoreline - see lake_shore entry below for the alternate."
+      "notes": "AODAmbientSoundManager::CreekSound - waterway-ribbon proximity layer, fades in within WaterFadeInStartM (60 m) of a creek/river edge (pipeline/build_ambient_zones.py's ODA2 WaterwayDistM channel, sourced from build_water_tiles.py's own osm_waterways.json). As of next steps.md SS7.29 this is a distinct layer from lake_shore/LakeSound's own lake-distance channel (previously one combined Water layer/distance signal covered both) - creek_babble stayed the waterway-specific asset because Summit County's road corridor runs along river/creek valleys (Blue River, Tenmile Creek, Snake River) far more than lake shoreline; see lake_shore entry below for the lake-specific layer."
     },
     {
       "role": "lake_shore",
@@ -36,7 +36,7 @@
       "original_format": "WAV, 44100 Hz stereo, 16 bit (login-gated original; preview MP3 fetched instead, see manifest _comment)",
       "duration_s": 212.614,
       "local_file": "content_src/audio/ambient/raw/lake_shore.mp3",
-      "notes": "Sourced and objectively verified (loop-seam/LUFS below) as the lake-specific alternate for AODAmbientSoundManager::WaterSound, per the brief's 'lapping/shore ambience near lakes' ask - NOT wired to a distinct C++ layer this pass (the manager holds one generic Water layer, not a lake-vs-waterway split - see class header comment and next steps.md SS7.28 'what's left'). Swap WaterSound to this asset on Dillon Reservoir-focused drives, or add a second lake-specific layer later, without any pipeline change."
+      "notes": "AODAmbientSoundManager::LakeSound (next steps.md SS7.29) - lake/reservoir shoreline layer, faded by pipeline/build_ambient_zones.py's independent lake-distance channel (ODA2's LakeDistM, from this same osm_water.json polygon source), separate from CreekSound/creek_babble's waterway-distance channel. Sourced and objectively verified (loop-seam/LUFS) as the lake-specific alternate for the 'lapping/shore ambience near lakes' ask; Arc 5.4 originally imported this asset (SW_LakeShore) without wiring it to a distinct layer - SS7.29 is the pass that actually splits Water into Creek vs Lake."
     },
     {
       "role": "town_hum",

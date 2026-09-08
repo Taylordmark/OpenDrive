@@ -8,7 +8,7 @@ class UAudioComponent;
 class USoundBase;
 
 /** Ambient zone class a grid cell can be baked as - see pipeline/
- *  build_ambient_zones.py's ODA1 format doc. Mirrors that script's
+ *  build_ambient_zones.py's ODA2 format doc. Mirrors that script's
  *  ZONE_OPEN/ZONE_FOREST/ZONE_ALPINE/ZONE_SETTLEMENT constants exactly -
  *  values must stay in sync with the pipeline side, there is no shared
  *  enum between Python and C++ here (same convention every other binary
@@ -22,12 +22,18 @@ enum class EODAmbientZone : uint8
 	Settlement = 3,
 };
 
-/** One parsed ODA1 ambient-zone grid - see pipeline/build_ambient_zones.py's
+/** One parsed ODA2 ambient-zone grid - see pipeline/build_ambient_zones.py's
  *  module docstring for the full format and design reasoning (why this is a
  *  single flat whole-map grid, not a streamed per-2km-tile format like the
  *  guardrail/embankment/bridge managers: the payload is small enough - a few
  *  hundred KB at 100 m cells - to just load once and index with arithmetic,
- *  no async load/unload plumbing earns its keep here). */
+ *  no async load/unload plumbing earns its keep here).
+ *
+ *  Bumped from ODA1 (next steps.md SS7.29): the single combined WaterDistM
+ *  field is now two independent fields, LakeDistM and WaterwayDistM, so
+ *  AODAmbientSoundManager can crossfade a lake layer and a creek layer
+ *  separately instead of one generic Water layer - see SampleLakeDistM/
+ *  SampleWaterwayDistM below and the class comment. */
 struct FParsedAmbientZoneGrid
 {
 	int32 OriginXCm = 0, OriginYCm = 0;
@@ -37,7 +43,8 @@ struct FParsedAmbientZoneGrid
 	// Row-major, Cols*Rows entries each.
 	TArray<uint8> Zone;
 	TArray<uint8> Density255;
-	TArray<uint16> WaterDistM;
+	TArray<uint16> LakeDistM;
+	TArray<uint16> WaterwayDistM;
 
 	FString GenerationId;
 	bool bValid = false;
@@ -47,11 +54,20 @@ struct FParsedAmbientZoneGrid
 	 *  I in right now", not a smooth blend. */
 	bool SampleNearest(float WorldXCm, float WorldYCm, EODAmbientZone& OutZone, uint8& OutDensity) const;
 
-	/** Bilinearly-interpolated water distance (meters) - unlike SampleNearest
-	 *  above, the water layer's fade needs a SMOOTH value across the ~60 m
-	 *  fade window, not a cell-quantized step, so this interpolates across
-	 *  the four surrounding cells instead of snapping to the nearest one. */
-	float SampleWaterDistM(float WorldXCm, float WorldYCm) const;
+	/** Bilinearly-interpolated distance (meters) to the nearest lake/
+	 *  reservoir polygon - unlike SampleNearest above, the water layers'
+	 *  fade needs a SMOOTH value across the ~60 m fade window, not a
+	 *  cell-quantized step, so this interpolates across the four
+	 *  surrounding cells instead of snapping to the nearest one. */
+	float SampleLakeDistM(float WorldXCm, float WorldYCm) const;
+
+	/** Same bilinear interpolation as SampleLakeDistM, against the
+	 *  waterway (creek/river) distance channel instead. */
+	float SampleWaterwayDistM(float WorldXCm, float WorldYCm) const;
+
+private:
+	static float BilinearSample(const TArray<uint16>& Field, int32 Cols, int32 Rows,
+		int32 OriginXCm, int32 OriginYCm, float CellSizeCm, float WorldXCm, float WorldYCm);
 };
 
 /** One ambient loop layer the manager crossfades between zones - see
@@ -75,7 +91,7 @@ struct FODAmbientLayer
  * Tile-keyed ambient sound (Arc 5.4 / next steps.md SS7.28, backlog item
  * asked 2026-07-27, built 2026-09-07): as the player drives, crossfaded
  * looping ambience follows the pipeline-baked ambient-zone grid (pipeline/
- * build_ambient_zones.py's ODA1 sidecar - see that module for the bake
+ * build_ambient_zones.py's ODA2 sidecar - see that module for the bake
  * itself, which reuses classify_biomes.py/classify_settlements.py's tile
  * data plus a water-proximity raster rather than inventing a new spatial
  * system, per the user brief).
@@ -88,23 +104,28 @@ struct FODAmbientLayer
  * every frame - ambient zone boundaries move at driving speed, not audio
  * rates, so there's no benefit to checking every tick.
  *
- * Four looping AudioComponents are held permanently (one per ambient
- * layer - Forest, Alpine/wind-bed, Settlement/town-hum, Water) and NEVER
- * destroyed/recreated on a zone change; only their volumes are crossfaded
- * (FadeIn/FadeOut over CrossfadeSeconds) between whichever zone the player
- * is currently in and whichever they were in a moment ago. This is
- * deliberately simpler than a "swap the active SoundBase" approach: with a
- * fixed 1:1 layer-to-purpose mapping (LayerForest/LayerAlpine/
- * LayerSettlement/LayerWater), a zone change is just "which layer(s) fade
- * up, which fade down" - Open zones fade all the way down to the Alpine
- * layer alone (a plain wind bed is the correct ambience for open/rocky/dry
- * terrain too, see pipeline/build_ambient_zones.py's ZONE_OPEN comment),
- * Forest/Settlement zones bring in their own layer ON TOP of that wind bed
- * rather than replacing it (a settlement or forest patch still has wind),
- * and the Water layer is an entirely independent additive layer driven by
- * SampleWaterDistM() rather than the zone class at all - it fades in
- * within WaterFadeInStartM of a creek/lake edge regardless of which zone
- * class that edge sits inside.
+ * Five looping AudioComponents are held permanently (one per ambient
+ * layer - Forest, Alpine/wind-bed, Settlement/town-hum, Creek, Lake) and
+ * NEVER destroyed/recreated on a zone change; only their volumes are
+ * crossfaded (FadeIn/FadeOut over CrossfadeSeconds) between whichever zone
+ * the player is currently in and whichever they were in a moment ago. This
+ * is deliberately simpler than a "swap the active SoundBase" approach: with
+ * a fixed 1:1 layer-to-purpose mapping (LayerForest/LayerAlpine/
+ * LayerSettlement/LayerCreek/LayerLake), a zone change is just "which
+ * layer(s) fade up, which fade down" - Open zones fade all the way down to
+ * the Alpine layer alone (a plain wind bed is the correct ambience for
+ * open/rocky/dry terrain too, see pipeline/build_ambient_zones.py's
+ * ZONE_OPEN comment), Forest/Settlement zones bring in their own layer ON
+ * TOP of that wind bed rather than replacing it (a settlement or forest
+ * patch still has wind), and the Creek/Lake layers are each an entirely
+ * independent additive layer driven by SampleWaterwayDistM()/
+ * SampleLakeDistM() rather than the zone class at all - each fades in
+ * within WaterFadeInStartM of its own kind of water edge regardless of
+ * which zone class that edge sits inside. Split from a single generic
+ * Water layer (next steps.md SS7.29, ODA1 -> ODA2): where a creek runs
+ * into a reservoir both distances can be small at once, so both layers can
+ * be audible together at a confluence - that's handled entirely by their
+ * independent crossfades, no special-casing needed.
  *
  * Day/night or season coupling is explicitly NOT wired (per the brief,
  * "keep hooks simple for later") - SetTimeOfDayHint()/SetSeasonHint() below
@@ -137,10 +158,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ambient")
 	float CrossfadeSeconds = 4.0f;
 
-	/** Water layer fades linearly from 0 (at/beyond this distance) to full
-	 *  volume at 0 m (the ribbon/lake edge itself) - see pipeline/
-	 *  build_ambient_zones.py's WATER_DIST_CAP_M for the grid's own storage
-	 *  cap (500 m, comfortably above this). */
+	/** Both water layers (Creek and Lake) fade linearly from 0 (at/beyond
+	 *  this distance) to full volume at 0 m (the ribbon/lake edge itself) -
+	 *  see pipeline/build_ambient_zones.py's WATER_DIST_CAP_M for the
+	 *  grid's own storage cap (500 m, comfortably above this). */
 	UPROPERTY(EditAnywhere, Category = "Ambient")
 	float WaterFadeInStartM = 60.0f;
 
@@ -164,8 +185,19 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
 	TObjectPtr<USoundBase> SettlementHumSound;
 
+	/** Creek/river ambience, faded by SampleWaterwayDistM() - default asset
+	 *  is SW_CreekBabble (see manifest.json's creek_babble entry: picked as
+	 *  the default because Summit County's road corridor runs along river/
+	 *  creek valleys far more than lake shoreline). */
 	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
-	TObjectPtr<USoundBase> WaterSound;
+	TObjectPtr<USoundBase> CreekSound;
+
+	/** Lake/reservoir shoreline ambience, faded by SampleLakeDistM() -
+	 *  default asset is SW_LakeShore (manifest.json's lake_shore entry,
+	 *  sourced/normalized/imported since the Arc 5.4 pass but unwired to a
+	 *  distinct layer until this SS7.29 split). */
+	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
+	TObjectPtr<USoundBase> LakeSound;
 
 	/** Seams for later coupling (season/day-night) - deliberately unused
 	 *  no-ops for now, see class comment. */
@@ -187,7 +219,9 @@ private:
 	UPROPERTY()
 	FODAmbientLayer LayerSettlement;
 	UPROPERTY()
-	FODAmbientLayer LayerWater;
+	FODAmbientLayer LayerCreek;
+	UPROPERTY()
+	FODAmbientLayer LayerLake;
 
 	float TimeSinceSample = 0.0f;
 	double LastDiagTime = 0.0;

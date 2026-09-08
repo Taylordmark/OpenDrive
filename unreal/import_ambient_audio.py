@@ -24,10 +24,11 @@ them loop in-game).
 
 ROLE_TO_ASSET below maps manifest.json's "role" keys to the SW_* asset names
 ODAmbientSoundManager.cpp's BeginPlay() LoadObject()s - keep both in sync if
-either changes. lake_shore is intentionally imported too (as SW_LakeShore)
-even though no default C++ property points at it yet - see manifest.json's
-lake_shore notes and the class header comment for why (verified CC0 lake-
-specific alternate, not wired to a distinct layer this pass).
+either changes. lake_shore (SW_LakeShore) is now wired to its own LakeSound
+layer, faded by lake distance independently of CreekSound/SW_CreekBabble's
+waterway distance - see next steps.md SS7.29 and the class header comment
+(this was an unused extra import for one pass, see manifest.json's
+lake_shore notes for that history).
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
@@ -85,10 +86,10 @@ def main():
         log(f"imported {DEST_DIR}/{asset_name} (bLooping=True) from {wav_path}")
 
     log(f"done: {len(imported)}/{len(ROLE_TO_ASSET)} SoundWave asset(s) imported: {imported}")
-    if len(imported) < 4:
-        log("WARNING: fewer than the 4 assets ODAmbientSoundManager's default "
-            "LoadObject() calls expect were imported - forest/alpine/town/creek "
-            "are the required 4; lake_shore is an optional extra.")
+    if len(imported) < 5:
+        log("WARNING: fewer than the 5 assets ODAmbientSoundManager's default "
+            "LoadObject() calls expect were imported - forest/alpine/town/creek/lake "
+            "are all wired to a distinct layer as of next steps.md SS7.29.")
 
 
 if __name__ == "__main__":
