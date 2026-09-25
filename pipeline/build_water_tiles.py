@@ -1109,7 +1109,7 @@ def main():
         cy_cm = float(np.mean([p[1] for p in ring_xy_cm]))
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris})
+        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris, "is_ribbon": False})
 
         lake_summaries.append({
             "way_id": poly["way_id"], "name": poly["name"] or "(unnamed)",
@@ -1132,7 +1132,7 @@ def main():
         cx_cm, cy_cm = rb["centroid_cm"]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"]})
+        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"], "is_ribbon": True})
     n_river_chains = sum(1 for c in chains if c["class"] == "river")
     n_stream_chains = sum(1 for c in chains if c["class"] == "stream")
     print(f"\n{len(raw_ways)} waterway way(s) chained into {len(chains)} waterway centerline(s) "
@@ -1146,6 +1146,19 @@ def main():
 
     total_verts = total_tris = 0
     written_paths = []
+    ribbon_flags = {}   # §7.34: "tx,ty" -> [is_ribbon per feature, SAME order as
+                          # write_tile() wrote them] - a Python-only sidecar, NOT
+                          # part of the ODL1 .bin format itself (left byte-for-byte
+                          # unchanged - ODWaterManager.cpp's runtime reader and
+                          # build_terrain_mesh_tiles.py's lake-bed depression pass
+                          # both still treat every feature as a generic flat water
+                          # surface, exactly as intended - "ribbons render/freeze
+                          # like lakes" stays true). Only load_lake_beds()'s NEW
+                          # is_ribbon-aware callers (build_road_embankments.py's
+                          # §7.23 water-crossing trigger) read this file; a caller
+                          # that doesn't know about it (or a stale/missing sidecar)
+                          # sees plain lake dicts exactly as before - see that
+                          # function's own backward-compatible-default comment.
     for (tx, ty), lakes in buckets.items():
         out_path = OUT_DIR / f"water_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(out_path, lakes, gen_id_bytes)
@@ -1154,10 +1167,17 @@ def main():
         t = sum(len(lk["tris"]) for lk in lakes)
         total_verts += v
         total_tris += t
+        ribbon_flags[f"{tx},{ty}"] = [bool(lk.get("is_ribbon", False)) for lk in lakes]
         print(f"  tile ({tx},{ty}): {len(lakes)} feature(s), {v} verts, {t} tris -> {out_path.name}")
 
     n_stale = delete_stale_tiles(OUT_DIR, f"water_{AREA_NAME}_test_tile_*.bin", written_paths)
     print(f"deleted {n_stale} stale water tile(s) from a previous run")
+
+    ribbon_flags_path = OUT_DIR / f"water_{AREA_NAME}_test_ribbon_flags.json"
+    ribbon_flags_path.write_text(json.dumps(ribbon_flags))
+    n_ribbon_features = sum(sum(1 for v in flags if v) for flags in ribbon_flags.values())
+    print(f"wrote ribbon/lake type sidecar ({n_ribbon_features} ribbon feature(s) "
+          f"of {sum(len(v) for v in ribbon_flags.values())} total) -> {ribbon_flags_path.name}")
 
     print(f"\n{len(polygons)} OSM water polygon(s) fetched -> {len(lake_summaries)} lake(s) built "
           f"({n_too_small} too small/sliver, skipped; {n_fallback_elev} used the ring-vertex "

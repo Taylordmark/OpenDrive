@@ -238,6 +238,35 @@ after the override) - a momentary single-station polygon touch doesn't spawn
 a degenerate one-station bridge, matching every other run-building path in
 this module.
 
+**§7.34 fix (2026-09-08, closing §7.33's Finding 2):** condition 1 above
+("genuine both-sided straddle - trusted unconditionally") was calibrated
+against real lake/reservoir polygons, where two pavement edges both landing
+inside the ring genuinely implies open water underneath. `build_water_
+tiles.py`'s later §7.26/§7.27 waterway-ribbon work feeds river/stream ribbon
+polygons into this SAME lake list BY DESIGN (so a ribbon renders/freezes
+like a lake) - but a narrow creek ribbon is a completely different shape:
+an ordinary road crossing a named creek (culvert OR real bridge, no
+distinction in the geometry) can trivially have both 9m-apart pavement
+edges land inside a several-meter-wide ribbon with zero elevation gap,
+which condition 1's unconditional trust then reads as proof of a genuine
+crossing - confirmed as the root cause of the §7.33 audit's Finding 2 (122
+bridge runs / 2.69km vs the documented 23/1.78km, 111 of 122 water-driven,
+self-reinforcing with §7.27's own deliberate ribbon-spans-straight-across
+behavior under an already-bridged crossing). Fix: `lakes` (from
+`load_lake_beds()`) now carries an `is_ribbon` flag per polygon (see
+build_water_tiles.py's own §7.34 docstring section for how it's tagged/
+threaded through, backward-compatibly, without touching the ODL1 binary
+format or the Unreal runtime reader). `compute_side()` tracks a parallel
+`in_ribbon` mask; condition 1's unconditional trust is narrowed to
+`both_edges_REAL_lake` (both edges in a lake AND neither edge's matching
+polygon is a ribbon) - a ribbon crossing, one-sided OR two-sided, now always
+falls through to condition 2's clearance guard instead, same as a lakeside
+road brushing a real lake's shore. Real lake polygons are completely
+unaffected (`is_ribbon` is always False for them, so `both_edges_real_lake
+== both_edges_in_lake` exactly, byte-identical to pre-fix behavior) - see
+`scratchpad/verify_water_trigger_fix.txt` for the before/after counts and
+the Silverthorne interchange survival check.
+
 **Pier/deck height over water surface, not DEM lakebed:** any final
 BRIDGE_CLS station whose edge is `in_lake` (regardless of which rule put it
 there) has its shipped `drop_cm` recomputed against the baked lake surface Z
@@ -700,6 +729,12 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
     edge_cy = -edge_n * 100.0
 
     in_lake = np.zeros(n, dtype=bool)
+    in_ribbon = np.zeros(n, dtype=bool)   # §7.34: subset of in_lake that hit a
+                                            # waterway RIBBON polygon specifically
+                                            # (river/stream, build_water_tiles.py's
+                                            # is_ribbon flag) rather than a real
+                                            # lake/reservoir ring - see module
+                                            # docstring's §7.34 section
     lake_z_cm = np.full(n, np.nan)   # §7.23: baked lake surface Z (cm) at whichever
                                        # lake polygon this edge point falls inside, NaN
                                        # elsewhere - used for the water-crossing
@@ -716,7 +751,31 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
         inside = _point_in_polygon(edge_cx[idx], edge_cy[idx], lake["ring_x"], lake["ring_y"])
         in_lake[idx] |= inside
         hit_idx = idx[inside]
-        lake_z_cm[hit_idx] = lake["z_cm"]  # last-match wins on rare overlap - harmless
+        if lake.get("is_ribbon", False):
+            in_ribbon[hit_idx] = True
+            # §7.34: a ribbon's ring is not flat like a real lake's - its Z
+            # follows the stream's downhill slope along its length, so
+            # lake["z_cm"] (just the ring's first vertex) is not a meaningful
+            # "water surface" for a station that may sit anywhere along the
+            # ribbon's length; using it directly made the clearance guard
+            # effectively noise (measured: it let ~200+ ordinary culvert
+            # stations across the county pass a spurious clearance check -
+            # see scratchpad/verify_water_trigger_fix.txt). Look up the Z of
+            # each hit station's NEAREST ring vertex instead - a local, not
+            # global, water-surface estimate. Falls back to the old
+            # global-scalar behavior if ring_z is missing (stale cached water
+            # data from before this fix).
+            ring_z = lake.get("ring_z")
+            if ring_z is not None and len(ring_z) == len(lake["ring_x"]):
+                for hi in hit_idx:
+                    dx = lake["ring_x"] - edge_cx[hi]
+                    dy = lake["ring_y"] - edge_cy[hi]
+                    nearest = np.argmin(dx * dx + dy * dy)
+                    lake_z_cm[hi] = ring_z[nearest]
+            else:
+                lake_z_cm[hit_idx] = lake["z_cm"]
+        else:
+            lake_z_cm[hit_idx] = lake["z_cm"]  # last-match wins on rare overlap - harmless
 
     cls_arr = classify_with_hysteresis(drop_m, in_lake, in_junction_box)
     cls_arr = demote_short_runs(cls_arr, s)
@@ -724,7 +783,8 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
 
     return {
         "east": east, "north": north, "s": s, "road_name": road_name,
-        "in_junction_box": in_junction_box, "in_lake": in_lake, "lake_z_cm": lake_z_cm,
+        "in_junction_box": in_junction_box, "in_lake": in_lake, "in_ribbon": in_ribbon,
+        "lake_z_cm": lake_z_cm,
         "edge_cx": edge_cx, "edge_cy": edge_cy, "z_cm": z_cm_all,
         "drop_m": drop_m, "drop_cm": drop_cm, "cls_arr": cls_arr,
         "is_bridge_osm": is_bridge_osm_seg,
@@ -801,7 +861,39 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
 
         reasons = []
         genuine = False
-        if water_frac >= BRIDGE_WATER_MIN_FRAC:
+        # §7.34 fix: the module's own docstring promises demote_short_runs()
+        # already stops "isolated single-station polygon touches" from
+        # spawning degenerate stubs - measured false on real data. demote_
+        # short_runs() only checks the length of the surrounding CONTIGUOUS
+        # NON-NONE run (any class), not the BRIDGE_CLS sub-run specifically -
+        # so a single water_crossing-forced station sitting inside (or next
+        # to) an otherwise-legitimate, longer EMBANK_CLS run survives that
+        # filter (the combined run is plenty long) and then reaches here as
+        # its own 1-station, 0.0 m "run", which the unconditional water-OR
+        # below used to wave through as "genuine" regardless. Confirmed on
+        # this county's data: 44 of 112 reported "genuine" runs were exactly
+        # this - 0.0 m, single station - contributing 0 km and inflating only
+        # the run COUNT, not the mileage (see scratchpad/verify_water_trigger_
+        # fix.txt). Require the water-forced run to be at least 2 stations
+        # wide (i.e. NOT a single isolated touch) before trusting it
+        # unconditionally; a true isolated single-station touch instead falls
+        # through to the ordinary paved/rebound/short-both-sided test below,
+        # same as any other short bridge-threshold run.
+        # NB: some 2+-station runs also land at run_len_m == 0.0 (duplicate/
+        # near-duplicate arc-length positions at a tile-chunk boundary) -
+        # guard on the actual arc length, not just the station count.
+        is_single_station_touch = (run_end - run_start) <= 1 or run_len_m <= 0.0
+        # §7.34 fix: rule 1 above ("unpaved/minor roads never get a concrete
+        # deck, regardless of drop shape") is stated as a hard rule in this
+        # function's own docstring, but the water-crossing unconditional OR
+        # bypassed it entirely - measured on real data: Shrine Pass Road
+        # (OSM-tagged unpaved over 99% of its length) and two TIGER-import
+        # "County Road"/"Willow Creek" segments got genuine bridge decks
+        # purely from the geometry trigger. A water crossing still needs
+        # *some* deck-worthy road to carry it - a dirt road fords or
+        # culverts a creek, it doesn't get a concrete span - so the paved
+        # gate applies here too, same as the ordinary short-span path below.
+        if water_frac >= BRIDGE_WATER_MIN_FRAC and not is_single_station_touch and not is_unpaved:
             # Unconditional OR - a water crossing always gets a deck, per the
             # task brief, regardless of the paved/rebound rules below (a
             # genuine reservoir/creek crossing IS the abutment-plausibility
@@ -833,6 +925,18 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
 
         if not genuine:
             demote_reasons = []
+            # §7.34: water_frac qualified but one of the new guards above
+            # (single-station degenerate touch, or unpaved road) blocked the
+            # unconditional water-OR - report why explicitly rather than
+            # falling through with an empty reasons list.
+            if water_frac >= BRIDGE_WATER_MIN_FRAC:
+                if is_single_station_touch:
+                    demote_reasons.append(
+                        f"isolated single-station water-polygon touch ({run_len_m:.1f} m run) - "
+                        f"not a real crossing, likely a station embedded in a longer non-bridge run")
+                if is_unpaved:
+                    demote_reasons.append(f"unpaved/minor road: {unpaved_reason} "
+                                           f"(water crossing does not override the paved-deck gate)")
             if water_frac < BRIDGE_WATER_MIN_FRAC:
                 if run_len_m > BRIDGE_GENUINE_MAX_LEN_M or both_sided_frac < BRIDGE_BOTH_SIDED_MIN_FRAC:
                     demote_reasons.append(
@@ -921,6 +1025,7 @@ def main():
     n_bridge_runs_demoted = 0
     n_water_crossing_stations = 0
     n_water_crossing_both_edges = 0
+    n_water_crossing_from_ribbon = 0   # §7.34: sanity counter - should always be 0
 
     for seg_i, seg in enumerate(data["segments"]):
         n = len(seg["east_m"])
@@ -950,13 +1055,27 @@ def main():
             d = sides[side]
             other = sides[-side]
             both_edges_in_lake = d["in_lake"] & other["in_lake"]
+            # §7.34: the unconditional both-edges trust only applies when
+            # NEITHER edge's matching polygon is a waterway ribbon - see the
+            # module docstring's §7.34 section. A ribbon (either or both
+            # edges) always falls through to the same clearance guard a
+            # one-sided lake-shore case uses.
+            both_edges_real_lake = both_edges_in_lake & ~d["in_ribbon"] & ~other["in_ribbon"]
             clearance_m = d["z_cm"] / 100.0 - d["lake_z_cm"] / 100.0  # NaN-safe: comparisons with NaN are False
-            guarded_one_sided = (d["in_lake"] & ~both_edges_in_lake &
-                                  (clearance_m >= WATER_CROSSING_MIN_CLEARANCE_M))
-            water_crossing = (both_edges_in_lake | guarded_one_sided) & ~d["in_junction_box"]
+            guarded_side = (d["in_lake"] & ~both_edges_real_lake &
+                             (clearance_m >= WATER_CROSSING_MIN_CLEARANCE_M))
+            water_crossing = (both_edges_real_lake | guarded_side) & ~d["in_junction_box"]
             d["water_crossing"] = water_crossing
             n_water_crossing_stations += int(water_crossing.sum())
-            n_water_crossing_both_edges += int((both_edges_in_lake & ~d["in_junction_box"]).sum())
+            n_water_crossing_both_edges += int((both_edges_real_lake & ~d["in_junction_box"]).sum())
+            # §7.34 sanity counter: a ribbon-matched pair should NEVER reach
+            # the unconditional both-edges branch (both_edges_real_lake is
+            # False whenever either side is a ribbon, by construction) -
+            # this stays 0 by definition; kept as a live assertion-style
+            # check rather than trusting the construction silently.
+            n_water_crossing_from_ribbon += int(
+                (both_edges_in_lake & (d["in_ribbon"] | other["in_ribbon"]) &
+                 both_edges_real_lake & ~d["in_junction_box"]).sum())
             if water_crossing.any():
                 d["cls_arr"] = np.where(water_crossing, BRIDGE_CLS, d["cls_arr"]).astype(np.int8)
                 d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"])
@@ -1043,8 +1162,9 @@ def main():
           f"{n_genuine} genuine ({n_bridge_runs_pre - n_genuine} demoted to embankment) -> {REPORT_PATH}")
     print(f"  §7.23 water-crossing trigger: {n_water_crossing_stations} station(s) forced to 'bridge' by "
           f"lake-polygon geometry regardless of DEM drop ({n_water_crossing_both_edges} via the unconditional "
-          f"both-edges-in-water case, {n_water_crossing_stations - n_water_crossing_both_edges} via the "
-          f"guarded one-edge-in-water+{WATER_CROSSING_MIN_CLEARANCE_M:.1f}m-clearance case)")
+          f"both-edges-in-REAL-LAKE case, {n_water_crossing_stations - n_water_crossing_both_edges} via the "
+          f"guarded one-edge (or ribbon-either-edge)+{WATER_CROSSING_MIN_CLEARANCE_M:.1f}m-clearance case) "
+          f"[§7.34: {n_water_crossing_from_ribbon} unconditional station(s) from a ribbon - should always be 0]")
     if dam_report:
         print("  Dillon Dam Road runs found:")
         for cls_name, run_len_m, max_drop in dam_report:

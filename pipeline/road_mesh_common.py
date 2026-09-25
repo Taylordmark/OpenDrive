@@ -904,6 +904,33 @@ JUNCTION_SAME_NAME_EDGE_STATIONS = 5
 # comfortably covering the documented real same-spot disagreement distances.
 JUNCTION_RECONCILE_RADIUS_M = 20.0
 
+# §7.34 fix (2026-09-08, closing §7.33's Finding 1): reconcile_junction_
+# elevations()'s SAME-SEGMENT ("switchback") branch had no restriction
+# analogous to JUNCTION_SAME_NAME_EDGE_STATIONS - its own docstring assumed
+# "already correctly scoped by seg_idx equality" was enough, but the §7.33
+# audit found 242 same-segment pairs still firing at the current 20m radius,
+# none of them anywhere near the documented genuine same-spot precedent's
+# distance range (Lake Hughes, 1.1-2.4m): 66% sat in the outermost 5m of the
+# 20m radius, 88% touched no real graph junction, median imposed snap 4.6m,
+# max 9.6m (worst: Robbers Nest Drive seg347, two points of an ordinary
+# 12%-grade hairpin 19.8m apart in plan / ~80m along-road, falsely snapped
+# together). Re-derived against the same captured pre-reconciliation station
+# arrays the audit used (scratchpad/reconcile_pre_arrays.npz via capture_
+# reconcile_pairs.py, county-wide rebuild - 274,644 stations, reproduced the
+# audit's 295/242/53 split exactly) and swept a same-segment-only distance
+# cap from 0.5m to 20m (scratchpad/sweep_same_seg_radius.py): ALL 242
+# same-segment pairs sit at 4.67m or farther apart in plan view - there is a
+# clean, total gap with NOTHING between 0m and 4.67m, comfortably straddling
+# the 1.1-2.4m Lake Hughes range with margin on both sides. 3.0m sits in the
+# middle of that empty gap: strictly above every documented genuine same-spot
+# case, strictly below every one of today's 242 false same-segment pairs (0
+# survive), so this single threshold change eliminates the entire false-pair
+# population with no per-pair exception list needed. Deliberately NOT reused
+# for the cross-segment same-name branch below (JUNCTION_SAME_NAME_EDGE_
+# STATIONS, §7.20's own fix) - that branch already has its own, independent,
+# already-verified restriction and untouched by this change.
+JUNCTION_SAME_SEG_RADIUS_M = 3.0
+
 # Separate, much tighter threshold used ONLY to catch cross-road (different
 # seg_idx AND different/missing road_name) pairs (2026-08-24, Taylor's Lake
 # Hughes screenshot: a torn-open canyon where "Lake Hughes Road" and an
@@ -1166,7 +1193,8 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
                                    min_gap_m=CONFLICT_MIN_GAP_M,
                                    same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
                                    wall_min_grade=WALL_MIN_GRADE, is_bridge=None,
-                                   same_name_edge_stations=JUNCTION_SAME_NAME_EDGE_STATIONS):
+                                   same_name_edge_stations=JUNCTION_SAME_NAME_EDGE_STATIONS,
+                                   same_seg_radius_m=JUNCTION_SAME_SEG_RADIUS_M):
     """The reusable road-road junction smoothing pass (Taylor, 2026-08-24: two
     roads meeting/crossing at grade were disagreeing on elevation by meters
     at the same physical spot - Lake Hughes near spawn, one road's pavement
@@ -1233,6 +1261,17 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
     2026-08-24 Lake Hughes same-road behavior unchanged for callers that
     don't have a bridge flag handy.
 
+    `same_seg_radius_m` (2026-09-08 fix, §7.34 - see JUNCTION_SAME_SEG_
+    RADIUS_M's docstring): a same-segment ("switchback") match is only in
+    scope when the two stations are within this many meters of each other in
+    plan view - much tighter than `radius_m`/JUNCTION_RECONCILE_RADIUS_M,
+    which only bounds the candidate-pair SEARCH (both branches share that
+    search), not what counts as "the same physical spot" once same_seg is
+    already known True. Without this, two points on the SAME switchback's
+    different legs (close in plan view, genuinely far apart in real
+    elevation and along-road distance) read as the documented Lake Hughes
+    same-spot disagreement and got forcibly flattened together.
+
     `same_name_edge_stations` (2026-09-07 fix - see JUNCTION_SAME_NAME_EDGE_
     STATIONS's docstring): a cross-segment, name-only match is only in scope
     when BOTH stations sit within this many stations of their OWN segment's
@@ -1289,7 +1328,13 @@ def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx,
         same_seg = seg_idx[i] == seg_idx[j]
         same_name = bool(road_name[i]) and road_name[i] == road_name[j]
         if same_seg:
-            in_scope = True
+            # §7.34 fix - see JUNCTION_SAME_SEG_RADIUS_M's docstring: a real
+            # same-spot disagreement (Lake Hughes, 1.1-2.4m) sits nowhere
+            # near a switchback's own two legs merely passing within the
+            # wide 20m search radius of each other in plan view - only the
+            # former is this pass's actual target.
+            dist_m_pre = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
+            in_scope = dist_m_pre <= same_seg_radius_m
         elif same_name:
             # Cross-segment, name-only match: only in scope near EITHER end
             # of BOTH segments (a real chain-break seam is local, not
