@@ -9,6 +9,7 @@
 
 class UDynamicMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 
 /** One parsed terrain tile - plain data, safe to build off the game thread
  *  (no UObject/component touched). Mirrors the ODT1 sidecar payload layout
@@ -349,6 +350,17 @@ public:
 	 *  (Near-resident, or confirmed to have no file at that fidelity). */
 	void GetStreamingProgress(const FVector& AroundPos, int32& OutReady, int32& OutTotal) const;
 
+	/** Seasons feature (2026-09-07): the ground material instance every tile's
+	 *  Comp/WallComp actually renders with - see TerrainMID's own comment for
+	 *  why this is a MID and not the raw TerrainMat asset. AODSeasonController
+	 *  drives SnowLineLowZCm/SnowLineHighZCm/SpringGreen on this directly
+	 *  rather than this manager owning any season logic itself (same
+	 *  "controller pushes params into a manager-owned MID" split
+	 *  AODDayNightController/AODAtmosphereController use for their own
+	 *  targets). Null until BeginPlay has run (or if TerrainMat failed to
+	 *  load) - callers must null-check. */
+	UMaterialInstanceDynamic* GetGroundMID() const { return TerrainMID; }
+
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);
 	// ParseRoadStationSidecarFile moved to ODBinSidecarUtil.h (2026-08-26) -
@@ -469,6 +481,19 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> TerrainMat;
+
+	/** Seasons feature (2026-09-07): a single MID created once from TerrainMat
+	 *  in BeginPlay and applied to every tile's Comp/WallComp INSTEAD OF the
+	 *  raw TerrainMat asset (SetMaterial still called per-component the same
+	 *  as before, just with this shared instance) - a plain UMaterialInterface
+	 *  asset reference can't take a runtime SetScalarParameterValue() call,
+	 *  and every tile sharing ONE dynamic instance (rather than one MID per
+	 *  tile) keeps the seasonal snow-line sweep a single cheap call per tick
+	 *  from AODSeasonController instead of one per resident tile. Null if
+	 *  TerrainMat failed to load (same silent-no-op convention as TerrainMat
+	 *  itself). */
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> TerrainMID;
 
 	// Runtime terrain carve (2026-08-26, Arc 7 rescope): loaded once in
 	// BeginPlay from roadstations_{area}.bin, never mutated again - shared

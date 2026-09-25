@@ -2,11 +2,15 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/HUD.h"
+#include "InputCoreTypes.h"
 #include "ODRaceHUD.generated.h"
 
 class AODRaceManager;
 class AODRoadManager;
 class AODMainMenu;
+class AODSettingsMenu;
+class AODCreditsMenu;
+class AODRebindMenu;
 
 /**
  * Canvas race HUD: timer, best, gate progress, speed — plus the stage map
@@ -46,10 +50,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Map", meta = (ClampMin = 20, ClampMax = 800))
 	float MiniMapZoomM = 90.0f;
 
+	/** Re-derives ToggleMap/ZoomMapIn/ZoomMapOut's keys from FODInputConfig
+	 *  and rebuilds them - called at BeginPlay and again live by
+	 *  AODRebindMenu after a rebind (Arc 4.1, SS7.32). */
+	void RefreshODManagedKeyBindings();
+
 private:
 	void ToggleMiniMap() { bShowMiniMap = !bShowMiniMap; }
 	void ZoomIn() { MiniMapZoomM = FMath::Max(20.0f, MiniMapZoomM * 0.8f); }
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
+
+	TArray<FKey> LastODManagedKeys;
 
 	/**
 	 * Draw the stage map into a panel. ZoomRadiusM <= 0 fits the whole route
@@ -79,4 +90,18 @@ private:
 	 *  instead of the in-game HUD, not on top of it. */
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
+
+	/** Settings/Credits panels (Arc 4.4) - drawn full-screen over whatever's
+	 *  behind them (pause menu or front-end), same dim-and-panel shape as
+	 *  DrawMainMenu's car-config panel above; generic over AODSettingsMenu's/
+	 *  AODCreditsMenu's own row-list APIs so both AODPauseMenu and AODMainMenu
+	 *  share one drawing implementation each regardless of which parent has
+	 *  them open. */
+	void DrawSettingsMenu(AODSettingsMenu* Menu) const;
+	void DrawCreditsMenu(AODCreditsMenu* Menu) const;
+	/** Arc 4.1 (SS7.32) rebind sub-screen - drawn ON TOP of the Settings
+	 *  panel (not instead of it) when AODSettingsMenu::IsRebindOpen(), same
+	 *  as DrawSettingsMenu/DrawCreditsMenu's "generic over whichever parent
+	 *  has it open" shape. */
+	void DrawRebindMenu(AODRebindMenu* Menu) const;
 };

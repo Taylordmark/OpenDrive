@@ -8,7 +8,11 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/CommandLine.h"
 #include "UnrealClient.h"
+#include "ODCreditsMenu.h"
+#include "ODInputConfig.h"
 #include "ODMainMenu.h"
+#include "ODRebindMenu.h"
+#include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
 
 namespace
@@ -65,8 +69,12 @@ void AODPauseMenu::BeginPlay()
 		B.bExecuteWhenPaused = true;
 		B.bConsumeInput = bConsume;
 	};
+	// Escape is a fixed, always-on cancel/pause key - deliberately NOT
+	// rebindable (Arc 4.1, SS7.32) so a player can never lock themselves out
+	// of pausing. Pause's OTHER key is the rebindable primary - see
+	// RefreshPauseKeyBinding, called here and again live by AODRebindMenu.
 	Bind(EKeys::Escape, &AODPauseMenu::Toggle, true);
-	Bind(EKeys::P, &AODPauseMenu::Toggle, false);
+	RefreshPauseKeyBinding();
 	Bind(EKeys::Up, &AODPauseMenu::Up, false);
 	Bind(EKeys::Down, &AODPauseMenu::Down, false);
 	Bind(EKeys::Left, &AODPauseMenu::Left, false);
@@ -101,8 +109,60 @@ void AODPauseMenu::BeginPlay()
 	}
 }
 
+void AODPauseMenu::RefreshPauseKeyBinding()
+{
+	if (!InputComponent)
+	{
+		return;
+	}
+	if (LastPauseKey.IsValid())
+	{
+		InputComponent->KeyBindings.RemoveAll([this](const FInputKeyBinding& B)
+		{
+			return B.Chord.Key == LastPauseKey;
+		});
+		LastPauseKey = FKey();
+	}
+	const FKey PauseKey = FODInputConfig::GetKeyboardKey(EODInputAction::Pause);
+	if (PauseKey.IsValid() && PauseKey != EKeys::Escape)
+	{
+		FInputKeyBinding& B = InputComponent->BindKey(PauseKey, IE_Pressed, this, &AODPauseMenu::Toggle);
+		B.bExecuteWhenPaused = true;
+		B.bConsumeInput = false;
+		LastPauseKey = PauseKey;
+	}
+}
+
 void AODPauseMenu::Toggle()
 {
+	// Settings/Credits back out one level first (Escape), same as any other
+	// modal-inside-a-modal convention - see this class's header comment.
+	// Rebind (Arc 4.1, SS7.32) is a further level under Settings: Escape
+	// cancels an in-progress key capture first, then backs out of the rebind
+	// screen, then out of Settings, matching the same one-level-at-a-time
+	// convention.
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu && SettingsMenu->IsRebindOpen())
+		{
+			if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu(); Rebind && Rebind->IsCapturing())
+			{
+				Rebind->CancelCapture();
+			}
+			else
+			{
+				SettingsMenu->CloseRebind();
+			}
+			return;
+		}
+		bSettingsOpen = false;
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;
+		return;
+	}
 	// the front-end menu owns Escape while it's up (it also binds Escape); don't
 	// pop the pause overlay under it
 	if (const AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld());
@@ -117,6 +177,22 @@ void AODPauseMenu::Toggle()
 
 void AODPauseMenu::Up()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
+		{
+			SettingsMenu->MoveSelection(-1);
+		}
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		if (CreditsMenu)
+		{
+			CreditsMenu->Scroll(-1);
+		}
+		return;
+	}
 	if (bOpen)
 	{
 		Selected = (Selected + NumRows() - 1) % NumRows();
@@ -125,6 +201,22 @@ void AODPauseMenu::Up()
 
 void AODPauseMenu::Down()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
+		{
+			SettingsMenu->MoveSelection(+1);
+		}
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		if (CreditsMenu)
+		{
+			CreditsMenu->Scroll(+1);
+		}
+		return;
+	}
 	if (bOpen)
 	{
 		Selected = (Selected + 1) % NumRows();
@@ -143,6 +235,38 @@ void AODPauseMenu::Right()
 
 void AODPauseMenu::Activate()
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
+		{
+			if (SettingsMenu->IsRebindOpen())
+			{
+				if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu();
+					Rebind && Rebind->ActivateSelected())   // true == "Back" row selected
+				{
+					SettingsMenu->CloseRebind();
+				}
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
+			{
+				bSettingsOpen = false;
+			}
+			else if (SettingsMenu->GetSelected() == SettingsMenu->ControlsRowIndex())   // "Controls" row
+			{
+				SettingsMenu->OpenRebind();
+			}
+			else
+			{
+				SettingsMenu->AdjustSelected(+1);   // Enter cycles a value row, like the row list below
+			}
+		}
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;   // no rows to activate - Enter also just backs out
+		return;
+	}
 	if (!bOpen)
 	{
 		return;
@@ -159,7 +283,17 @@ void AODPauseMenu::Activate()
 			Main->OpenGarage();           // keeps the game paused; "Drive"/esc resumes here
 		}
 	}
-	else if (Selected == 4)               // Main Menu (car/location front-end)
+	else if (Selected == 4)               // Settings
+	{
+		EnsureSettingsMenu();
+		bSettingsOpen = true;
+	}
+	else if (Selected == 5)               // Credits
+	{
+		EnsureCreditsMenu();
+		bCreditsOpen = true;
+	}
+	else if (Selected == 6)               // Main Menu (car/location front-end)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
@@ -167,7 +301,7 @@ void AODPauseMenu::Activate()
 			Main->OpenMenu();             // keeps the game paused
 		}
 	}
-	else if (Selected == 5)               // Quit Game
+	else if (Selected == 7)               // Quit Game
 	{
 		UKismetSystemLibrary::QuitGame(this,
 			UGameplayStatics::GetPlayerController(this, 0),
@@ -181,6 +315,18 @@ void AODPauseMenu::Activate()
 
 void AODPauseMenu::Adjust(int32 Dir)
 {
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
+		{
+			SettingsMenu->AdjustSelected(Dir);
+		}
+		return;
+	}
+	if (bCreditsOpen)
+	{
+		return;   // credits has no adjustable rows, only scroll (Up/Down above)
+	}
 	if (!bOpen)
 	{
 		return;
@@ -257,10 +403,18 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	case 4:
-		OutLabel = TEXT("Main Menu");
+		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
 	case 5:
+		OutLabel = TEXT("Credits");
+		OutValue.Empty();
+		break;
+	case 6:
+		OutLabel = TEXT("Main Menu");
+		OutValue.Empty();
+		break;
+	case 7:
 		OutLabel = TEXT("Quit Game");
 		OutValue.Empty();
 		break;
@@ -269,4 +423,40 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	}
+}
+
+AODSettingsMenu* AODPauseMenu::EnsureSettingsMenu()
+{
+	if (SettingsMenu)
+	{
+		return SettingsMenu;
+	}
+	if (AODSettingsMenu* Found = FindManager<AODSettingsMenu>(GetWorld()))
+	{
+		SettingsMenu = Found;
+		return SettingsMenu;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		SettingsMenu = World->SpawnActor<AODSettingsMenu>();
+	}
+	return SettingsMenu;
+}
+
+AODCreditsMenu* AODPauseMenu::EnsureCreditsMenu()
+{
+	if (CreditsMenu)
+	{
+		return CreditsMenu;
+	}
+	if (AODCreditsMenu* Found = FindManager<AODCreditsMenu>(GetWorld()))
+	{
+		CreditsMenu = Found;
+		return CreditsMenu;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		CreditsMenu = World->SpawnActor<AODCreditsMenu>();
+	}
+	return CreditsMenu;
 }

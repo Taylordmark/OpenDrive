@@ -1,0 +1,561 @@
+#include "ODSeasonController.h"
+
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
+#include "Math/RandomStream.h"
+#include "Misc/CommandLine.h"
+#include "ODForestManager.h"
+#include "ODTerrainManager.h"
+#include "ODWaterManager.h"
+
+namespace
+{
+	// ---- ground snow-line sweep (2026-09-07) ----------------------------
+	// Baked defaults from unreal/apply_ground_material.py for the active area
+	// (summit_county, ORIGIN_HEIGHT_M=3435.3): SNOW_START_M=3500,
+	// SNOW_FULL_M=3950 -> (m - ORIGIN_HEIGHT_M) * 100. Duplicated here as
+	// plain constants (no python/JSON read at runtime) - matches this
+	// project's existing convention of C++ owning its own copy of pipeline
+	// constants it needs (e.g. AODTerrainManager's own carve-radius
+	// constants), with a comment tying the two together so a future area
+	// swap is at least discoverable from either side.
+	constexpr float SnowLineLowBaseCm = 6470.0f;
+	constexpr float SnowLineHighBaseCm = 51470.0f;
+
+	// Floor band the snow line sweeps down to at full winter (SnowCover=1) -
+	// same 45000 cm band WIDTH as the baseline (so the material's own 40 m
+	// noise patchiness looks the same width sweeping through as it does
+	// sitting at the real treeline), positioned low enough that summit_county's
+	// real valley floor (Dillon Reservoir, ~2765 m ASL -> world Z ~= -67030 cm)
+	// sits comfortably above SnowLineHighFloorCm, i.e. fully inside the "100%
+	// covered" band, not partway up the noise-broken transition.
+	constexpr float SnowLineLowFloorCm = -125000.0f;
+	constexpr float SnowLineHighFloorCm = -80000.0f;
+
+	// ---- 2026-09-07 polish pass: melt-compression fix -------------------
+	// Bug found via -odseason=winter -odseasonphase=0.5: with SnowLineLowZCm/
+	// HighZCm both swept LINEARLY in SnowCover from their baked baseline
+	// straight to the floor above, the valley floor (world Z ~= -67030 cm,
+	// same reference used to place the floor) only enters the ~45000 cm-wide
+	// band's crossing window once SnowCover has already fallen to ~0.56 -
+	// below that the whole visible valley reads pure baseline (raw altitude
+	// term clamped to 0), and it re-saturates to fully-covered by ~0.90. That
+	// squeezes the ENTIRE visible ground transition into SnowCover's narrow
+	// [0.56, 0.90] sub-range, so a melt/accumulation phase that lands outside
+	// it (e.g. -odseasonphase=0.5, SnowCover=0.5) shows either full green or
+	// full white instead of the required patchwork - the reported defect.
+	//
+	// Fix: keep SnowLineHighZCm's simple baseline->floor lerp (unchanged -
+	// it never rises above SnowLineHighBaseCm, so anything genuinely above
+	// treeline - e.g. Quandary Peak - always stays clamped to fully-covered
+	// throughout the sweep, no regression there). Replace ONLY the LOW edge's
+	// mapping with one solved so that, evaluated at SnowValleyRefZCm, the
+	// raw altitude coverage term comes out equal to SnowCover itself (an
+	// identity ramp) across the middle of the sweep - i.e. SnowCover=0.25
+	// visibly reads as ~25% ground coverage at the vantage, 0.5 as a genuine
+	// half-and-half patchwork, 0.75 as ~75%, instead of being compressed into
+	// a third of the range. Solved from snow_t_raw's own formula in
+	// apply_ground_material.py: clamp01((z - Low) / (High - Low)) = SnowCover
+	// => Low = (z - SnowCover * High) / (1 - SnowCover), evaluated with the
+	// SAME High(SnowCover) lerp already used below.
+	//
+	// The identity solve has two structural edge cases, both handled by
+	// blending it away over a narrow margin rather than using it raw:
+	//  - Near SnowCover=0 it demands Low jump instantly from
+	//    SnowLineLowBaseCm to a value far lower (the gap between the baked
+	//    treeline snowline and RefZ) - an actual pop, which is exactly what
+	//    this fix exists to remove. Blended back to SnowLineLowBaseCm at
+	//    SnowCover=0 over [0, SnowMeltBlendInEnd] via smoothstep so the value
+	//    is continuous and starts exactly at the baked default (byte-identical
+	//    SnowCover=0 baseline preserved).
+	//  - As SnowCover approaches the point where High(SnowCover) itself
+	//    equals RefZ, the identity solve's implied band width collapses
+	//    toward zero (High-Low -> 0), which would read as a hard cliff right
+	//    at that SnowCover value. Blended over to the original fixed floor
+	//    (SnowLineLowFloorCm - already proven safe/complete-coverage at
+	//    SnowCover=1) starting at SnowMeltBlendOutStart, comfortably before
+	//    RefZ values in the plausible on-road range ever reach the collapse
+	//    point (High(0.85) = -60280 cm; RefZ would have to sit below that -
+	//    i.e. below the winter floor's own high edge - to still be
+	//    mid-collapse there, which no drivable road surface does).
+	//
+	// RefZ ITSELF is NOT a hardcoded constant (a 2026-09-07 same-day fix -
+	// see the polish-pass QA notes): the first version of this fix pinned it
+	// to SnowValleyRefZFallbackCm (Dillon Reservoir's lake-bed Z), which is
+	// only correct for a camera actually standing at lake level. Dillon Dam
+	// Road itself runs along the dam crest, well above the lake bed, so the
+	// embankment visible at that (and every other) QA vantage sat far enough
+	// above the lake-bed reference that the identity solve's crossing window
+	// was still off-screen for most of the sweep - the SAME compression bug,
+	// just re-triggered by a wrong reference elevation instead of a wrong
+	// travel distance. Fix: read the actual player pawn's world Z each push
+	// and use THAT as RefZ, so the crossing window is always centered on
+	// wherever the camera/car actually is, at every vantage, not just the one
+	// this pass happened to be tuned against. Falls back to the lake-bed
+	// constant only if no pawn exists yet (e.g. the very first push before
+	// the vehicle has spawned).
+	constexpr float SnowValleyRefZFallbackCm = -67030.0f;   // Dillon Reservoir lake-bed world Z (~2765 m ASL) - BeginPlay-time fallback only, see above.
+	constexpr float SnowMeltBlendInEnd = 0.15f;     // below this, blend from SnowLineLowBaseCm into the identity curve
+	constexpr float SnowMeltBlendOutStart = 0.85f;  // above this, blend from the identity curve down to SnowLineLowFloorCm (well short of the collapse point)
+
+	float SnowLineHighForCover(float SnowCover)
+	{
+		return FMath::Lerp(SnowLineHighBaseCm, SnowLineHighFloorCm, SnowCover);
+	}
+
+	// Identity-ramp solve (see comment block above) - valid away from the
+	// SnowCover=1 singularity, which the caller keeps clear of via
+	// SnowMeltBlendOutStart.
+	float SnowLineLowIdentity(float SnowCover, float RefZ)
+	{
+		const float High = SnowLineHighForCover(SnowCover);
+		const float Denom = FMath::Max(1.0f - SnowCover, 0.01f);
+		return (RefZ - SnowCover * High) / Denom;
+	}
+
+	// "Light" continuous snowfall level held through the whole winter hold -
+	// spec: "snowing during fall->winter transition, light within winter, off
+	// elsewhere".
+	constexpr float WinterLightSnowfall = 0.2f;
+
+	// ---- 2026-09-07 snowfall-snap fix ------------------------------------
+	// Bug: the fall->winter transition ramps SnowfallIntensity 0->1 (a
+	// blizzard peak right at the transition's end, S4), but the winter-hold
+	// branch used to hard-set it to WinterLightSnowfall (0.2) the instant the
+	// hold began - a hard step from 1.0 to 0.2 at exactly S4 (~3.2/s
+	// derivative at 4 Hz), the one discontinuity in an otherwise all-
+	// smoothstep param set. Fix: continue easing DOWN from the transition's
+	// peak to the hold level over the first WinterSnowfallDecaySeconds of the
+	// winter hold (smoothstep, same shape every other ramp in this function
+	// uses) instead of snapping - "a driver at that moment would see the
+	// blizzard cut out instantly" is exactly the case this closes.
+	constexpr float WinterSnowfallDecaySeconds = 300.0f;   // ~5 in-game minutes
+
+	float SmoothStep01(float T)
+	{
+		T = FMath::Clamp(T, 0.0f, 1.0f);
+		return T * T * (3.0f - 2.0f * T);
+	}
+
+	// Piecewise SnowLineLowZCm(SnowCover) - see the "melt-compression fix"
+	// comment block above: identity ramp in the middle, smoothly blended back
+	// to the exact baked baseline at SnowCover=0 and to the exact proven-safe
+	// floor at SnowCover=1 so both endpoints stay byte-identical to before.
+	float SnowLineLowForCover(float SnowCover, float RefZ)
+	{
+		if (SnowCover <= SnowMeltBlendInEnd)
+		{
+			const float W = SmoothStep01(SnowCover / SnowMeltBlendInEnd);
+			return FMath::Lerp(SnowLineLowBaseCm, SnowLineLowIdentity(SnowMeltBlendInEnd, RefZ), W);
+		}
+		if (SnowCover >= SnowMeltBlendOutStart)
+		{
+			const float W = SmoothStep01((SnowCover - SnowMeltBlendOutStart) / (1.0f - SnowMeltBlendOutStart));
+			return FMath::Lerp(SnowLineLowIdentity(SnowMeltBlendOutStart, RefZ), SnowLineLowFloorCm, W);
+		}
+		return SnowLineLowIdentity(SnowCover, RefZ);
+	}
+}
+
+AODSeasonController::AODSeasonController()
+{
+	PrimaryActorTick.bCanEverTick = true;
+	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+}
+
+void AODSeasonController::BeginPlay()
+{
+	Super::BeginPlay();
+
+	FindManagers();
+	EnsureSnowfallComponent();
+
+	// ---- QA freeze flags (2026-09-07) ------------------------------------
+	// -odseason=<summer|fall|winter|spring>: jump to that season's stable
+	// midpoint and FREEZE the clock there (no further ticking advance).
+	// -odseasonphase=<0..1> (only meaningful paired with -odseason=): instead
+	// freeze mid-TRANSITION *into the next season* at that progress - e.g.
+	// -odseason=fall -odseasonphase=0.25 freezes 25% of the way through the
+	// fall->winter transition, not 25% into fall's own hold.
+	// -odseasonrate=N: time-scale for watching transitions play out live.
+	FString SeasonName;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odseason="), SeasonName))
+	{
+		const float HoldStart = SeasonHoldStartSeconds(SeasonName);
+		float Phase = -1.0f;
+		if (FParse::Value(FCommandLine::Get(), TEXT("odseasonphase="), Phase) && Phase >= 0.0f)
+		{
+			const float TransitionStart = HoldStart + HoldSeconds;
+			ClockSeconds = FMath::Fmod(TransitionStart + FMath::Clamp(Phase, 0.0f, 1.0f) * TransitionSeconds,
+				LoopSeconds());
+		}
+		else
+		{
+			ClockSeconds = FMath::Fmod(HoldStart + HoldSeconds * 0.5f, LoopSeconds());
+		}
+		bFrozen = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("ODSeasonController: QA freeze -odseason=%s%s -> ClockSeconds=%.1f"),
+			*SeasonName, Phase >= 0.0f ? *FString::Printf(TEXT(" -odseasonphase=%.2f"), Phase) : TEXT(""),
+			ClockSeconds);
+	}
+
+	float Rate = TimeScale;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odseasonrate="), Rate))
+	{
+		TimeScale = Rate;
+	}
+
+	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+	PushParamsToMIDs();
+}
+
+float AODSeasonController::SeasonHoldStartSeconds(const FString& SeasonName) const
+{
+	const FString S = SeasonName.ToLower();
+	if (S == TEXT("summer")) return 0.0f;
+	if (S == TEXT("fall") || S == TEXT("autumn")) return HoldSeconds + TransitionSeconds;
+	if (S == TEXT("winter")) return 2.0f * (HoldSeconds + TransitionSeconds);
+	if (S == TEXT("spring")) return 3.0f * (HoldSeconds + TransitionSeconds);
+	UE_LOG(LogTemp, Warning,
+		TEXT("ODSeasonController: -odseason=%s not recognized (expected summer/fall/winter/spring) - "
+		     "defaulting to summer"), *SeasonName);
+	return 0.0f;
+}
+
+void AODSeasonController::FindManagers()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	for (TActorIterator<AODTerrainManager> It(World); It; ++It) { TerrainMgr = *It; break; }
+	for (TActorIterator<AODWaterManager> It(World); It; ++It) { WaterMgr = *It; break; }
+	for (TActorIterator<AODForestManager> It(World); It; ++It) { ForestMgr = *It; break; }
+	UE_LOG(LogTemp, Display,
+		TEXT("ODSeasonController: managers found - terrain=%d water=%d forest=%d"),
+		TerrainMgr.IsValid(), WaterMgr.IsValid(), ForestMgr.IsValid());
+}
+
+void AODSeasonController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	// Late-bind managers: AODGameMode's Ensure* spawns run in BeginPlay order
+	// and this controller is spawned last (see EnsureSeasonController), but
+	// tolerate a missing manager gracefully either way (open-world levels
+	// only, per the class comment) rather than requiring exact spawn order.
+	if (!TerrainMgr.IsValid() || !WaterMgr.IsValid() || !ForestMgr.IsValid())
+	{
+		FindManagers();
+	}
+
+	if (!bFrozen)
+	{
+		ClockSeconds = FMath::Fmod(ClockSeconds + DeltaSeconds * TimeScale, LoopSeconds());
+		ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+	}
+
+	PushAccumSeconds += DeltaSeconds;
+	const float PushInterval = ParamPushHz > 0.0f ? 1.0f / ParamPushHz : 0.0f;
+	if (PushAccumSeconds >= PushInterval)
+	{
+		PushAccumSeconds = 0.0f;
+		PushParamsToMIDs();
+	}
+
+	// Falling-snow motion is animated every tick (cheap - a few hundred
+	// instances), independent of the throttled material-param push above.
+	UpdateSnowfallFX(DeltaSeconds);
+}
+
+void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, float& OutSnow,
+	float& OutSnowfall, float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const
+{
+	const float S0 = 0.0f;
+	const float S1 = HoldSeconds;                       // summer hold end / summer->fall transition start
+	const float S2 = S1 + TransitionSeconds;             // fall hold start
+	const float S3 = S2 + HoldSeconds;                   // fall hold end / fall->winter transition start
+	const float S4 = S3 + TransitionSeconds;             // winter hold start
+	const float S5 = S4 + HoldSeconds;                   // winter hold end / winter->spring transition start
+	const float S6 = S5 + TransitionSeconds;             // spring hold start
+	const float S7 = S6 + HoldSeconds;                   // spring hold end / spring->summer transition start
+	// S7 + TransitionSeconds == LoopSeconds() (== S0 of the next lap)
+
+	OutFall = 0.0f; OutSnow = 0.0f; OutSnowfall = 0.0f; OutFreeze = 0.0f; OutSpringGreen = 0.0f;
+	OutLeafDrop = 0.0f;
+
+	if (Clock < S1)
+	{
+		// summer hold: everything at baseline.
+	}
+	else if (Clock < S2)
+	{
+		// summer -> fall transition: deciduous canopies patch-turn orange
+		// (see M_Foliage's FallBlend wiring in build_flora_materials.py).
+		const float T = SmoothStep01((Clock - S1) / TransitionSeconds);
+		OutFall = T;
+	}
+	else if (Clock < S3)
+	{
+		// fall hold: fully orange, canopy still full (no drop yet).
+		OutFall = 1.0f;
+	}
+	else if (Clock < S4)
+	{
+		// fall -> winter transition (deciduous arc, 2026-09 follow-up):
+		// leaves that remain STAY orange (FallBlend held at 1 - they don't
+		// fade back toward green on the way out, they fall off orange) while
+		// LeafDrop ramps 0->1, progressively dissolving the canopy cards
+		// down to bare twig geometry (see M_Foliage's LeafDrop wiring).
+		// Snow grows in, lake starts to skin over, snow starts falling, and
+		// the same SnowCover ramp also builds "bunches of snow" onto the
+		// now-exposed twigs via the deciduous bark MID.
+		const float T = SmoothStep01((Clock - S3) / TransitionSeconds);
+		OutFall = 1.0f;
+		OutLeafDrop = T;
+		OutSnow = T;
+		OutFreeze = T;
+		OutSnowfall = T;   // ramps 0->1 as winter arrives
+	}
+	else if (Clock < S5)
+	{
+		// winter hold: closed snow cover, frozen lake, deciduous canopies
+		// fully bare (LeafDrop=1) and snow-capped. SnowfallIntensity is NOT a
+		// flat hold value here - see the "snowfall-snap fix" comment above -
+		// it eases down from the fall->winter transition's blizzard peak
+		// (1.0 at S4) to the light continuous-snow level over the first
+		// WinterSnowfallDecaySeconds of the hold, then stays flat for the
+		// remainder (SmoothStep01 clamps its input, so this is exactly
+		// WinterLightSnowfall for the rest of the hold with no further code
+		// needed).
+		OutFall = 1.0f;
+		OutLeafDrop = 1.0f;
+		OutSnow = 1.0f;
+		OutFreeze = 1.0f;
+		const float SnowfallDecayT = SmoothStep01((Clock - S4) / WinterSnowfallDecaySeconds);
+		OutSnowfall = FMath::Lerp(1.0f, WinterLightSnowfall, SnowfallDecayT);
+	}
+	else if (Clock < S6)
+	{
+		// winter -> spring transition: reverse patchy retreat + thaw, snowfall
+		// tapers off with the melt, fresh-green ramps in. Deciduous canopies
+		// reverse-dissolve back in (LeafDrop 1->0) as fresh GREEN growth, not
+		// the fall orange - FallBlend eases back to 0 over the same span so
+		// the re-budding leaves render green under SpringGreen's fresh tint.
+		const float T = SmoothStep01((Clock - S5) / TransitionSeconds);
+		OutSnow = 1.0f - T;
+		OutFreeze = 1.0f - T;
+		OutSnowfall = WinterLightSnowfall * (1.0f - T);
+		OutSpringGreen = T;
+		OutFall = 1.0f - T;
+		OutLeafDrop = 1.0f - T;
+	}
+	else if (Clock < S7)
+	{
+		// spring hold: melted, fresh-green easing back to summer's baseline
+		// over the course of the hold. Deciduous canopy already fully
+		// re-leafed (LeafDrop=0) and green (FallBlend=0) by S6.
+		const float T = SmoothStep01((Clock - S6) / HoldSeconds);
+		OutSpringGreen = 1.0f - T;
+	}
+	// else spring -> summer transition: everything already at/approaching
+	// baseline (SpringGreen reaches 0 by S7 given the decay above), left at
+	// the OutX defaults set above.
+}
+
+void AODSeasonController::PushParamsToMIDs()
+{
+	if (AODTerrainManager* Terrain = TerrainMgr.Get())
+	{
+		if (UMaterialInstanceDynamic* GroundMID = Terrain->GetGroundMID())
+		{
+			// Reference elevation for the melt-compression fix's identity
+			// ramp: the player pawn's own current world Z, not a fixed
+			// guessed constant (see the big comment above SnowLineLowIdentity).
+			// This keeps the visible altitude-band crossing centered on
+			// wherever the camera/car actually is, at any QA vantage or any
+			// real drive, instead of only working near one hardcoded
+			// elevation. Falls back to the lake-bed constant before the
+			// pawn exists yet (e.g. the very first param push at BeginPlay).
+			float RefZ = SnowValleyRefZFallbackCm;
+			if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+			{
+				RefZ = Player->GetActorLocation().Z;
+			}
+			const float Low = SnowLineLowForCover(SnowCover, RefZ);
+			const float High = SnowLineHighForCover(SnowCover);
+			if (FParse::Param(FCommandLine::Get(), TEXT("odtrace")) && !bLoggedSnowDebugOnce)
+			{
+				bLoggedSnowDebugOnce = true;
+				UE_LOG(LogTemp, Display,
+					TEXT("ODSeasonController: [snowdbg] SnowCover=%.3f RefZ=%.1f Low=%.1f High=%.1f Band=%.1f"),
+					SnowCover, RefZ, Low, High, High - Low);
+			}
+			GroundMID->SetScalarParameterValue(TEXT("SnowLineLowZCm"), Low);
+			GroundMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), High);
+			GroundMID->SetScalarParameterValue(TEXT("SpringGreen"), SpringGreen);
+		}
+	}
+	if (AODWaterManager* Water = WaterMgr.Get())
+	{
+		if (UMaterialInstanceDynamic* WaterMID = Water->GetWaterMID())
+		{
+			WaterMID->SetScalarParameterValue(TEXT("FreezeBlend"), FreezeBlend);
+		}
+	}
+	if (AODForestManager* Forest = ForestMgr.Get())
+	{
+		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
+		{
+			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			// FallBlend is deliberately NOT pushed here (2026-09 deciduous-arc
+			// follow-up): this MID is the Conifer/evergreen species batch
+			// (see ConiferSpeciesIndex in ODForestManager.cpp), and
+			// build_flora_materials.py's fall-color wiring now actually
+			// blends toward orange when FallBlend > 0 on WHATEVER MID it's
+			// set on - the shared M_Foliage graph can't tell species apart,
+			// only per-MID parameter values can. Leaving this MID's
+			// FallBlend at its material default (0.0) is what keeps
+			// conifers evergreen; only DeciduousFoliageMID below gets a
+			// real FallBlend push. (Before this follow-up wired FallBlend
+			// into the graph, pushing it here was a harmless no-op; it isn't
+			// anymore.)
+		}
+		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): the
+		// Blob/tree_blob-only MIDs get FallBlend/LeafDrop as well as
+		// SnowCover (canopy dissolve + twig snow) - the Conifer MID above
+		// never receives LeafDrop, so evergreen canopies can't dissolve.
+		if (UMaterialInstanceDynamic* DeciduousFoliageMID = Forest->GetDeciduousFoliageMID())
+		{
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("LeafDrop"), LeafDrop);
+		}
+		if (UMaterialInstanceDynamic* DeciduousBarkMID = Forest->GetDeciduousBarkMID())
+		{
+			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+		}
+	}
+}
+
+void AODSeasonController::EnsureSnowfallComponent()
+{
+	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	UMaterialInterface* SnowFxMat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_SnowFlake.M_SnowFlake"));
+	if (!SphereMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODSeasonController: /Engine/BasicShapes/Sphere missing - no snowfall FX"));
+		return;
+	}
+
+	SnowFxHism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+	SnowFxHism->SetupAttachment(RootComponent);
+	SnowFxHism->SetStaticMesh(SphereMesh);
+	if (SnowFxMat)
+	{
+		SnowFxHism->SetMaterial(0, UMaterialInstanceDynamic::Create(SnowFxMat, this));
+	}
+	SnowFxHism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	SnowFxHism->SetCastShadow(false);
+	SnowFxHism->SetAffectDynamicIndirectLighting(false);
+	SnowFxHism->SetVisibility(false);
+	SnowFxHism->RegisterComponent();
+
+	// A box of tiny flakes around wherever the effect is attached (the player
+	// pawn, once one exists - see UpdateSnowfallFX). Fixed pool, seeded once;
+	// only visibility + per-instance fall/drift motion change at runtime.
+	//
+	// 2026-09-07 tuning note: the first pass used a 5 cm scale over a 28 m x
+	// 28 m x 18 m box (220 flakes) - technically animating (confirmed via a
+	// pixel-diff against the zero-snowfall baseline showing real per-frame
+	// motion), but at driving distance in a 1280x720 screenshot it read as
+	// essentially invisible noise, not "visibly snowing." Bumped scale and
+	// tightened the box (denser per unit volume) so light snowfall reads
+	// clearly in a still frame without turning into a blizzard.
+	constexpr int32 NumFlakes = 260;
+	constexpr float HalfExtentXYCm = 900.0f;
+	constexpr float HalfHeightCm = 700.0f;
+	FRandomStream Rng(12345);
+	SnowFxLocalOffsets.Reserve(NumFlakes);
+	TArray<FTransform> Transforms;
+	Transforms.Reserve(NumFlakes);
+	for (int32 i = 0; i < NumFlakes; ++i)
+	{
+		const FVector Offset(
+			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm),
+			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm),
+			Rng.FRandRange(-HalfHeightCm, HalfHeightCm));
+		SnowFxLocalOffsets.Add(Offset);
+		FTransform T;
+		T.SetLocation(Offset);
+		T.SetScale3D(FVector(0.11f));   // ~11 cm sphere - reads as a soft flake at driving distance
+		Transforms.Add(T);
+	}
+	SnowFxHism->AddInstances(Transforms, false);
+}
+
+void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
+{
+	if (!SnowFxHism)
+	{
+		return;
+	}
+
+	// Attach to the player pawn once one exists (camera-attached bounds, per
+	// spec) - open-world levels spawn AODVehiclePawn asynchronously relative
+	// to this actor's own BeginPlay, so this is checked lazily rather than
+	// assumed available up front.
+	if (!bSnowFxAttached)
+	{
+		if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+		{
+			SnowFxHism->AttachToComponent(Player->GetRootComponent(),
+				FAttachmentTransformRules::KeepWorldTransform);
+			SnowFxHism->SetRelativeLocation(FVector(0.0f, 0.0f, 300.0f));   // roughly windshield height and above
+			bSnowFxAttached = true;
+		}
+	}
+
+	const bool bVisible = SnowfallIntensity > 0.02f;
+	if (SnowFxHism->IsVisible() != bVisible)
+	{
+		SnowFxHism->SetVisibility(bVisible);
+	}
+	if (!bVisible)
+	{
+		return;
+	}
+
+	constexpr float FallSpeedCmS = 260.0f;
+	constexpr float DriftXCmS = 28.0f;
+	constexpr float DriftYCmS = 14.0f;
+	constexpr float HalfHeightCm = 700.0f;
+	constexpr float HalfExtentXYCm = 900.0f;
+
+	const int32 Num = SnowFxLocalOffsets.Num();
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FVector& Offset = SnowFxLocalOffsets[i];
+		Offset.Z -= FallSpeedCmS * DeltaSeconds;
+		Offset.X += DriftXCmS * DeltaSeconds;
+		Offset.Y += DriftYCmS * DeltaSeconds;
+		if (Offset.Z < -HalfHeightCm)
+		{
+			Offset.Z += 2.0f * HalfHeightCm;
+		}
+		if (Offset.X > HalfExtentXYCm) Offset.X -= 2.0f * HalfExtentXYCm;
+		if (Offset.Y > HalfExtentXYCm) Offset.Y -= 2.0f * HalfExtentXYCm;
+
+		FTransform T;
+		T.SetLocation(Offset);
+		T.SetScale3D(FVector(0.11f));
+		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
+	}
+}

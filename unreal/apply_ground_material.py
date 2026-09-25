@@ -101,7 +101,23 @@ SNOW_FULL_M = 3950.0     # full coverage by here (Quandary Peak's 4348 m stays s
 SNOW_LOW_CM = (SNOW_START_M - ORIGIN_HEIGHT_M) * 100.0
 SNOW_HIGH_CM = (SNOW_FULL_M - ORIGIN_HEIGHT_M) * 100.0
 SNOW_NOISE_SCALE_CM = 4000.0   # 40 m patchiness at the snow line
-SNOW_NOISE_STRENGTH = 0.5
+# 2026-09-08 polish-pass fix: was 0.5 (bias range +/-0.25 on the 0..1 raw
+# altitude-coverage fraction). AODSeasonController's melt-compression fix
+# (identity-ramp SnowLineLowZCm) already makes the RAW fraction sit right at
+# SnowCover for the vantage's own elevation - but snow_t_raw feeds a plain
+# Lerp(base_albedo, snow_albedo, snow_factor), a smooth per-pixel BLEND, not
+# a threshold. With only +/-0.25 of noise wiggle around a mid-transition
+# SnowCover=0.5, snow_t never left the [0.25, 0.75] range anywhere on
+# screen, so instead of some 40 m cells reading fully white and others fully
+# green (real patchiness), the whole visible area rendered one uniform pale
+# 50%-blended wash - looking like a global dissolve, not melting snow.
+# Raising this to 1.3 (bias range +/-0.65) means at SnowCover=0.5 the noise
+# does push individual 40 m cells all the way to 0 (bare) and 1 (full snow)
+# while others stay in between, producing genuine chunky patches; at the
+# S~0.16/0.84 checkpoints it still leaves most of the frame dominated by one
+# extreme with real (if partial) breakthrough at the other, matching the
+# "mostly snowy with patches opening" / "mostly green with drifts" spec.
+SNOW_NOISE_STRENGTH = 1.3
 SNOW_STEEP_REDUCTION = 0.65    # snow coverage cut on near-vertical rock
 
 MACRO_NOISE_SCALE_CM = 12000.0  # 120 m - large-scale dirt-patch breakup, not tied to any biome/road signal
@@ -308,6 +324,34 @@ def make_uv(tile_cm):
     return g.mul(world_xy, g.const(1.0 / tile_cm))
 
 
+def wrap_lattice_uv(uv2, period=97.0):
+    """Wrap a lattice-space UV (already divided by the noise's world-space
+    cell size) into [0, period) before it reaches value_noise's hash.
+
+    2026-09-08 polish-pass fix: the snow-noise hash (see value_noise below)
+    is the classic dot/sin/frac trick, which is only well-behaved for small
+    hash-input magnitudes - GPU sin() loses precision once its argument gets
+    into the thousands, and this area's absolute world coordinates (real
+    Colorado UTM-scale positions, hundreds of thousands of cm) divided by
+    SNOW_NOISE_SCALE_CM still land the lattice cell index in the ~100-200
+    range, which after the hash's own *(12.9898, 78.233) dot product lands
+    well into five-figure radians. Empirically (2026-09-08 QA render at the
+    Dillon Dam Road vantage) this produced a near-DEGENERATE hash - all 4
+    corners of the local cell landing at nearly the same value - so raising
+    SNOW_NOISE_STRENGTH from 0.5 all the way to 4.0 in isolated testing
+    changed the rendered look by almost nothing (still one uniform tone, no
+    patches), which is the fingerprint of a saturated/constant hash input,
+    not merely "not enough amplitude." Wrapping the lattice coordinate into a
+    small repeating range keeps the hash's own inputs small (and therefore
+    numerically well-behaved) while still varying with position at the same
+    40 m cell size - it just repeats the pattern every `period` cells
+    (97 * 40 m = ~3.9 km here), far beyond anything a single frame can see.
+    """
+    scaled = g.mul(uv2, g.const(1.0 / period))
+    wrapped01 = g.fracv(scaled)
+    return g.mul(wrapped01, g.const(period))
+
+
 def value_noise(uv2, seed_offset=(0.0, 0.0)):
     """Cheap tileable-lattice value noise (floor/frac + 4-corner hash-lerp) -
     a material-graph port of ODTerrainManager.cpp's own HashLattice/
@@ -442,6 +486,20 @@ veg_albedo = g.lerp(grass_tinted, forest_tinted, forest_weight)
 veg_normal = g.lerp(grass["normal"], forest["normal"], forest_weight, a_out="RGB", b_out="RGB")
 veg_rough = g.lerp(rough_scalar(grass["rough"]), rough_scalar(forest["rough"]), forest_weight)
 
+# ---------------------------------------------------------------- seasons: spring fresh-green tint
+# (2026-09-07, seasons feature part 1) - AODSeasonController drives this
+# scalar param (0 baseline, unconnected to anything else so SnowCover=0/
+# SpringGreen=0 is a byte-for-byte no-op back to the pre-seasons look).
+# Deliberately capped low (SPRING_GREEN_MAX_BLEND) and only applied to the
+# vegetated base, never the steep/rock/scree layers - a subtle, temporary
+# "new growth" brightening of the existing biome-tinted grass/forest-floor
+# color, not a texture swap or a full-saturation cartoon green.
+SPRING_GREEN_COLOR = (0.32, 0.52, 0.16)
+SPRING_GREEN_MAX_BLEND = 0.35
+spring_green_param = g.scalar_param("SpringGreen", 0.0)
+spring_green_color = g.const3(*SPRING_GREEN_COLOR)
+spring_green_amount = g.mul(spring_green_param, g.const(SPRING_GREEN_MAX_BLEND))
+
 # large-scale (120 m) position noise picks organic dirt-trail patches -
 # texture-variety only, not tied to any biome/road signal (the C++ tint's
 # own road-verge blend already handles the "near road" cue as a color shift;
@@ -451,6 +509,8 @@ dirt_amount = g.mul(patch_noise, g.const(DIRT_PATCH_STRENGTH))
 veg_albedo = g.lerp(veg_albedo, dirt["albedo"], dirt_amount, b_out="RGB")
 veg_normal = g.lerp(veg_normal, dirt["normal"], dirt_amount, b_out="RGB")
 veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), dirt_amount)
+
+veg_albedo = g.lerp(veg_albedo, spring_green_color, spring_green_amount, b_out="")
 
 # ---- above treeline, blend the vegetated base toward scree even on FLAT
 # ground (real alpine tundra is patchy rock/gravel, not solid grass) - same
@@ -490,7 +550,8 @@ snow_low = g.scalar_param("SnowLineLowZCm", SNOW_LOW_CM)
 snow_high = g.scalar_param("SnowLineHighZCm", SNOW_HIGH_CM)
 snow_t_raw = g.clamp01(g.div(g.sub(world_z, snow_low), g.sub(snow_high, snow_low)))
 
-snow_noise = value_noise(g.mul(world_xy, g.const(1.0 / SNOW_NOISE_SCALE_CM)), seed_offset=(91.0, 37.0))
+snow_noise = value_noise(
+    wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / SNOW_NOISE_SCALE_CM))), seed_offset=(91.0, 37.0))
 noise_bias = g.mul(g.sub(snow_noise, g.const(0.5)), g.const(SNOW_NOISE_STRENGTH))
 snow_t = g.clamp01(g.add(snow_t_raw, noise_bias))
 
@@ -541,4 +602,5 @@ if not all_ok:
 log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"treeline={TREELINE_LOW_M:.0f}-{TREELINE_HIGH_M:.0f}m ({TREELINE_LOW_CM:.0f}-{TREELINE_HIGH_CM:.0f}cm), "
     f"snowline={SNOW_START_M:.0f}-{SNOW_FULL_M:.0f}m ({SNOW_LOW_CM:.0f}-{SNOW_HIGH_CM:.0f}cm), "
-    f"layers={list(LAYERS.keys())}, triplanar=rock")
+    f"layers={list(LAYERS.keys())}, triplanar=rock, "
+    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen]")

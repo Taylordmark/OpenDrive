@@ -7,6 +7,8 @@
 class AODVehiclePawn;
 class UODVehicleMovement;
 class AODGarageEnvironment;
+class AODSettingsMenu;
+class AODCreditsMenu;
 
 /** Which screen of the front-end the player is on. */
 UENUM()
@@ -85,10 +87,19 @@ public:
 	bool IsActive() const { return Stage != EODMenuStage::Playing; }
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
-	// Car, Engine, Drivetrain, Tuning, Input Device, Drive
-	int32 NumRows() const { return 6; }
+	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
+	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Settings,
+	// Credits, Drive (5.2: exhaust preset row + 4 slider rows, same
+	// value-cycling idiom as the rows above them; Settings/Credits added
+	// Arc 4.4, next steps.md SS4.4/SS7.31 - see Adjust()/GetRow() in the .cpp).
+	int32 NumRows() const { return 13; }
 	int32 GetSelected() const { return Selected; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
+
+	bool IsSettingsOpen() const { return bSettingsOpen; }
+	bool IsCreditsOpen() const { return bCreditsOpen; }
+	AODSettingsMenu* GetSettingsMenu() const { return SettingsMenu; }
+	AODCreditsMenu* GetCreditsMenu() const { return CreditsMenu; }
 
 	/** Loading-screen progress numbers (2026-08-27, spawn-loading-screen task) -
 	 *  ODRaceHUD reads these while Stage == Loading to draw a "terrain N/M ·
@@ -135,7 +146,16 @@ private:
 	void ApplyEngine();
 	void ApplyDrivetrain();
 	void ApplyTuning();
+	void ApplyExhaust();     // pushes current Exhaust* fields to the synth
 	void ChangeCar(int32 Dir);
+
+	// persistence (Arc 5.2) - GConfig into GameUserSettings.ini, same
+	// mechanism/pattern as AODVehiclePawn::Save/LoadInputDeviceMode (no
+	// SaveGame object exists yet in this project; see that class's comment).
+	// Tuning/Engine/Drivetrain picks do NOT persist today - only Input
+	// Device and now Exhaust do; see ODMainMenu.cpp for the noted gap.
+	void SaveExhaustConfig() const;
+	void LoadExhaustConfig();
 
 	AODVehiclePawn* FindPawn() const;
 	UODVehicleMovement* FindMovement() const;
@@ -148,6 +168,18 @@ private:
 	AODGarageEnvironment* EnsureGarageEnvironment();
 	TWeakObjectPtr<AODGarageEnvironment> GarageEnv;
 
+	// Settings/Credits (Arc 4.4): same lazy-spawn/plain-logic-object pattern
+	// as EnsureGarageEnvironment() above - see AODSettingsMenu's class
+	// comment for why these aren't independent input-owning actors.
+	AODSettingsMenu* EnsureSettingsMenu();
+	AODCreditsMenu* EnsureCreditsMenu();
+	bool bSettingsOpen = false;
+	bool bCreditsOpen = false;
+	UPROPERTY()
+	TObjectPtr<AODSettingsMenu> SettingsMenu;
+	UPROPERTY()
+	TObjectPtr<AODCreditsMenu> CreditsMenu;
+
 	EODMenuStage Stage = EODMenuStage::CarConfig;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
@@ -155,6 +187,17 @@ private:
 	int32 DriveIdx = 0;      // index into the Layouts[] table
 	int32 TuneIdx = 0;       // index into AODTuningManager::Presets
 	int32 HoveredTownIdx = INDEX_NONE;
+
+	// Exhaust (Arc 5.2): ExhaustPresetIdx picks a baseline from ExhaustPresets[]
+	// (ODMainMenu.cpp); the four slider fields are the CURRENT effective
+	// values, seeded from the preset on pick and then independently nudgeable
+	// - same relationship real cars have between "exhaust kit" and "how open
+	// you actually left the valve". Persisted (see Save/LoadExhaustConfig).
+	int32 ExhaustPresetIdx = 0;
+	float ExhaustLoudness = 0.65f;
+	float ExhaustRasp = 0.35f;
+	float ExhaustMufflerCutoff = 2200.0f;
+	float ExhaustPop = 0.02f;
 
 	bool bEntered = false;   // EnterCarConfig() has run (pawn was ready)
 

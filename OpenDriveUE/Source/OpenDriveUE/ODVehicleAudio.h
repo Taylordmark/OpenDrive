@@ -40,6 +40,15 @@ public:
 	/** Menu/garage-facing: exhaust + engine-character params live on this. */
 	UODEngineSynth* GetEngineSynth() const { return Engine; }
 
+	/** Settings-shell-facing (Arc 4.4): Master*Vehicle volume combined into
+	 *  one scale, pushed straight to both synths' single output-gain
+	 *  multiply point (UODEngineSynth/UODRoadNoiseSynth's own VolumeScale -
+	 *  see their OnGenerateAudio()). Cached so EnsureSynths() can re-apply
+	 *  it to a freshly (re)created pair after a car swap, which would
+	 *  otherwise silently reset to the synths' 1.0 default and drop the
+	 *  player's volume setting. */
+	void SetVehicleVolumeScale(float Scale);
+
 private:
 	UFUNCTION()
 	void OnVehicleHit(UPrimitiveComponent* HitComponent, AActor* OtherActor,
@@ -56,6 +65,10 @@ private:
 
 	TWeakObjectPtr<APawn> BoundCar;
 	double LastImpactTime = -1.0;
+
+	// see SetVehicleVolumeScale()'s comment - re-applied to Engine/Road every
+	// time EnsureSynths() (re)creates them.
+	float CachedVehicleVolumeScale = 1.0f;
 
 	// -odrec hook
 	float RecSeconds = -1.0f;

@@ -82,14 +82,31 @@ Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
                                # vertical-ordering hint for
                                # detect_elevation_conflicts() later.
          "east_m": [...], "north_m": [...], "s_m": [...],
-         "elev_m": [...]}   # grade-CONFORMING absolute DEM elevation (rides
+         "elev_m": [...],  # grade-CONFORMING absolute DEM elevation (rides
                              # the real ground; only deviates via cut/bridge/
                              # tunnel where max_grade forces it to - never
                              # terrain-smoothed) or interpolated, for
                              # is_bridge stations - NOT yet shifted by
                              # ROAD_LIFT or ORIGIN_HEIGHT_M (that's a UE-
                              # frame concern, applied by consumers via
-                             # road_mesh_common.road_ue_z_m())
+                             # road_mesh_common.road_ue_z_m()). ALREADY
+                             # flattened toward any real graph-junction's
+                             # shared elevation the station is within the
+                             # influence radius of (see junction_suppress).
+         "junction_suppress": [...],  # 0..1 per station (2026-09-04, Arc
+                             # 7.17) - 1.0 deep inside a real junction's flush
+                             # box, smoothstep-easing to 0.0 over the
+                             # JUNCTION_APPROACH_M blend zone, 0.0 elsewhere.
+                             # Threaded through build_road_network.py into
+                             # road_mesh_common.build_road_chunks()'s
+                             # junction_suppress param -> ODR3 uv1.y, which
+                             # unreal/apply_road_material.py reads to stop
+                             # painting lane markings through the junction.
+         "in_junction_box": [...]}  # bool per station (2026-09-04) - hard
+                             # "inside the flush box" flag (no approach-zone
+                             # blend); build_road_guardrails.py/build_road_
+                             # barrier.py can use this to skip placing rail/
+                             # barrier through open junction pavement.
       ]
     }
 
@@ -106,6 +123,7 @@ import json
 import math
 import os
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -118,7 +136,9 @@ from road_mesh_common import (STATION_SPACING, resample_stations,
                                despike_ground, clamp_plausible_elevation,
                                despike_road_profile,
                                classify_wall_stations, junction_agreement_pass,
-                               reconcile_junction_elevations)
+                               reconcile_junction_elevations,
+                               ROAD_HALF_WIDTH, JUNCTION_BOX_MARGIN_M, JUNCTION_APPROACH_M,
+                               JUNCTION_MAX_DISAGREEMENT_M)
 
 # ---------------------------------------------------------------- config
 DEM_ZOOM = 15                   # matches build_terrain_tiles.py's MAX_ZOOM
@@ -494,7 +514,18 @@ def merge_way_chains(ways):
     grade/grade-change limits, not thrown away even though it isn't
     rendered directly - the 7th carries each node's source way's
     (lanes, surface, layer) triple (way_tag_meta()) - all parallel to the
-    first."""
+    first.
+
+    ALSO returns `degree` (2026-09-04, Arc 7.17 junction-unification fix -
+    see road_mesh_common.py's "junction unification" section): the node id
+    -> incident-way-count dict this function already computes to decide
+    where to break a chain. A node with degree>=3 is a REAL junction (3+
+    road edges meet, or two roads cross/join at a shared node) by exactly
+    the same rule this function already uses to break a chain there; a
+    degree-2 node is always a same-road continuation (this function chains
+    straight through it) and must never be flagged as a junction. main()
+    below uses this to build the `junctions` list build_road_chunks()/
+    flatten_junction_elevations() consume."""
     edges = []
     edge_structure = []
     edge_tunnel = []
@@ -564,7 +595,7 @@ def merge_way_chains(ways):
     for i in range(len(edges)):  # remaining: isolated loops with no junction
         if not used[i]:
             chains.append(walk_from(i, True))
-    return chains
+    return chains, degree
 
 
 # ---------------------------------------------------------------- main build
@@ -574,7 +605,7 @@ def main():
     ways = [e for e in data["elements"] if e["type"] == "way"]
     print(f"Loaded {len(ways)} ways, {len(nodes)} nodes")
 
-    chains = merge_way_chains(ways)
+    chains, node_degree = merge_way_chains(ways)
     print(f"Merged into {len(chains)} chains (real junctions/dead-ends)")
 
     # local frame anchored at the test-area bbox center - the SAME origin
@@ -592,7 +623,13 @@ def main():
         is_tunnel = np.array(tunnel, dtype=bool)
         length = float(np.sum(np.hypot(np.diff(latlon[:, 0]) * M_PER_DEG_LAT,
                                         np.diff(latlon[:, 1]) * m_per_deg_lon)))
-        scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway, meta))
+        # chain[0]/chain[-1] (2026-09-04, Arc 7.17): the OSM node ids this
+        # chain starts/ends at - kept through scored/kept below so main()'s
+        # junction pass can tell exactly which real junction node (if any,
+        # via node_degree) each KEPT segment's own two ends touch, with no
+        # geometric guessing (see merge_way_chains()'s docstring).
+        scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway, meta,
+                        chain[0], chain[-1]))
     scored.sort(key=lambda t: -t[0])
 
     # only fetch DEM tiles for chains that will actually become segments
@@ -612,7 +649,8 @@ def main():
     total_km = 0.0
     n_grade_warnings = 0
     n_spike_repairs = 0
-    for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway, meta) in enumerate(kept):
+    for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway, meta,
+              node_start, node_end) in enumerate(kept):
         east = (latlon[:, 1] - lon0) * m_per_deg_lon
         north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
         s, e, n = resample_stations(east, north, STATION_SPACING)
@@ -744,6 +782,7 @@ def main():
             "lanes_s": lanes_s, "surface_s": surface_s, "layer_s": layer_s,
             "e": e, "n": n, "s": s, "h": h,
             "max_grade_s": max_grade_s, "max_grade_delta_s": max_grade_delta_s,
+            "node_start": node_start, "node_end": node_end,
         })
         total_km += length / 1000.0
 
@@ -795,9 +834,18 @@ def main():
     # carries the higher-priority side's own local slope at each seam, which
     # gets threaded into grade_smooth_elevation as pinned_edge_grades so the
     # rate limiter eases away from a MATCHED slope instead of a free one.
+    #
+    # is_struct_s (bridge OR tunnel - see is_structure_way()) is passed as
+    # is_bridge so a structure station's DEM-independent, span-interpolated
+    # elevation never gets matched by XY proximity against an unrelated
+    # same-named-road station elsewhere in the network (2026-09-04 - see
+    # reconcile_junction_elevations()'s is_bridge docstring; found via the
+    # same 51-jump bridge-adjacent survey that motivated the graph-junction
+    # pass's own structure exclusion below).
     all_is_struct = np.concatenate([seg["is_struct_s"] for seg in segments])
     reconciled_elev, touched, pinned_grade = reconcile_junction_elevations(
-        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name)
+        all_east, all_north, all_elev, all_seg_idx, all_station_idx, all_road_name,
+        is_bridge=all_is_struct)
     n_touched = int(touched.sum())
     if n_touched and os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
         print(f"OD_RAW_ROAD_STATIONS=1: skipping the junction re-smoothing pass "
@@ -825,13 +873,169 @@ def main():
                 seg["max_grade_s"], seg["max_grade_delta_s"],
                 pinned_edge_grades=pinned_edges)
 
+    # Real (graph) junction detection + flatten (2026-09-04, Arc 7.17 - Taylor's
+    # Blue River Parkway/Silverthorne screenshot; see next steps.md SS7.17).
+    # The pass above only ever reconciles a road against ITSELF (same seg_idx
+    # or same road_name) - a real intersection of two DIFFERENTLY NAMED roads
+    # never enters it at all, which is exactly the reported bug (crossing
+    # roads baked as independently-stacked ribbons, lane markings running
+    # straight through). Junction NODES come straight from merge_way_chains()'s
+    # own OSM graph degree (node_degree, returned above) - a node with 3+
+    # incident ways is a real junction by the exact same rule that function
+    # already uses to break a chain there; a degree-2 node is always a same-
+    # road continuation and is never flagged. Each KEPT segment's chain-start/
+    # chain-end node id (node_start/node_end, carried through since the
+    # `scored`/`kept` loop above) is exactly the node its chain broke at, so
+    # matching those against node_degree finds every real junction a baked
+    # segment actually touches with no geometric/proximity guessing.
+    current_elev = np.concatenate([seg["h"] for seg in segments])
+    # Bridge/tunnel endpoints are excluded from junction participation
+    # entirely (2026-09-04) - caught via a 51-jump, all-bridge-adjacent
+    # survey after the per-segment flatten fix above: a bridge deck's
+    # endpoint elevation is structurally pinned by its own span
+    # interpolation (fill_structure_gaps, is_struct_s), and forcing it to
+    # blend toward an unrelated surface road's target elevation over just
+    # JUNCTION_APPROACH_M produced implausible near-vertical jumps (up to
+    # 34 m over 20 m of arc-length at seg208, an overpass). A bridge ramp
+    # meeting a graph node of degree>=3 is not the flush-pavement,
+    # shared-grade intersection this pass is meant to flatten.
+    junction_incident = defaultdict(list)   # node_id -> [(seg_idx, 'start'|'end')]
+    for seg_i, seg in enumerate(segments):
+        is_struct_s = seg["is_struct_s"]
+        start_ok = not (len(is_struct_s) and is_struct_s[0])
+        end_ok = not (len(is_struct_s) and is_struct_s[-1])
+        if start_ok and node_degree.get(seg["node_start"], 0) >= 3:
+            junction_incident[seg["node_start"]].append((seg_i, "start"))
+        if end_ok and node_degree.get(seg["node_end"], 0) >= 3:
+            junction_incident[seg["node_end"]].append((seg_i, "end"))
+
+    junctions = []
+    junction_target_elev = {}   # node_id -> target elevation, for the flatten pass below
+    for node_id, incident in junction_incident.items():
+        if len(incident) < 2:
+            # only one KEPT segment actually reaches this junction node (the
+            # other incident way(s) were too short/filtered by MAX_SEGMENTS
+            # or MIN_SEGMENT_STATIONS) - nothing to unify against.
+            continue
+        lat_n, lon_n = nodes[node_id]
+        ej = (lon_n - lon0) * m_per_deg_lon
+        nj = (lat_n - lat0) * M_PER_DEG_LAT
+        elevs = []
+        for seg_i, end in incident:
+            lo, hi = offsets[seg_i], offsets[seg_i + 1]
+            elevs.append(current_elev[lo if end == "start" else hi - 1])
+        # Outlier exclusion (2026-09-04, bug #3 - see JUNCTION_MAX_
+        # DISAGREEMENT_M's docstring): a participant stranded more than that
+        # far from the REST of this node's incident elevations (median,
+        # robust to a single bad outlier the way max()/mean() aren't) isn't
+        # part of a real flush intersection - drop it from this node
+        # entirely rather than let it drag the others toward it (or get
+        # dragged toward them into a fake vertical transition itself).
+        median_elev = float(np.median(elevs))
+        ok = [(seg_i, end, z) for (seg_i, end), z in zip(incident, elevs)
+              if abs(z - median_elev) <= JUNCTION_MAX_DISAGREEMENT_M]
+        incident_ok = [(seg_i, end) for seg_i, end, z in ok]
+        junction_incident[node_id] = incident_ok
+        if len(incident_ok) < 2:
+            # every other participant got excluded (or there was only ever
+            # one plausible one) - nothing left to unify, same as a node
+            # with <2 incident segments to begin with.
+            continue
+        elevs_ok = [z for seg_i, end, z in ok]
+        # highest incident approach wins (same "never lower a station, only
+        # raise" doctrine reconcile_junction_elevations() above already
+        # uses) - every other road meeting here blends UP to it, never down.
+        target_elev = float(max(elevs_ok))
+        junction_target_elev[node_id] = target_elev
+        junctions.append({"east_m": float(ej), "north_m": float(nj),
+                           "elev_m": target_elev, "num_roads": len(incident_ok)})
+
+    n_junctions = len(junctions)
+    if n_junctions:
+        box_r = ROAD_HALF_WIDTH + JUNCTION_BOX_MARGIN_M
+        print(f"{n_junctions} real junction node(s) detected (3+ incident roads, graph "
+              f"degree) - flattening pavement elevation within {box_r:.1f} m of each "
+              f"junction center, blending back over {JUNCTION_APPROACH_M:.0f} m")
+        # Per-SEGMENT, arc-length-restricted blend (2026-09-04 bugfix - first
+        # cut of this pass called road_mesh_common.flatten_junction_elevations()
+        # network-wide, matching every station to its nearest junction by raw
+        # XY distance regardless of which road it's actually on. That's wrong
+        # whenever a DIFFERENT, unrelated road happens to pass within the
+        # ~28m box+approach radius in plan view but sits at a very different
+        # elevation - a switchback stacked over itself or an overpass, exactly
+        # what classify_wall_stations()/reconcile_junction_elevations() above
+        # already exist to detect and exclude. Caught live: verify_terrain_
+        # fit.py's PRE-BAKE CONSISTENCY CHECK failed with a 108.91 m max
+        # deviation - a station on some other road got yanked to a nearby
+        # junction's target elevation. Fixed by only ever touching a
+        # junction's own KNOWN participant segments (junction_incident,
+        # already resolved via the graph, not proximity), blended along that
+        # segment's OWN arc-length distance from its OWN endpoint - so a
+        # station can only be pulled toward a junction its road structurally
+        # connects to, never one it merely passes near in plan view.
+        final_elev = current_elev.copy()
+        best_w = np.ones(len(current_elev))   # 1.0 = untouched; smaller = more pulled
+        for node_id, incident in junction_incident.items():
+            if len(incident) < 2:
+                continue
+            target = junction_target_elev[node_id]
+            for seg_i, end in incident:
+                lo, hi = offsets[seg_i], offsets[seg_i + 1]
+                s_seg = np.asarray(segments[seg_i]["s"], dtype=np.float64)
+                d = (s_seg - s_seg[0]) if end == "start" else (s_seg[-1] - s_seg)
+                w = np.ones_like(d)
+                w[d <= box_r] = 0.0
+                ease = (d > box_r) & (d <= box_r + JUNCTION_APPROACH_M)
+                t = (d[ease] - box_r) / JUNCTION_APPROACH_M
+                w[ease] = t * t * (3.0 - 2.0 * t)
+                seg_slice = best_w[lo:hi]
+                pull_here = w < seg_slice   # this junction pulls harder than
+                                             # whatever (if anything) already
+                                             # claimed this station
+                seg_slice[pull_here] = w[pull_here]
+                best_w[lo:hi] = seg_slice
+                final_elev[lo:hi] = np.where(
+                    pull_here, target * (1.0 - w) + current_elev[lo:hi] * w, final_elev[lo:hi])
+        all_junction_suppress_elev = 1.0 - best_w   # kept for the print below only
+    else:
+        print("0 real junction nodes detected (3+ incident roads) - no elevation flattening applied")
+        final_elev = current_elev
+        best_w = np.ones(len(current_elev))
+
+    for idx, seg in enumerate(segments):
+        lo, hi = offsets[idx], offsets[idx + 1]
+        seg["h"] = final_elev[lo:hi]
+
+    # per-station "inside a junction's flush box" mask (2026-09-04) - exported
+    # below so build_road_guardrails.py can skip placing rail through open
+    # junction pavement the same way it already skips reconcile_junction_
+    # elevations()'s same-road `touched` mask (see that script's docstring).
+    # junction_suppress (1 - blend_t) is the SMOOTH 0..1 companion - 1.0 deep
+    # inside the flush box, smoothstep-easing to 0.0 over the approach zone -
+    # threaded through build_road_network.py -> road_mesh_common.
+    # build_road_chunks(junction_suppress=...) into the ODR3 uv1.y channel,
+    # which is what unreal/apply_road_material.py actually reads to stop
+    # painting lane markings through the junction (a hard in/out flag would
+    # pop at the approach boundary instead of easing out).
+    # Reuse best_w from the per-segment elevation-flatten pass above rather
+    # than re-deriving via compute_junction_influence() (network-wide
+    # XY-nearest match - same class of bug as the elevation case: it would
+    # suppress lane markings on an unrelated road that merely passes near a
+    # junction in plan view). best_w is already the correct per-segment,
+    # graph-participant-restricted weight (1.0 = untouched, 0.0 = deep
+    # inside a junction box this station's own road actually connects to).
+    all_junction_suppress = 1.0 - best_w
+    all_in_box = best_w <= 0.0
+
     # Cross-road at-grade junction agreement (2026-09-06, immediate-queue
-    # item 5) - runs LAST, on the final smoothed profiles, and ships as-is:
-    # see junction_agreement_pass()'s docstring for why writing agreement
-    # into pre-smooth ground and re-smoothing (tried twice) regressed the
-    # junction audit instead. junction_skip: never raise a road toward a
-    # grade-separated neighbor - bridges/tunnels (with their approach spans)
-    # and every auto-detected elevation conflict sit out.
+    # item 5) - runs LAST, on top of the graph-junction flatten above, and
+    # ships as-is: see junction_agreement_pass()'s docstring for why writing
+    # agreement into pre-smooth ground and re-smoothing (tried twice)
+    # regressed the junction audit instead. Catches at-grade crossings the
+    # graph-degree pass above can't see (no shared OSM node at the
+    # crossing). junction_skip: never raise a road toward a grade-separated
+    # neighbor - bridges/tunnels (with their approach spans) and every
+    # auto-detected elevation conflict sit out.
     if os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
         print("OD_RAW_ROAD_STATIONS=1: skipping the junction-agreement pass")
     else:
@@ -872,6 +1076,8 @@ def main():
             "north_m": [round(float(v), 2) for v in seg["n"]],
             "s_m": [round(float(v), 2) for v in seg["s"]],
             "elev_m": [round(float(v), 2) for v in seg["h"]],
+            "junction_suppress": [round(float(v), 4) for v in all_junction_suppress[lo:hi]],
+            "in_junction_box": [bool(v) for v in all_in_box[lo:hi]],
         })
         n_bridge = int(np.sum(seg["is_struct_s"]))
         n_carve_excluded = int(np.sum(is_bridge_out))

@@ -13,12 +13,20 @@ instead of ever baking them into a texture:
     length METERS along the centerline, continuous (not rescaled by width),
     so tiling by world meters never stretches on curves or between road
     classes.
-  - UV1 (u1, "TexCoord[1]"): road HALF-width in meters at this vertex -
-    recovers a real meters offset from u0 (meterPos = (u0-0.5)*2*u1) so
-    stripe widths/tiling read as a constant real-world size regardless of
-    how wide the pavement is. Zero on any chunk that didn't come from a real
-    ODR3 tile (ODRoadManager only writes a second UV layer when
-    Chunk.bHasV3Data) - RoadHalfWidthFallbackM below covers that case.
+  - UV1 (u1, "TexCoord[1]"): u1 (r) = road HALF-width in meters at this
+    vertex - recovers a real meters offset from u0 (meterPos =
+    (u0-0.5)*2*u1) so stripe widths/tiling read as a constant real-world
+    size regardless of how wide the pavement is. Zero on any chunk that
+    didn't come from a real ODR3 tile (ODRoadManager only writes a second UV
+    layer when Chunk.bHasV3Data) - RoadHalfWidthFallbackM below covers that
+    case. v1 (g) = junction-suppress weight, 0..1 (Arc 7.17, 2026-09-04 -
+    repurposed from the former "reserved (0.0)"; see
+    pipeline/road_mesh_common.py's build_road_chunks docstring for how
+    build_road_stations.py's real-junction-node flatten pass fills this in).
+    1.0 means "inside a real graph junction's flush footprint" - multiplied
+    into final_paint_mask below (not_in_junction) so lane markings stop
+    being drawn through the junction box, smoothstep-easing back in over the
+    approach zone; never gates the base asphalt/gravel look.
   - Vertex color (baked per-chunk in CreateChunkMeshComponent, not read from
     a texture): R = road_class_id/6, G = lane_count/8, B = oneway (0/1),
     A = a per-chunk 0..1 wear-variety seed. A chunk with NO ODR3 data (plain
@@ -313,6 +321,17 @@ half_width_fallback = g.scalar_param("RoadHalfWidthFallbackM", RoadHalfWidthFall
 has_uv1 = g.step(g.const(0.01), u1_raw)
 half_width_eff = g.lerp(half_width_fallback, u1_raw, has_uv1)
 
+# junction_raw (Arc 7.17, 2026-09-04): uv1.y, repurposed from "reserved
+# (0.0)" - see road_mesh_common.build_road_chunks()'s docstring. 0..1,
+# smoothstep-eased by the pipeline itself (build_road_stations.py's
+# junction-flatten pass), so no extra falloff shaping is needed here - just
+# invert it into a 1=paint/0=suppress multiplier for the marking masks
+# below. Never gates the base asphalt/gravel look (asphalt_albedo etc.
+# above), only the painted-line layer - a junction still needs to READ as
+# pavement, just without a centerline running through the open box.
+junction_raw = g.mask(uv1, gg=True)
+not_in_junction = g.sub(g.const(1.0), g.clamp01(junction_raw))
+
 vcol = g.vertex_color()
 class_norm = g.mask(vcol, r=True)      # road_class_id/6
 lane_norm = g.mask(vcol, gg=True)      # lane_count/8
@@ -442,7 +461,7 @@ def hash1(v):
 wear_noise = g.lerp(hash1(noise_i), hash1(g.add(noise_i, g.const(1.0))), noise_f)
 wear_visibility = g.sub(g.const(1.0), g.mul(wear_noise, wear_scalar_param))
 
-final_paint_mask = g.mul(paint_mask, wear_visibility)
+final_paint_mask = g.mul(g.mul(paint_mask, wear_visibility), not_in_junction)
 paint_rough = g.const(0.35)   # paint reads smoother/glossier than worn asphalt
 
 final_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)

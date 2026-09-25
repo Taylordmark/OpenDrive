@@ -19,7 +19,10 @@ public class OpenDriveUE : ModuleRules
 			"AudioMixer",
 			"GeometryFramework",
 			"GeometryCore",
-			"AssetRegistry"
+			"AssetRegistry",
+			// FDisplayMetrics (Settings menu's "Native" resolution row, Arc 4.4) -
+			// lives in ApplicationCore, not Engine/Core.
+			"ApplicationCore"
 		});
 	}
 }

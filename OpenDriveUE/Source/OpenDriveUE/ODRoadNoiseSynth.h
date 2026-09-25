@@ -25,6 +25,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Road", meta = (ClampMin = 0, ClampMax = 1))
 	float Volume = 0.55f;
 
+	/** Master*Vehicle volume from the settings shell (Arc 4.4) - multiplied
+	 *  in alongside Volume above at OnGenerateAudio()'s single output write,
+	 *  same convention as UODEngineSynth::VolumeScale. Default 1.0 = no
+	 *  change from today's behavior. */
+	UPROPERTY(EditAnywhere, Category = "Audio", meta = (ClampMin = 0, ClampMax = 1))
+	float VolumeScale = 1.0f;
+	void SetVolumeScale(float Scale) { VolumeScale = FMath::Clamp(Scale, 0.0f, 1.0f); }
+
 protected:
 	virtual bool Init(int32& SampleRate) override;
 	virtual int32 OnGenerateAudio(float* OutAudio, int32 NumSamples) override;

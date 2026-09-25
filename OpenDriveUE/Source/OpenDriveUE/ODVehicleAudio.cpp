@@ -40,12 +40,31 @@ void AODVehicleAudio::EnsureSynths(APawn* Car)
 	Road->RegisterComponent();
 	Road->Start();
 
+	// re-apply the player's volume setting to the freshly created pair - see
+	// SetVehicleVolumeScale()'s comment (a car swap would otherwise silently
+	// reset both synths back to their 1.0 default).
+	Engine->SetVolumeScale(CachedVehicleVolumeScale);
+	Road->SetVolumeScale(CachedVehicleVolumeScale);
+
 	if (auto* Root = Cast<UPrimitiveComponent>(Car->GetRootComponent()))
 	{
 		Root->OnComponentHit.AddUniqueDynamic(this, &AODVehicleAudio::OnVehicleHit);
 	}
 	UE_LOG(LogTemp, Display, TEXT("ODVehicleAudio: synths attached to %s"),
 		*Car->GetName());
+}
+
+void AODVehicleAudio::SetVehicleVolumeScale(float Scale)
+{
+	CachedVehicleVolumeScale = FMath::Clamp(Scale, 0.0f, 1.0f);
+	if (Engine)
+	{
+		Engine->SetVolumeScale(CachedVehicleVolumeScale);
+	}
+	if (Road)
+	{
+		Road->SetVolumeScale(CachedVehicleVolumeScale);
+	}
 }
 
 void AODVehicleAudio::OnVehicleHit(UPrimitiveComponent*, AActor*,

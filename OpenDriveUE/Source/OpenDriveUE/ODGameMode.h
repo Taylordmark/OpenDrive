@@ -63,4 +63,41 @@ private:
 	 *  rides high above the surrounding terrain - see
 	 *  pipeline/build_road_guardrails.py. */
 	void EnsureGuardrailManager();
+
+	/** Embankment skirts (2026-09-07) - same "find or spawn" shape as
+	 *  EnsureGuardrailManager above, deriving AODEmbankmentManager's tile
+	 *  prefix from the level's own AODRoadManager the same way. Streams
+	 *  runtime-extruded sloped earthen skirts wherever the road rides
+	 *  2.5-7m above the surrounding terrain (below that the terrain meets
+	 *  the road on its own; above that is the later bridge-deck task's
+	 *  job) - see pipeline/build_road_embankments.py. */
+	void EnsureEmbankmentManager();
+
+	/** Bridge decks (2026-09-07, §7.21) - same "find or spawn" shape as
+	 *  EnsureEmbankmentManager above, deriving AODBridgeManager's tile prefix
+	 *  from the level's own AODRoadManager the same way. Streams runtime-
+	 *  extruded concrete deck fascia + pier columns wherever pipeline/
+	 *  build_road_embankments.py's own §7.21 sub-classification pass kept a
+	 *  "bridge"-class run as a genuine short span (most of the raw >7m-drop
+	 *  classification is actually a mountainside sidehill cut and gets
+	 *  demoted to the embankment skirt above instead - see that module's
+	 *  docstring). */
+	void EnsureBridgeManager();
+
+	/** Seasons feature (2026-09-07) - same "find or spawn" shape as
+	 *  EnsureAtmosphereController above (no per-level tile-prefix needed,
+	 *  applies identically everywhere): spawns AODSeasonController, which in
+	 *  turn finds AODTerrainManager/AODWaterManager/AODForestManager (spawned
+	 *  by the Ensure* calls above, in order, earlier in this same BeginPlay)
+	 *  and drives their ground/water/foliage MIDs through a looping season
+	 *  clock. */
+	void EnsureSeasonController();
+
+	/** Ambient biome/city audio (Arc 5.4 / next steps.md SS7.28, 2026-09-07) -
+	 *  same "find or spawn" shape as EnsureEmbankmentManager above, deriving
+	 *  AODAmbientSoundManager's zone-file name from the level's own
+	 *  AODRoadManager the same way. Crossfades wind/forest/settlement/water
+	 *  ambient loops against pipeline/build_ambient_zones.py's baked zone
+	 *  grid as the player drives - see that class for the full design. */
+	void EnsureAmbientSoundManager();
 };

@@ -8,6 +8,7 @@
 class UCapsuleComponent;
 class UHierarchicalInstancedStaticMeshComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class UStaticMesh;
 
 /** A named regional flora recipe (Arc 7.3 "per-region foliage recipes"),
@@ -534,6 +535,40 @@ private:
 	// tree bark material already hit once (see next steps.md §7.15).
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RockMat;
+
+public:
+	/** Seasons feature (2026-09-07) - see FoliageSeasonMID's own comment
+	 *  at its declaration below. AODSeasonController drives SnowCover/
+	 *  FallBlend on this. Null until BeginPlay has run (or if M_Foliage
+	 *  failed to load) - callers must null-check. */
+	UMaterialInstanceDynamic* GetFoliageSeasonMID() const { return FoliageSeasonMID; }
+
+	/** Deciduous-arc follow-up (2026-09, next steps.md sec 7.17) - the
+	 *  Blob/tree_blob-only counterpart to GetFoliageSeasonMID() above.
+	 *  AODSeasonController drives FallBlend/LeafDrop/SnowCover on this one;
+	 *  a separate MID instance so those pushes never reach the Conifer
+	 *  batch. Null until BeginPlay has run - callers must null-check. */
+	UMaterialInstanceDynamic* GetDeciduousFoliageMID() const { return DeciduousFoliageMID; }
+
+	/** Deciduous-arc follow-up (2026-09) - MID off M_Bark_Aspen for the same
+	 *  Blob/tree_blob batch's trunk+branch slot (twig snow, SnowCover-driven
+	 *  - see build_flora_materials.py). Null until BeginPlay has run. */
+	UMaterialInstanceDynamic* GetDeciduousBarkMID() const { return DeciduousBarkMID; }
+
+private:
+	// One shared MID (evergreen/Conifer canopy only, see ConiferSpeciesIndex
+	// in ODForestManager.cpp) every such HISM's SetMaterial() call in
+	// BuildTile() uses instead of M_Foliage's own baked-in material.
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> FoliageSeasonMID;
+
+	// Deciduous (Blob/tree_blob) counterpart - see GetDeciduousFoliageMID()/
+	// GetDeciduousBarkMID() above.
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> DeciduousFoliageMID;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> DeciduousBarkMID;
 
 	// Per-mesh "how far below its own pivot does the mesh's geometry extend"
 	// (local, unscaled cm; <= 0) - added 2026-08-27 (live-drive report:

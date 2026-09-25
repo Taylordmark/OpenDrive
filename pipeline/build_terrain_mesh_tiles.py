@@ -52,6 +52,7 @@ ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
 
 import json
 import math
+import re
 import struct
 import sys
 from collections import defaultdict
@@ -457,18 +458,47 @@ def _extract_boundary_rings(tris):
     return rings
 
 
+def _load_ribbon_flags():
+    """§7.34: reads build_water_tiles.py's Python-only "tx,ty" -> [is_ribbon
+    per feature] sidecar (water_<AREA>_test_ribbon_flags.json), written
+    alongside the .bin tiles - NOT part of the ODL1 binary format itself
+    (that stays byte-for-byte unchanged; ODWaterManager.cpp's runtime reader
+    never needs this distinction, "ribbons render/freeze like lakes" is
+    unaffected). Returns {} if the sidecar is missing (bake predates §7.34,
+    or a different area's water tiles were baked without it) - every caller
+    below treats a missing/short entry as "not a ribbon" (real-lake
+    behavior), the same as before this flag existed, so this is a strictly
+    additive, backward-compatible read."""
+    matches = sorted(OUT_DIR.glob(f"water_*_ribbon_flags.json"))
+    if not matches:
+        return {}
+    try:
+        return json.loads(matches[0].read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+_TILE_XY_RE = re.compile(r"_tile_(-?\d+)_(-?\d+)\.bin$")
+
+
 def load_lake_beds():
     """Every baked lake's boundary ring (gx_cm/gy_cm-frame, i.e. the SAME
     x=east_m*100, y=-north_m*100 convention build_tile()'s grid uses) plus
-    its baked surface Z (cm) and bounding box, read back from
-    OUT_DIR/water_<AREA>_test_tile_*.bin. Returns [] (terrain bakes with no
-    lake depression, same "no hole" tolerance every other missing-tile path
-    here already has) if no water tiles have been baked yet - run
+    its baked surface Z (cm), bounding box, and (§7.34) whether it's a real
+    lake/reservoir polygon or a waterway ribbon (is_ribbon) - read back from
+    OUT_DIR/water_<AREA>_test_tile_*.bin plus its ribbon-flags sidecar (see
+    _load_ribbon_flags()). Returns [] (terrain bakes with no lake
+    depression, same "no hole" tolerance every other missing-tile path here
+    already has) if no water tiles have been baked yet - run
     build_water_tiles.py first to get lake beds."""
     paths = sorted(OUT_DIR.glob(WATER_TILE_GLOB))
+    ribbon_flags = _load_ribbon_flags()
     lakes = []
     for path in paths:
-        for verts, tris in _read_lake_bin_tile(path):
+        m = _TILE_XY_RE.search(path.name)
+        tile_flags = ribbon_flags.get(f"{m.group(1)},{m.group(2)}", []) if m else []
+        for feature_idx, (verts, tris) in enumerate(_read_lake_bin_tile(path)):
+            is_ribbon = feature_idx < len(tile_flags) and bool(tile_flags[feature_idx])
             if len(tris) == 0:
                 continue
             for ring_idx in _extract_boundary_rings(tris):
@@ -495,8 +525,21 @@ def load_lake_beds():
                 lakes.append({
                     "ring_x": ring_xy[:, 0].astype(np.float64),
                     "ring_y": ring_xy[:, 1].astype(np.float64),
+                    # §7.34: per-vertex Z along the ring, SAME index order as
+                    # ring_x/ring_y. A real lake's ring is flat (every vertex
+                    # shares one Z, same value as z_cm below) so this is inert
+                    # for lakes. A waterway ribbon's ring is NOT flat - it
+                    # follows the stream's downhill slope along its length -
+                    # so a single scalar (z_cm, just vertex 0's Z) is not a
+                    # meaningful "water surface" for a station that may sit
+                    # anywhere along the ribbon. build_road_embankments.py's
+                    # §7.34 ribbon clearance guard uses this to look up the Z
+                    # of each station's NEAREST ring vertex instead of trusting
+                    # one arbitrary global value - see its own comment.
+                    "ring_z": verts[ring_idx, 2].astype(np.float64),
                     "z_cm": z_cm,
                     "bbox": bbox,
+                    "is_ribbon": is_ribbon,
                 })
     if lakes:
         print(f"  loaded {len(lakes)} lake bed(s) from {len(paths)} water tile(s) for "

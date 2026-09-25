@@ -10,6 +10,7 @@
 #include "DynamicMesh/MeshNormals.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -253,6 +254,13 @@ void AODTerrainManager::BeginPlay()
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: TerrainMat load %s"),
 		TerrainMat ? TEXT("OK") : TEXT("FAILED (terrain will use engine default material)"));
+
+	// Seasons feature (2026-09-07): one shared MID for every tile to render
+	// with instead of the raw asset - see TerrainMID's header comment.
+	if (TerrainMat)
+	{
+		TerrainMID = UMaterialInstanceDynamic::Create(TerrainMat, this);
+	}
 
 	// Runtime terrain carve (2026-08-26): load the road-station sidecar once
 	// up front, before any tile load can be dispatched from Tick - see
@@ -1565,9 +1573,9 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	}
 	TCollision = Lap(Clock);
 
-	if (TerrainMat)
+	if (TerrainMID)
 	{
-		Comp->SetMaterial(0, TerrainMat);
+		Comp->SetMaterial(0, TerrainMID);
 	}
 	TMaterial = Lap(Clock);
 
@@ -1612,9 +1620,9 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 		// corridor by construction.
 		WallComp->EnableComplexAsSimpleCollision();
 		WallComp->SetCollisionProfileName(TEXT("BlockAll"));
-		if (TerrainMat)
+		if (TerrainMID)
 		{
-			WallComp->SetMaterial(0, TerrainMat);
+			WallComp->SetMaterial(0, TerrainMID);
 		}
 		Tile.WallComp = WallComp;
 		TWall = Lap(Clock);

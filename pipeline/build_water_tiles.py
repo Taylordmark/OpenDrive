@@ -79,6 +79,31 @@ elevation minus this area's local origin" UE-frame Z everything else here
 already does; there is deliberately NO global sea-level plane (per task
 scope - Green Valley's lakes are ~700 m ASL, nowhere near ocean level).
 
+WATERWAYS (added 2026-09-07, closes the §7.23 caveat that a bridge deck
+crosses a dry gully - no water was ever drawn under real creek/river
+crossings): waterway=river/named-stream centerlines are buffered into
+ribbon polygons and fed into the SAME "lakes" list this module already
+writes to each ODL1 tile - build_terrain_mesh_tiles.load_lake_beds()/
+apply_water_depression() and ODWaterManager.cpp's CreateLakeComponent both
+already treat every polygon in a tile as a generic flat-shaded water
+surface with no lake-specific logic (the boundary-ring extractor's own
+2026-09-03 comment explicitly anticipated "a stream/river confluence baked
+into the same lake mesh entry" - this pass is that), so no runtime/terrain
+code changes were needed - see fetch_waterways()/build_waterway_ribbons()
+below for the new pipeline stage feeding that same path.
+
+ROAD CROSSING GAPS (added 2026-09-07, §7.27): of the 449 waterway/road
+crossings §7.26 found, 317 coincide with a §7.22 bridge station (deck +
+terrain carve already separate ribbon from road vertically - left alone)
+but 132 do not, and the ribbon used to render straight across the road at
+grade there - a visible water-sheet-over-pavement defect. Each such
+crossing segment now gets a gap cut spanning the road corridor (+ margin,
+see ROAD_GAP_MARGIN_M) via find_road_gap_intervals()/retained_t_intervals(),
+so the ribbon terminates at one road edge and resumes at the other (an
+implied culvert under the road) instead of rendering through it. Bridged
+crossings are untouched by this logic (find_road_gap_intervals is only
+called when the crossing's nearest road point is NOT a bridge).
+
 Usage:  python build_water_tiles.py   (needs road_stations.json first, for
                                         the shared world-frame origin)
 
@@ -108,10 +133,11 @@ from pathlib import Path
 
 import numpy as np
 import requests
+from scipy.spatial import cKDTree
 
 from build_terrain_mesh_tiles import NEAR_DEM_ZOOM, sample_dem
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
-from road_mesh_common import road_ue_z_m
+from road_mesh_common import ROAD_HALF_WIDTH, road_ue_z_m
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
 OVERPASS_URLS = [
@@ -293,6 +319,565 @@ def fetch_water_polygons():
           f"{skipped_too_few} too few nodes, skipped; {n_relations_built} multipolygon "
           f"relation(s) contributed {n_relation_rings} outer ring(s)) -> {RAW_DIR / 'osm_water.json'}")
     return polygons
+
+
+# --------------------------------------------------------------- waterways
+# Class defaults (m) used when an OSM `width` tag is absent - see
+# build_waterway_ribbons() for the tagged/default split reported in
+# verify_waterways_stats.txt. Blue River through Breckenridge (real,
+# checked against the DEM valley floor width at a handful of cross-
+# sections) runs ~8-12 m bank-to-bank in this stretch; a real named
+# mountain creek (Tenmile/Straight/Swan) is a fraction of that.
+WATERWAY_CLASS_WIDTH_M = {"river": 10.0, "stream": 3.5}
+WATERWAY_MIN_WIDTH_M = 1.5      # sanity floor for a garbage/zero width= tag
+WATERWAY_MAX_WIDTH_M = 60.0     # sanity ceiling (a tagged width in the
+                                  # hundreds of meters is a digitizing/unit
+                                  # error, not a real Summit County creek)
+WATERWAY_RESAMPLE_M = 20.0      # centerline resample spacing for elevation
+                                  # sampling + ribbon segmentation - matches
+                                  # the water bake's own lake DEM raster
+                                  # scale (RASTER_STEP_M), fine enough to
+                                  # follow real bends without one "lake"
+                                  # entry per OSM node.
+WATERWAY_SMOOTH_WINDOW = 5      # centered moving-average window (samples)
+                                  # applied before the monotonic clamp -
+                                  # damps single-pixel DEM noise without
+                                  # erasing the real valley grade.
+WATERWAY_DEPTH_M = 0.4          # water surface sits this far BELOW the
+                                  # smoothed monotonic centerline DEM
+                                  # reading (used as a stand-in for "bank"
+                                  # elevation - see module docstring caveat
+                                  # in verify_waterways_stats.txt: DEM
+                                  # resolution can't resolve a real bank
+                                  # separately from the channel at these
+                                  # narrow widths).
+ROAD_WATER_CLEARANCE_M = 1.0    # min gap kept between a ribbon edge and
+                                  # the road pavement edge for a
+                                  # near-parallel run (Blue River / CO-9).
+ROAD_CROSSING_ANGLE_DEG = 45.0  # >= this angle between waterway and
+                                  # nearest-road tangent counts as a
+                                  # "crossing" (left alone - the bridge
+                                  # deck + terrain carve already separates
+                                  # them vertically) rather than a
+                                  # "parallel run" (clipped off pavement).
+
+# §7.27: at a "crossing" that does NOT coincide with a §7.22 bridge station,
+# there is no deck/terrain separation - the ribbon must not render across
+# the road at grade (a visible water-sheet-over-pavement defect). Instead a
+# gap is cut in the ribbon spanning the road corridor (+ margin) so the
+# creek reads as terminating at one road edge and resuming at the other -
+# an implied culvert under the road, same visual language a real county
+# road/creek crossing without a bridge actually uses.
+ROAD_GAP_MARGIN_M = 1.5         # extra clearance added to ROAD_HALF_WIDTH
+                                  # on each side of an unbridged-crossing
+                                  # gap, so no ribbon triangle pokes out
+                                  # from under the implied culvert (same
+                                  # spirit as ROAD_WATER_CLEARANCE_M for
+                                  # parallel runs, just its own constant
+                                  # since a crossing gap and a parallel
+                                  # pull-back are different clearances).
+GAP_SUBSAMPLES = 21             # sub-samples taken along a crossing
+                                  # segment (WATERWAY_RESAMPLE_M ~= 20 m
+                                  # long) to locate the gap's entry/exit
+                                  # parametric position precisely - ~1 m
+                                  # spacing, well inside ROAD_GAP_MARGIN_M's
+                                  # buffer against the resulting rounding.
+MIN_GAP_FRAGMENT_M = 1.0        # a retained ribbon fragment shorter than
+                                  # this after a gap clip (chain-end stub,
+                                  # or two closely-spaced gaps leaving a
+                                  # sliver between them) is dropped instead
+                                  # of emitted as a degenerate quad.
+
+
+def fetch_waterways():
+    """Overpass fetch for waterway=river (always) / waterway=stream (named
+    only - an unnamed hillside trickle is noise, not a real feature) in the
+    active bbox. Simple `way["waterway"=...]` query only (no relation/
+    multipolygon handling - a linear waterway relation, e.g. a very long
+    multi-segment river OSM sometimes groups under `type=waterway`, is a
+    real but rare shape not seen in this county's data and is out of scope
+    for this pass, same spirit as this module's existing lake-relation
+    scope note)."""
+    s, w, n_, e = BBOX_SNWE
+    query = f"""
+    [out:json][timeout:180];
+    (
+      way["waterway"="river"]({s},{w},{n_},{e});
+      way["waterway"="stream"]["name"]({s},{w},{n_},{e});
+    );
+    (._;>;);
+    out body;
+    """
+    print(f"Querying Overpass for waterways in the {AREA_NAME} bbox "
+          f"({s:.3f},{w:.3f},{n_:.3f},{e:.3f}) ...")
+    data = None
+    for url in OVERPASS_URLS:
+        try:
+            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
+            r.raise_for_status()
+            data = r.json()
+            break
+        except requests.RequestException as exc:
+            print(f"  {url} failed ({exc}), trying next mirror")
+    if data is None:
+        raise SystemExit("All Overpass mirrors failed.")
+
+    nodes = {el["id"]: (el["lat"], el["lon"])
+             for el in data["elements"] if el["type"] == "node"}
+    ways = [el for el in data["elements"] if el["type"] == "way"]
+
+    n_river = n_stream = n_stream_unnamed_skipped = 0
+    # unnamed streams never reach Overpass at all (query already filters
+    # them server-side) - n_stream_unnamed_skipped stays informational/0
+    # unless a future query relaxation reintroduces them.
+    raw_ways = []
+    for w_el in ways:
+        nd_ids = w_el.get("nodes", [])
+        if len(nd_ids) < 2:
+            continue
+        pts = [nodes[n] for n in nd_ids if n in nodes]
+        if len(pts) < 2:
+            continue
+        tags = w_el.get("tags", {})
+        cls = tags.get("waterway")
+        if cls not in ("river", "stream"):
+            continue
+        if cls == "river":
+            n_river += 1
+        else:
+            n_stream += 1
+        raw_ways.append({
+            "way_id": w_el["id"], "node_ids": [n for n in nd_ids if n in nodes],
+            "pts": pts, "name": tags.get("name", ""), "class": cls,
+            "width": tags.get("width"),
+        })
+
+    (RAW_DIR / "osm_waterways.json").write_text(json.dumps({"ways": raw_ways, "nodes": nodes}))
+    print(f"  got {len(raw_ways)} waterway way(s): {n_river} river, {n_stream} named stream "
+          f"-> {RAW_DIR / 'osm_waterways.json'}")
+    return raw_ways, nodes
+
+
+def _parse_width_m(width_tag):
+    """OSM `width` values are inconsistent free text ("8", "8 m", "8m",
+    occasionally other units) - this project's data only ever has plain
+    numbers/"<n> m", so a permissive-but-bounded parse (strip non-numeric
+    suffix, sanity-clamp) is enough; anything unparseable falls back to the
+    class default exactly like a missing tag would."""
+    if not width_tag:
+        return None
+    try:
+        num = float("".join(ch for ch in str(width_tag) if ch.isdigit() or ch in ".-"))
+    except ValueError:
+        return None
+    if num <= 0 or not (WATERWAY_MIN_WIDTH_M <= num <= WATERWAY_MAX_WIDTH_M):
+        return None
+    return num
+
+
+def chain_waterways(raw_ways, nodes):
+    """Chains same-name, same-class OSM way segments that share an endpoint
+    node into single logical waterway centerlines (a real OSM river/creek is
+    almost always split into many short ways between tributary junctions).
+    Chaining is restricted to (class, name) groups so a shared confluence
+    node between e.g. Blue River and Tenmile Creek never merges the two into
+    one chain - only fragments of the SAME named waterway are joined. Reuses
+    build_water_tiles.assemble_outer_rings' segment-walking approach but for
+    OPEN chains (no closure requirement). An unnamed river (rare; "river" is
+    selected regardless of name) chains within its own empty-name/way_id-
+    keyed singleton group instead of merging with other unnamed rivers that
+    happen to share a node."""
+    groups = defaultdict(list)
+    for w_ in raw_ways:
+        key = (w_["class"], w_["name"]) if w_["name"] else (w_["class"], f"__unnamed_{w_['way_id']}")
+        groups[key].append(w_)
+
+    chains = []
+    for (cls, name), members in groups.items():
+        segments = [list(m["node_ids"]) for m in members]
+        width_tags = [m["width"] for m in members if m["width"]]
+        unused = list(range(len(segments)))
+        while unused:
+            i0 = unused.pop(0)
+            chain = list(segments[i0])
+            progress = True
+            while progress:
+                progress = False
+                for j in list(unused):
+                    seg = segments[j]
+                    if seg[0] == chain[-1]:
+                        chain.extend(seg[1:]); unused.remove(j); progress = True
+                    elif seg[-1] == chain[-1]:
+                        chain.extend(list(reversed(seg))[1:]); unused.remove(j); progress = True
+                    elif seg[-1] == chain[0]:
+                        chain[0:0] = seg[:-1]; unused.remove(j); progress = True
+                    elif seg[0] == chain[0]:
+                        chain[0:0] = list(reversed(seg))[:-1]; unused.remove(j); progress = True
+                    else:
+                        continue
+                    break
+            latlon = [tuple(nodes[nid]) for nid in chain if nid in nodes]
+            if len(latlon) < 2:
+                continue
+            chains.append({
+                "class": cls, "name": name or "(unnamed)", "latlon": latlon,
+                "width_tag_m": _parse_width_m(width_tags[0]) if width_tags else None,
+            })
+    return chains
+
+
+def resample_polyline(east_m, north_m, step_m):
+    """Uniform arc-length resample of a polyline (removes OSM's uneven
+    node-density noise before DEM sampling / monotonic smoothing)."""
+    east_m = np.asarray(east_m, dtype=np.float64)
+    north_m = np.asarray(north_m, dtype=np.float64)
+    seg = np.hypot(np.diff(east_m), np.diff(north_m))
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    total = s[-1]
+    if total < 1e-6:
+        return east_m[:1], north_m[:1]
+    n_samples = max(2, int(round(total / step_m)) + 1)
+    s_new = np.linspace(0.0, total, n_samples)
+    e_new = np.interp(s_new, s, east_m)
+    n_new = np.interp(s_new, s, north_m)
+    return e_new, n_new
+
+
+def monotonic_flow_profile(elev_m):
+    """Smooths then forces elev_m non-increasing along its own index order
+    (assumes the array has ALREADY been oriented high->low by the caller -
+    see build_waterway_ribbons). Moving-average smooth first (damps DEM
+    noise), then a running-minimum clamp (guarantees the final profile never
+    ticks back uphill even if smoothing reintroduced a local bump)."""
+    n = len(elev_m)
+    if n < 2:
+        return elev_m.copy()
+    w = min(WATERWAY_SMOOTH_WINDOW, n if n % 2 else n - 1)
+    if w < 3:
+        smoothed = elev_m.copy()
+    else:
+        kernel = np.ones(w) / w
+        pad = w // 2
+        padded = np.pad(elev_m, pad, mode="edge")
+        smoothed = np.convolve(padded, kernel, mode="valid")
+    return np.minimum.accumulate(smoothed)
+
+
+def offset_polyline(east_m, north_m, half_width_m):
+    """Per-vertex left/right offset polylines from a centerline, using the
+    average of the adjacent segment normals at interior vertices (a simple
+    miter join - no explicit miter-length clamp against very sharp bends;
+    acceptable for real OSM creek/river node spacing, which is fine-grained
+    enough that this hasn't produced a visible spike in this county's data -
+    documented limitation, not verified exhaustively). Returns
+    (left_e, left_n, right_e, right_n), each same length as the input."""
+    e = np.asarray(east_m); n = np.asarray(north_m)
+    npts = len(e)
+    tangents = np.zeros((npts, 2))
+    tangents[1:-1, 0] = e[2:] - e[:-2]
+    tangents[1:-1, 1] = n[2:] - n[:-2]
+    tangents[0] = [e[1] - e[0], n[1] - n[0]]
+    tangents[-1] = [e[-1] - e[-2], n[-1] - n[-2]]
+    lens = np.hypot(tangents[:, 0], tangents[:, 1])
+    lens[lens < 1e-9] = 1.0
+    tangents /= lens[:, None]
+    # left normal = tangent rotated +90 deg in (east, north) plane
+    normals = np.stack([-tangents[:, 1], tangents[:, 0]], axis=1)
+    left_e = e + normals[:, 0] * half_width_m
+    left_n = n + normals[:, 1] * half_width_m
+    right_e = e - normals[:, 0] * half_width_m
+    right_n = n - normals[:, 1] * half_width_m
+    return left_e, left_n, right_e, right_n
+
+
+def build_road_point_index():
+    """cKDTree over every road station point (east_m/north_m, meters,
+    origin-relative) plus a parallel is_bridge/tangent array, for the
+    waterway/road-overlap check (build_waterway_ribbons). Returns None if
+    road_stations.json has no segments (shouldn't happen - build_water_tiles
+    already requires it for the shared origin - but degrade to "no road
+    overlap check" rather than crash)."""
+    if not STATIONS_PATH.is_file():
+        return None
+    station_data = json.loads(STATIONS_PATH.read_text())
+    pts_e, pts_n, pts_bridge, pts_tx, pts_ty = [], [], [], [], []
+    for seg in station_data.get("segments", []):
+        ex = np.asarray(seg["east_m"]); nx = np.asarray(seg["north_m"])
+        if len(ex) < 2:
+            continue
+        tx = np.gradient(ex); ty = np.gradient(nx)
+        tl = np.hypot(tx, ty); tl[tl < 1e-9] = 1.0
+        pts_e.append(ex); pts_n.append(nx)
+        pts_bridge.append(np.asarray(seg.get("is_bridge", [False] * len(ex)), dtype=bool))
+        pts_tx.append(tx / tl); pts_ty.append(ty / tl)
+    if not pts_e:
+        return None
+    all_e = np.concatenate(pts_e); all_n = np.concatenate(pts_n)
+    all_bridge = np.concatenate(pts_bridge)
+    all_tx = np.concatenate(pts_tx); all_ty = np.concatenate(pts_ty)
+    tree = cKDTree(np.stack([all_e, all_n], axis=1))
+    return {"tree": tree, "bridge": all_bridge, "tx": all_tx, "ty": all_ty,
+            "e": all_e, "n": all_n}
+
+
+def clip_corner_to_road(corner_e, corner_n, center_e, center_n, road_idx):
+    """If corner_e/n sits closer to the nearest road point than
+    ROAD_HALF_WIDTH+ROAD_WATER_CLEARANCE_M, pulls the corner back toward the
+    centerline point just far enough (one-shot approximation using the
+    CURRENT nearest-road distance at the corner, not re-queried after the
+    pull - good enough at this scale/clearance) to respect that clearance.
+    Returns (new_e, new_n, was_clipped)."""
+    dist, idx = road_idx["tree"].query([corner_e, corner_n])
+    min_allowed = ROAD_HALF_WIDTH + ROAD_WATER_CLEARANCE_M
+    if dist >= min_allowed:
+        return corner_e, corner_n, False
+    dx, dy = corner_e - center_e, corner_n - center_n
+    full_len = math.hypot(dx, dy)
+    if full_len < 1e-6:
+        return corner_e, corner_n, False
+    # Approximate target length: shrink by the shortfall between the actual
+    # nearest-road distance at the (unclipped) corner and the required
+    # clearance - clamped to [0, full_len].
+    shortfall = min_allowed - dist
+    new_len = max(0.0, full_len - shortfall)
+    scale = new_len / full_len
+    return center_e + dx * scale, center_n + dy * scale, True
+
+
+def find_road_gap_intervals(e0, n0, e1, n1, road_idx, gap_half_width_m,
+                             n_subsamples=GAP_SUBSAMPLES):
+    """§7.27: along the straight segment from (e0,n0) to (e1,n1), finds the
+    parametric t-interval(s) in [0,1] where the centerline sits within
+    gap_half_width_m of the nearest road station AND that nearest station is
+    NOT on a bridge - i.e. where an unbridged road corridor overlaps this
+    ribbon segment and must be cut out (implied culvert) rather than drawn
+    across the pavement at grade. A bridged crossing never contributes an
+    interval here (the deck already separates ribbon from road vertically -
+    §7.22/§7.26), so bridged crossings are left fully continuous.
+
+    Each contiguous run of in-gap subsamples is rounded outward by one
+    subsample step before being returned - conservative, so the discretized
+    boundary never leaves a sliver of ribbon poking out from under the
+    implied culvert; ROAD_GAP_MARGIN_M's own clearance covers the resulting
+    <= 1 subsample-step (~1 m) of over-clip. Returns a list of merged
+    (t_start, t_end) pairs, empty if the whole segment clears the corridor
+    or every nearby road point on it is a bridge."""
+    ts = np.linspace(0.0, 1.0, n_subsamples)
+    pts_e = e0 + (e1 - e0) * ts
+    pts_n = n0 + (n1 - n0) * ts
+    dists, idxs = road_idx["tree"].query(np.stack([pts_e, pts_n], axis=1))
+    in_gap = (dists < gap_half_width_m) & (~road_idx["bridge"][idxs])
+    n = len(ts)
+    raw_intervals = []
+    i = 0
+    while i < n:
+        if in_gap[i]:
+            j = i
+            while j + 1 < n and in_gap[j + 1]:
+                j += 1
+            raw_intervals.append((ts[max(0, i - 1)], ts[min(n - 1, j + 1)]))
+            i = j + 1
+        else:
+            i += 1
+    merged = []
+    for lo, hi in raw_intervals:
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def retained_t_intervals(gap_intervals):
+    """[0,1] minus the union of gap_intervals (already sorted/merged by
+    find_road_gap_intervals) -> the list of retained (t0,t1) sub-intervals
+    a segment's ribbon quad(s) should actually be built from."""
+    if not gap_intervals:
+        return [(0.0, 1.0)]
+    retained = []
+    cursor = 0.0
+    for lo, hi in gap_intervals:
+        if lo > cursor:
+            retained.append((cursor, lo))
+        cursor = max(cursor, hi)
+    if cursor < 1.0:
+        retained.append((cursor, 1.0))
+    return retained
+
+
+def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache, road_idx):
+    """Centerline (lat/lon chain) -> list of per-segment flat ribbon quads
+    ("lake" dicts, SAME shape build_lake_mesh's caller already produces) +
+    a summary dict for verify_waterways_stats.txt. See module docstring for
+    the elevation/geometry/road-overlap approach."""
+    ribbons = []
+    summaries = []
+    n_width_tagged = n_width_default = 0
+    n_crossings = n_crossings_bridged = n_parallel_clipped = 0
+    n_gap_segments = n_gap_fragments_dropped = 0
+    total_ribbon_km = 0.0
+
+    for chain in chains:
+        lat = np.array([lat for lat, lon in chain["latlon"]])
+        lon = np.array([lon for lat, lon in chain["latlon"]])
+        east_m = (lon - lon0) * m_per_deg_lon
+        north_m = (lat - lat0) * M_PER_DEG_LAT
+        if len(east_m) < 2:
+            continue
+
+        rs_e, rs_n = resample_polyline(east_m, north_m, WATERWAY_RESAMPLE_M)
+        if len(rs_e) < 2:
+            continue
+        rs_lat = lat0 + rs_n / M_PER_DEG_LAT
+        rs_lon = lon0 + rs_e / m_per_deg_lon
+        raw_elev = sample_dem(rs_lat, rs_lon, NEAR_DEM_ZOOM, session, dem_cache)
+
+        # Flow direction: a river flows high -> low. Compare mean elevation
+        # of the first vs last fifth of the chain; reverse array order (and
+        # remember to reverse geometry back) if the chain was digitized
+        # low -> high, so index 0 is always the upstream/high end.
+        k = max(1, len(raw_elev) // 5)
+        reversed_chain = np.mean(raw_elev[:k]) < np.mean(raw_elev[-k:])
+        if reversed_chain:
+            rs_e, rs_n = rs_e[::-1].copy(), rs_n[::-1].copy()
+            raw_elev = raw_elev[::-1].copy()
+
+        smooth_elev = monotonic_flow_profile(raw_elev)
+        water_elev = smooth_elev - WATERWAY_DEPTH_M
+        z_cm = (water_elev + 0.0 - ORIGIN_HEIGHT_M) * 100.0  # road_ue_z_m inlined for the array case
+        # (road_ue_z_m(elev_m, 0.0, ORIGIN_HEIGHT_M) is scalar-only in its
+        # existing call sites; the formula itself - elev + lift - origin -
+        # is trivially vectorized here, kept numerically identical.)
+
+        half_width_m = chain["width_tag_m"] or WATERWAY_CLASS_WIDTH_M[chain["class"]]
+        if chain["width_tag_m"]:
+            n_width_tagged += 1
+        else:
+            n_width_default += 1
+        half_width_m = half_width_m / 2.0
+
+        left_e, left_n, right_e, right_n = offset_polyline(rs_e, rs_n, half_width_m)
+        clip_left_e, clip_left_n = left_e.copy(), left_n.copy()
+        clip_right_e, clip_right_n = right_e.copy(), right_n.copy()
+
+        gap_half_width_m = ROAD_HALF_WIDTH + ROAD_GAP_MARGIN_M
+        seg_gaps = []   # (i, t_start, t_end) in chain order, for the verify plot
+        n_seg_crossings = n_seg_parallel_clipped = n_seg_gap_segments = n_seg_fragments_dropped = 0
+        for i in range(len(rs_e) - 1):
+            l0e, l0n, r0e, r0n = left_e[i], left_n[i], right_e[i], right_n[i]
+            l1e, l1n, r1e, r1n = left_e[i + 1], left_n[i + 1], right_e[i + 1], right_n[i + 1]
+            gap_intervals = []
+            if road_idx is not None:
+                mid_e = (rs_e[i] + rs_e[i + 1]) / 2.0
+                mid_n = (rs_n[i] + rs_n[i + 1]) / 2.0
+                dist, ridx = road_idx["tree"].query([mid_e, mid_n])
+                if dist < half_width_m + ROAD_HALF_WIDTH + ROAD_WATER_CLEARANCE_M + 10.0:
+                    wtx, wty = rs_e[i + 1] - rs_e[i], rs_n[i + 1] - rs_n[i]
+                    wlen = math.hypot(wtx, wty) or 1.0
+                    wtx, wty = wtx / wlen, wty / wlen
+                    rtx, rty = road_idx["tx"][ridx], road_idx["ty"][ridx]
+                    cos_ang = abs(wtx * rtx + wty * rty)
+                    angle_deg = math.degrees(math.acos(min(1.0, max(-1.0, cos_ang))))
+                    is_crossing = angle_deg >= ROAD_CROSSING_ANGLE_DEG
+                    if is_crossing:
+                        n_seg_crossings += 1
+                        if road_idx["bridge"][ridx]:
+                            n_crossings_bridged += 1
+                            # §7.22 bridge deck already separates ribbon from
+                            # road vertically - no gap, draw straight through.
+                        else:
+                            # §7.27: no bridge at this crossing - cut a gap
+                            # spanning the road corridor (+ margin) instead
+                            # of drawing the ribbon across pavement at grade.
+                            gap_intervals = find_road_gap_intervals(
+                                rs_e[i], rs_n[i], rs_e[i + 1], rs_n[i + 1],
+                                road_idx, gap_half_width_m)
+                            if gap_intervals:
+                                n_seg_gap_segments += 1
+                                seg_gaps.append((i, gap_intervals))
+                    else:
+                        l0e, l0n, c0 = clip_corner_to_road(l0e, l0n, rs_e[i], rs_n[i], road_idx)
+                        r0e, r0n, c1 = clip_corner_to_road(r0e, r0n, rs_e[i], rs_n[i], road_idx)
+                        l1e, l1n, c2 = clip_corner_to_road(l1e, l1n, rs_e[i + 1], rs_n[i + 1], road_idx)
+                        r1e, r1n, c3 = clip_corner_to_road(r1e, r1n, rs_e[i + 1], rs_n[i + 1], road_idx)
+                        if c0 or c1 or c2 or c3:
+                            n_seg_parallel_clipped += 1
+                        if c0: clip_left_e[i], clip_left_n[i] = l0e, l0n
+                        if c1: clip_right_e[i], clip_right_n[i] = r0e, r0n
+                        if c2: clip_left_e[i + 1], clip_left_n[i + 1] = l1e, l1n
+                        if c3: clip_right_e[i + 1], clip_right_n[i + 1] = r1e, r1n
+
+            seg_len_m = math.hypot(rs_e[i + 1] - rs_e[i], rs_n[i + 1] - rs_n[i])
+
+            def _emit_quad(ta, tb):
+                # Corners/elevation lerped linearly between vertex i and
+                # i+1 at parametric ta/tb - the base smoothed water surface
+                # (z_cm) is already monotonic non-increasing along the
+                # chain, and a linear interpolation between two points of a
+                # monotonic sequence stays monotonic, so splitting a segment
+                # here changes nothing about flow monotonicity (§7.26).
+                qle0, qln0 = _lerp(l0e, l1e, ta), _lerp(l0n, l1n, ta)
+                qre0, qrn0 = _lerp(r0e, r1e, ta), _lerp(r0n, r1n, ta)
+                qle1, qln1 = _lerp(l0e, l1e, tb), _lerp(l0n, l1n, tb)
+                qre1, qrn1 = _lerp(r0e, r1e, tb), _lerp(r0n, r1n, tb)
+                q_xy_cm = [(qle0 * 100.0, -qln0 * 100.0), (qre0 * 100.0, -qrn0 * 100.0),
+                           (qre1 * 100.0, -qrn1 * 100.0), (qle1 * 100.0, -qln1 * 100.0)]
+                za = _lerp(z_cm[i], z_cm[i + 1], ta)
+                zb = _lerp(z_cm[i], z_cm[i + 1], tb)
+                q_z_cm = float((za + zb) / 2.0)
+                verts, uvs, tris, method = build_lake_mesh(q_xy_cm, q_z_cm)
+                if len(tris) == 0:
+                    return 0.0
+                cx_cm = float(np.mean([p[0] for p in q_xy_cm]))
+                cy_cm = float(np.mean([p[1] for p in q_xy_cm]))
+                ribbons.append({"verts": verts, "uvs": uvs, "tris": tris,
+                                 "centroid_cm": (cx_cm, cy_cm)})
+                return seg_len_m * (tb - ta)
+
+            for ta, tb in retained_t_intervals(gap_intervals):
+                frag_len_m = seg_len_m * (tb - ta)
+                if gap_intervals and frag_len_m < MIN_GAP_FRAGMENT_M:
+                    n_seg_fragments_dropped += 1
+                    continue
+                total_ribbon_km += _emit_quad(ta, tb) / 1000.0
+
+        n_crossings += n_seg_crossings
+        n_parallel_clipped += n_seg_parallel_clipped
+        n_gap_segments += n_seg_gap_segments
+        n_gap_fragments_dropped += n_seg_fragments_dropped
+        summaries.append({
+            "name": chain["name"], "class": chain["class"],
+            "n_segments": len(rs_e) - 1, "half_width_m": half_width_m,
+            "elev_hi_m": float(smooth_elev[0]), "elev_lo_m": float(smooth_elev[-1]),
+            "reversed": bool(reversed_chain),
+            "n_crossings": n_seg_crossings, "n_parallel_clipped": n_seg_parallel_clipped,
+            "n_gap_segments": n_seg_gap_segments, "n_fragments_dropped": n_seg_fragments_dropped,
+            # Full geometry for offline verification plots (map + longitudinal
+            # profile) - small enough per-chain (WATERWAY_RESAMPLE_M spacing)
+            # to dump for every chain, not just the named highlights.
+            "east_m": rs_e.tolist(), "north_m": rs_n.tolist(),
+            "raw_elev_m": raw_elev.tolist(), "smooth_elev_m": smooth_elev.tolist(),
+            "water_elev_m": water_elev.tolist(),
+            "left_e": clip_left_e.tolist(), "left_n": clip_left_n.tolist(),
+            "right_e": clip_right_e.tolist(), "right_n": clip_right_n.tolist(),
+            # gap intervals for the verify-script overlay: (segment index,
+            # [(t_start, t_end), ...]) - lets the plot draw the exact clipped
+            # span against the road corridor rather than re-deriving it.
+            "seg_gaps": [(int(idx), [(float(a), float(b)) for a, b in ivls])
+                         for idx, ivls in seg_gaps],
+        })
+
+    stats = {
+        "n_width_tagged": n_width_tagged, "n_width_default": n_width_default,
+        "n_crossings": n_crossings, "n_crossings_bridged": n_crossings_bridged,
+        "n_parallel_clipped": n_parallel_clipped, "total_ribbon_km": total_ribbon_km,
+        "n_gap_segments": n_gap_segments, "n_gap_fragments_dropped": n_gap_fragments_dropped,
+    }
+    return ribbons, summaries, stats
 
 
 def polygon_area_m2(ring_e, ring_n):
@@ -546,15 +1131,35 @@ def main():
         cy_cm = float(np.mean([p[1] for p in ring_xy_cm]))
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris})
+        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris, "is_ribbon": False})
 
         lake_summaries.append({
             "way_id": poly["way_id"], "name": poly["name"] or "(unnamed)",
             "area_m2": area_m2, "surface_elev_m": surface_elev_m,
             "surface_z_cm": surface_z_cm, "tile": (tx, ty),
             "n_dem_samples": len(elevs), "verts": len(verts), "tris": len(tris),
-            "method": method,
+            "method": method, "ring_latlon": [list(p) for p in ring_ll],
         })
+
+    # ------------------------------------------------------------ waterways
+    n_lake_tiles = len(buckets)
+    raw_ways, ww_nodes = fetch_waterways()
+    chains = chain_waterways(raw_ways, ww_nodes)
+    road_idx = build_road_point_index()
+    if road_idx is None:
+        print("  WARNING: no road points loaded - waterway/road overlap check skipped")
+    ribbons, chain_summaries, ww_stats = build_waterway_ribbons(
+        chains, lat0, lon0, m_per_deg_lon, session, dem_cache, road_idx)
+    for rb in ribbons:
+        cx_cm, cy_cm = rb["centroid_cm"]
+        tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
+        ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
+        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"], "is_ribbon": True})
+    n_river_chains = sum(1 for c in chains if c["class"] == "river")
+    n_stream_chains = sum(1 for c in chains if c["class"] == "stream")
+    print(f"\n{len(raw_ways)} waterway way(s) chained into {len(chains)} waterway centerline(s) "
+          f"({n_river_chains} river, {n_stream_chains} named stream), {len(ribbons)} ribbon "
+          f"segment(s), {ww_stats['total_ribbon_km']:.2f} km total")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     gen_id = compute_generation_id()
@@ -563,6 +1168,19 @@ def main():
 
     total_verts = total_tris = 0
     written_paths = []
+    ribbon_flags = {}   # §7.34: "tx,ty" -> [is_ribbon per feature, SAME order as
+                          # write_tile() wrote them] - a Python-only sidecar, NOT
+                          # part of the ODL1 .bin format itself (left byte-for-byte
+                          # unchanged - ODWaterManager.cpp's runtime reader and
+                          # build_terrain_mesh_tiles.py's lake-bed depression pass
+                          # both still treat every feature as a generic flat water
+                          # surface, exactly as intended - "ribbons render/freeze
+                          # like lakes" stays true). Only load_lake_beds()'s NEW
+                          # is_ribbon-aware callers (build_road_embankments.py's
+                          # §7.23 water-crossing trigger) read this file; a caller
+                          # that doesn't know about it (or a stale/missing sidecar)
+                          # sees plain lake dicts exactly as before - see that
+                          # function's own backward-compatible-default comment.
     for (tx, ty), lakes in buckets.items():
         out_path = OUT_DIR / f"water_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(out_path, lakes, gen_id_bytes)
@@ -571,18 +1189,27 @@ def main():
         t = sum(len(lk["tris"]) for lk in lakes)
         total_verts += v
         total_tris += t
-        print(f"  tile ({tx},{ty}): {len(lakes)} lake(s), {v} verts, {t} tris -> {out_path.name}")
+        ribbon_flags[f"{tx},{ty}"] = [bool(lk.get("is_ribbon", False)) for lk in lakes]
+        print(f"  tile ({tx},{ty}): {len(lakes)} feature(s), {v} verts, {t} tris -> {out_path.name}")
 
     n_stale = delete_stale_tiles(OUT_DIR, f"water_{AREA_NAME}_test_tile_*.bin", written_paths)
     print(f"deleted {n_stale} stale water tile(s) from a previous run")
+
+    ribbon_flags_path = OUT_DIR / f"water_{AREA_NAME}_test_ribbon_flags.json"
+    ribbon_flags_path.write_text(json.dumps(ribbon_flags))
+    n_ribbon_features = sum(sum(1 for v in flags if v) for flags in ribbon_flags.values())
+    print(f"wrote ribbon/lake type sidecar ({n_ribbon_features} ribbon feature(s) "
+          f"of {sum(len(v) for v in ribbon_flags.values())} total) -> {ribbon_flags_path.name}")
 
     print(f"\n{len(polygons)} OSM water polygon(s) fetched -> {len(lake_summaries)} lake(s) built "
           f"({n_flowing} flowing-water [river/stream/canal] polygon(s) skipped - flat-plane "
           f"model doesn't apply, see FLOWING_WATER_TAGS; {n_too_small} too small/sliver, "
           f"skipped; {n_fallback_elev} used the ring-vertex "
           f"elevation fallback [interior raster found nothing]; {n_fan_fallback} used the "
-          f"fan-triangulation fallback [ear-clip stalled]) -> {len(buckets)} tile(s), "
-          f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
+          f"fan-triangulation fallback [ear-clip stalled])")
+    print(f"waterway ribbons added {len(ribbons)} more feature(s) across "
+          f"{len(buckets) - n_lake_tiles} additional tile(s) (lakes alone used {n_lake_tiles} tile(s))")
+    print(f"-> {len(buckets)} tile(s) total, {total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
     print("\nPer-lake summary:")
     for s in sorted(lake_summaries, key=lambda s: -s["area_m2"])[:20]:
@@ -590,6 +1217,40 @@ def main():
               f"surface_elev={s['surface_elev_m']:.1f} m surface_z={s['surface_z_cm']:.1f} cm "
               f"tile={s['tile']} dem_samples={s['n_dem_samples']} verts={s['verts']} "
               f"tris={s['tris']} method={s['method']}")
+
+    print("\nPer-waterway summary:")
+    for s in sorted(chain_summaries, key=lambda s: -s["n_segments"]):
+        print(f"  \"{s['name']}\" class={s['class']} segments={s['n_segments']} "
+              f"half_width={s['half_width_m']:.1f}m elev {s['elev_hi_m']:.1f}->{s['elev_lo_m']:.1f}m "
+              f"reversed={s['reversed']} crossings={s['n_crossings']} "
+              f"parallel_clipped={s['n_parallel_clipped']} gap_segments={s['n_gap_segments']} "
+              f"fragments_dropped={s['n_fragments_dropped']}")
+
+    print(f"\nwaterway width sourcing: {ww_stats['n_width_tagged']} tagged, "
+          f"{ww_stats['n_width_default']} class default")
+    print(f"waterway/road crossings: {ww_stats['n_crossings']} "
+          f"({ww_stats['n_crossings_bridged']} coincide with a bridge station)")
+    print(f"waterway/road parallel-run clips applied: {ww_stats['n_parallel_clipped']}")
+    print(f"§7.27 unbridged-crossing gaps: {ww_stats['n_gap_segments']} segment(s) gap-clipped, "
+          f"{ww_stats['n_gap_fragments_dropped']} sub-fragment(s) dropped below "
+          f"{MIN_GAP_FRAGMENT_M:.1f} m")
+
+    # Dump a machine-readable record (gitignored data/raw, same as every
+    # other *_test raw-fetch cache this module already writes) for offline
+    # verification scripts to consume without re-running the Overpass fetch.
+    dump = {
+        "lake_summaries": [
+            {k: (list(v) if isinstance(v, tuple) else v) for k, v in s.items()}
+            for s in lake_summaries
+        ],
+        "chain_summaries": chain_summaries,
+        "ww_stats": ww_stats,
+        "n_lake_tiles": n_lake_tiles,
+        "n_total_tiles": len(buckets),
+        "total_verts": total_verts,
+        "total_tris": total_tris,
+    }
+    (RAW_DIR / "waterway_build_summary.json").write_text(json.dumps(dump, indent=2))
 
 
 if __name__ == "__main__":

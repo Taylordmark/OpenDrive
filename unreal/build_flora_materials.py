@@ -84,6 +84,154 @@ def must_connect_property(expr, out_pin, mat_property):
             f"connect_material_property failed: output pin '{out_pin}' -> {mat_property}")
 
 
+# ---------------------------------------------------------------------------
+# Deciduous-arc follow-up (2026-09, next steps.md sec 7.17) node-soup helpers -
+# small, explicit, material-argument-first so the same helpers build graphs on
+# both M_Foliage (fall color / leaf drop) and M_Bark_Aspen (twig snow) below.
+_ny = {}
+
+
+def _node(mat, cls, x=-700):
+    _ny[mat] = _ny.get(mat, 800) + 120
+    return MEL.create_material_expression(mat, cls, x, _ny[mat])
+
+
+def _must_connect(a, a_out, b, b_out):
+    if not MEL.connect_material_expressions(a, a_out, b, b_out):
+        raise RuntimeError(
+            f"could not connect {a.get_class().get_name()}.{a_out!r} -> "
+            f"{b.get_class().get_name()}.{b_out!r}")
+
+
+def _const(mat, v, x=-700):
+    n = _node(mat, unreal.MaterialExpressionConstant, x)
+    n.set_editor_property("r", v)
+    return n
+
+
+def _const2(mat, a, b, x=-700):
+    n = _node(mat, unreal.MaterialExpressionConstant2Vector, x)
+    n.set_editor_property("r", a)
+    n.set_editor_property("g", b)
+    return n
+
+
+def _const3(mat, r, gg, b, x=-700):
+    n = _node(mat, unreal.MaterialExpressionConstant3Vector, x)
+    n.set_editor_property("constant", unreal.LinearColor(r, gg, b, 1.0))
+    return n
+
+
+def _mask(mat, a, r=False, gg=False, b=False, alpha=False, a_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionComponentMask, x)
+    n.set_editor_property("r", r)
+    n.set_editor_property("g", gg)
+    n.set_editor_property("b", b)
+    n.set_editor_property("a", alpha)
+    _must_connect(a, a_out, n, "")
+    return n
+
+
+def _binop(mat, cls, a, b, a_out="", b_out="", x=-700):
+    n = _node(mat, cls, x)
+    _must_connect(a, a_out, n, "A")
+    _must_connect(b, b_out, n, "B")
+    return n
+
+
+def _mul(mat, a, b, a_out="", b_out=""):
+    return _binop(mat, unreal.MaterialExpressionMultiply, a, b, a_out, b_out)
+
+
+def _add(mat, a, b, a_out="", b_out=""):
+    return _binop(mat, unreal.MaterialExpressionAdd, a, b, a_out, b_out)
+
+
+def _sub(mat, a, b, a_out="", b_out=""):
+    return _binop(mat, unreal.MaterialExpressionSubtract, a, b, a_out, b_out)
+
+
+def _div(mat, a, b, a_out="", b_out=""):
+    return _binop(mat, unreal.MaterialExpressionDivide, a, b, a_out, b_out)
+
+
+def _dotp(mat, a, b, a_out="", b_out=""):
+    return _binop(mat, unreal.MaterialExpressionDotProduct, a, b, a_out, b_out)
+
+
+def _clamp01(mat, a, a_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionClamp, x)
+    n.set_editor_property("min_default", 0.0)
+    n.set_editor_property("max_default", 1.0)
+    _must_connect(a, a_out, n, "")
+    return n
+
+
+def _frac(mat, a, a_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionFrac, x)
+    _must_connect(a, a_out, n, "")
+    return n
+
+
+def _floor(mat, a, a_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionFloor, x)
+    _must_connect(a, a_out, n, "")
+    return n
+
+
+def _sine(mat, a, a_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionSine, x)
+    _must_connect(a, a_out, n, "")
+    return n
+
+
+def _lerp(mat, a, b, alpha, a_out="", b_out="", al_out="", x=-700):
+    n = _node(mat, unreal.MaterialExpressionLinearInterpolate, x)
+    _must_connect(a, a_out, n, "A")
+    _must_connect(b, b_out, n, "B")
+    _must_connect(alpha, al_out, n, "Alpha")
+    return n
+
+
+def _world_xy(mat):
+    wp = _node(mat, unreal.MaterialExpressionWorldPosition)
+    return _mask(mat, wp, r=True, gg=True)
+
+
+def _value_noise(mat, uv2, scale_cm, period=97.0, seed_offset=(0.0, 0.0)):
+    """Direct port of apply_ground_material.py's value_noise()/
+    wrap_lattice_uv() (see that file's 2026-09-08 polish-pass comment for
+    why the lattice-wrap step exists): a tileable-lattice value-noise hash,
+    with its input pre-wrapped into a small repeating range so the classic
+    sin/dot hash trick stays numerically stable at this project's real
+    (large, UTM-scale) world coordinates. Returns a scalar roughly in [0,1]."""
+    uv2 = _mul(mat, uv2, _const(mat, 1.0 / scale_cm))
+    if seed_offset != (0.0, 0.0):
+        uv2 = _add(mat, uv2, _const2(mat, *seed_offset))
+    scaled = _mul(mat, uv2, _const(mat, 1.0 / period))
+    wrapped01 = _frac(mat, scaled)
+    wrapped = _mul(mat, wrapped01, _const(mat, period))
+
+    i = _floor(mat, wrapped)
+    f = _frac(mat, wrapped)
+
+    def _hash2(v):
+        d = _dotp(mat, v, _const2(mat, 12.9898, 78.233))
+        s = _sine(mat, d)
+        m = _mul(mat, s, _const(mat, 43758.5453))
+        return _frac(mat, m)
+
+    h00 = _hash2(i)
+    h10 = _hash2(_add(mat, i, _const2(mat, 1.0, 0.0)))
+    h01 = _hash2(_add(mat, i, _const2(mat, 0.0, 1.0)))
+    h11 = _hash2(_add(mat, i, _const2(mat, 1.0, 1.0)))
+    fx = _mask(mat, f, r=True)
+    fy = _mask(mat, f, gg=True)
+    top = _lerp(mat, h00, h10, fx)
+    bot = _lerp(mat, h01, h11, fx)
+    return _lerp(mat, top, bot, fy)
+
+
 # ----------------------------------------------------------- M_Bark_* (opaque)
 BARK_MATS = {
     "M_Bark_Conifer": ("T_BarkConifer", 0.80),
@@ -110,6 +258,43 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
     # ("Material .../M_Bark_* missing usage flag InstancedStaticMeshes!").
     mat.set_editor_property("used_with_instanced_static_meshes", True)
     mat.set_editor_property("two_sided", False)
+
+    # Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): "twig snow" -
+    # M_Bark_Aspen ONLY (this is the trunk+branch material for tree_blob, the
+    # one species with real branch geometry - see make_tree_meshes.py's
+    # add_deciduous_branches()). AODForestManager applies a SEPARATE dynamic
+    # MID off this material to the Blob/tree_blob batch only
+    # (DeciduousBarkMID); every other species/batch keeps this material's
+    # STATIC baked reference with SnowCover at its 0.0 default, so this is
+    # zero-regression for bark_conifer/bark_willow and for tree_scrub_oak
+    # (also M_Bark_Aspen, also left static). SnowCover=0 reproduces the
+    # plain sampled bark color exactly (Lerp alpha 0 = A unchanged).
+    if mat_name == "M_Bark_Aspen":
+        snow_cover_bark = MEL.create_material_expression(
+            mat, unreal.MaterialExpressionScalarParameter, -700, 700)
+        snow_cover_bark.set_editor_property("parameter_name", "SnowCover")
+        snow_cover_bark.set_editor_property("default_value", 0.0)
+
+        # Chunky snow "bunches" rather than a uniform coat: threshold a
+        # value-noise field (branch-scale cells, ~35 cm) against SnowCover so
+        # only a growing, patchy subset of the bark surface goes white -
+        # reads as clumps of snow sitting on twigs/branch crooks, not a flat
+        # tint. Same wrap-lattice-noise technique apply_ground_material.py's
+        # polish pass proved out for this project's real-world coordinate
+        # scale (see _value_noise()'s docstring above).
+        patch = _value_noise(mat, _world_xy(mat), scale_cm=35.0, seed_offset=(3.7, 9.1))
+        # SnowCover boosted before the threshold compare so full winter
+        # (SnowCover=1) comfortably clears every patch's noise value instead
+        # of asymptotically approaching partial coverage.
+        boosted = _mul(mat, snow_cover_bark, _const(mat, 1.6))
+        snow_amt_bark = _clamp01(mat, _sub(mat, boosted, patch))
+
+        bark_color = ts  # the plain sampled bark TextureSample node above
+        snow_color_bark = _const3(mat, 0.95, 0.96, 0.98)
+        snowed_bark = _lerp(mat, bark_color, snow_color_bark, snow_amt_bark, a_out="RGB")
+        must_connect_property(snowed_bark, "", unreal.MaterialProperty.MP_BASE_COLOR)
+        log("  + twig-snow SnowCover wiring (chunky patch threshold, ~35cm cells)")
+
     MEL.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/{mat_name}", only_if_is_dirty=False)
     log(f"built {mat_name} (opaque, roughness {roughness})")
@@ -152,9 +337,215 @@ m_fol.set_editor_property("opacity_mask_clip_value", 0.35)
 m_fol.set_editor_property("two_sided", True)
 m_fol.set_editor_property("used_with_nanite", True)
 m_fol.set_editor_property("used_with_instanced_static_meshes", True)
+
+# ---------------------------------------------------------- seasons: canopy snow
+# (2026-09-07, seasons feature part 1) - AODForestManager applies a shared MID
+# built from THIS material to its Conifer/evergreen HISM batch only (see
+# ODForestManager.cpp's FoliageSeasonMID) and drives SnowCover on it.
+# SnowCover=0 is a byte-for-byte no-op (final base color == the plain sampled
+# atlas color) - required zero-regression baseline for every OTHER species'
+# batch too, since they still use this same base material asset unmodified.
+#
+# Snow only settles on top-facing card surfaces (VertexNormalWS.Z, clamped to
+# [0,1] - a card facing sideways or down gets none) and is desynced per
+# HISM instance via MaterialExpressionPerInstanceRandom (free on any
+# instanced-static-mesh draw, no SetCustomDataValue plumbing needed - this
+# project has none of that anywhere yet) so a whole tile's conifers don't
+# all frost over in lockstep.
+#
+# FallBlend is exposed here (scalar param, unconnected) for a SECOND task's
+# deciduous-tree arc (orange leaves / leaf drop / bare twigs) to wire up
+# against this same material - not used for any visual effect by this pass,
+# per this task's own scope split.
+snow_cover_param = MEL.create_material_expression(
+    m_fol, unreal.MaterialExpressionScalarParameter, -700, 600)
+snow_cover_param.set_editor_property("parameter_name", "SnowCover")
+snow_cover_param.set_editor_property("default_value", 0.0)
+
+fall_blend_param = MEL.create_material_expression(
+    m_fol, unreal.MaterialExpressionScalarParameter, -700, 750)
+fall_blend_param.set_editor_property("parameter_name", "FallBlend")
+fall_blend_param.set_editor_property("default_value", 0.0)
+# Deliberately left unconnected - see docstring above; the param still exists
+# on the material/MID for the deciduous-tree task to consume.
+
+# NOTE (2026-09-07): this used to be VertexNormalWS.Z clamped to [0,1] - a
+# "top facing surface" metric. That's meaningless for this project's crossed
+# foliage cards (see docstring above): a vertical X-shaped quad has no true
+# upward-facing normal, so VertexNormalWS.Z reads near-zero across the whole
+# canopy and crushed snow_amount to ~0 everywhere regardless of SnowCover
+# (confirmed by screenshot: winter render had zero visible canopy snow even
+# though every graph connection here checked out fine).
+#
+# Two height-based replacements were tried and both failed for reasons
+# specific to this HISM/foliage vertex factory, confirmed via a throwaway
+# diagnostic material that visualized each candidate metric directly as a
+# bright red overlay and re-rendered at the same vantage:
+#   1. MaterialExpressionLocalPosition.Z (normalized against the conifer's
+#      ~1650-1814cm bounding-box height) rendered as a flat, uniform zero
+#      across every instance's entire canopy - this vertex factory does not
+#      populate per-vertex local position usefully here (no readable "origin"
+#      enum exists on this node in this UE 5.8 python API to diagnose further).
+#   2. WorldPosition().Z minus ObjectPositionWS().Z (meant to give "height
+#      above this instance's own pivot") instead produced a patchy, cluster-
+#      shaped banding that didn't line up with individual tree crowns at all -
+#      ObjectPositionWS evidently resolves to something like the HISM's
+#      internal occlusion-cluster origin for this vertex factory, not a true
+#      per-instance pivot, so the subtraction is meaningless per-tree.
+# The one thing PROVEN to work (same diagnostic technique, forcing
+# snow_amount = SnowCover directly) is a UNIFORM per-instance tint: MID
+# param push, species targeting (Conifer-only), and the base-color Lerp all
+# render correctly end to end. So this pass drops the per-vertex "only the
+# top of the crown" ambition and tints the WHOLE canopy per instance instead,
+# still desynced by PerInstanceRandom so a tile's conifers don't frost in
+# lockstep - a simpler, honest design that matches this game's chunky
+# stylized-realistic look (many stylized racers just whiten the whole crown
+# at winter) rather than a photoreal top-only accumulation this vertex
+# factory can't currently give us cheaply.
+per_instance_random = MEL.create_material_expression(
+    m_fol, unreal.MaterialExpressionPerInstanceRandom, -700, 1050)
+desync = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -500, 1050)
+desync_lo = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -700, 1200)
+# 2026-09-07 polish pass: raised from 0.55 - the winter QA shot
+# (season_winter.png) showed conifers still reading plain green at driving
+# distance, only detectable as frosted in a zoomed pixel crop. 0.55 meant the
+# laggiest instance only ever reached a 55% blend toward snow_color even at
+# full SnowCover=1, which the two-sided-foliage subsurface term's still-green
+# MP_SUBSURFACE_COLOR (see snowed_subsurface below, added this same pass)
+# fights against at grazing/backlit angles. 0.82 keeps SOME per-instance
+# desync (a laggiest tree is still visibly behind the leaders) while making
+# every conifer read as clearly frosted, not just tinted, once winter holds.
+desync_lo.set_editor_property("r", 0.82)
+desync_hi = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -700, 1300)
+desync_hi.set_editor_property("r", 1.0)
+if not MEL.connect_material_expressions(desync_lo, "", desync, "A"):
+    raise RuntimeError("could not connect desync_lo -> desync Lerp.A")
+if not MEL.connect_material_expressions(desync_hi, "", desync, "B"):
+    raise RuntimeError("could not connect desync_hi -> desync Lerp.B")
+if not MEL.connect_material_expressions(per_instance_random, "", desync, "Alpha"):
+    raise RuntimeError("could not connect PerInstanceRandom -> desync Lerp.Alpha")
+
+snow_amount_raw = MEL.create_material_expression(m_fol, unreal.MaterialExpressionMultiply, -200, 1050)
+if not MEL.connect_material_expressions(snow_cover_param, "", snow_amount_raw, "A"):
+    raise RuntimeError("could not connect SnowCover param -> snow_amount_raw.A")
+if not MEL.connect_material_expressions(desync, "", snow_amount_raw, "B"):
+    raise RuntimeError("could not connect desync -> snow_amount_raw.B")
+
+# 2026-09-07 polish pass: steepen the response curve so canopies reach a
+# strongly-frosted look well before SnowCover hits 1.0 (Crew 2's winter
+# conifers are boldly white-topped, not a subtle tint) instead of a slow
+# linear crawl. SnowCover=0 is untouched - Multiply/Clamp of 0 is still 0, so
+# the byte-for-byte zero-regression baseline holds.
+snow_boost_const = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant, -200, 1150)
+snow_boost_const.set_editor_property("r", 1.45)
+snow_amount_boosted = MEL.create_material_expression(m_fol, unreal.MaterialExpressionMultiply, -100, 1100)
+if not MEL.connect_material_expressions(snow_amount_raw, "", snow_amount_boosted, "A"):
+    raise RuntimeError("could not connect snow_amount_raw -> snow_amount_boosted.A")
+if not MEL.connect_material_expressions(snow_boost_const, "", snow_amount_boosted, "B"):
+    raise RuntimeError("could not connect snow_boost_const -> snow_amount_boosted.B")
+snow_amount = MEL.create_material_expression(m_fol, unreal.MaterialExpressionClamp, 0, 1100)
+snow_amount.set_editor_property("min_default", 0.0)
+snow_amount.set_editor_property("max_default", 1.0)
+if not MEL.connect_material_expressions(snow_amount_boosted, "", snow_amount, ""):
+    raise RuntimeError("could not connect snow_amount_boosted -> snow_amount Clamp input")
+
+snow_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant3Vector, -350, 0)
+snow_color.set_editor_property("constant", unreal.LinearColor(0.92, 0.94, 0.97, 1.0))
+snowed_base_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -100, 0)
+if not MEL.connect_material_expressions(ts, "RGB", snowed_base_color, "A"):
+    raise RuntimeError("could not connect base atlas color -> canopy-snow Lerp.A")
+if not MEL.connect_material_expressions(snow_color, "", snowed_base_color, "B"):
+    raise RuntimeError("could not connect snow color -> canopy-snow Lerp.B")
+if not MEL.connect_material_expressions(snow_amount, "", snowed_base_color, "Alpha"):
+    raise RuntimeError("could not connect snow_amount -> canopy-snow Lerp.Alpha")
+# Re-point BaseColor at the snow-blended result (was `ts` "RGB" directly above).
+must_connect_property(snowed_base_color, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+# 2026-09-07 polish pass: MSM_TWO_SIDED_FOLIAGE's wrapped-transmission term
+# tints backlit/grazing-angle canopy faces with MP_SUBSURFACE_COLOR
+# regardless of BaseColor - `sss` above stays a fixed dark green year-round,
+# which was silently fighting the BaseColor snow blend above and reading as
+# "still plain green" at driving distance even where BaseColor itself was
+# heavily blended toward snow_color. Fade it toward a pale winter subsurface
+# tint on the same snow_amount curve so backlit needles read frosted too.
+snow_subsurface_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant3Vector, -400, 500)
+snow_subsurface_color.set_editor_property("constant", unreal.LinearColor(0.75, 0.80, 0.86, 1.0))
+snowed_subsurface = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -200, 450)
+if not MEL.connect_material_expressions(sss, "", snowed_subsurface, "A"):
+    raise RuntimeError("could not connect base subsurface color -> canopy-snow-subsurface Lerp.A")
+if not MEL.connect_material_expressions(snow_subsurface_color, "", snowed_subsurface, "B"):
+    raise RuntimeError("could not connect snow subsurface color -> canopy-snow-subsurface Lerp.B")
+if not MEL.connect_material_expressions(snow_amount, "", snowed_subsurface, "Alpha"):
+    raise RuntimeError("could not connect snow_amount -> canopy-snow-subsurface Lerp.Alpha")
+# Re-point MP_SUBSURFACE_COLOR at the snow-blended result (was `sss` directly above).
+must_connect_property(snowed_subsurface, "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
+
+# ------------------------------------------------ deciduous arc: fall color + leaf drop
+# (2026-09 follow-up to the seasons feature - next steps.md sec 7.17). Wires
+# up FallBlend (exposed-but-unwired by the first seasons pass) and adds a new
+# LeafDrop param. ONLY the deciduous (Blob/tree_blob) species gets a dynamic
+# MID off this same base material with non-zero values pushed into these
+# (see ODForestManager.cpp's DeciduousFoliageMID) - every other species'
+# HISM still references this material's STATIC baked defaults (FallBlend=0,
+# LeafDrop=0), and every formula below is an exact no-op at 0/0 (Lerp alpha
+# 0 = the plain sampled atlas color unchanged; drop_amount 0 = opacity mask
+# unchanged), so this whole section is zero-regression for every non-target
+# species/batch and for the summer baseline.
+#
+# Variation at two levels per the task spec: PER-TREE desync reuses the same
+# free PerInstanceRandom input the snow desync above already reads (early/
+# late turners), and WITHIN-CANOPY patchiness comes from a value-noise field
+# sampled from absolute WorldPosition.XY - the same tileable lattice-noise
+# hash (with the same lattice-wrap numerical-stability fix) apply_ground_
+# material.py's polish pass proved out at this project's real-world (large,
+# UTM-scale) coordinate range; see _value_noise()'s docstring above. Both
+# are blended into one per-pixel-per-instance "turn threshold" in [0,1];
+# FallBlend/LeafDrop crossing that threshold (over a soft band, not a hard
+# cut) is what produces "a few spots turn first, then more and more" instead
+# of the whole canopy flipping at once.
+leaf_drop_param = MEL.create_material_expression(
+    m_fol, unreal.MaterialExpressionScalarParameter, -700, 1500)
+leaf_drop_param.set_editor_property("parameter_name", "LeafDrop")
+leaf_drop_param.set_editor_property("default_value", 0.0)
+
+patch_noise = _value_noise(m_fol, _world_xy(m_fol), scale_cm=180.0, seed_offset=(41.0, 17.0))
+turn_threshold = _add(m_fol,
+                       _mul(m_fol, per_instance_random, _const(m_fol, 0.5)),
+                       _mul(m_fol, patch_noise, _const(m_fol, 0.5)))
+
+TURN_BAND = 0.30  # soft-threshold width - wider = more overlap between "early" and "late" trees/patches
+thr_lo = _sub(m_fol, turn_threshold, _const(m_fol, TURN_BAND / 2.0))
+
+fall_amount = _clamp01(m_fol, _div(m_fol, _sub(m_fol, fall_blend_param, thr_lo), _const(m_fol, TURN_BAND)))
+drop_amount = _clamp01(m_fol, _div(m_fol, _sub(m_fol, leaf_drop_param, thr_lo), _const(m_fol, TURN_BAND)))
+
+fall_color = _const3(m_fol, 0.86, 0.42, 0.07)   # stylized aspen-gold/orange
+base_after_fall = _lerp(m_fol, ts, fall_color, fall_amount, a_out="RGB")
+# Re-point the canopy-snow Lerp's "before snow" input at the fall-blended
+# color instead of the raw sampled atlas color (was `ts` "RGB" - see the
+# snowed_base_color wiring above); harmless for every non-deciduous species
+# since fall_amount is 0 there, so base_after_fall == ts exactly.
+if not MEL.connect_material_expressions(base_after_fall, "", snowed_base_color, "A"):
+    raise RuntimeError("could not re-point canopy-snow Lerp.A at base_after_fall")
+
+opacity_after_drop = _mul(m_fol, ts, _sub(m_fol, _const(m_fol, 1.0), drop_amount), a_out="A")
+# Re-point the opacity mask at the leaf-drop-eroded value (was `ts` "A"
+# directly, connected near the top of this script) - the alpha-cutout
+# clip (opacity_mask_clip_value=0.35, set above) then discards whatever this
+# pushes below that threshold, progressively opening holes in the canopy
+# card down to nothing as LeafDrop approaches 1, revealing the bare branch
+# geometry make_tree_meshes.py's add_deciduous_branches() gives tree_blob
+# underneath (branches share the bark material, always rendered).
+must_connect_property(opacity_after_drop, "", unreal.MaterialProperty.MP_OPACITY_MASK)
+
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage", only_if_is_dirty=False)
-log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_FoliageAtlas)")
+log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_FoliageAtlas, "
+    "seasons params SnowCover [wired, boosted+clamped uniform per-instance tint x "
+    "PerInstanceRandom desync [0.82,1.0], drives BaseColor AND MP_SUBSURFACE_COLOR] / "
+    "FallBlend+LeafDrop [wired 2026-09 deciduous-arc follow-up: per-instance x "
+    "per-patch value-noise turn-threshold drives orange BaseColor blend and "
+    "opacity-mask leaf-drop dissolve])")
 
 unreal.EditorAssetLibrary.save_directory(MAT_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)

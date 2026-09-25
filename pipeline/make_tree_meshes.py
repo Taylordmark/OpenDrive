@@ -155,6 +155,43 @@ class Mesh:
             tr = br + up * size_h
             self.quad(bl, br, tr, tl, uv, "foliage")
 
+    def branch(self, start, end, r0, r1, mat, sides=4):
+        """A simple tapered tube from arbitrary 3D point `start` to `end`
+        (unlike trunk(), which only stacks rings along world-Z) - used for
+        the deciduous "bare twig" branch structure (2026-09 seasons
+        follow-up, see build_aspen): a handful of these fanning out from the
+        upper trunk gives real geometry for leaves to dissolve away from,
+        without the poly cost of a proper branching system. Capped at the
+        far end only (near end is buried in the trunk/a parent branch, never
+        seen); low `sides` (default 4) keeps each branch cheap - this is
+        rendered as thousands of HISM instances."""
+        start = np.asarray(start, dtype=float)
+        end = np.asarray(end, dtype=float)
+        axis = end - start
+        length = np.linalg.norm(axis)
+        if length < 1e-6:
+            return end
+        axis_n = axis / length
+        ref = np.array([0.0, 0.0, 1.0]) if abs(axis_n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        u = np.cross(axis_n, ref)
+        u /= np.linalg.norm(u)
+        v = np.cross(axis_n, u)
+        ring0 = [start + (math.cos(2 * math.pi * s / sides) * u
+                           + math.sin(2 * math.pi * s / sides) * v) * r0 for s in range(sides)]
+        ring1 = [end + (math.cos(2 * math.pi * s / sides) * u
+                         + math.sin(2 * math.pi * s / sides) * v) * r1 for s in range(sides)]
+        for s in range(sides):
+            s2 = (s + 1) % sides
+            u0, u1 = s / sides, (s + 1) / sides
+            a, b = ring0[s], ring0[s2]
+            c, d = ring1[s2], ring1[s]
+            self._tri(a, b, c, (u0, 0.0), (u1, 0.0), (u1, 1.0), mat)
+            self._tri(a, c, d, (u0, 0.0), (u1, 1.0), (u0, 1.0), mat)
+        for s in range(sides):
+            s2 = (s + 1) % sides
+            self._tri(ring1[s], ring1[s2], end, (0.0, 0.0), (1.0, 0.0), (0.5, 1.0), mat)
+        return end
+
     def save(self, name, mat_textures):
         """mat_textures: ordered dict-like of matname -> texture filename
         (or None). Order = OBJ material declaration order; usemtl statements
@@ -367,9 +404,38 @@ def build_krummholz(name):
     m.save(name, {"bark_conifer": BARK_TEX["bark_conifer"], "foliage": FOLIAGE_TEX})
 
 
-def build_aspen(name, height_scale=1.0, trunk_clear_frac=0.55):
+def add_deciduous_branches(m, trunk_top_h, crown_center, crown_rx, crown_rz,
+                            trunk_top_r, mat="bark_aspen", n_branches=7):
+    """Fan a handful of tapering twig branches from the trunk top up into the
+    crown volume (2026-09 seasons follow-up: "bare twigs" needs branch
+    geometry that survives when the leaf cards dissolve away - see next
+    steps.md sec 7.17). Cheap: `n_branches` calls to Mesh.branch() at
+    sides=4 (~14 tris each including the tip cap), well under the <100 extra
+    tris/tree budget this is scoped to, and it renders as thousands of HISM
+    instances so per-tree cost matters. Shares the trunk's own bark material
+    so it's always present (just hidden inside the summer canopy) - no new
+    material slot."""
+    start = np.array([0.0, 0.0, trunk_top_h])
+    cx, cy, cz = crown_center
+    for i in range(n_branches):
+        az = 2 * math.pi * i / n_branches + rng.uniform(-0.3, 0.3)
+        reach = rng.uniform(0.7, 1.0)
+        end = np.array([
+            cx + math.cos(az) * crown_rx * reach,
+            cy + math.sin(az) * crown_rx * reach,
+            trunk_top_h + (cz + crown_rz * rng.uniform(0.15, 0.55) - trunk_top_h) * reach,
+        ])
+        r0 = trunk_top_r * rng.uniform(0.55, 0.8)
+        r1 = r0 * rng.uniform(0.12, 0.22)
+        m.branch(start, end, r0, r1, mat, sides=4)
+
+
+def build_aspen(name, height_scale=1.0, trunk_clear_frac=0.55, with_branches=False):
     """Pale-trunked deciduous - long bare trunk, oval/round crown of
-    fluttering pale-green leaf cards."""
+    fluttering pale-green leaf cards. with_branches=True (tree_blob only,
+    the species the seasons deciduous arc targets - see next steps.md sec
+    7.17) adds a bare-twig branch structure under the canopy so leaves have
+    something to dissolve away FROM in the fall->winter transition."""
     total_h = 1150 * height_scale
     trunk_r0 = 20 * height_scale
     m = Mesh()
@@ -379,8 +445,12 @@ def build_aspen(name, height_scale=1.0, trunk_clear_frac=0.55):
                (trunk_top_h, trunk_r0 * 0.55)]
     m.trunk(profile, "bark_aspen", u_repeat=1.5, v_repeat=2.0)
     crown_center = (0.0, 0.0, trunk_top_h + crown_h * 0.55)
+    crown_rx = 230 * height_scale
+    if with_branches:
+        add_deciduous_branches(m, trunk_top_h, crown_center, crown_rx,
+                                crown_h * 0.65, trunk_r0 * 0.55)
     scatter_ellipsoid_crown(
-        m, crown_center, rx=230 * height_scale, ry=230 * height_scale,
+        m, crown_center, rx=crown_rx, ry=crown_rx,
         rz=crown_h * 0.65, n_clusters=46, cell="aspen_leaf",
         size_w=(140 * height_scale, 230 * height_scale),
         size_h=(140 * height_scale, 220 * height_scale), n_cross=3)
@@ -448,7 +518,7 @@ def build_grass_tuft(name):
 
 
 def main():
-    build_aspen("tree_blob", height_scale=0.92, trunk_clear_frac=0.48)
+    build_aspen("tree_blob", height_scale=0.92, trunk_clear_frac=0.48, with_branches=True)
     build_engelmann_spruce("tree_olive")
     build_lodgepole_pine("tree_conifer", height_scale=1.0)
     build_aspen("tree_scrub_oak", height_scale=1.22, trunk_clear_frac=0.62)

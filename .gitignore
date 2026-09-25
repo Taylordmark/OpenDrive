@@ -47,3 +47,14 @@ content_src/textures/building/*/
 # is not - deterministic re-run reproduces it, see manifest.json).
 content_src/textures/water/*.png
 
+# Same convention, Arc 5.4 ambient CC0 audio loops (next steps.md SS7.28) -
+# content_src/audio/ambient/download_ambient_audio.py + manifest.json are
+# tracked, fetched previews are not - deterministic re-fetch from
+# freesound.org's CDN reproduces them (see manifest.json's _comment for why
+# the preview rendition rather than each sound's login-gated original).
+content_src/audio/ambient/raw/*.mp3
+
+# Same convention, normalize_ambient_audio.py's loudness-matched output -
+# deterministic re-run of that script against raw/*.mp3 reproduces these.
+content_src/audio/ambient/normalized/*.wav
+

@@ -47,6 +47,31 @@ void UODEngineSynth::ConfigureEngine(int32 InCylinders, float InDisplacementL)
 	ConfigVersion.fetch_add(1);
 }
 
+void UODEngineSynth::SetExhaustConfig(const FODExhaustConfig& Config)
+{
+	// plain-float writes, matching the existing Loudness/Rasp/MufflerCutoff/
+	// TimingJitter/CutRpmSag convention: menu-adjust-rate, not per-buffer, so
+	// no atomics/ConfigLock needed (same reasoning as those properties).
+	Loudness = FMath::Clamp(Config.Loudness, 0.0f, 1.0f);
+	Rasp = FMath::Clamp(Config.Rasp, 0.0f, 1.0f);
+	MufflerCutoff = FMath::Clamp(Config.MufflerCutoff, 200.0f, 8000.0f);
+	PopProbability = FMath::Clamp(Config.PopProbability, 0.0f, 1.0f);
+	PopWindowSec = FMath::Clamp(Config.PopWindowSec, 0.05f, 3.0f);
+	PopDecay = FMath::Clamp(Config.PopDecay, 0.1f, 5.0f);
+}
+
+FODExhaustConfig UODEngineSynth::GetExhaustConfig() const
+{
+	FODExhaustConfig Config;
+	Config.Loudness = Loudness;
+	Config.Rasp = Rasp;
+	Config.MufflerCutoff = MufflerCutoff;
+	Config.PopProbability = PopProbability;
+	Config.PopWindowSec = PopWindowSec;
+	Config.PopDecay = PopDecay;
+	return Config;
+}
+
 bool UODEngineSynth::Init(int32& SampleRate)
 {
 	SampleRateHz = (float)SampleRate;
@@ -120,6 +145,21 @@ int32 UODEngineSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 	const float NoiseBurstDecay =
 		FMath::Exp(-1.0f / (0.008f * SampleRateHz));   // ~8 ms pop tail
 
+	// lift-off pop/burble (Arc 5.2): detect a snap-off-the-throttle at revs
+	// using the RAW (unsmoothed) throttle target, so a quick lift registers
+	// even though SmThrottle itself glides - same "hard edge on the trigger"
+	// idea as bCutNow above. A real ignition cut (limiter/shift) takes
+	// priority and doesn't also open a pop window. Once open, the window
+	// decays per-buffer (buffers are short, ~tens of ms, same granularity as
+	// CutSag's per-buffer glide above).
+	if (PrevThrottleForPop > PopLiftHighThrottle && Thr < PopLiftLowThrottle
+		&& SmRpm > PopMinRpm && !bCutNow)
+	{
+		PopWindowRemainSec = PopWindowSec;
+	}
+	PrevThrottleForPop = Thr;
+	PopWindowRemainSec = FMath::Max(0.0f, PopWindowRemainSec - NumSamples / SampleRateHz);
+
 	for (int32 i = 0; i < NumSamples; ++i)
 	{
 		Phase720 += PhaseInc;
@@ -134,14 +174,65 @@ int32 UODEngineSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 		while (NextFire < FireCount
 			&& Phase720 >= FireAngle[NextFire] + JitterAngle)
 		{
+			// NOTE (post-mortem fix, 2026-09-08): the >>9 shift leaves a
+			// 23-bit value in [0, 2^23-1], so the correct divisor to map that
+			// onto [0,1) is 2^22 = 4194304.0f (as the Noise line below
+			// already does with its (int32) cast). 5d1e594 divided by
+			// 8388608.0f = 2^23 instead, so R1/R2 were silently confined to
+			// [-1, 0) - never positive. That is the actual root cause of the
+			// Arc 5.2 exhaust-pop dropout bug (see MaxConsecutivePopSkips
+			// comment below for the mechanism), not RNG "correlation": with
+			// PopRoll = (R1+1)*0.5 always < 0.5, any EffP >= 0.5 (Open starts
+			// at PopProbability=0.75) skipped every firing with certainty
+			// until the decaying EffP fell under 0.5, producing a long
+			// deterministic all-skip run - not a probabilistic one.
 			NoiseSeed = NoiseSeed * 1664525u + 1013904223u;
-			const float R1 = (NoiseSeed >> 9) / 8388608.0f - 1.0f;   // [-1,1)
+			const float R1 = (NoiseSeed >> 9) / 4194304.0f - 1.0f;   // [-1,1)
 			NoiseSeed = NoiseSeed * 1664525u + 1013904223u;
-			const float R2 = (NoiseSeed >> 9) / 8388608.0f - 1.0f;
+			const float R2 = (NoiseSeed >> 9) / 4194304.0f - 1.0f;
 			const float AmpJit = 1.0f + R1 * JitterAmt * 0.6f;
 			JitterAngle = R2 * JitterAmt * 0.004f;   // frac of 720 (~1.7 deg max)
-			if (!bCutNow)
+			// lift-off pop/burble (Arc 5.2): while a pop window is open,
+			// probabilistically skip this firing outright too - the same
+			// "misfire = silence" treatment as bCutNow, just per-firing
+			// instead of for the whole cut. Post-mortem fix: draws its OWN
+			// LCG advance (R3) instead of reusing R1 - even with R1's range
+			// now fixed above, sharing a draw across two unrelated uses is
+			// bad practice (a future change to one consumer silently biases
+			// the other), and it keeps this roll's distribution independent
+			// of AmpJit/JitterAngle placement in the stream.
+			bool bSkipFiring = bCutNow;
+			if (!bSkipFiring && PopWindowRemainSec > 0.0f && PopProbability > 0.0f)
 			{
+				const float Frac = FMath::Clamp(PopWindowRemainSec / PopWindowSec, 0.0f, 1.0f);
+				const float EffP = PopProbability * FMath::Pow(Frac, PopDecay);
+				NoiseSeed = NoiseSeed * 1664525u + 1013904223u;
+				const float R3 = (NoiseSeed >> 9) / 4194304.0f - 1.0f;   // [-1,1)
+				const float PopRoll = (R3 + 1.0f) * 0.5f;   // [-1,1) -> [0,1)
+				// MaxConsecutivePopSkips (ODEngineSynth.h): hard cap,
+				// independent of the RNG fix above - defense in depth so no
+				// probability/decay setting can ever produce a sustained
+				// dropout instead of crackle, regardless of what the RNG
+				// does. Only pop-mechanism skips count; a real ignition cut
+				// (bCutNow, handled above) is deliberate silence and doesn't
+				// touch this counter.
+				if (PopRoll < EffP && ConsecutivePopSkips < MaxConsecutivePopSkips)
+				{
+					bSkipFiring = true;
+					++ConsecutivePopSkips;
+					// next real firing gets the relight bang - THAT bang, on
+					// an otherwise-normal-throttle firing, IS the audible pop.
+					ResumeBoost = FMath::Max(ResumeBoost, 1);
+				}
+			}
+			if (!bSkipFiring)
+			{
+				// any firing that actually sounds - whether the pop roll
+				// missed, the cap forced it, or no pop window was even open -
+				// clears the streak. Deliberately NOT scoped to the window-
+				// open branch above: a window closing mid-streak must not
+				// carry a partial count into the next lift's window.
+				ConsecutivePopSkips = 0;
 				float Boost = 1.0f;
 				if (ResumeBoost > 0)
 				{
@@ -188,7 +279,7 @@ int32 UODEngineSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 		const float Shaped = FMath::Tanh((S * 0.28f + Noise) * Drive);
 		LpState += (Shaped - LpState) * LpCoeff;
 
-		OutAudio[i] = LpState * Amp;
+		OutAudio[i] = LpState * Amp * VolumeScale;
 	}
 	(void)FiringHz;
 

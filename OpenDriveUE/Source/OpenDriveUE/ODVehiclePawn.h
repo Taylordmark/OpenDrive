@@ -2,9 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
+#include "InputCoreTypes.h"
 #include "ODVehiclePawn.generated.h"
 
 class UCameraComponent;
+class UInputComponent;
 class UODVehicleDef;
 class UODVehicleMovement;
 class USpringArmComponent;
@@ -47,6 +49,18 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* Input) override;
+
+	/** Arc 4.1 (next steps.md SS4.1/SS7.32): re-derives every keyboard/
+	 *  gamepad key this pawn binds from FODInputConfig and rebuilds them on
+	 *  the given InputComponent (or this pawn's own InputComponent if
+	 *  nullptr) - called once from SetupPlayerInputComponent at spawn and
+	 *  again by AODRebindMenu after a live rebind, so a mid-session key
+	 *  change takes effect immediately without a restart. Removes only the
+	 *  keys THIS function itself bound last time (tracked in
+	 *  LastODManagedKeys) before rebuilding, so arrow-key aliases, V
+	 *  (dev-facing CycleVehicle) and the wheel-axis binds in
+	 *  SetupGamepadAndWheelInput are untouched. */
+	void RefreshODManagedKeyBindings(UInputComponent* Input = nullptr);
 
 	UPROPERTY(VisibleAnywhere, Category = "Vehicle")
 	TObjectPtr<UStaticMeshComponent> Body;
@@ -503,6 +517,12 @@ private:
 	void WheelHandbrakeReleased() { bWheelHandbrake = false; }
 
 	void SetupGamepadAndWheelInput(UInputComponent* Input);
+
+	/** Keys RefreshODManagedKeyBindings bound last call, so the next call can
+	 *  remove exactly those before rebuilding from the current config -
+	 *  see that function's header comment. */
+	TArray<FKey> LastODManagedKeys;
+	TWeakObjectPtr<UInputComponent> CachedInputComponent;
 
 	// --- device selection state (Auto = last-device-wins) ---
 	EODInputDevice DeviceMode = EODInputDevice::Auto;
