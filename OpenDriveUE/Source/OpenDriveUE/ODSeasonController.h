@@ -10,6 +10,7 @@ class UMaterialInterface;
 class AODTerrainManager;
 class AODWaterManager;
 class AODForestManager;
+class AODWeatherController;
 
 /**
  * Seasons feature, first half (2026-09-07): a continuous, looping season
@@ -18,7 +19,8 @@ class AODForestManager;
  * water/foliage MIDs those managers already own (AODTerrainManager::
  * GetGroundMID / AODWaterManager::GetWaterMID / AODForestManager::
  * GetFoliageSeasonMID), plus a simple runtime falling-snow effect this actor
- * owns directly. Mirrors AODDayNightController/AODAtmosphereController's
+ * owns directly (since Weather W1 its level comes from AODWeatherController,
+ * not the clock - see SnowfallIntensity). Mirrors AODDayNightController/AODAtmosphereController's
  * "runtime-spawned singleton controller, find-or-spawn from AODGameMode"
  * shape - see AODGameMode::EnsureSeasonController.
  *
@@ -87,6 +89,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Season|Debug")
 	float SnowCover = 0.0f;
 
+	/** Falling-snow FX level. Weather-owned since W1 (next steps.md sec
+	 *  7.39): AODWeatherController's PrecipIntensity * PrecipType, copied in
+	 *  Tick - the clock no longer computes it. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Season|Debug")
 	float SnowfallIntensity = 0.0f;
 
@@ -112,14 +117,23 @@ public:
 	 *  when an -odseason= QA flag is on the command line - QA always wins. */
 	void SetSeasonLock(const FString& SeasonName);
 
+	/** Weather W1 (next steps.md sec 7.39): the clock as a calendar month,
+	 *  [0, 12) with Jan = [0, 1). Season hold midpoints land mid-month:
+	 *  summer = mid-July (6.5), fall = mid-Oct, winter = mid-Jan, spring =
+	 *  mid-Apr - pipeline/sim_weather.py's month_of_clock() mirrors this. */
+	float MonthOfYear() const
+	{
+		return FMath::Fmod(6.5f + (ClockSeconds - 0.5f * HoldSeconds) / LoopSeconds() * 12.0f + 12.0f, 12.0f);
+	}
+
 private:
 	/** Pure function of a loop-position clock (seconds, [0, LoopSeconds)) to
-	 *  the six season blends - see the .cpp definition for the segment
+	 *  the five season blends - see the .cpp definition for the segment
 	 *  breakdown. Static/const-only so it's trivially unit-testable and so
 	 *  the -odseason=/-odseasonphase= QA path and the normal ticking path
 	 *  can share the exact same math. */
 	void ComputeParamsForClock(float Clock, float& OutFall, float& OutSnow,
-		float& OutSnowfall, float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const;
+		float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const;
 
 	/** loop-position seconds where season X's HOLD begins - see the .cpp's
 	 *  QA-flag parsing for how -odseason=/-odseasonphase= use these. */
@@ -139,6 +153,7 @@ private:
 	TWeakObjectPtr<AODTerrainManager> TerrainMgr;
 	TWeakObjectPtr<AODWaterManager> WaterMgr;
 	TWeakObjectPtr<AODForestManager> ForestMgr;
+	TWeakObjectPtr<AODWeatherController> WeatherCtl;
 
 	/** Simple runtime falling-snow effect (2026-09-07): a pool of tiny sphere
 	 *  instances, camera-attached, animated by hand in Tick - NOT Niagara.

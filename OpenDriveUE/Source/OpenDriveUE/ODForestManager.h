@@ -555,6 +555,14 @@ public:
 	 *  - see build_flora_materials.py). Null until BeginPlay has run. */
 	UMaterialInstanceDynamic* GetDeciduousBarkMID() const { return DeciduousBarkMID; }
 
+	/** Weather W1 (next steps.md sec 7.39): nearest classified biome point's
+	 *  biome, and its elevation minus the mean over all points (climate.json
+	 *  normals are for the stage's typical height; AODWeatherController
+	 *  applies a lapse rate to the delta). False with no point-biome data
+	 *  (Landscape-mask path / missing biome_*.bin). ODB1 points carry
+	 *  ElevM 0, so the delta is 0 there. */
+	bool BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM) const;
+
 private:
 	// One shared MID (evergreen/Conifer canopy only, see ConiferSpeciesIndex
 	// in ODForestManager.cpp) every such HISM's SetMaterial() call in

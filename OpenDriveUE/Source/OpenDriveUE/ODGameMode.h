@@ -93,6 +93,12 @@ private:
 	 *  clock. */
 	void EnsureSeasonController();
 
+	/** Weather W1 (next steps.md sec 7.39) - same shape as
+	 *  EnsureSeasonController above, spawned right after it: AODWeatherController
+	 *  reads the season clock's month and loads its own climate_<area>_test.json
+	 *  from the level's AODRoadManager. */
+	void EnsureWeatherController();
+
 	/** Ambient biome/city audio (Arc 5.4 / next steps.md SS7.28, 2026-09-07) -
 	 *  same "find or spawn" shape as EnsureEmbankmentManager above, deriving
 	 *  AODAmbientSoundManager's zone-file name from the level's own

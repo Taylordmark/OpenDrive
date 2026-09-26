@@ -1220,6 +1220,33 @@ float AODForestManager::ForestWeightAt(double WorldX, double WorldY) const
 	return MaskR[Y * MaskRes + X] / 255.0f;
 }
 
+bool AODForestManager::BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM) const
+{
+	if (!bUsePointBiomes || BiomePoints.Num() == 0)
+	{
+		return false;
+	}
+	// ponytail: same linear scan as BlendAt(); weather calls this once per
+	// roll (minutes apart), so no bucketing.
+	const FVector2D Here(WorldX, WorldY);
+	float BestD2 = TNumericLimits<float>::Max();
+	const FBiomePoint* Nearest = &BiomePoints[0];
+	double ElevSum = 0.0;
+	for (const FBiomePoint& Pt : BiomePoints)
+	{
+		ElevSum += Pt.ElevM;
+		const float D2 = FVector2D::DistSquared(Pt.WorldXY, Here);
+		if (D2 < BestD2)
+		{
+			BestD2 = D2;
+			Nearest = &Pt;
+		}
+	}
+	OutBiome = Nearest->Biome;
+	OutElevDeltaM = Nearest->ElevM - (float)(ElevSum / BiomePoints.Num());
+	return true;
+}
+
 void AODForestManager::BlendAt(double WorldX, double WorldY,
                                 FBiomeRecipe& OutRecipe, float& OutForestWeight,
                                 EODBiome& OutNearestBiome) const

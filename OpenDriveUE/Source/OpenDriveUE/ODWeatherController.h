@@ -1,0 +1,141 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "ODWeatherController.generated.h"
+
+/** Weather states (next steps.md "Weather plan", W1). Order MUST match
+ *  pipeline/sim_weather.py's STATES - it indexes the same weight/target
+ *  tables. Tornado/Hurricane are event states: rolled and held like the
+ *  others, their visuals are W4/W5. */
+UENUM()
+enum class EODWeatherState : uint8
+{
+	Clear,
+	Overcast,
+	Rain,
+	HeavyRain,
+	Sleet,
+	Snow,
+	Blizzard,
+	Fog,
+	DustStorm,
+	Thunderstorm,
+	Tornado,
+	Hurricane,
+};
+
+/** One stage's climate.json (pipeline/fetch_climate.py, W0), staged as
+ *  Content/OpenDrive/Masks/climate_<area>_test.json. Defaults = the mild
+ *  fallback used when a stage has none. */
+struct FODClimate
+{
+	float MonthlyTempC[12] = { 3, 4, 7, 11, 15, 19, 22, 22, 18, 13, 8, 4 };
+	float MonthlyPrecipMm[12] = { 70, 70, 70, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
+	float Hurricane = 0.0f;
+	float Tornado = 0.0f;
+	float DustStorm = 0.0f;
+};
+
+/**
+ * Weather W1 (2026-09-25, next steps.md sec 7.39): state + published scalars,
+ * no visuals (W2 consumes the scalars). Same "find-or-spawn from
+ * AODGameMode" singleton shape as AODSeasonController - see
+ * AODGameMode::EnsureWeatherController.
+ *
+ * A weighted random walk: every HoldMin..HoldMax seconds the next state is
+ * drawn from weights = stage climate (climate.json monthly temp/precip +
+ * storm weights) at the season clock's month (AODSeasonController::
+ * MonthOfYear - the garage Season lock freezes that month, so weather rolls
+ * within the picked season) x the biome at the player (AODForestManager::
+ * BiomeSampleAt). Temperature (month temp + lapse rate from the player's
+ * elevation) splits precipitation into rain/sleet/snow. The weight table is
+ * mirrored 1:1 in pipeline/sim_weather.py, which simulates it offline.
+ *
+ * Published scalars ramp to each new state's targets over RampSeconds with
+ * a smoothstep, so nothing snaps. AODSeasonController reads
+ * PrecipIntensity * PrecipType as its SnowfallIntensity (falling snow is
+ * weather-owned; the season clock keeps ground cover/freeze/green-up).
+ *
+ * QA: console "od.Weather <State>" forces and holds a state, "od.Weather
+ * Auto" resumes the walk. Every transition is logged.
+ */
+UCLASS()
+class OPENDRIVEUE_API AODWeatherController : public AActor
+{
+	GENERATED_BODY()
+
+public:
+	AODWeatherController();
+	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Smoothstep ramp length between two states' scalar targets. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float RampSeconds = 90.0f;
+
+	/** Wetness 0 -> 1 time under PrecipIntensity 1 (scales with intensity). */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float WetUpSeconds = 180.0f;
+
+	/** Wetness 1 -> 0 time once precipitation stops - dries slowly. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float DrySeconds = 1200.0f;
+
+	// ---- published scalars (W2/W3 consumers read these) ----
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	EODWeatherState State = EODWeatherState::Clear;
+
+	/** 0 dry .. 1 downpour/blizzard. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float PrecipIntensity = 0.0f;
+
+	/** 0 rain .. 0.5 sleet .. 1 snow. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float PrecipType = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float WindSpeedMs = 3.0f;
+
+	/** Direction the wind blows toward, degrees (world yaw). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float WindDirDeg = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float VisibilityM = 20000.0f;
+
+	/** Surface wetness: accumulates under precipitation, dries slowly. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float Wetness = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float CloudCover = 0.1f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float DustAmount = 0.0f;
+
+	/** QA: a state name forces and holds it; "Auto" (or empty) resumes the
+	 *  random walk with an immediate roll. False on an unknown name. */
+	bool ForceState(const FString& Name);
+
+	/** Immediate re-roll (garage season lock changed) - no-op while forced. */
+	void Reroll();
+
+private:
+	struct FTargets
+	{
+		float Precip = 0.0f, PrecipType = 0.0f, Wind = 0.0f, WindDir = 0.0f,
+			Visibility = 0.0f, Cloud = 0.0f, Dust = 0.0f;
+	};
+
+	void LoadClimate();
+	void Roll();
+	void EnterState(EODWeatherState NewState, float HoldSeconds);
+	FTargets Published() const;
+
+	FODClimate Climate;
+	FTargets From, To;
+	float RampT = 1.0f;
+	float HoldLeft = 0.0f;
+	bool bForced = false;
+};

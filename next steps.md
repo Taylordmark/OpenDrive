@@ -6936,3 +6936,110 @@ Notes:
   (Dixie Alley) box allowance.
 - Hurricane basins are lat/lon boxes. The E Pacific box stops at 30N, so
   SoCal (56-73 km from the coast) correctly gets 0.
+
+### 7.39 Weather W1: AODWeatherController (2026-09-25)
+Implements W1 above: weather state plus published scalars. There are no
+visuals yet (that's W2). There's also no weather picker: weather rolls
+within whatever season the garage Season row gives the clock.
+- **`AODWeatherController`** (`ODWeatherController.h/.cpp`) is
+  find-or-spawned by `AODGameMode::EnsureWeatherController`, right after
+  the season controller. It has 12 states (`EODWeatherState`), Clear
+  through Hurricane. Tornado and Hurricane are event states: they're only
+  rolled and held for now.
+- **Random walk.** Each state holds 4-12 min (Tornado 3-5, Hurricane
+  10-20), then the next one is drawn from weights. The inputs are:
+  - `climate.json` monthly temp/precip and storm weights, interpolated at
+    `AODSeasonController::MonthOfYear()` (new; season hold midpoints are
+    mid-Jul/Oct/Jan/Apr);
+  - a per-biome {precip, fog, dust} multiplier at the player;
+  - temperature (month temp minus 6.5 C/km times the player's elevation
+    above the stage mean), which splits precip into rain/sleet/snow
+    (all rain above 2 C, all snow below -2 C).
+
+  Tornado can only be rolled out of Thunderstorm. A garage season change
+  re-rolls immediately (`Reroll()` from `SetSeasonLock`).
+- **Biome at the player:** new public
+  `AODForestManager::BiomeSampleAt` (nearest classified point, plus its
+  `ElevM` minus the mean). The forest manager is spawned on every
+  open-world level, while `ODBarrierManager` is optional
+  (`BARRIER_ENABLED`), so its private `BiomeAt` was left alone.
+  `ODAmbientSoundManager` has only a 4-class zone grid, not biomes.
+  Without point-biome data, neutral multipliers and no lapse are used.
+- **Published scalars:** `PrecipIntensity`, `PrecipType` (0 rain, 0.5
+  sleet, 1 snow), `WindSpeedMs` + `WindDirDeg`, `VisibilityM`,
+  `CloudCover`, `DustAmount`. Each is smoothstepped to the new state's
+  target over `RampSeconds` (90 s). The wind direction drifts ±40° per
+  roll. `Wetness` fills over `WetUpSeconds`/intensity (180 s) and dries
+  over `DrySeconds` (1200 s).
+- **Falling snow is weather-owned.** `AODSeasonController::Tick` sets
+  `SnowfallIntensity = PrecipIntensity * PrecipType`, and the existing
+  snow HISM FX reads it unchanged. The clock's own snowfall ramp, the
+  winter light-snow level and the §7.17 snowfall-snap decay were deleted
+  from `ComputeParamsForClock` (5 blends now). Ground cover, freeze,
+  green-up and leaf drop are unchanged.
+- **QA:** `od.Weather <State>` forces and holds a state. `od.Weather Auto`
+  resumes the walk, and a bare `od.Weather` prints the current scalars.
+  Every transition logs `ODWeatherController: A -> B (hold, month, T, P,
+  biome)`.
+- **How climate.json reaches runtime:** the same way as the `.bin`
+  sidecars. `fetch_climate.py` now also writes
+  `OpenDriveUE/Content/OpenDrive/Masks/climate_<name>.json`, which
+  `DirectoriesToAlwaysStageAsUFS=OpenDrive/Masks` stages into packaged
+  builds. The runtime loads `climate_<area>_test.json`, with the area
+  derived from `AODRoadManager::RoadTilePrefix` like every
+  `Ensure*Manager`. It's parsed with the engine `Json` module (added to
+  `Build.cs`). If it's missing, a mild default climate is used and a
+  warning is logged once. The existing 6 files were copied in by hand
+  (no NASA re-fetch).
+- **Offline mirror:** `pipeline/sim_weather.py [--loops N]`. Same constant
+  names as the C++ table (comments on both sides). It simulates the 4 h
+  season loop per stage (200 loops averaged by default; `--loops 1` is a
+  single 4 h trace) and asserts the plan's sanity checks. Result: `sanity
+  ok`. % of each season's time:
+
+| stage | season | Clr | Ovc | Rain | HvyR | Tstm | Slt | Snow | Bliz | Fog | Dust | Torn | Hurr |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| tail_of_the_dragon | summer | 22.7 | 15.0 | 32.3 | 14.7 | 9.8 | 0.0 | 0.0 | 0.0 | 5.3 | 0.0 | 0.2 | 0.0 |
+| tail_of_the_dragon | fall | 27.7 | 15.8 | 33.7 | 13.2 | 3.5 | 0.0 | 0.0 | 0.0 | 6.2 | 0.0 | 0.0 | 0.0 |
+| tail_of_the_dragon | winter | 26.7 | 14.8 | 35.7 | 14.1 | 0.0 | 1.4 | 0.0 | 0.0 | 7.3 | 0.0 | 0.0 | 0.0 |
+| tail_of_the_dragon | spring | 25.5 | 15.5 | 34.8 | 16.0 | 3.0 | 0.0 | 0.0 | 0.0 | 5.2 | 0.0 | 0.0 | 0.0 |
+| green_valley_test | summer | 61.6 | 8.7 | 0.3 | 0.1 | 0.2 | 0.0 | 0.0 | 0.0 | 1.9 | 27.1 | 0.0 | 0.0 |
+| green_valley_test | fall | 55.2 | 17.3 | 7.0 | 2.0 | 0.8 | 0.0 | 0.0 | 0.0 | 2.5 | 15.1 | 0.0 | 0.0 |
+| green_valley_test | winter | 42.3 | 25.6 | 20.2 | 8.0 | 0.6 | 0.0 | 0.0 | 0.0 | 3.2 | 0.0 | 0.0 | 0.0 |
+| green_valley_test | spring | 54.9 | 16.7 | 8.0 | 3.1 | 1.4 | 0.0 | 0.0 | 0.0 | 2.9 | 13.0 | 0.0 | 0.0 |
+| oahu_test | summer | 32.9 | 20.9 | 21.2 | 8.2 | 4.3 | 0.0 | 0.0 | 0.0 | 11.3 | 0.0 | 0.0 | 1.2 |
+| oahu_test | fall | 25.8 | 14.4 | 29.0 | 12.2 | 7.2 | 0.0 | 0.0 | 0.0 | 9.7 | 0.0 | 0.0 | 1.8 |
+| oahu_test | winter | 25.1 | 15.8 | 30.5 | 12.2 | 7.9 | 0.0 | 0.0 | 0.0 | 8.6 | 0.0 | 0.0 | 0.0 |
+| oahu_test | spring | 28.7 | 20.2 | 25.2 | 9.4 | 7.4 | 0.0 | 0.0 | 0.0 | 9.0 | 0.0 | 0.0 | 0.0 |
+| palmdale_test | summer | 61.6 | 10.0 | 0.3 | 0.2 | 0.3 | 0.0 | 0.0 | 0.0 | 3.8 | 23.7 | 0.0 | 0.0 |
+| palmdale_test | fall | 54.9 | 15.1 | 6.3 | 3.5 | 1.2 | 0.0 | 0.0 | 0.0 | 4.8 | 14.2 | 0.0 | 0.0 |
+| palmdale_test | winter | 37.2 | 22.1 | 21.6 | 9.7 | 0.4 | 0.0 | 0.0 | 0.0 | 9.0 | 0.0 | 0.0 | 0.0 |
+| palmdale_test | spring | 53.1 | 16.4 | 8.0 | 3.2 | 1.0 | 0.0 | 0.0 | 0.0 | 6.3 | 12.0 | 0.0 | 0.0 |
+| skagit_cascades_test | summer | 34.9 | 18.8 | 24.3 | 8.3 | 3.3 | 0.0 | 0.0 | 0.0 | 10.4 | 0.0 | 0.0 | 0.0 |
+| skagit_cascades_test | fall | 21.3 | 12.0 | 36.7 | 15.8 | 1.3 | 3.5 | 1.2 | 0.3 | 7.9 | 0.0 | 0.0 | 0.0 |
+| skagit_cascades_test | winter | 15.0 | 10.0 | 7.1 | 2.5 | 0.0 | 26.4 | 25.1 | 8.4 | 5.6 | 0.0 | 0.0 | 0.0 |
+| skagit_cascades_test | spring | 24.1 | 13.4 | 37.9 | 15.9 | 0.5 | 1.1 | 0.3 | 0.0 | 6.8 | 0.0 | 0.0 | 0.0 |
+| summit_county_test | summer | 34.6 | 25.6 | 20.1 | 7.5 | 2.2 | 0.0 | 0.0 | 0.0 | 10.0 | 0.0 | 0.0 | 0.0 |
+| summit_county_test | fall | 31.5 | 18.9 | 8.4 | 4.2 | 0.0 | 1.8 | 19.9 | 5.6 | 9.9 | 0.0 | 0.0 | 0.0 |
+| summit_county_test | winter | 25.4 | 14.8 | 0.0 | 0.0 | 0.0 | 0.0 | 38.9 | 13.1 | 7.8 | 0.0 | 0.0 | 0.0 |
+| summit_county_test | spring | 29.2 | 17.2 | 8.3 | 2.3 | 0.0 | 2.4 | 23.8 | 8.2 | 8.7 | 0.0 | 0.0 | 0.0 |
+
+- **Sanity:** Oahu never gets snow or sleet, and hurricanes are 1-2% of
+  summer/fall. Palmdale's summer is dust ~24% vs rain <1%. Summit's winter
+  is 52% snow+blizzard. Skagit is rain-dominant outside winter, and its
+  winter is mixed sleet/snow (the NASA POWER cell averages in the
+  Cascades, Jan -0.4 C).
+- **Sim vs runtime gaps:**
+  - The sim uses `road_biomes.json`, but only green_valley (ODB1, no
+    elevation) and summit_county (ODB2) have a `biome_*.bin` on disk, so
+    Oahu and Skagit run with neutral biome multipliers in game until
+    their bins are exported.
+  - Tail of the Dragon's level has no `AODRoadManager`, so it gets the
+    mild default climate, not its `climate_tail_of_the_dragon.json`.
+- **Files:** `ODWeatherController.h/.cpp` (new), `ODGameMode.h/.cpp`,
+  `ODSeasonController.h/.cpp`, `ODForestManager.h/.cpp`,
+  `OpenDriveUE.Build.cs`, `pipeline/fetch_climate.py`,
+  `pipeline/sim_weather.py` (new).
+- **Verified:** headless `Build.bat OpenDriveUEEditor Win64 Development`,
+  `Result: Succeeded`, no warnings (`scratchpad/weather_w1_build.log`).
+  Not run in-game, per the no-launch rule.

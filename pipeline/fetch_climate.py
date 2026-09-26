@@ -14,6 +14,8 @@ Usage:  python fetch_climate.py [name ...]   (default: every stage + test road)
 Reads   data/stages/<name>/stage_meta.json  or
         data/road_tiles/<name>/road_test_meta.json (+ road_biomes.json)
 Writes  <same dir>/climate.json
+        OpenDriveUE/Content/OpenDrive/Masks/climate_<name>.json (runtime copy
+        for AODWeatherController, staged like the .bin sidecars)
 """
 
 import argparse
@@ -30,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 COAST_URL = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
              "master/geojson/ne_10m_coastline.geojson")
 COAST_PATH = ROOT / "data" / "raw" / "ne_10m_coastline.geojson"
+MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 HEADERS = {"User-Agent": "OpenDrive-pipeline/0.1"}
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
@@ -160,7 +163,10 @@ def run(name):
         "biome_source": "road_biomes.json" if shares is not None else "none",
         "storms": storm_weights(lat, lon, ckm, shares, annual_mm),
     }
-    (out_dir / "climate.json").write_text(json.dumps(out, indent=2))
+    text = json.dumps(out, indent=2)
+    (out_dir / "climate.json").write_text(text)
+    MASKS_DIR.mkdir(parents=True, exist_ok=True)
+    (MASKS_DIR / f"climate_{name}.json").write_text(text)
     return lat, lon, out
 
 

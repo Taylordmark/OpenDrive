@@ -11,6 +11,7 @@
 #include "ODForestManager.h"
 #include "ODTerrainManager.h"
 #include "ODWaterManager.h"
+#include "ODWeatherController.h"
 
 namespace
 {
@@ -117,24 +118,6 @@ namespace
 		return (RefZ - SnowCover * High) / Denom;
 	}
 
-	// "Light" continuous snowfall level held through the whole winter hold -
-	// spec: "snowing during fall->winter transition, light within winter, off
-	// elsewhere".
-	constexpr float WinterLightSnowfall = 0.2f;
-
-	// ---- 2026-09-07 snowfall-snap fix ------------------------------------
-	// Bug: the fall->winter transition ramps SnowfallIntensity 0->1 (a
-	// blizzard peak right at the transition's end, S4), but the winter-hold
-	// branch used to hard-set it to WinterLightSnowfall (0.2) the instant the
-	// hold began - a hard step from 1.0 to 0.2 at exactly S4 (~3.2/s
-	// derivative at 4 Hz), the one discontinuity in an otherwise all-
-	// smoothstep param set. Fix: continue easing DOWN from the transition's
-	// peak to the hold level over the first WinterSnowfallDecaySeconds of the
-	// winter hold (smoothstep, same shape every other ramp in this function
-	// uses) instead of snapping - "a driver at that moment would see the
-	// blizzard cut out instantly" is exactly the case this closes.
-	constexpr float WinterSnowfallDecaySeconds = 300.0f;   // ~5 in-game minutes
-
 	float SmoothStep01(float T)
 	{
 		T = FMath::Clamp(T, 0.0f, 1.0f);
@@ -210,7 +193,7 @@ void AODSeasonController::BeginPlay()
 		TimeScale = Rate;
 	}
 
-	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, FreezeBlend, SpringGreen, LeafDrop);
 	PushParamsToMIDs();
 }
 
@@ -239,8 +222,18 @@ void AODSeasonController::SetSeasonLock(const FString& SeasonName)
 	{
 		ClockSeconds = FMath::Fmod(SeasonHoldStartSeconds(SeasonName) + HoldSeconds * 0.5f, LoopSeconds());
 	}
-	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, FreezeBlend, SpringGreen, LeafDrop);
 	PushParamsToMIDs();
+	// Weather rolls within the picked season - re-roll now, not at the next
+	// hold end (the garage can call this before our first Tick bound it).
+	if (!WeatherCtl.IsValid())
+	{
+		FindManagers();
+	}
+	if (AODWeatherController* Weather = WeatherCtl.Get())
+	{
+		Weather->Reroll();
+	}
 	UE_LOG(LogTemp, Display, TEXT("ODSeasonController: garage season lock '%s' -> frozen=%d ClockSeconds=%.1f"),
 		SeasonName.IsEmpty() ? TEXT("Auto") : *SeasonName, bFrozen, ClockSeconds);
 }
@@ -255,9 +248,10 @@ void AODSeasonController::FindManagers()
 	for (TActorIterator<AODTerrainManager> It(World); It; ++It) { TerrainMgr = *It; break; }
 	for (TActorIterator<AODWaterManager> It(World); It; ++It) { WaterMgr = *It; break; }
 	for (TActorIterator<AODForestManager> It(World); It; ++It) { ForestMgr = *It; break; }
+	for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
 	UE_LOG(LogTemp, Display,
-		TEXT("ODSeasonController: managers found - terrain=%d water=%d forest=%d"),
-		TerrainMgr.IsValid(), WaterMgr.IsValid(), ForestMgr.IsValid());
+		TEXT("ODSeasonController: managers found - terrain=%d water=%d forest=%d weather=%d"),
+		TerrainMgr.IsValid(), WaterMgr.IsValid(), ForestMgr.IsValid(), WeatherCtl.IsValid());
 }
 
 void AODSeasonController::Tick(float DeltaSeconds)
@@ -268,7 +262,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 	// and this controller is spawned last (see EnsureSeasonController), but
 	// tolerate a missing manager gracefully either way (open-world levels
 	// only, per the class comment) rather than requiring exact spawn order.
-	if (!TerrainMgr.IsValid() || !WaterMgr.IsValid() || !ForestMgr.IsValid())
+	if (!TerrainMgr.IsValid() || !WaterMgr.IsValid() || !ForestMgr.IsValid() || !WeatherCtl.IsValid())
 	{
 		FindManagers();
 	}
@@ -276,8 +270,14 @@ void AODSeasonController::Tick(float DeltaSeconds)
 	if (!bFrozen)
 	{
 		ClockSeconds = FMath::Fmod(ClockSeconds + DeltaSeconds * TimeScale, LoopSeconds());
-		ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+		ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, FreezeBlend, SpringGreen, LeafDrop);
 	}
+
+	// Falling snow is weather-owned (Weather W1, next steps.md sec 7.39):
+	// snowfall = PrecipIntensity * PrecipType, so rain never shows flakes and
+	// sleet shows half. The clock keeps ground cover/freeze/green-up.
+	const AODWeatherController* Weather = WeatherCtl.Get();
+	SnowfallIntensity = Weather ? Weather->PrecipIntensity * Weather->PrecipType : 0.0f;
 
 	PushAccumSeconds += DeltaSeconds;
 	const float PushInterval = ParamPushHz > 0.0f ? 1.0f / ParamPushHz : 0.0f;
@@ -293,7 +293,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 }
 
 void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, float& OutSnow,
-	float& OutSnowfall, float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const
+	float& OutFreeze, float& OutSpringGreen, float& OutLeafDrop) const
 {
 	const float S0 = 0.0f;
 	const float S1 = HoldSeconds;                       // summer hold end / summer->fall transition start
@@ -305,7 +305,7 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 	const float S7 = S6 + HoldSeconds;                   // spring hold end / spring->summer transition start
 	// S7 + TransitionSeconds == LoopSeconds() (== S0 of the next lap)
 
-	OutFall = 0.0f; OutSnow = 0.0f; OutSnowfall = 0.0f; OutFreeze = 0.0f; OutSpringGreen = 0.0f;
+	OutFall = 0.0f; OutSnow = 0.0f; OutFreeze = 0.0f; OutSpringGreen = 0.0f;
 	OutLeafDrop = 0.0f;
 
 	if (Clock < S1)
@@ -331,45 +331,34 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 		// fade back toward green on the way out, they fall off orange) while
 		// LeafDrop ramps 0->1, progressively dissolving the canopy cards
 		// down to bare twig geometry (see M_Foliage's LeafDrop wiring).
-		// Snow grows in, lake starts to skin over, snow starts falling, and
-		// the same SnowCover ramp also builds "bunches of snow" onto the
-		// now-exposed twigs via the deciduous bark MID.
+		// Snow grows in, lake starts to skin over, and the same SnowCover
+		// ramp also builds "bunches of snow" onto the now-exposed twigs via
+		// the deciduous bark MID. (Falling snow is weather's, see Tick.)
 		const float T = SmoothStep01((Clock - S3) / TransitionSeconds);
 		OutFall = 1.0f;
 		OutLeafDrop = T;
 		OutSnow = T;
 		OutFreeze = T;
-		OutSnowfall = T;   // ramps 0->1 as winter arrives
 	}
 	else if (Clock < S5)
 	{
 		// winter hold: closed snow cover, frozen lake, deciduous canopies
-		// fully bare (LeafDrop=1) and snow-capped. SnowfallIntensity is NOT a
-		// flat hold value here - see the "snowfall-snap fix" comment above -
-		// it eases down from the fall->winter transition's blizzard peak
-		// (1.0 at S4) to the light continuous-snow level over the first
-		// WinterSnowfallDecaySeconds of the hold, then stays flat for the
-		// remainder (SmoothStep01 clamps its input, so this is exactly
-		// WinterLightSnowfall for the rest of the hold with no further code
-		// needed).
+		// fully bare (LeafDrop=1) and snow-capped.
 		OutFall = 1.0f;
 		OutLeafDrop = 1.0f;
 		OutSnow = 1.0f;
 		OutFreeze = 1.0f;
-		const float SnowfallDecayT = SmoothStep01((Clock - S4) / WinterSnowfallDecaySeconds);
-		OutSnowfall = FMath::Lerp(1.0f, WinterLightSnowfall, SnowfallDecayT);
 	}
 	else if (Clock < S6)
 	{
-		// winter -> spring transition: reverse patchy retreat + thaw, snowfall
-		// tapers off with the melt, fresh-green ramps in. Deciduous canopies
+		// winter -> spring transition: reverse patchy retreat + thaw,
+		// fresh-green ramps in. Deciduous canopies
 		// reverse-dissolve back in (LeafDrop 1->0) as fresh GREEN growth, not
 		// the fall orange - FallBlend eases back to 0 over the same span so
 		// the re-budding leaves render green under SpringGreen's fresh tint.
 		const float T = SmoothStep01((Clock - S5) / TransitionSeconds);
 		OutSnow = 1.0f - T;
 		OutFreeze = 1.0f - T;
-		OutSnowfall = WinterLightSnowfall * (1.0f - T);
 		OutSpringGreen = T;
 		OutFall = 1.0f - T;
 		OutLeafDrop = 1.0f - T;

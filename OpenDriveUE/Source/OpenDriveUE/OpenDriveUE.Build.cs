@@ -22,7 +22,9 @@ public class OpenDriveUE : ModuleRules
 			"AssetRegistry",
 			// FDisplayMetrics (Settings menu's "Native" resolution row, Arc 4.4) -
 			// lives in ApplicationCore, not Engine/Core.
-			"ApplicationCore"
+			"ApplicationCore",
+			// climate_<area>_test.json (ODWeatherController, Weather W1).
+			"Json"
 		});
 	}
 }
