@@ -31,6 +31,14 @@ perf difference), so this material is Default Lit, not Unlit, going
 forward. Documented here so nobody "simplifies" this back to Unlit without
 re-hitting the exact same bug.
 
+Weather W2 (2026-09-25, next steps.md sec 7.40): the same pool now also draws
+rain streaks and a sleet mix, so each property is Lerp(rain, snow) by
+PerInstanceCustomData[0] (AODSeasonController sets 0 = rain drop, 1 = snow
+flake per instance). Its default is 1, so an instance with no custom data
+renders exactly the old snow constants. Each Lerp's three inputs are checked
+post-save (see the verify block), covering the "intermediate node input not
+verifiable" worry below.
+
 Same in-place-rebuild MaterialEditingLibrary approach this project's other
 apply_*_material.py scripts already established.
 
@@ -49,6 +57,12 @@ OPACITY = 0.92
 # keeps flakes readable in shadow/backlit conditions without blowing out to
 # a glowing orb in direct sun.
 EMISSIVE_STRENGTH = 1.2
+
+# Rain streaks (Weather W2): thin, faint, slightly blue-grey - a drop is mostly
+# see-through, it reads by its streak, not its body.
+RAIN_COLOR = (0.72, 0.76, 0.82)
+RAIN_OPACITY = 0.3
+RAIN_EMISSIVE_STRENGTH = 0.35
 
 
 def log(msg):
@@ -85,20 +99,40 @@ mat.set_editor_property("used_with_instanced_static_meshes", True)
 # own verification. One constant per property removes that whole class of
 # bug and needs no runtime tuning (this material has no exposed parameters).
 final_emissive = tuple(c * EMISSIVE_STRENGTH for c in SNOW_COLOR)
-emissive_node = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, 0)
-emissive_node.set_editor_property("constant", unreal.LinearColor(*final_emissive, 1.0))
-req(MEL.connect_material_property(emissive_node, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR),
-    "Constant3Vector -> MP_EMISSIVE_COLOR")
+rain_emissive = tuple(c * RAIN_EMISSIVE_STRENGTH for c in RAIN_COLOR)
 
-basecolor_node = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, -150)
-basecolor_node.set_editor_property("constant", unreal.LinearColor(*SNOW_COLOR, 1.0))
-req(MEL.connect_material_property(basecolor_node, "", unreal.MaterialProperty.MP_BASE_COLOR),
-    "Constant3Vector -> MP_BASE_COLOR")
+# 0 = rain drop, 1 = snow flake (per instance, see module docstring).
+kind_node = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -800, 150)
+kind_node.set_editor_property("data_index", 0)
+kind_node.set_editor_property("const_default_value", 1.0)
 
-opacity_node = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -400, 300)
-opacity_node.set_editor_property("r", OPACITY)
-req(MEL.connect_material_property(opacity_node, "", unreal.MaterialProperty.MP_OPACITY),
-    "Constant -> MP_OPACITY")
+lerps = []
+
+
+def rain_snow(rain_node, snow_node, prop, y):
+    lerp = MEL.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -200, y)
+    req(MEL.connect_material_expressions(rain_node, "", lerp, "A"), f"{prop} Lerp.A")
+    req(MEL.connect_material_expressions(snow_node, "", lerp, "B"), f"{prop} Lerp.B")
+    req(MEL.connect_material_expressions(kind_node, "", lerp, "Alpha"), f"{prop} Lerp.Alpha")
+    req(MEL.connect_material_property(lerp, "", prop), f"Lerp -> {prop}")
+    lerps.append((prop, lerp))
+
+
+def vec3(c, y):
+    n = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant3Vector, -400, y)
+    n.set_editor_property("constant", unreal.LinearColor(*c, 1.0))
+    return n
+
+
+def scalar(v, y):
+    n = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -400, y)
+    n.set_editor_property("r", v)
+    return n
+
+
+rain_snow(vec3(rain_emissive, 0), vec3(final_emissive, 50), unreal.MaterialProperty.MP_EMISSIVE_COLOR, 0)
+rain_snow(vec3(RAIN_COLOR, -150), vec3(SNOW_COLOR, -100), unreal.MaterialProperty.MP_BASE_COLOR, -150)
+rain_snow(scalar(RAIN_OPACITY, 300), scalar(OPACITY, 350), unreal.MaterialProperty.MP_OPACITY, 300)
 
 MEL.recompile_material(mat)
 unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
@@ -110,5 +144,11 @@ if node is None:
 node2 = MEL.get_material_property_input_node(reloaded, unreal.MaterialProperty.MP_BASE_COLOR)
 if node2 is None:
     raise RuntimeError("M_SnowFlake: MP_BASE_COLOR failed to connect - see script")
-log(f"built + saved {MAT_NAME} (translucent default-lit, base_color={SNOW_COLOR}, "
-    f"emissive={final_emissive}, opacity={OPACITY})")
+for prop, _ in lerps:
+    n = MEL.get_material_property_input_node(reloaded, prop)
+    ins = MEL.get_inputs_for_material_expression(reloaded, n) if n else []
+    if n is None or len([i for i in ins if i is not None]) != 3:
+        raise RuntimeError(f"M_SnowFlake: {prop} Lerp not fully wired ({ins})")
+    log(f"  {prop}: Lerp inputs={[i.get_class().get_name() for i in ins]}")
+log(f"built + saved {MAT_NAME} (translucent default-lit, snow base_color={SNOW_COLOR}, "
+    f"emissive={final_emissive}, opacity={OPACITY}; rain {RAIN_COLOR}/{RAIN_OPACITY})")

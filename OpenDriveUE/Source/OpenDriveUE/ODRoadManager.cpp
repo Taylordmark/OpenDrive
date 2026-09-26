@@ -9,6 +9,7 @@
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -58,12 +59,23 @@ AODRoadManager::AODRoadManager()
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
 
+UMaterialInstanceDynamic* AODRoadManager::GetRoadMID() const
+{
+	return Cast<UMaterialInstanceDynamic>(RoadMat);
+}
+
 void AODRoadManager::BeginPlay()
 {
 	Super::BeginPlay();
 
 	RoadMat = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road.M_Road"));
+	// Weather W2 (sec 7.40): one shared MID so AODSeasonController can push
+	// the "Wetness" scalar to every road chunk at once.
+	if (RoadMat)
+	{
+		RoadMat = UMaterialInstanceDynamic::Create(RoadMat, this);
+	}
 	RoadMatOneWay = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay"));
 	LoadCenterline();

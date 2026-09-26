@@ -6,6 +6,7 @@
 
 class UAudioComponent;
 class USoundBase;
+class AODWeatherController;
 
 /** Ambient zone class a grid cell can be baked as - see pipeline/
  *  build_ambient_zones.py's ODA2 format doc. Mirrors that script's
@@ -199,6 +200,28 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
 	TObjectPtr<USoundBase> LakeSound;
 
+	/** Weather W2 (next steps.md sec 7.40) layers, driven by
+	 *  AODWeatherController's scalars rather than the zone grid, so they
+	 *  also play on a level with no zone file (AmbientZoneFile empty, e.g.
+	 *  Tail of the Dragon). Rain = PrecipIntensity * (1 - PrecipType);
+	 *  storm wind = max(wind above 5 m/s, DustAmount), a second, higher-
+	 *  pitched instance of SW_AlpineWind by default. Defaults are
+	 *  SW_Rain/SW_Thunder (content_src/audio/ambient/generate_weather_audio.py,
+	 *  procedural); a missing one logs a warning once and stays silent. */
+	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
+	TObjectPtr<USoundBase> RainSound;
+
+	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
+	TObjectPtr<USoundBase> StormWindSound;
+
+	/** One-shot, see QueueThunder. */
+	UPROPERTY(EditAnywhere, Category = "Ambient|Sounds")
+	TObjectPtr<USoundBase> ThunderSound;
+
+	/** Lightning (AODAtmosphereController): play ThunderSound after
+	 *  DelaySeconds (distance / speed of sound) at Volume 0..1. */
+	void QueueThunder(float DelaySeconds, float Volume) { PendingThunder.Add({ DelaySeconds, Volume }); }
+
 	/** Seams for later coupling (season/day-night) - deliberately unused
 	 *  no-ops for now, see class comment. */
 	void SetTimeOfDayHint(float Hour01) { /* not wired yet */ }
@@ -229,6 +252,14 @@ private:
 	FODAmbientLayer LayerCreek;
 	UPROPERTY()
 	FODAmbientLayer LayerLake;
+	UPROPERTY()
+	FODAmbientLayer LayerRain;
+	UPROPERTY()
+	FODAmbientLayer LayerWind;
+
+	TWeakObjectPtr<AODWeatherController> WeatherCtl;
+	struct FPendingThunder { float TimeLeft; float Volume; };
+	TArray<FPendingThunder> PendingThunder;
 
 	float TimeSinceSample = 0.0f;
 	double LastDiagTime = 0.0;

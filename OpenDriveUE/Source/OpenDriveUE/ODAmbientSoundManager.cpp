@@ -1,10 +1,12 @@
 #include "ODAmbientSoundManager.h"
 
 #include "Components/AudioComponent.h"
+#include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODBinSidecarUtil.h"
+#include "ODWeatherController.h"
 #include "Sound/SoundBase.h"
 
 bool FParsedAmbientZoneGrid::SampleNearest(float WorldXCm, float WorldYCm, EODAmbientZone& OutZone, uint8& OutDensity) const
@@ -75,6 +77,11 @@ AODAmbientSoundManager::AODAmbientSoundManager()
 
 bool AODAmbientSoundManager::LoadZoneGrid()
 {
+	if (AmbientZoneFile.IsEmpty())
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODAmbientSoundManager: no AmbientZoneFile - zone layers silent, weather layers only"));
+		return false;
+	}
 	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
 		/ (AmbientZoneFile + TEXT(".bin"));
 
@@ -176,15 +183,19 @@ void AODAmbientSoundManager::EnsureLayers()
 	LayerCreek.Comp = SpawnAmbientLoop(this, CreekSound);
 	LayerLake.Sound = LakeSound;
 	LayerLake.Comp = SpawnAmbientLoop(this, LakeSound);
+	LayerRain.Sound = RainSound;
+	LayerRain.Comp = SpawnAmbientLoop(this, RainSound);
+	LayerWind.Sound = StormWindSound;
+	LayerWind.Comp = SpawnAmbientLoop(this, StormWindSound);
 
 	int32 NumReady = 0;
-	for (const FODAmbientLayer* L : { &LayerForest, &LayerAlpine, &LayerSettlement, &LayerCreek, &LayerLake })
+	for (const FODAmbientLayer* L : { &LayerForest, &LayerAlpine, &LayerSettlement, &LayerCreek, &LayerLake, &LayerRain, &LayerWind })
 	{
 		if (L->Comp) { ++NumReady; }
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODAmbientSoundManager: %d/5 ambient layer(s) have a sound assigned "
+	UE_LOG(LogTemp, Display, TEXT("ODAmbientSoundManager: %d/7 ambient layer(s) have a sound assigned "
 		"and playing (unset ones stay silent - see AmbientZoneFile's ForestSound/AlpineWindSound/"
-		"SettlementHumSound/CreekSound/LakeSound properties)"), NumReady);
+		"SettlementHumSound/CreekSound/LakeSound/RainSound/StormWindSound properties)"), NumReady);
 }
 
 void AODAmbientSoundManager::BeginPlay()
@@ -208,18 +219,36 @@ void AODAmbientSoundManager::BeginPlay()
 		{
 			Target = LoadObject<USoundBase>(nullptr, Path);
 		}
+		if (!Target)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODAmbientSoundManager: missing sound asset '%s' - that layer stays silent "
+				"(run unreal/import_ambient_audio.py)"), Path);
+		}
 	};
 	LoadDefaultSound(ForestSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_ForestWind.SW_ForestWind"));
 	LoadDefaultSound(AlpineWindSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_AlpineWind.SW_AlpineWind"));
 	LoadDefaultSound(SettlementHumSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_TownHum.SW_TownHum"));
 	LoadDefaultSound(CreekSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_CreekBabble.SW_CreekBabble"));
 	LoadDefaultSound(LakeSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_LakeShore.SW_LakeShore"));
+	LoadDefaultSound(RainSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_Rain.SW_Rain"));
+	LoadDefaultSound(StormWindSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_AlpineWind.SW_AlpineWind"));
+	LoadDefaultSound(ThunderSound, TEXT("/Game/OpenDrive/Audio/Ambient/SW_Thunder.SW_Thunder"));
 
 	EnsureLayers();
 }
 
 void AODAmbientSoundManager::SampleAndRetarget()
 {
+	// Weather layers first - they don't need the zone grid or the pawn.
+	if (!WeatherCtl.IsValid())
+	{
+		for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It) { WeatherCtl = *It; break; }
+	}
+	const AODWeatherController* Weather = WeatherCtl.Get();
+	LayerRain.TargetVolume = Weather ? Weather->PrecipIntensity * (1.0f - Weather->PrecipType) : 0.0f;
+	LayerWind.TargetVolume = Weather
+		? FMath::Max(FMath::Clamp((Weather->WindSpeedMs - 5.0f) / 15.0f, 0.0f, 1.0f), Weather->DustAmount) : 0.0f;
+
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Player || !bGridLoaded)
 	{
@@ -269,7 +298,7 @@ void AODAmbientSoundManager::Tick(float DeltaSeconds)
 	// Smooth every layer's CurrentVolume toward TargetVolume every frame
 	// (not just on a sample tick) so the crossfade itself reads as
 	// continuous audio, not a stepped volume change every SamplePeriod.
-	for (FODAmbientLayer* L : { &LayerForest, &LayerAlpine, &LayerSettlement, &LayerCreek, &LayerLake })
+	for (FODAmbientLayer* L : { &LayerForest, &LayerAlpine, &LayerSettlement, &LayerCreek, &LayerLake, &LayerRain, &LayerWind })
 	{
 		if (!L->Comp)
 		{
@@ -283,13 +312,32 @@ void AODAmbientSoundManager::Tick(float DeltaSeconds)
 			L->Comp->Play();
 		}
 	}
+	// Storm wind howls higher as it builds.
+	if (LayerWind.Comp)
+	{
+		LayerWind.Comp->SetPitchMultiplier(0.9f + 0.4f * LayerWind.CurrentVolume);
+	}
+
+	for (int32 i = PendingThunder.Num() - 1; i >= 0; --i)
+	{
+		PendingThunder[i].TimeLeft -= DeltaSeconds;
+		if (PendingThunder[i].TimeLeft <= 0.0f)
+		{
+			if (ThunderSound)
+			{
+				UGameplayStatics::PlaySound2D(this, ThunderSound, PendingThunder[i].Volume * VolumeScale);
+			}
+			PendingThunder.RemoveAtSwap(i);
+		}
+	}
 
 	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastDiagTime > 5.0)
 	{
 		LastDiagTime = Now;
 		UE_LOG(LogTemp, Display,
-			TEXT("ODAmbientSoundManager: vol forest=%.2f alpine=%.2f settlement=%.2f creek=%.2f lake=%.2f"),
+			TEXT("ODAmbientSoundManager: vol forest=%.2f alpine=%.2f settlement=%.2f creek=%.2f lake=%.2f rain=%.2f wind=%.2f"),
 			LayerForest.CurrentVolume, LayerAlpine.CurrentVolume,
-			LayerSettlement.CurrentVolume, LayerCreek.CurrentVolume, LayerLake.CurrentVolume);
+			LayerSettlement.CurrentVolume, LayerCreek.CurrentVolume, LayerLake.CurrentVolume,
+			LayerRain.CurrentVolume, LayerWind.CurrentVolume);
 	}
 }

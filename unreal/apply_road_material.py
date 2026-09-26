@@ -113,6 +113,13 @@ DashPaintFraction = 0.5
 LineSharpnessPerM = 24.0        # antialiasing sharpness (1/m) for all stripe edges
 WearNoiseScaleM = 9.0
 WearMaxFade = 0.6               # markings never fade past 40% of full brightness/opacity
+# Weather W2 (next steps.md sec 7.40): "Wetness" scalar, pushed at runtime by
+# AODSeasonController from AODWeatherController::Wetness into
+# AODRoadManager's shared road MID. Default 0 = dry = the exact pre-W2 graph
+# output (x * 1 and Lerp(x, y, 0) are identity). Replaces the retired baked
+# road_moisture roughness term (sec 2.2) with a live one.
+WetDarken = 0.55                # albedo multiplier at Wetness 1 (wet asphalt reads much darker)
+WetRoughness = 0.12             # roughness at Wetness 1 (water film = sky reflections)
 
 
 def log(msg):
@@ -464,9 +471,14 @@ wear_visibility = g.sub(g.const(1.0), g.mul(wear_noise, wear_scalar_param))
 final_paint_mask = g.mul(g.mul(paint_mask, wear_visibility), not_in_junction)
 paint_rough = g.const(0.35)   # paint reads smoother/glossier than worn asphalt
 
-final_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
+dry_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
 final_normal = base_normal   # markings are flat paint, not a separate normal layer
-final_rough = g.lerp(base_rough, paint_rough, final_paint_mask)
+dry_rough = g.lerp(base_rough, paint_rough, final_paint_mask)
+
+# ---------------------------------------------------------------- weather wetness (W2)
+wetness = g.scalar_param("Wetness", 0.0)
+final_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(WetDarken), wetness))
+final_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
 
 MEL.connect_material_property(final_albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
 MEL.connect_material_property(final_normal, "", unreal.MaterialProperty.MP_NORMAL)
@@ -500,4 +512,5 @@ if not all_ok:
         "see the post-save verification log above")
 
 log(f"built + saved {MAT_NAME} - asphalt sets={list(TILE_M.keys())}, "
-    f"fallback half-width={RoadHalfWidthFallbackM}m")
+    f"fallback half-width={RoadHalfWidthFallbackM}m, Wetness param (darken {WetDarken}, "
+    f"rough {WetRoughness})")

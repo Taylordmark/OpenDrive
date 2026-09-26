@@ -149,16 +149,25 @@ void AODWeatherController::LoadClimate()
 	// Same AODRoadManager-derived area name as every AODGameMode::Ensure*
 	// manager: "road_<area>_test" -> Content/OpenDrive/Masks/climate_<area>_test.json
 	// (copied there by pipeline/fetch_climate.py, staged like the .bin sidecars).
+	// No road manager (Tail of the Dragon's hand-built level): the level name
+	// in snake case, "TailOfTheDragon" -> climate_tail_of_the_dragon.json.
 	FString Area;
 	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 	{
 		Area = It->RoadTilePrefix;
 		Area.RemoveFromStart(TEXT("road_"));
-		Area.RemoveFromEnd(TEXT("_test"));
 		break;
 	}
+	if (Area.IsEmpty())
+	{
+		for (const TCHAR C : UGameplayStatics::GetCurrentLevelName(this))
+		{
+			if (FChar::IsUpper(C) && !Area.IsEmpty()) { Area += TEXT('_'); }
+			Area += FChar::ToLower(C);
+		}
+	}
 	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("climate_%s_test.json"), *Area);
+		/ FString::Printf(TEXT("climate_%s.json"), *Area);
 
 	FString Text;
 	TSharedPtr<FJsonObject> Obj;

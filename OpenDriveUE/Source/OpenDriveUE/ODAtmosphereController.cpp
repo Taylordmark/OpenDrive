@@ -1,12 +1,19 @@
 #include "ODAtmosphereController.h"
 
+#include "Components/DirectionalLightComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
+#include "Components/SkyLightComponent.h"
 #include "Components/VolumetricCloudComponent.h"
+#include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/PostProcessVolume.h"
+#include "Engine/SkyLight.h"
 #include "EngineUtils.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "ODAmbientSoundManager.h"
+#include "ODWeatherController.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -29,11 +36,19 @@ const TCHAR* CloudMaterialPath =
 // too low flattens depth cueing. Tune in small steps (0.05-0.1) live -
 // the r.SkyAtmosphere.AerialPerspective.StartDepth cvar is a proven no-op.
 constexpr float AerialPerspectiveViewDistanceScale = 0.8f;
+
+// ---- Weather W2 (sec 7.40) targets at full weight ----
+const FLinearColor DustTan(1.0f, 0.72f, 0.42f);
+constexpr float FullCloudCoverage = 0.5f;     // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
+constexpr float OvercastSkyLuminance = 0.35f; // x SkyLuminanceFactor
+constexpr float OvercastSun = 0.25f;          // x sun intensity
+constexpr float OvercastSkyLight = 0.6f;      // x sky light intensity
+constexpr float FlashSeconds = 0.35f;
 }
 
 AODAtmosphereController::AODAtmosphereController()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;   // Weather W2
 }
 
 void AODAtmosphereController::BeginPlay()
@@ -94,6 +109,8 @@ void AODAtmosphereController::EnsureSkyAtmosphere()
 	Comp->SetAerialPerspectiveStartDepth(0.07f);   // vs 0.1 default - haze builds a bit sooner
 	Comp->SetHeightFogContribution(1.0f);
 	Comp->SetAerialPespectiveViewDistanceScale(AerialPerspectiveViewDistanceScale); // sic - engine's own spelling
+	AtmoComp = Comp;
+	BaseSkyLuminance = Comp->SkyLuminanceFactor;
 
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: tuned SkyAtmosphere for high-altitude haze"));
 }
@@ -158,6 +175,14 @@ void AODAtmosphereController::EnsureHeightFog()
 	// density CVars (r.VolumetricFog.GridPixelSize etc.) - perf note from the
 	// task: "keep volumetric fog grid at defaults."
 
+	FogComp = Comp;
+	BaseFogDensity = Comp->FogDensity;
+	BaseFogFalloff = Comp->FogHeightFalloff;
+	BaseFogOpacity = Comp->FogMaxOpacity;
+	BaseFogStart = Comp->StartDistance;
+	BaseFogAmbientScale = Comp->SkyAtmosphereAmbientContributionColorScale;
+	BaseFogAlbedo = Comp->VolumetricFogAlbedo;
+
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: tuned ExponentialHeightFog for ground haze"));
 }
 
@@ -189,7 +214,12 @@ void AODAtmosphereController::EnsureVolumetricCloud()
 
 	if (UMaterialInterface* CloudMat = LoadObject<UMaterialInterface>(nullptr, CloudMaterialPath))
 	{
-		Comp->SetMaterial(CloudMat);
+		// MID so Weather W2 can drive coverage (Tick); baselines read back
+		// from the instance, so Clear restores them exactly.
+		CloudMID = UMaterialInstanceDynamic::Create(CloudMat, this);
+		BaseCloudCoverage = CloudMID->K2_GetScalarParameterValue(TEXT("Cloud_GlobalCoverage"));
+		BaseStormClouds = CloudMID->K2_GetScalarParameterValue(TEXT("StormClouds"));
+		Comp->SetMaterial(CloudMID);
 	}
 	else
 	{
@@ -293,4 +323,158 @@ void AODAtmosphereController::SpawnGradeVolume()
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: spawned Grade post-process volume "
 		"(Priority=%.0f, saturation=%.2f, contrast=%.2f)"),
 		GradeVolume->Priority, S.ColorSaturation.X, S.ColorContrast.X);
+}
+
+void AODAtmosphereController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (!WeatherCtl.IsValid())
+	{
+		for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It) { WeatherCtl = *It; break; }
+	}
+	const AODWeatherController* Weather = WeatherCtl.Get();
+	if (!Weather)
+	{
+		return;
+	}
+	if (BaseSunIntensity <= 0.0f || BaseSkyLightIntensity <= 0.0f)
+	{
+		FindLights();
+	}
+
+	// 0..1 weights, snapped to exactly 0 near Clear so every Lerp below
+	// returns its baseline bit-for-bit.
+	auto Weight = [](float X) { X = FMath::Clamp(X, 0.0f, 1.0f); return X < 1e-3f ? 0.0f : X; };
+	const float FogW = Weight((20000.0f - Weather->VisibilityM) / 15000.0f);
+	const float CloudW = Weight((Weather->CloudCover - 0.1f) / 0.9f);
+	const float DustW = Weight(Weather->DustAmount);
+	const float Flash = UpdateLightning(DeltaSeconds, *Weather);
+
+	// Weather scalars ramp over ~90 s - skip the render-state writes when
+	// nothing moved (most frames).
+	if (FMath::IsNearlyEqual(FogW, LastFogW, 1e-4f) && FMath::IsNearlyEqual(CloudW, LastCloudW, 1e-4f)
+		&& FMath::IsNearlyEqual(DustW, LastDustW, 1e-4f) && Flash == LastFlash)
+	{
+		return;
+	}
+	LastFogW = FogW; LastCloudW = CloudW; LastDustW = DustW; LastFlash = Flash;
+
+	if (UExponentialHeightFogComponent* F = FogComp.Get())
+	{
+		// Koschmieder: visibility V (m) = 3.912 / extinction. The renderer
+		// uses FogDensity / 1000 as extinction per cm (SceneCore.cpp), so
+		// FogDensity = 39.12 / V. Falloff flattens so the fog is uniform in
+		// height, not a valley layer.
+		const float TargetDensity = 39.12f / FMath::Max(Weather->VisibilityM, 100.0f);
+		F->SetFogDensity(FMath::Lerp(BaseFogDensity, TargetDensity, FogW));
+		F->SetFogHeightFalloff(FMath::Lerp(BaseFogFalloff, 0.001f, FogW));
+		F->SetFogMaxOpacity(FMath::Lerp(BaseFogOpacity, 1.0f, FogW));
+		F->SetStartDistance(FMath::Lerp(BaseFogStart, 0.0f, FogW));
+		// Dust: tint the sky-atmosphere-lit inscatter (r.SupportSky
+		// AtmosphereAffectsHeightFog, default on) and the volumetric albedo tan.
+		F->SetSkyAtmosphereAmbientContributionColorScale(
+			FMath::Lerp(BaseFogAmbientScale, BaseFogAmbientScale * DustTan, DustW));
+		F->SetVolumetricFogAlbedo(DustW > 0.0f
+			? FMath::Lerp(FLinearColor(BaseFogAlbedo), DustTan, DustW).ToFColor(true) : BaseFogAlbedo);
+	}
+	if (USkyAtmosphereComponent* A = AtmoComp.Get())
+	{
+		const FLinearColor Tint = FMath::Lerp(FLinearColor::White, DustTan, 0.7f * DustW);
+		A->SetSkyLuminanceFactor(BaseSkyLuminance * FMath::Lerp(1.0f, OvercastSkyLuminance, CloudW) * Tint);
+	}
+	if (CloudMID)
+	{
+		CloudMID->SetScalarParameterValue(TEXT("Cloud_GlobalCoverage"), FMath::Lerp(BaseCloudCoverage, FullCloudCoverage, CloudW));
+		CloudMID->SetScalarParameterValue(TEXT("StormClouds"),
+			FMath::Lerp(BaseStormClouds, 1.0f, FMath::Clamp((Weather->CloudCover - 0.85f) / 0.15f, 0.0f, 1.0f)));
+	}
+	// ponytail: a light at Intensity 0 is AODGarageEnvironment's menu
+	// blackout - left alone, so the garage stays dark; it restores the value
+	// it cached and the next change here overwrites it from our baseline.
+	if (UDirectionalLightComponent* Sun = SunComp.Get(); Sun && BaseSunIntensity > 0.0f && Sun->Intensity > 0.0f)
+	{
+		Sun->SetIntensity(BaseSunIntensity * FMath::Lerp(1.0f, OvercastSun, CloudW) * (1.0f + Flash));
+	}
+	if (USkyLightComponent* Sky = SkyLightComp.Get(); Sky && BaseSkyLightIntensity > 0.0f && Sky->Intensity > 0.0f)
+	{
+		Sky->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.0f, OvercastSkyLight, CloudW) * (1.0f + Flash));
+	}
+}
+
+void AODAtmosphereController::FindLights()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	// The sun is the atmosphere sun light (AODDayNightController's moon is
+	// spawned with bAtmosphereSunLight=false); fall back to the first one.
+	if (BaseSunIntensity <= 0.0f)
+	{
+		for (TActorIterator<ADirectionalLight> It(World); It; ++It)
+		{
+			UDirectionalLightComponent* Comp = It->FindComponentByClass<UDirectionalLightComponent>();
+			if (Comp && (Comp->IsUsedAsAtmosphereSunLight() || !SunComp.IsValid()))
+			{
+				SunComp = Comp;
+			}
+		}
+		BaseSunIntensity = SunComp.IsValid() ? SunComp->Intensity : 0.0f;
+	}
+	if (BaseSkyLightIntensity <= 0.0f)
+	{
+		for (TActorIterator<ASkyLight> It(World); It; ++It)
+		{
+			SkyLightComp = It->FindComponentByClass<USkyLightComponent>();
+			break;
+		}
+		BaseSkyLightIntensity = SkyLightComp.IsValid() ? SkyLightComp->Intensity : 0.0f;
+	}
+}
+
+float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeatherController& Weather)
+{
+	if (FlashAge >= 0.0f)
+	{
+		FlashAge += DeltaSeconds;
+	}
+	if (Weather.State == EODWeatherState::Thunderstorm && Weather.PrecipIntensity > 0.5f)
+	{
+		StrikeCountdown -= DeltaSeconds;
+		if (StrikeCountdown <= 0.0f)
+		{
+			StrikeCountdown = FMath::FRandRange(8.0f, 30.0f);
+			const float DistM = FMath::FRandRange(500.0f, 8000.0f);
+			const float Near = 1.0f - (DistM - 500.0f) / 7500.0f;
+			FlashAge = 0.0f;
+			FlashPeak = FMath::Lerp(1.5f, 6.0f, Near);
+			if (!AmbientMgr.IsValid())
+			{
+				for (TActorIterator<AODAmbientSoundManager> It(GetWorld()); It; ++It) { AmbientMgr = *It; break; }
+			}
+			if (AODAmbientSoundManager* Ambient = AmbientMgr.Get())
+			{
+				Ambient->QueueThunder(DistM / 343.0f, FMath::Lerp(0.35f, 1.0f, Near));
+			}
+			UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: lightning at %.0f m (flash x%.1f, thunder in %.1f s)"),
+				DistM, 1.0f + FlashPeak, DistM / 343.0f);
+		}
+	}
+	else
+	{
+		StrikeCountdown = 5.0f;   // first strike shortly after the storm builds
+	}
+
+	if (FlashAge < 0.0f || FlashAge > FlashSeconds)
+	{
+		FlashAge = -1.0f;
+		return 0.0f;
+	}
+	// Double flicker: bright stroke, a dip, a second stroke fading out.
+	const float Env = FlashAge < 0.07f ? 1.0f
+		: FlashAge < 0.13f ? 0.15f
+		: 0.8f * (1.0f - (FlashAge - 0.13f) / (FlashSeconds - 0.13f));
+	return FlashPeak * Env;
 }

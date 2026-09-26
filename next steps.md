@@ -7085,3 +7085,95 @@ Implements W3 above. All in `UODVehicleMovement`; the pawn is unchanged.
 - **Verified:** headless `Build.bat OpenDriveUEEditor Win64 Development`,
   `Result: Succeeded`, no warnings (`scratchpad/weather_w3_build.log`).
   Not run in-game, per the no-launch rule.
+
+### 7.40 Weather W2: visuals + audio (2026-09-25)
+Implements W2 above: the published weather scalars now drive what you see
+and hear.
+- **Precipitation:** the season controller's snowfall sphere pool
+  (`AODSeasonController`, still no Niagara) is now all precipitation:
+  - 520 instances. The visible count is `Num * PrecipIntensity`, so Snow
+    (0.5) still shows the tuned 260. Unused slots get scale 0.
+  - Each instance has a fixed roll. It is snow if the roll is below
+    `PrecipType`, so sleet is about half and half.
+  - Snow looks as before (0.11 scale, 260 cm/s) but now drifts at 0.1x
+    the wind.
+  - Rain is a 1.5 cm x 50 cm streak falling at 900 cm/s, pushed at 0.5x
+    the wind and rotated along its velocity (converted to the pawn's
+    local space).
+  - Per-instance custom data 0 (1 snow, 0 rain) drives `M_SnowFlake`,
+    whose `apply_snow_particle_material.py` gains a PerInstanceCustomData
+    lerp to a dim, translucent blue-grey rain look.
+  - Season lock and `od.Weather Snow` behave as before (type 1, all flakes).
+- **Atmosphere:** `AODAtmosphereController` now ticks. It captures the
+  baselines BeginPlay sets, turns visibility, cloud and dust into 0..1
+  weights (snapped to 0 below 1e-3), and lerps baseline to target, so
+  Clear writes back exactly today's values. Writes are skipped when the
+  weights haven't moved.
+  - **Fog:** density = 39.12 / VisibilityM (Koschmieder, since the renderer
+    uses FogDensity/1000 per cm). Opacity goes to 1, start distance to 0,
+    and falloff to 0.001, over V = 20 km down to 5 km.
+  - **Dust:** a tan (1, 0.72, 0.42) tint on the fog's
+    SkyAtmosphereAmbientContributionColorScale, the volumetric fog albedo
+    and the sky luminance.
+  - **Clouds:** a MID of the engine's `m_SimpleVolumetricCloud_Inst`.
+    `Cloud_GlobalCoverage` goes from -0.2 to 0.5 and `StormClouds` from
+    0 to 1 over CloudCover 0.85..1.
+  - **Overcast:** the sky luminance is x0.35, the sun (the atmosphere sun
+    light, not the moon) x0.25, and the sky light x0.6.
+  - A light at intensity 0 (the garage menu blackout) is left alone.
+- **Lightning:** during Thunderstorm with precipitation above 0.5, a strike
+  every 8-30 s, 500-8000 m away. The sun and sky light get a 0.35 s
+  double-flicker boost (x2.5 far to x7 near). Thunder is queued on the
+  ambient manager, delayed by distance / 343 m/s, at volume 0.35-1 by
+  distance. Each strike is logged.
+- **Road wetness:** `apply_road_material.py` adds a `Wetness` scalar
+  (default 0 = the old dry graph). Albedo is x lerp(1, 0.55) and roughness
+  lerps to 0.12. `AODRoadManager` wraps `M_Road` in one shared MID
+  (`GetRoadMID()`), and the season controller pushes
+  `AODWeatherController::Wetness` into it at its 3 Hz param push.
+- **Audio:** `AODAmbientSoundManager` gains two weather layers, set before
+  the zone-grid early return:
+  - `LayerRain` (SW_Rain): PrecipIntensity x (1 - PrecipType).
+  - `LayerWind`: a second SW_AlpineWind instance at max((wind - 5)/15,
+    DustAmount), pitch 0.9-1.3 as it builds.
+
+  Thunder is a delayed `PlaySound2D` of SW_Thunder. A missing default
+  asset now logs a warning. SW_Rain (40 s loop, -23 LUFS, seam -1.2 dB)
+  and SW_Thunder (8 s, -18 LUFS) are procedural, from the new
+  `content_src/audio/ambient/generate_weather_audio.py`. They are
+  imported by `import_ambient_audio.py` (thunder not looping). Nothing
+  was downloaded and there is no license entry.
+- **W1 gap fixed (Dragon):** with no `AODRoadManager`,
+  `AODWeatherController::LoadClimate` falls back to the level name in
+  snake case, so TailOfTheDragon loads `climate_tail_of_the_dragon.json`.
+  The path pattern changed to `climate_<area>.json`, where area keeps its
+  `_test` suffix. `AODGameMode::EnsureAmbientSoundManager` now spawns the
+  manager with an empty `AmbientZoneFile` when there's no road, so the
+  zone layers stay silent and the weather layers still play.
+- **Files:**
+  - `ODSeasonController.h/.cpp`, `ODAtmosphereController.h/.cpp`,
+    `ODAmbientSoundManager.h/.cpp`, `ODRoadManager.h/.cpp`,
+    `ODWeatherController.h/.cpp`, `ODGameMode.cpp`
+  - `unreal/apply_snow_particle_material.py`,
+    `unreal/apply_road_material.py`, `unreal/import_ambient_audio.py`
+  - `content_src/audio/ambient/generate_weather_audio.py` (new)
+  - Assets rebuilt headless: `M_SnowFlake`, `M_Road`, and new
+    `SW_Rain`/`SW_Thunder`.
+- **Verified:**
+  - The three `unreal/*.py` commandlets ran clean. Their post-save checks
+    show M_Road BaseColor fed by the wetness Multiply and Roughness by the
+    Wetness Lerp, and M_SnowFlake's lerps wired.
+  - Headless `Build.bat OpenDriveUEEditor Win64 Development`: `Result:
+    Succeeded`, no warnings (`scratchpad/weather_w2_build.log`).
+  - Not run in-game, per the no-launch rule, so nothing visual is tuned
+    by eye yet.
+- **Gaps:**
+  - The cloud coverage range (-0.2..0.5), the overcast dimming factors and
+    the rain streak size/opacity are first guesses and need a look pass.
+  - Tail of the Dragon's road isn't an `AODRoadManager` mesh, so it gets
+    no wetness.
+  - No puddle mask or wet terrain/foliage.
+  - Rain streaks ignore car speed; the pool rides the pawn.
+  - Wind and dust share one reused loop, and there is no distinct dust
+    hiss.
+  - Lightning has no visible bolt or cloud flash, only the light spike.

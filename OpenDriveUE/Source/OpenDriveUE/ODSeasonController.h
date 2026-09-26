@@ -11,6 +11,7 @@ class AODTerrainManager;
 class AODWaterManager;
 class AODForestManager;
 class AODWeatherController;
+class AODRoadManager;
 
 /**
  * Seasons feature, first half (2026-09-07): a continuous, looping season
@@ -154,6 +155,7 @@ private:
 	TWeakObjectPtr<AODWaterManager> WaterMgr;
 	TWeakObjectPtr<AODForestManager> ForestMgr;
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
+	TWeakObjectPtr<AODRoadManager> RoadMgr;   // Weather W2 road "Wetness"; absent on Tail of the Dragon
 
 	/** Simple runtime falling-snow effect (2026-09-07): a pool of tiny sphere
 	 *  instances, camera-attached, animated by hand in Tick - NOT Niagara.
@@ -163,10 +165,18 @@ private:
 	 *  controller owns and animates directly is the "simplest robust option"
 	 *  call for "falling snow must be visible" - cheap (a few hundred tiny
 	 *  instances, updated once per tick, not per-material-param-push rate)
-	 *  and needs no editor session or asset pipeline step to exist. */
+	 *  and needs no editor session or asset pipeline step to exist.
+	 *
+	 *  Weather W2 (next steps.md sec 7.40): the same pool is all precipitation
+	 *  - visible count scales with PrecipIntensity, each instance is snow when
+	 *  its fixed roll < PrecipType (so sleet is a mix) else a thin fast rain
+	 *  streak slanted along the wind; per-instance custom data 0 (1 snow, 0
+	 *  rain) picks M_SnowFlake's look. */
 	UPROPERTY()
 	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> SnowFxHism;
 
 	TArray<FVector> SnowFxLocalOffsets;
+	TArray<float> PrecipFxSnowRoll;   // fixed [0,1) per instance: snow if < PrecipType
+	TArray<uint8> PrecipFxIsSnow;     // last custom-data value pushed per instance
 	bool bSnowFxAttached = false;
 };

@@ -6,6 +6,7 @@
 #include "ODRoadManager.generated.h"
 
 class UDynamicMeshComponent;
+class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
 
@@ -123,6 +124,9 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Shared road-chunk MID (Weather W2 wetness), null if M_Road failed to load. */
+	UMaterialInstanceDynamic* GetRoadMID() const;
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin" (ODR2 format).

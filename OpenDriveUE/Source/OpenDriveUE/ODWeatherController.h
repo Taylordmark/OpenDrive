@@ -26,7 +26,8 @@ enum class EODWeatherState : uint8
 };
 
 /** One stage's climate.json (pipeline/fetch_climate.py, W0), staged as
- *  Content/OpenDrive/Masks/climate_<area>_test.json. Defaults = the mild
+ *  Content/OpenDrive/Masks/climate_<area>_test.json (or climate_<level>.json
+ *  on a level with no AODRoadManager, e.g. Tail of the Dragon). Defaults = the mild
  *  fallback used when a stage has none. */
 struct FODClimate
 {

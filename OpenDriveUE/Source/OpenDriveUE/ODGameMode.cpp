@@ -470,6 +470,14 @@ void AODGameMode::EnsureAmbientSoundManager()
 	}
 	if (!Road)
 	{
+		// Weather W2 (sec 7.40): no road (e.g. Tail of the Dragon) still gets
+		// the manager for its weather layers (rain/wind/thunder); an empty
+		// AmbientZoneFile just leaves the zone layers silent.
+		if (AODAmbientSoundManager* Ambient = World->SpawnActor<AODAmbientSoundManager>())
+		{
+			Ambient->AmbientZoneFile.Empty();   // not the summit_county default
+		}
+		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned AODAmbientSoundManager (no road - weather layers only)"));
 		return;
 	}
 

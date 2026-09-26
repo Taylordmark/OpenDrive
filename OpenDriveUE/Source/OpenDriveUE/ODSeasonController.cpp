@@ -9,6 +9,7 @@
 #include "Math/RandomStream.h"
 #include "Misc/CommandLine.h"
 #include "ODForestManager.h"
+#include "ODRoadManager.h"
 #include "ODTerrainManager.h"
 #include "ODWaterManager.h"
 #include "ODWeatherController.h"
@@ -249,6 +250,7 @@ void AODSeasonController::FindManagers()
 	for (TActorIterator<AODWaterManager> It(World); It; ++It) { WaterMgr = *It; break; }
 	for (TActorIterator<AODForestManager> It(World); It; ++It) { ForestMgr = *It; break; }
 	for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
+	for (TActorIterator<AODRoadManager> It(World); It; ++It) { RoadMgr = *It; break; }
 	UE_LOG(LogTemp, Display,
 		TEXT("ODSeasonController: managers found - terrain=%d water=%d forest=%d weather=%d"),
 		TerrainMgr.IsValid(), WaterMgr.IsValid(), ForestMgr.IsValid(), WeatherCtl.IsValid());
@@ -449,6 +451,16 @@ void AODSeasonController::PushParamsToMIDs()
 			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
 		}
 	}
+	// Weather W2 (sec 7.40): wet road = darker + glossier (unreal/
+	// apply_road_material.py's "Wetness" param, 0 = the dry baseline).
+	if (AODRoadManager* Road = RoadMgr.Get())
+	{
+		if (UMaterialInstanceDynamic* RoadMID = Road->GetRoadMID())
+		{
+			const AODWeatherController* Weather = WeatherCtl.Get();
+			RoadMID->SetScalarParameterValue(TEXT("Wetness"), Weather ? Weather->Wetness : 0.0f);
+		}
+	}
 }
 
 void AODSeasonController::EnsureSnowfallComponent()
@@ -486,11 +498,14 @@ void AODSeasonController::EnsureSnowfallComponent()
 	// essentially invisible noise, not "visibly snowing." Bumped scale and
 	// tightened the box (denser per unit volume) so light snowfall reads
 	// clearly in a still frame without turning into a blizzard.
-	constexpr int32 NumFlakes = 260;
+	// Weather W2: pool doubled to 520 - the visible count is Num *
+	// PrecipIntensity, so the Snow state (0.5) still shows the tuned 260.
+	constexpr int32 NumFlakes = 520;
 	constexpr float HalfExtentXYCm = 900.0f;
 	constexpr float HalfHeightCm = 700.0f;
 	FRandomStream Rng(12345);
 	SnowFxLocalOffsets.Reserve(NumFlakes);
+	PrecipFxSnowRoll.Reserve(NumFlakes);
 	TArray<FTransform> Transforms;
 	Transforms.Reserve(NumFlakes);
 	for (int32 i = 0; i < NumFlakes; ++i)
@@ -500,12 +515,19 @@ void AODSeasonController::EnsureSnowfallComponent()
 			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm),
 			Rng.FRandRange(-HalfHeightCm, HalfHeightCm));
 		SnowFxLocalOffsets.Add(Offset);
+		PrecipFxSnowRoll.Add(Rng.FRand());
 		FTransform T;
 		T.SetLocation(Offset);
 		T.SetScale3D(FVector(0.11f));   // ~11 cm sphere - reads as a soft flake at driving distance
 		Transforms.Add(T);
 	}
+	SnowFxHism->SetNumCustomDataFloats(1);
 	SnowFxHism->AddInstances(Transforms, false);
+	PrecipFxIsSnow.Init(1, NumFlakes);
+	for (int32 i = 0; i < NumFlakes; ++i)
+	{
+		SnowFxHism->SetCustomDataValue(i, 0, 1.0f, false);
+	}
 }
 
 void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
@@ -530,7 +552,9 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		}
 	}
 
-	const bool bVisible = SnowfallIntensity > 0.02f;
+	const AODWeatherController* Weather = WeatherCtl.Get();
+	const float Precip = Weather ? Weather->PrecipIntensity : 0.0f;
+	const bool bVisible = Precip > 0.02f;
 	if (SnowFxHism->IsVisible() != bVisible)
 	{
 		SnowFxHism->SetVisibility(bVisible);
@@ -540,29 +564,54 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		return;
 	}
 
-	constexpr float FallSpeedCmS = 260.0f;
-	constexpr float DriftXCmS = 28.0f;
-	constexpr float DriftYCmS = 14.0f;
-	constexpr float HalfHeightCm = 700.0f;
-	constexpr float HalfExtentXYCm = 900.0f;
+	// Weather W2: snow keeps its 260 cm/s fall and drifts at 0.1x wind; rain
+	// falls ~900 cm/s and is pushed at 0.5x wind, drawn as a thin sphere
+	// stretched along its own (local-space - the pool rides the pawn) velocity.
+	constexpr float SnowFallCmS = 260.0f;
+	constexpr float RainFallCmS = 900.0f;
+	constexpr double HalfHeightCm = 700.0;
+	constexpr double HalfExtentXYCm = 900.0;
+
+	const float WindCmS = (Weather ? Weather->WindSpeedMs : 0.0f) * 100.0f;
+	const float WindYaw = FMath::DegreesToRadians(Weather ? Weather->WindDirDeg : 0.0f);
+	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
+	const FTransform& CompXf = SnowFxHism->GetComponentTransform();
+	const FVector SnowVel = CompXf.InverseTransformVectorNoScale(WindDir * (0.1f * WindCmS) - FVector(0, 0, SnowFallCmS));
+	const FVector RainVel = CompXf.InverseTransformVectorNoScale(WindDir * (0.5f * WindCmS) - FVector(0, 0, RainFallCmS));
+	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainVel).ToQuat();
+	const float SnowType = Weather ? Weather->PrecipType : 1.0f;
 
 	const int32 Num = SnowFxLocalOffsets.Num();
+	const int32 NumActive = FMath::RoundToInt(Num * FMath::Clamp(Precip, 0.0f, 1.0f));
 	for (int32 i = 0; i < Num; ++i)
 	{
-		FVector& Offset = SnowFxLocalOffsets[i];
-		Offset.Z -= FallSpeedCmS * DeltaSeconds;
-		Offset.X += DriftXCmS * DeltaSeconds;
-		Offset.Y += DriftYCmS * DeltaSeconds;
-		if (Offset.Z < -HalfHeightCm)
+		const bool bSnow = PrecipFxSnowRoll[i] < SnowType;
+		if (PrecipFxIsSnow[i] != (uint8)bSnow)
 		{
-			Offset.Z += 2.0f * HalfHeightCm;
+			PrecipFxIsSnow[i] = bSnow;
+			SnowFxHism->SetCustomDataValue(i, 0, bSnow ? 1.0f : 0.0f, false);
 		}
-		if (Offset.X > HalfExtentXYCm) Offset.X -= 2.0f * HalfExtentXYCm;
-		if (Offset.Y > HalfExtentXYCm) Offset.Y -= 2.0f * HalfExtentXYCm;
+		FVector& Offset = SnowFxLocalOffsets[i];
+		Offset += (bSnow ? SnowVel : RainVel) * DeltaSeconds;
+		Offset.X = FMath::Wrap(Offset.X, -HalfExtentXYCm, HalfExtentXYCm);
+		Offset.Y = FMath::Wrap(Offset.Y, -HalfExtentXYCm, HalfExtentXYCm);
+		Offset.Z = FMath::Wrap(Offset.Z, -HalfHeightCm, HalfHeightCm);
 
 		FTransform T;
 		T.SetLocation(Offset);
-		T.SetScale3D(FVector(0.11f));
+		if (i >= NumActive)
+		{
+			T.SetScale3D(FVector::ZeroVector);   // pool slot unused at this intensity
+		}
+		else if (bSnow)
+		{
+			T.SetScale3D(FVector(0.11f));
+		}
+		else
+		{
+			T.SetRotation(RainRot);
+			T.SetScale3D(FVector(0.015f, 0.015f, 0.5f));   // ~1.5 cm x 50 cm streak
+		}
 		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
 	}
 }
