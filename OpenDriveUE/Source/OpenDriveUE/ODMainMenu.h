@@ -88,11 +88,11 @@ public:
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
 	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
-	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Settings,
-	// Credits, Drive (5.2: exhaust preset row + 4 slider rows, same
+	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Season,
+	// Settings, Credits, Drive (5.2: exhaust preset row + 4 slider rows, same
 	// value-cycling idiom as the rows above them; Settings/Credits added
-	// Arc 4.4, next steps.md SS4.4/SS7.31 - see Adjust()/GetRow() in the .cpp).
-	int32 NumRows() const { return 13; }
+	// Arc 4.4, next steps.md SS4.4/SS7.31; Season SS7.38 - see Adjust()/GetRow() in the .cpp).
+	int32 NumRows() const { return 14; }
 	int32 GetSelected() const { return Selected; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
@@ -154,6 +154,7 @@ private:
 	void ApplyDrivetrain();
 	void ApplyTuning();
 	void ApplyExhaust();     // pushes current Exhaust* fields to the synth
+	void ApplySeason();      // pushes SeasonIdx to AODSeasonController (lock or Auto)
 	void ChangeCar(int32 Dir);
 
 	// persistence (Arc 5.2) - GConfig into GameUserSettings.ini, same
@@ -204,6 +205,10 @@ private:
 	float ExhaustRasp = 0.35f;
 	float ExhaustMufflerCutoff = 2200.0f;
 	float ExhaustPop = 0.02f;
+
+	// Season row (SS7.38): index into SeasonNames[] (ODMainMenu.cpp), 0 = Auto
+	// (the 4 h loop). Persisted beside the exhaust keys in GameUserSettings.ini.
+	int32 SeasonIdx = 0;
 
 	bool bEntered = false;   // EnterCarConfig() has run (pawn was ready)
 

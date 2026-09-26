@@ -227,6 +227,24 @@ float AODSeasonController::SeasonHoldStartSeconds(const FString& SeasonName) con
 	return 0.0f;
 }
 
+void AODSeasonController::SetSeasonLock(const FString& SeasonName)
+{
+	FString QASeason;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odseason="), QASeason))
+	{
+		return;
+	}
+	bFrozen = !SeasonName.IsEmpty();
+	if (bFrozen)
+	{
+		ClockSeconds = FMath::Fmod(SeasonHoldStartSeconds(SeasonName) + HoldSeconds * 0.5f, LoopSeconds());
+	}
+	ComputeParamsForClock(ClockSeconds, FallBlend, SnowCover, SnowfallIntensity, FreezeBlend, SpringGreen, LeafDrop);
+	PushParamsToMIDs();
+	UE_LOG(LogTemp, Display, TEXT("ODSeasonController: garage season lock '%s' -> frozen=%d ClockSeconds=%.1f"),
+		SeasonName.IsEmpty() ? TEXT("Auto") : *SeasonName, bFrozen, ClockSeconds);
+}
+
 void AODSeasonController::FindManagers()
 {
 	UWorld* World = GetWorld();

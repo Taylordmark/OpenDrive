@@ -14,6 +14,7 @@
 #include "ODGarageEnvironment.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
+#include "ODSeasonController.h"
 #include "ODSettingsMenu.h"
 #include "ODTerrainManager.h"
 #include "ODTuningManager.h"
@@ -111,6 +112,11 @@ constexpr float ExhaustRaspStep = 0.05f;
 constexpr float ExhaustMufflerStep = 200.0f;
 constexpr float ExhaustPopStep = 0.05f;
 
+// Garage Season row (SS7.38): "" = Auto, anything else is handed to
+// AODSeasonController::SetSeasonLock (same names -odseason= accepts).
+const TCHAR* const SeasonNames[] = {TEXT("Auto"), TEXT("Summer"), TEXT("Fall"), TEXT("Winter"), TEXT("Spring")};
+const TCHAR* SeasonConfigSection = TEXT("OpenDrive.Season");
+
 template <typename T>
 T* FindActor(UWorld* World)
 {
@@ -135,6 +141,8 @@ void AODMainMenu::BeginPlay()
 {
 	Super::BeginPlay();
 	LoadExhaustConfig();   // restore last session's exhaust pick before ApplyExhaust() ever runs
+	GConfig->GetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
+	SeasonIdx = FMath::Clamp(SeasonIdx, 0, (int32)UE_ARRAY_COUNT(SeasonNames) - 1);
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
 	{
@@ -463,6 +471,7 @@ void AODMainMenu::EnterCarConfig()
 	ApplyEngine();
 	ApplyDrivetrain();
 	ApplyExhaust();
+	ApplySeason();
 	bEntered = true;
 }
 
@@ -724,6 +733,14 @@ void AODMainMenu::Adjust(int32 Dir)
 			Pawn->SetInputDeviceMode(static_cast<EODInputDevice>(Next));
 		}
 		break;
+	case 10:
+		// Season row (SS7.38): Auto/Summer/Fall/Winter/Spring, applied live and
+		// persisted the same GConfig way as the exhaust rows.
+		SeasonIdx = (SeasonIdx + Dir + UE_ARRAY_COUNT(SeasonNames)) % UE_ARRAY_COUNT(SeasonNames);
+		ApplySeason();
+		GConfig->SetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
+		break;
 	default:
 		break;
 	}
@@ -815,6 +832,14 @@ void AODMainMenu::ApplyExhaust()
 			Config.PopDecay = Preset.PopDecay;
 			Synth->SetExhaustConfig(Config);
 		}
+	}
+}
+
+void AODMainMenu::ApplySeason()
+{
+	if (AODSeasonController* Season = FindActor<AODSeasonController>(GetWorld()))
+	{
+		Season->SetSeasonLock(SeasonIdx == 0 ? FString() : FString(SeasonNames[SeasonIdx]));
 	}
 }
 
@@ -1112,14 +1137,18 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		break;
 	}
 	case 10:
+		OutLabel = TEXT("Season");
+		OutValue = SeasonNames[SeasonIdx];
+		break;
+	case 11:
 		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
-	case 11:
+	case 12:
 		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
-	case 12:
+	case 13:
 		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
 		OutValue.Empty();
 		break;

@@ -106,6 +106,12 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Season|Debug")
 	float LeafDrop = 0.0f;
 
+	/** Garage "Season" row (next steps.md sec 7.38): a season name locks the
+	 *  clock at that season's hold midpoint via the same bFrozen path as
+	 *  -odseason=; empty = Auto (unfreeze, keep looping from here). No-op
+	 *  when an -odseason= QA flag is on the command line - QA always wins. */
+	void SetSeasonLock(const FString& SeasonName);
+
 private:
 	/** Pure function of a loop-position clock (seconds, [0, LoopSeconds)) to
 	 *  the six season blends - see the .cpp definition for the segment

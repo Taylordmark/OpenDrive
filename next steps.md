@@ -6885,3 +6885,54 @@ simulated 4-hour state trace per stage and plot state vs. season clock.
   other garage settings. Weather then rolls within the chosen season
   (for example, Winter at Summit means snow or blizzard; Winter at
   Palmdale means clear or rare rain).
+
+### 7.38 Garage season selection (2026-09-25)
+Implements the "season selection lives in the garage menu" decision above.
+- New garage row **Season** (row 10, between Input Device and Settings):
+  Auto / Summer / Fall / Winter / Spring. Auto is the default and is
+  today's 4 h loop, unchanged.
+- `AODSeasonController::SetSeasonLock(name)`: a season name sets
+  `ClockSeconds` to that season's hold midpoint and sets `bFrozen` (the
+  same freeze path `-odseason=` uses, via `SeasonHoldStartSeconds`);
+  empty = Auto, which clears `bFrozen` and keeps looping from the current
+  clock. Params are recomputed and pushed immediately, so a pick shows
+  even while the garage has the game paused. If `-odseason=` is on the
+  command line the call is a no-op, so QA freezes always win.
+- Persistence: `SeasonIdx` in GameUserSettings.ini, section
+  `[OpenDrive.Season]`, via GConfig, same as the exhaust rows (§7.30).
+  Loaded in `AODMainMenu::BeginPlay`, saved on every change.
+- Applied from `EnterCarConfig` (`ApplySeason`, next to `ApplyExhaust`), so
+  it runs on fresh boot and on the mid-drive `OpenGarage()` reopen, and
+  live from `Adjust()` like the other rows.
+- Files: `ODSeasonController.h/.cpp`, `ODMainMenu.h/.cpp` (`NumRows` 13 -> 14).
+- Verified: headless `Build.bat OpenDriveUEEditor Win64 Development`,
+  `Result: Succeeded` (`scratchpad/season_row_build.log`). Not run in-game,
+  per the no-launch rule.
+
+### Weather W0 results (2026-09-25)
+`pipeline/fetch_climate.py [name ...]` (default: all stages + test roads;
+`--selftest` checks the eligibility logic). `climate.json` gains
+`monthly_temp_c`, `monthly_precip_mm` (mm/month), `coast_km`,
+`biome_source` and `storms` {hurricane, tornado, dust_storm} weights 0..1.
+The annual keys are unchanged (tail_of_the_dragon identical).
+`coast_km` is the nearest Natural Earth 10m coastline vertex (downloaded once
+to `data/raw/`). Overpass coastline radius queries returned 429/504.
+
+| name | lat | lon | precip mm | temp C | coast km | biomes | hurr | torn | dust |
+|---|---|---|---|---|---|---|---|---|---|
+| tail_of_the_dragon | 35.50 | -83.96 | 1395 | 12.9 | 436 | no | 0 | 0.25 | 0 |
+| green_valley_test | 34.53 | -118.45 | 340 | 16.5 | 56 | yes | 0 | 0 | 1.00 |
+| oahu_test | 21.48 | -157.98 | 771 | 24.6 | 10 | yes | 0.93 | 0 | 0 |
+| palmdale_test | 34.59 | -118.12 | 285 | 16.7 | 73 | no | 0 | 0 | 1.00 |
+| skagit_cascades_test | 48.27 | -121.95 | 2049 | 6.9 | 32 | yes | 0 | 0 | 0 |
+| summit_county_test | 39.53 | -106.17 | 573 | -0.7 | 1116 | yes | 0 | 0 | 0 |
+
+Notes:
+- Green Valley is in SoCal (next to Palmdale), not the SE US, so the plan's
+  "weak tornado on Green Valley" doesn't apply. It gets dust instead: 75%
+  Desert+Canyon and 340 mm, just under the 350 mm cut.
+- Palmdale and Dragon have no `road_biomes.json`. For Palmdale, dust falls
+  back to precipitation alone. Dragon's tornado 0.25 is the SE US
+  (Dixie Alley) box allowance.
+- Hurricane basins are lat/lon boxes. The E Pacific box stops at 30N, so
+  SoCal (56-73 km from the coast) correctly gets 0.
