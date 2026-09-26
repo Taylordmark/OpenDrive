@@ -58,3 +58,7 @@ content_src/audio/ambient/raw/*.mp3
 # deterministic re-run of that script against raw/*.mp3 reproduces these.
 content_src/audio/ambient/normalized/*.wav
 
+
+# Claude Code local state, scratch data arrays
+.claude/
+scratchpad/*.npz
