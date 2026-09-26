@@ -33,7 +33,11 @@ struct FEngineDef
 	float DisplacementL;
 	float PeakNm, PeakRpm, MaxRpm, LimiterRpm, Inertia;
 };
+// Row 0 "Stock" (2026-09-25, Taylor: per-car engines must survive the
+// garage) is a sentinel - ApplyEngine() reads the active UODVehicleDef
+// instead of these zeros. Same for Layouts[0].
 const FEngineDef Engines[] = {
+	{TEXT("Stock"),        0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
 	{TEXT("V8 Muscle"),    8, 6.2f, 420.0f, 4600.0f, 7000.0f, 6850.0f, 0.25f},
 	{TEXT("V6 Sport"),     6, 3.5f, 335.0f, 5500.0f, 7900.0f, 7750.0f, 0.17f},
 	{TEXT("V10 Screamer"), 10, 5.2f, 480.0f, 6800.0f, 9000.0f, 8850.0f, 0.14f},
@@ -46,10 +50,37 @@ struct FLayoutDef
 	EODDriveLayout Layout;
 };
 const FLayoutDef Layouts[] = {
+	{TEXT("Stock"), EODDriveLayout::RWD},   // sentinel: def's DriveLayout
 	{TEXT("RWD"), EODDriveLayout::RWD},
 	{TEXT("FWD"), EODDriveLayout::FWD},
 	{TEXT("AWD"), EODDriveLayout::AWD},
 };
+
+// the active car's def, or null (no def assets -> hardcoded coupe)
+const UODVehicleDef* ActiveDef(const AODVehiclePawn* Pawn)
+{
+	if (!Pawn || !Pawn->GetVehicleDefs().IsValidIndex(Pawn->GetVehicleIndex()))
+	{
+		return nullptr;
+	}
+	return Pawn->GetVehicleDefs()[Pawn->GetVehicleIndex()];
+}
+
+// Stock's synth voice: defs carry no audio fields, so borrow the real
+// Engines[] row whose peak torque is nearest the def's (V8 without a def)
+const FEngineDef& StockVoice(const UODVehicleDef* Def)
+{
+	int32 Best = 1;
+	for (int32 i = 2; Def && i < (int32)UE_ARRAY_COUNT(Engines); ++i)
+	{
+		if (FMath::Abs(Engines[i].PeakNm - Def->PeakTorqueNm)
+			< FMath::Abs(Engines[Best].PeakNm - Def->PeakTorqueNm))
+		{
+			Best = i;
+		}
+	}
+	return Engines[Best];
+}
 
 // Exhaust presets (Arc 5.2) - Stock/Sport/Open, same table-of-defs idiom as
 // Engines[]/Layouts[] above. PopProbability/PopWindowSec/PopDecay feed
@@ -725,14 +756,18 @@ int32 AODMainMenu::NumPresets() const
 
 void AODMainMenu::ApplyEngine()
 {
-	const FEngineDef& E = Engines[EngineIdx];
+	// Stock (row 0) restores the active def's own engine; with no def the
+	// V8 row is the def/ctor default anyway
+	const UODVehicleDef* Def = ActiveDef(FindPawn());
+	const FEngineDef& E = EngineIdx != 0 ? Engines[EngineIdx] : StockVoice(Def);
 	if (UODVehicleMovement* D = FindMovement())
 	{
-		D->PeakTorqueNm = E.PeakNm;
-		D->PeakTorqueRpm = E.PeakRpm;
-		D->MaxRpm = E.MaxRpm;
-		D->LimiterRpm = E.LimiterRpm;
-		D->EngineInertia = E.Inertia;
+		const bool bStockDef = EngineIdx == 0 && Def;
+		D->PeakTorqueNm = bStockDef ? Def->PeakTorqueNm : E.PeakNm;
+		D->PeakTorqueRpm = bStockDef ? Def->PeakTorqueRpm : E.PeakRpm;
+		D->MaxRpm = bStockDef ? Def->MaxRpm : E.MaxRpm;
+		D->LimiterRpm = bStockDef ? Def->LimiterRpm : E.LimiterRpm;
+		D->EngineInertia = bStockDef ? Def->EngineInertia : E.Inertia;
 	}
 	if (AODVehicleAudio* Audio = FindActor<AODVehicleAudio>(GetWorld()))
 	{
@@ -747,7 +782,9 @@ void AODMainMenu::ApplyDrivetrain()
 {
 	if (UODVehicleMovement* D = FindMovement())
 	{
-		D->SetDriveLayout(Layouts[DriveIdx].Layout);
+		const UODVehicleDef* Def = ActiveDef(FindPawn());
+		D->SetDriveLayout(DriveIdx != 0 ? Layouts[DriveIdx].Layout
+			: Def ? Def->DriveLayout : EODDriveLayout::RWD);
 	}
 }
 
@@ -1007,10 +1044,25 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 	case 1:
 		OutLabel = TEXT("Engine");
 		OutValue = Engines[EngineIdx].Name;
+		if (EngineIdx == 0)
+		{
+			// "Stock (V8)" - first word of the borrowed synth voice's name
+			const FString Voice = StockVoice(ActiveDef(FindPawn())).Name;
+			OutValue = FString::Printf(TEXT("Stock (%s)"),
+				*Voice.Left(Voice.Find(TEXT(" "))));
+		}
 		break;
 	case 2:
 		OutLabel = TEXT("Drivetrain");
 		OutValue = Layouts[DriveIdx].Name;
+		if (DriveIdx == 0)
+		{
+			const UODVehicleDef* Def = ActiveDef(FindPawn());
+			const EODDriveLayout L = Def ? Def->DriveLayout : EODDriveLayout::RWD;
+			OutValue = FString::Printf(TEXT("Stock (%s)"),
+				L == EODDriveLayout::FWD ? TEXT("FWD")
+				: L == EODDriveLayout::AWD ? TEXT("AWD") : TEXT("RWD"));
+		}
 		break;
 	case 3:
 		OutLabel = TEXT("Tuning");

@@ -112,8 +112,8 @@ public:
 	 *  which is what flips the car. Below FadeStart the key still means full
 	 *  lock; by FadeEnd it only means HighSpeedSteerFrac of lock, and the
 	 *  ramp-toward-lock rate shrinks by the same factor (return-to-center
-	 *  stays fast). Applies to the KEYBOARD path only - analog devices carry
-	 *  their own resolution. */
+	 *  stays fast). The lock cap also applies to the gamepad stick
+	 *  (2026-09-25); the wheel stays 1:1. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float SteerFadeStartCmS = 900.0f;   // ~20 mph
 

@@ -1,0 +1,15 @@
+  loaded 45644 lake bed(s) from 514 water tile(s) for terrain depression
+45644 lake bed(s) loaded - qualifying-drop stations over open water are classified 'bridge', never 'embankment'
+0 station(s) flagged near a road-road junction (embankment/bridge classification forces 'none' there)
+1447 run(s) (52356 station(s)) -> C:\Users\taylo\Coding\OpenDrive\data\road_tiles\summit_county_test\road_embankments.json
+  embankment: 1033 run(s), 51775 station(s), ~253.71 km
+  bridge:     85 run(s), 581 station(s), ~2.48 km
+  skipped (junction-box, qualifying drop): 39 station(s)
+  §7.21 sub-classification: 233 bridge-threshold run(s) found pre-tile-chunking, 85 genuine (148 demoted to embankment) -> C:\Users\taylo\Coding\OpenDrive\data\road_tiles\summit_county_test\bridge_subclass_report.json
+  §7.23 water-crossing trigger: 322 station(s) forced to 'bridge' by lake-polygon geometry regardless of DEM drop (118 via the unconditional both-edges-in-REAL-LAKE case, 204 via the guarded one-edge (or ribbon-either-edge)+1.5m-clearance case) [§7.34: 0 unconditional station(s) from a ribbon - should always be 0]
+  Dillon Dam Road runs found:
+    embankment: 530.0 m run, max drop 3.29 m
+    embankment: 625.0 m run, max drop 3.17 m
+    bridge: 10.0 m run, max drop -0.37 m
+    embankment: 55.0 m run, max drop 6.22 m
+    embankment: 85.0 m run, max drop 3.70 m

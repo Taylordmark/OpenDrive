@@ -18,7 +18,6 @@
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
-#include "ODTuningManager.h"
 
 static FString FormatTime(float T)
 {
@@ -917,22 +916,6 @@ void AODRaceHUD::DrawHUD()
 			Line(FString::Printf(TEXT("best  %s"), *FormatTime(Race->BestTime)),
 				FLinearColor(0.5f, 0.8f, 1), 1.2f);
 		}
-	}
-
-	// ---- tuning preset toast (T to cycle) - only needs AODTuningManager
-	for (TActorIterator<AODTuningManager> It(GetWorld()); It; ++It)
-	{
-		if (Now - It->SwapShownAt < 3.0f && !It->CurrentPresetName.IsEmpty())
-		{
-			FCanvasTextItem Toast(
-				FVector2D(Canvas->SizeX * 0.5f - 60.0f, Canvas->SizeY - 130.0f),
-				FText::FromString(It->CurrentPresetName), Font,
-				FLinearColor(1.0f, 0.8f, 0.3f));
-			Toast.Scale = FVector2D(1.6f, 1.6f);
-			Toast.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Toast);
-		}
-		break;
 	}
 
 	// ---- out-of-bounds countdown (2026-09-06) - warns while the car is past

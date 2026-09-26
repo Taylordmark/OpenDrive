@@ -1,0 +1,235 @@
+§7.23 - Water crossing as a first-class bridge trigger
+=======================================================
+Summit County test area, run 2026-09-07
+
+TASK
+----
+7.21/7.22 left an honest, unresolved caveat: the bridge classifier's water-
+crossing signal never fired anywhere in the county, even though the task's
+own named target (Dillon Reservoir causeway / Swan Mountain Road) is exactly
+the kind of feature a "drop > 7m OR water crossing" rule is supposed to
+catch. This pass (a) inventories what actually crosses mapped water in this
+county's own data, (b) makes water-crossing an unconditional bridge trigger
+in build_road_embankments.py - independent of the raw DEM-drop threshold -
+with a data-justified guard against dam-top/at-grade-shoreline false
+positives, and (c) ships pier/deck geometry relative to the WATER SURFACE
+(the lake polygon's own baked Z), not the raw DEM "lakebed" reading.
+
+STEP 1 - OFFLINE INVENTORY (scratchpad/inventory_water_crossings*.py,
+county-wide, against the SAME baked lake polygons build_road_embankments.py
+itself reads via load_lake_beds())
+---------------------------------------------------------------------------
+Test: at the pipeline's own pavement-edge offset (ROAD_HALF_WIDTH = 4.5 m,
+same convention compute_side()'s pre-existing in_lake test already uses),
+does either pavement edge fall inside a mapped lake polygon ring anywhere
+in the 1,579-segment road network?
+
+RESULT: zero stations, anywhere in the county, have BOTH pavement edges
+inside a lake polygon simultaneously (i.e. no location reads as the road
+running directly through the middle of open water). Only two roads have
+EITHER edge inside a lake polygon at all:
+
+  Swan Mountain Road   - 20 stations, ~250 m stretch, lat 39.6007-39.6013,
+                          lon -106.0144 to -106.0176. ONE edge only (the
+                          shore-side edge), never both. Sample point at
+                          39.60111,-106.01493.
+  (unnamed local road) - 5 stations near lat 39.6523, lon -105.8768 (Vail
+                          area) + 8 stations near lat 39.4746, lon -106.0587
+                          (unrelated pond, different county area). Minor
+                          local/private roads, ONE edge only, both clusters
+                          too short to survive EMBANK_MIN_RUN_M (10 m) as a
+                          run even before any bridge-worthiness test.
+
+Every other named road checked (Dillon Dam Road, North Dillon Dam Road, US 6,
+CO 9, CO 91, I-70/"Gerald R. Ford Memorial Highway") passes within 10-200 m
+of a lake/pond polygon at various points but its pavement edges NEVER enter
+one, anywhere in the county (see scratchpad/inventory_water_crossings2.py
+output - centerline-to-nearest-lake-ring distance, n_within_10m is 0 for
+every one of these roads at every segment checked).
+
+VERDICT BY NAMED CASE:
+  Dillon Dam Road (the dam crest itself) - NOT a water crossing by this
+    data. Pavement never gets closer than ~12 m to any mapped lake polygon
+    at the road CENTERLINE (edge offset is even farther), across its entire
+    length. Consistent with a wide earthen dam crest set back from the
+    current shoreline. OSM tags NO man_made=dam anywhere in this county's
+    cached osm.json (checked directly - grepped every element's tags for
+    "dam"; only name matches like "Beaver Dam Road" turned up, nothing
+    tagged man_made=dam), so there is no tag to key a special case off of -
+    the geometry itself (pavement never inside the water polygon) already
+    excludes it, no separate guard logic was even needed for this specific
+    road.
+  Swan Mountain Road - the one place pavement geometry comes close.
+    SKIRTING, not CROSSING: only one edge (the lake-side edge) ever enters
+    the polygon, never both simultaneously, over a sustained ~250 m
+    stretch. Comparing the road's own elevation against the SAME baked lake
+    surface Z the water-rendering bake itself uses (not the raw DEM, which
+    is untrustworthy right at a shoreline) gives a clearance of -1.2 m to
+    +0.6 m across the whole stretch - i.e. the road sits essentially AT
+    water level. That is the geometric signature of a lakeside road built
+    on shoreline fill/rip-rap at grade, not a deck spanning a real gap.
+    See verify_water_bridge_profile.png (left panel) for the actual
+    profile - the road elevation trace and the water-surface trace are
+    within a meter of each other the whole way, nowhere near the +1.5 m
+    clearance guard.
+  US 6 / CO 9 / CO 91 / I-70 - none of these ever put a pavement edge
+    inside a mapped lake polygon anywhere in the county, so none qualify by
+    this test, full stop. This does NOT mean these roads have no real
+    bridges - see the scope-limit caveat below.
+
+STEP 2 - THE NEW UNCONDITIONAL TRIGGER (build_road_embankments.py, main(),
+between compute_side() and subclassify_bridge_runs())
+---------------------------------------------------------------------------
+A station on side S is forced to BRIDGE_CLS (bypassing the ordinary
+Schmitt-trigger drop classification entirely - "regardless of measured DEM
+drop", per the task brief) if side S's pavement edge is inside a lake
+polygon AND either:
+  1. the OPPOSITE side's edge is ALSO inside a lake polygon at the same
+     station (literal both-edge straddle) - trusted unconditionally, no
+     clearance check, since both edges cannot be inside the mapped ring
+     while the road sits on dry ground; OR
+  2. side S alone is inside a lake polygon and the road's own elevation
+     clears the MATCHING LAKE'S BAKED SURFACE Z by >= 1.5 m
+     (WATER_CROSSING_MIN_CLEARANCE_M) - this is the dam/one-sided-
+     shoreline guard, calibrated directly against the Swan Mountain Road
+     evidence above (actual clearance never exceeds +0.6 m there, well
+     under the 1.5 m bar).
+Forced runs are re-passed through the existing demote_short_runs()
+(EMBANK_MIN_RUN_M = 10 m) so an isolated 1-2 station polygon touch doesn't
+spawn a degenerate stub bridge. subclassify_bridge_runs()'s own
+"unconditional water OR" now reads this guarded water_crossing mask
+(previously it read the raw, unguarded in_lake test) - a run that clears
+this trigger stays genuine WITHOUT running the paved-road/rebound/short-
+both-sided gates, exactly the "existing genuine-subclass rules bypassed via
+the unconditional water rule" the task asked for.
+
+RESULT ON THIS COUNTY'S CURRENT BAKE: 2 stations county-wide were forced to
+BRIDGE_CLS by the new trigger's guarded one-edge case (both on the unnamed
+Vail-area road near lat 39.6523/lon -105.8768, clearance +1.7 to +2.2 m -
+a short driveway/private road next to a small pond). Both were immediately
+demoted back to NONE_CLS by demote_short_runs() (2 stations, well under the
+10 m minimum run length) and never reached the bridge sub-classification
+report at all. The unconditional both-edges-in-water case (condition 1)
+fired ZERO times anywhere in the county. Swan Mountain Road never triggers
+the new rule either (clearance guard correctly excludes it, as designed).
+
+NET EFFECT: +0 new genuine bridge runs, +0.00 km. This is the honest,
+calibrated result, not a bug or an unimplemented feature - the code path is
+real, tested against actual county data, and will correctly promote a
+genuine water crossing (both edges in water, or one edge clearly elevated
+over it) wherever one exists; this county's current OSM/DEM data simply
+does not contain one that clears the guard. This matches the task's own
+sanity check ("if it explodes, your crossing test is wrong") from the other
+direction - a test that finds nothing here, after finding the two named
+"should not bridge" cases correctly excluded by construction, is the
+expected/correct outcome for the county actually surveyed, not evidence the
+test is broken.
+
+STEP 3 - DECK/PIER TERMINATION AT WATER SURFACE, NOT DEM LAKEBED
+---------------------------------------------------------------------------
+Any final BRIDGE_CLS station whose pavement edge is in_lake (regardless of
+which rule promoted it - the pre-existing weak DEM-drop-over-water branch in
+classify_with_hysteresis(), or the new §7.23 trigger) now ships drop_cm
+computed against the matching lake's BAKED surface Z plus
+WATER_PIER_SUBMERGENCE_M (0.5 m), instead of the raw DEM sample.
+build_road_bridges.py's existing pier-height math (drop_cm - DECK_DEPTH_M)
+is unchanged; this only changes what drop_cm MEANS at a water station, so a
+water-crossing pier's foot terminates a half-meter below the lake's own
+flat, trustworthy baked surface - visually submerged, not floating at the
+waterline or planted in whatever the noisy raw DEM happened to read under
+the lake (build_terrain_mesh_tiles.py's own water-depression pass already
+establishes that raw DEM reading is not the real terrain height under a
+lake anyway). See verify_water_bridge_profile.png (right panel) for the
+schematic - illustrative only, since no run in this county's current bake
+actually reaches build_road_bridges.py via the water-crossing path to
+exercise it end-to-end (see STEP 2 result).
+
+STEP 4 - FULL BAKE CHAIN RE-RUN
+---------------------------------------------------------------------------
+build_road_embankments.py -> export_road_embankment_bin.py ->
+build_road_bridges.py -> export_road_bridge_bin.py, all completed cleanly.
+
+  embankment: 1,004 run(s), 53,758 station(s), ~263.77 km
+  bridge:     23 run(s), 378 station(s), ~1.78 km  (UNCHANGED from §7.22)
+  §7.21 sub-classification: 157 bridge-threshold run(s) found, 23 genuine
+    (134 demoted to embankment) - identical to §7.22's own numbers
+  §7.23 water-crossing trigger: 2 station(s) forced to 'bridge' by lake-
+    polygon geometry regardless of DEM drop (0 via both-edges-in-water,
+    2 via guarded one-edge-in-water+1.5m-clearance) - both later
+    demote_short_runs()-filtered out, 0 survive to the report
+  build_road_bridges.py: 23 genuine bridge run(s), 378 stations, 86 piers,
+    0 runs got zero piers - IDENTICAL to §7.22's pre-this-pass numbers
+  export_road_bridge_bin.py: 23 bridge run(s) -> 11 tile .bin files
+
+Genuine bridge list is UNCHANGED from §7.22 (same 23 runs: Gerald R. Ford
+Memorial Highway x11, CO 91 x2, Tenth Mountain Division Memorial Highway x2,
+I 70;CO 9 x2, Water Street x2, US 6 x2, CO 9 x1, I 70 x1 - all via the
+short+both-sided+paved+rebound path, none via the water path). Total
+genuine mileage: 1.775 km (matches §7.22's reported 1.78 km).
+
+NAMED §7.22 VALIDATION - REGRESSION CHECK (must stay 0 genuine, asserted
+against the freshly-baked bridge_subclass_report.json)
+---------------------------------------------------------------------------
+  Boreas Pass Road:      0 genuine (of 28 candidate runs)  [PASS]
+  County Road 4:         0 genuine (of  8 candidate runs)  [PASS]
+  Homestake Creek Road:  0 genuine (of  2 candidate runs)  [PASS]
+  Robbers Nest Drive:    0 genuine (of  4 candidate runs)  [PASS]
+  Garnet Road:           0 genuine (of  2 candidate runs)  [PASS]
+No regression from §7.20's station-elevation fix or §7.22's subclass
+results - this pass touches neither reconcile_junction_elevations() nor the
+paved/rebound discriminator logic, only adds a new, independently-guarded
+promotion path.
+
+HONEST CAVEATS
+---------------------------------------------------------------------------
+- Real creek/river bridges out of reach of THIS test by construction: the
+  task brief itself anticipated CO 9 over Blue River arms and I-70 over
+  Tenmile/Straight Creek as candidates. Those are OSM waterway=river|stream
+  LINEAR features. build_water_tiles.py explicitly only bakes closed
+  natural=water/landuse=reservoir RINGS into lake polygons (documented in
+  that module's own docstring, "linear waterways...are out of scope for
+  this pass") - a lake-polygon water-crossing test structurally cannot see
+  a river/creek crossing no matter how the geometry test here is tuned.
+  Those crossings, if real bridges exist there, would need to be caught (if
+  at all) by the pre-existing short+both-sided+paved+rebound path from
+  §7.21/§7.22 - and indeed several of this run's 23 genuine spans ARE named
+  paved-highway creek crossings (US 6 x2, CO 91 x2) that plausibly ARE real
+  river bridges, just not reached via the water-polygon path. Extending
+  build_water_tiles.py to also bake waterway=river/stream centerlines (with
+  a corridor width) would be a real follow-on, out of this pass's declared
+  scope (build_road_embankments.py/build_road_bridges.py only).
+- Dam-tag guard is geometric, not tag-based: OSM does not tag
+  man_made=dam anywhere in this county's cached data, so the "is this a
+  dam" question is answered entirely by geometry (pavement never enters
+  mapped water) for Dillon Dam Road specifically, and by the clearance
+  guard for the general one-sided-shoreline case. If a future county's OSM
+  data DOES tag man_made=dam near a road, this pass does not read that tag
+  - it would need to be added as a third, independent exclusion if ever
+  needed, current geometry-only guard is sufficient for this county.
+- WATER_CROSSING_MIN_CLEARANCE_M (1.5 m) and WATER_PIER_SUBMERGENCE_M
+  (0.5 m) are both engineering judgment calls, not derived from a survey -
+  1.5 m was picked to sit safely above the ~1 m of noise observed between
+  the elev_m-derived road height and the baked lake Z (a different
+  reference/interpolation path than the DEM sample itself), while staying
+  low enough to admit a plausible short culvert/causeway bridge. Neither
+  value was exercised end-to-end against a real qualifying run in this
+  county's data (see STEP 2) - a future county with an actual water
+  crossing would be the first real test of the exact threshold value, not
+  just the mechanism.
+- The "(unnamed)" road cluster hints there may be minor private
+  roads/driveways near small ponds elsewhere in the county whose short,
+  isolated water contact was correctly filtered by the 10 m minimum run
+  length - this is the SAME min-run treatment every other embankment/bridge
+  run in this module already gets, so no special-casing was added for
+  "unnamed", consistent with the module's existing default-to-eligible
+  posture for unnamed roads.
+- This pass does not re-verify §7.20/§7.22's own already-documented
+  caveats (name-based OSM join risk for the paved-road test, TIGER-fallback
+  heuristic risk, rebound-window threshold tuned to this county) - those
+  are unchanged by this pass and still apply to the 23 genuine non-water
+  runs exactly as documented in "next steps.md" §7.22.
+
+Committed: pipeline/build_road_embankments.py only (this pass touches no
+other pipeline module, same precedent as §7.22). Bakes (road_embankments.
+json, road_bridges.json, bridge_subclass_report.json, and the exported .bin
+tiles) are gitignored, regenerated locally, not committed.

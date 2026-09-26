@@ -1324,7 +1324,10 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// SmSteer/SmThrottle/SmBrake, which stay exactly the keyboard path.
 	if (ActiveDevice == EODInputDevice::Gamepad)
 	{
-		Movement->SetSteeringInput(GamepadSteerRaw);
+		// same speed-sensitive lock as the keyboard (2026-09-25): a firm stick
+		// flick at 70 mph was ~24 deg of road wheel, enough to spin the car
+		// under braking with every assist on (planar sim, see SteerFadeStartCmS)
+		Movement->SetSteeringInput(GamepadSteerRaw * SteerScale);
 		Movement->SetThrottleInput(GamepadThrottleRaw);
 		Movement->SetBrakeInput(GamepadBrakeRaw);
 		Movement->SetHandbrakeInput(bGamepadHandbrake);
@@ -1359,15 +1362,26 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		// handbrake already applied directly by HandbrakePressed/Released
 	}
 
-	// wheel visuals: suspension travel + steer + spin from our sim
+	// wheel visuals: suspension travel + steer + spin from our sim, plus the
+	// garage setup's tire diameter/width and camber (no new art - the one
+	// wheel mesh scaled on its axle axis Y and tilted top-inward)
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 	{
 		WheelSpinDeg[i] = FMath::Fmod(WheelSpinDeg[i]
 			+ FMath::RadiansToDegrees(Movement->GetWheelOmega(i)) * DeltaSeconds,
 			360.0f);
+		const float S = Movement->GetWheelRadius(i) / ReferenceWheelMeshRadiusCm;
+		const float Width = i < 2
+			? Movement->FrontTireWidthScale : Movement->RearTireWidthScale;
+		WheelVisuals[i]->SetRelativeScale3D(FVector(S, S * Width, S));
 		WheelVisuals[i]->SetRelativeLocation(Movement->GetWheelLocalPos(i));
+		// steer, then camber (+roll tips the top toward +Y = inward on the
+		// left), then spin about the tilted axle - one FRotator would apply
+		// roll first and wobble the camber as the wheel spins
+		const float Camber = (i % 2 == 0 ? 1.0f : -1.0f) * Movement->CamberDeg;
 		WheelVisuals[i]->SetRelativeRotation(
-			FRotator(-WheelSpinDeg[i], Movement->GetWheelSteerDeg(i), 0.0f));
+			FQuat(FRotator(0.0f, Movement->GetWheelSteerDeg(i), Camber))
+			* FQuat(FRotator(-WheelSpinDeg[i], 0.0f, 0.0f)));
 	}
 
 	// rollover tripwire (2026-08-27): Taylor reported hard braking at speed

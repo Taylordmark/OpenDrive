@@ -96,8 +96,12 @@ def make_def(name, display, chassis, wheel, props):
     log(f"wrote {name} ('{display}')")
 
 
-# Coupe: all defaults already equal today's car, so only identity + meshes.
-make_def("DA_Vehicle_Coupe", "Coupe", coupe_chassis, coupe_wheel, {})
+# Coupe: defaults are the baseline front-engine coupe; split/DI spelled out
+# (= UODVehicleDef defaults) since the COM now sits at 53% front, not mid-axle.
+make_def("DA_Vehicle_Coupe", "Coupe", coupe_chassis, coupe_wheel, {
+    "front_weight_frac": 0.53,
+    "yaw_dynamic_index": 1.0,
+})
 
 # GT: faster (lower drag, taller final, more power/rpm, lighter) AND grippier
 # (AWD, higher mu, much more downforce, lower COM, stiffer springs).
@@ -121,6 +125,8 @@ make_def("DA_Vehicle_GT", "GT", gt_chassis, gt_wheel, {
     "max_steer_angle_deg": 36.0,
     "front_brake_nm": 5200.0,
     "rear_brake_nm": 3600.0,
+    "front_weight_frac": 0.52,     # front-engine GT, slightly less nose than the coupe
+    "yaw_dynamic_index": 0.95,
 })
 
 unreal.EditorAssetLibrary.save_directory("/Game/OpenDrive/Car", only_if_is_dirty=False)

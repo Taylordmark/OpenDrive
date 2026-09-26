@@ -39,7 +39,8 @@ void UODVehicleMovement::SetupWheels(float FrontAxleX, float RearAxleX,
 	{
 		const bool bFront = i < 2;
 		Wheels[i].Attach = Attach[i];
-		Wheels[i].Radius = WheelRadiusCm;
+		Wheels[i].BaseRadius = WheelRadiusCm;
+		Wheels[i].Radius = WheelRadiusCm * TireDiameterScale;
 		Wheels[i].bSteer = bFront;
 		Wheels[i].bDriven = bFront ? bFrontDriven : bRearDriven;
 		Wheels[i].bHandbrake = !bFront;                 // rear handbrake always
@@ -96,6 +97,8 @@ void UODVehicleMovement::ApplyVehicleDef(const UODVehicleDef& Def)
 	DampingRatio = Def.DampingRatio;
 	RestLengthCm = Def.RestLengthCm;
 	ComLocalZ = Def.ComLocalZ;
+	FrontWeightFrac = Def.FrontWeightFrac;
+	YawDynamicIndex = Def.YawDynamicIndex;
 
 	DragCoeff = Def.DragCoeff;
 	DownforceCoeff = Def.DownforceCoeff;
@@ -123,18 +126,54 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 		return;                       // mesh not loaded yet - retry next tick
 	}
 
-	// nudge the physical COM to (0, 0, ComLocalZ) in body space: box-collision
+	// nudge the physical COM to (ComX, 0, ComLocalZ) in body space: box-collision
 	// COM sits mid-box, far above the real one, and COM height sets how much
-	// weight transfer the suspension sees
+	// weight transfer the suspension sees. ComX (2026-09-25, Taylor: per-car
+	// weight distribution) puts FrontWeightFrac of the static load on the
+	// front axle instead of whatever the mesh origin happened to give.
+	const float FrontX = Wheels.Num() == 4 ? Wheels[0].Attach.X : 132.0f;
+	const float RearX = Wheels.Num() == 4 ? Wheels[2].Attach.X : -128.0f;
+	const float Frac = FMath::Clamp(FrontWeightFrac, 0.3f, 0.7f);
+	const float ComX = RearX + Frac * (FrontX - RearX);
 	const FTransform Xf = Body->GetComponentTransform();
 	const FVector ComLocal = Xf.InverseTransformPosition(Body->GetCenterOfMass());
-	BI->COMNudge += FVector(-ComLocal.X, -ComLocal.Y, ComLocalZ - ComLocal.Z);
+	BI->COMNudge += FVector(ComX - ComLocal.X, -ComLocal.Y, ComLocalZ - ComLocal.Z);
+	BI->InertiaTensorScale = FVector::OneVector;   // measure unscaled (idempotent)
 	BI->UpdateMassProperties();
 
-	const float CornerW = Body->GetMass() * 980.0f * 0.25f;
-	for (FODWheel& W : Wheels)
+	// yaw inertia from the dynamic index, Iz = k*m*a*b (2026-09-25): the box
+	// collision alone only knew length/mass. InertiaTensorScale is an
+	// equivalent-box *dimension* scale (Chaos::Utilities::ScaleInertia), so
+	// Iz and Iy are both linear in ScaleX^2 while Ix ignores it: measure Iz at
+	// ScaleX^2 = 1 and 2, then solve. Stretching X adds the same m*x^2 to
+	// pitch as to yaw - mass at the ends - and leaves roll alone.
+	const float Mass = Body->GetMass();
+	const float A = FrontX - ComX;
+	const float B = ComX - RearX;
+	const float IzTarget = FMath::Clamp(YawDynamicIndex, 0.6f, 1.4f) * Mass * A * B;
+	// inertia is reported in principal (mass-space) axes: project onto body Z
+	// (identity for the box collision, but a convex hull could rotate it)
+	auto BodyIz = [BI]()
 	{
-		W.FzSm = CornerW;             // seed loads so first-tick grip is sane
+		const FVector I = BI->GetBodyInertiaTensor();
+		const FVector Z = BI->GetMassSpaceLocal().GetRotation()
+			.UnrotateVector(FVector::UpVector);
+		return I.X * Z.X * Z.X + I.Y * Z.Y * Z.Y + I.Z * Z.Z * Z.Z;
+	};
+	const float Iz1 = BodyIz();
+	BI->InertiaTensorScale = FVector(UE_SQRT_2, 1.0f, 1.0f);
+	BI->UpdateMassProperties();
+	const float PerSx2 = BodyIz() - Iz1;   // dIz per unit ScaleX^2
+	const float Sx2 = PerSx2 > 1.0f
+		? FMath::Clamp(1.0f + (IzTarget - Iz1) / PerSx2, 0.25f, 9.0f) : 1.0f;
+	BI->InertiaTensorScale = FVector(FMath::Sqrt(Sx2), 1.0f, 1.0f);
+	BI->UpdateMassProperties();
+	const float IzFinal = BodyIz();
+
+	// seed loads so first-tick grip is sane - per axle from the static split
+	for (int32 i = 0; i < Wheels.Num(); ++i)
+	{
+		Wheels[i].FzSm = Mass * 980.0f * 0.5f * (i < 2 ? Frac : 1.0f - Frac);
 	}
 
 	// headless hook: -odtc=high|low|off pins the assist level for tests
@@ -159,9 +198,11 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 
 	UE_LOG(LogTemp, Display,
 		TEXT("ODVehicleMovement: bound to %s (mass=%.0f kg, com z=%.1f -> "
-		     "%.1f, %d wheels)"),
-		*GetOwner()->GetName(), Body->GetMass(), ComLocal.Z, ComLocalZ,
-		Wheels.Num());
+		     "%.1f, com x=%.1f -> %.1f, split %.0f/%.0f, Iz=%.3g kg cm2 "
+		     "(target %.3g, scaleX %.2f), %d wheels)"),
+		*GetOwner()->GetName(), Mass, ComLocal.Z, ComLocalZ, ComLocal.X, ComX,
+		Frac * 100.0f, (1.0f - Frac) * 100.0f, IzFinal, IzTarget,
+		FMath::Sqrt(Sx2), Wheels.Num());
 }
 
 void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
@@ -260,7 +301,7 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 				TEXT("ODDrivetrain: t=%.2f pos=(%.0f,%.0f,%.0f) rpm=%.0f gear=%d thr=%.2f cut=%d "
 				     "coupled=%.0f spd=%.0f slip=%.2f fz=%.0f aF=%.1f FyF=%.0f "
 				     "FyR=%.0f FxR=%.0f yaw=%.0f susp=%.1f gnd=%d surf=%s "
-				     "tc=%.2f esc=%.0f abs=%d relax=%d omega=%.2f park=%d"),
+				     "tc=%.2f esc=%.2f abs=%d relax=%d omega=%.2f park=%d"),
 				Now, Body->GetComponentLocation().X, Body->GetComponentLocation().Y,
 				Body->GetComponentLocation().Z,
 				EngineRpm, Gear, EffectiveThrottle, bTraceCut ? 1 : 0,
@@ -268,7 +309,7 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 				TraceAlphaF, TraceFyF, TraceFyR, TraceFxR,
 				Body->GetPhysicsAngularVelocityInDegrees().Z,
 				RestLengthCm + RideHeightDelta - Wheels[0].SpringLen, Grounded,
-				Surf ? *Surf->GetName() : TEXT("none"), TcScale, EscBrakeNm,
+				Surf ? *Surf->GetName() : TEXT("none"), TcScale, EscU,
 				bAbsActiveThisTick ? 1 : 0, bRelaxedShift ? 1 : 0,
 				Wheels[2].Omega, bParkHold ? 1 : 0);
 		}
@@ -300,7 +341,9 @@ void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
 
 	for (FODWheel& W : Wheels)
 	{
-		W.SteerDeg = W.bSteer ? SteerIn * MaxSteerAngleDeg * Taper : 0.0f;
+		W.Radius = W.BaseRadius * TireDiameterScale;   // garage setup may change it
+		W.SteerDeg = W.bSteer
+			? SteerIn * MaxSteerAngleDeg * SteerLockScale * Taper : 0.0f;
 
 		const FVector Start = Xf.TransformPosition(W.Attach);
 		FHitResult Hit;
@@ -354,6 +397,7 @@ void UODVehicleMovement::PrimeSuspension()
 
 	for (FODWheel& W : Wheels)
 	{
+		W.Radius = W.BaseRadius * TireDiameterScale;
 		const FVector Start = Xf.TransformPosition(W.Attach);
 		FHitResult Hit;
 		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start,
@@ -547,7 +591,13 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		ReverseIntent = 0.0f;
 	}
 	// while reversing the pedals swap: brake input drives, throttle brakes
-	const float Demand = Gear < 0 ? BrakeIn : ThrottleIn;
+	float Demand = Gear < 0 ? BrakeIn : ThrottleIn;
+	// setup top-speed cap (offroad gearing): fade throttle over the last 8 km/h
+	if (TopSpeedCapKph > 0.0f && Gear > 0)
+	{
+		Demand *= FMath::Clamp(
+			(TopSpeedCapKph - FwdSpeedCmS * 0.036f) / 8.0f, 0.0f, 1.0f);
+	}
 
 	// ---- engine sim
 	if (LimiterTimer > 0.0f)
@@ -659,34 +709,55 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		TcScale = 1.0f;
 	}
 
-	// ---- ESC Low: slides are allowed, spins are not - excess yaw over what
-	// the steering (friction-clamped) asks for gets damped by braking one
-	// front wheel. Handbrake pulls disable it (rally flicks stay clean).
+	// ---- ESC (High + Low): watch the REAR axle's slip angle - that is the
+	// "rear end swinging out" - and once it passes the tire's peak plus the
+	// mode's allowance, do what production ESC does for oversteer:
+	//   - brake the outside front (counter-yaw moment),
+	//   - release pedal brake on the inside front and the rears (pedal
+	//     braking saturates the rear friction circle mid-corner, and less
+	//     decel = less weight stripped off the rear),
+	//   - cut engine-BRAKE drag only (MSR). Drive torque is left alone:
+	//     lifting mid-slide throws weight forward and spins a RWD car
+	//     (planar sim: cutting drive turned a self-recovering 8 deg slide
+	//     into a 49 deg spin). TC High's wheelspin control still limits it.
+	// Handbrake pulls disable it (rally flicks stay clean).
 	float EscTarget = 0.0f;
-	if (TractionMode == EODTractionMode::Low && !bHandbrakeIn)
+	if (TractionMode != EODTractionMode::Off && !bHandbrakeIn
+		&& FwdSpeedCmS > 400.0f && Wheels[2].bInContact && Wheels[3].bInContact)
 	{
-		const float VxMs = FwdSpeedCmS / 100.0f;
-		if (VxMs > 4.0f)
+		const FTransform Xf = Body->GetComponentTransform();
+		const FVector RearAxle = Xf.TransformPosition(
+			FVector(Wheels[2].Attach.X, 0.0f, Wheels[2].Attach.Z));
+		const FVector V = Xf.InverseTransformVectorNoScale(
+			Body->GetPhysicsLinearVelocityAtPoint(RearAxle));
+		const float SlipDeg = FMath::RadiansToDegrees(
+			FMath::Atan2(FMath::Abs(V.Y), FMath::Max(V.X, 1.0f)));
+		EscSlipRate += ((SlipDeg - EscPrevSlipDeg) / Dt - EscSlipRate)
+			* FMath::Min(Dt * 15.0f, 1.0f);
+		const float Predicted =
+			SlipDeg + FMath::Max(EscSlipRate, 0.0f) * EscLookahead;
+		const float Limit = PeakSlipAngleDeg + SlipAngleAddDeg
+			+ (TractionMode == EODTractionMode::High
+				? EscSlideAllowHighDeg : EscSlideAllowLowDeg);
+		EscTarget = FMath::Clamp((Predicted - Limit) / EscRampDeg, 0.0f, 1.0f);
+		// rear sliding out to the left (V.Y < 0) = nose over-rotated right
+		// -> braking the left front yaws it back
+		if (EscTarget > 0.0f)
 		{
-			const float SteerRad =
-				FMath::DegreesToRadians(Wheels[0].SteerDeg);
-			// kinematic yaw demand, clamped to what tires could ever deliver
-			const float MaxYaw = 9.5f / VxMs;                       // rad/s
-			const float DesiredYaw = FMath::Clamp(
-				VxMs / 2.6f * FMath::Tan(SteerRad), -MaxYaw, MaxYaw);
-			const float ActualYaw = FMath::DegreesToRadians(
-				(float)Body->GetPhysicsAngularVelocityInDegrees().Z);
-			const float YawErr = ActualYaw - DesiredYaw;
-			const float Excess = FMath::Abs(YawErr) - EscYawDeadband;
-			if (Excess > 0.0f)
-			{
-				EscTarget = FMath::Min(Excess * 5000.0f, 3200.0f);
-				// rotating right too hard -> brake the left (outside) front
-				EscWheel = YawErr > 0.0f ? 0 : 1;
-			}
+			EscWheel = V.Y < 0.0f ? 0 : 1;
 		}
+		EscPrevSlipDeg = SlipDeg;
 	}
-	EscBrakeNm += (EscTarget - EscBrakeNm) * FMath::Min(Dt * 12.0f, 1.0f);
+	else
+	{
+		EscPrevSlipDeg = EscSlipRate = 0.0f;
+	}
+	// ~70 ms hydraulic rise, like a real ESC modulator
+	EscU += (EscTarget - EscU) * FMath::Min(Dt * 15.0f, 1.0f);
+	if (WheelTq < 0.0f)
+	{
+		WheelTq *= 1.0f - EscU;
+	}
 
 	// spawn parking hold: full brakes until the driver's first pedal input
 	// (brake counts - that's the reverse request in this control scheme)
@@ -700,10 +771,12 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 	{
 		FODWheel& W = Wheels[i];
 		W.DriveNm = W.bDriven ? WheelTq : 0.0f;
-		W.BrakeNm = PedalBrake * W.MaxBrakeNm
-			+ (bHandbrakeIn ? W.MaxHandbrakeNm : 0.0f)
+		const bool bEscOutside = i == EscWheel;
+		const float PedalKeep = bEscOutside ? 1.0f : 1.0f - EscU;
+		W.BrakeNm = PedalBrake * W.MaxBrakeNm * PedalKeep * (i < 2 ? 1.0f : RearBrakeScale)
+			+ (bHandbrakeIn ? W.MaxHandbrakeNm * HandbrakeScale : 0.0f)
 			+ (bParkHold ? W.MaxBrakeNm : 0.0f)
-			+ (i == EscWheel && EscBrakeNm > 1.0f ? EscBrakeNm : 0.0f);
+			+ (bEscOutside ? EscU * W.MaxBrakeNm * (1.0f - PedalBrake) : 0.0f);
 	}
 
 	CurTotalRatio = Ratio * FinalRatio;
@@ -719,16 +792,20 @@ float UODVehicleMovement::SurfaceGrip(const UPhysicalMaterial* Mat) const
 	// mistake," not simulate a specific ground texture. Biome ground
 	// materials can still carry distinct names/textures for visuals/audio;
 	// this just stops branching physics on them.
+	// The two tiers are the garage setup's (rally/offroad tires keep far
+	// more of their grip off the tarmac than street/drag tires do).
 	if (Mat && Mat->GetName().Contains(TEXT("Asphalt")))
 	{
-		return 1.0f;   // on-road
+		return OnRoadGrip;   // on-road
 	}
-	return 0.6f;   // off-road (any surface that isn't the road)
+	return OffRoadGrip;   // off-road (any surface that isn't the road)
 }
 
 void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 {
-	const float PeakSlipAngleRad = FMath::DegreesToRadians(PeakSlipAngleDeg);
+	const float PeakSlipAngleRad =
+		FMath::DegreesToRadians(PeakSlipAngleDeg + SlipAngleAddDeg);
+	const float SlideKeep = FMath::Max(SlideFrac, SlideFracMin);
 	const FVector Up = Body->GetUpVector();
 	const FVector BodyFwd = Body->GetForwardVector();
 	const float QuarterMassKg = Body->GetMass() * 0.25f;
@@ -745,6 +822,7 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 	// filled per wheel below, consumed after the loop by the axle-paired ABS
 	// pass (brake integration itself happens in that second pass)
 	float SlipRatios[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	float SlipAngles[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 	float EffInertias[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 	for (int32 i = 0; i < Wheels.Num(); ++i)
@@ -755,6 +833,7 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 
 		float ReactionNm = 0.0f;
 		float WheelSlipRatio = 0.0f;   // braking slip; ABS reads this below
+		float WheelSlipAngle = 0.0f;   // cornering ABS reads this too
 		if (W.bInContact)
 		{
 			// contact-patch frame: wheel forward = body forward yawed by the
@@ -808,15 +887,19 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			// grip curve: smooth rise to peak at Sc=1, fade to sliding grip
 			const float Shape = Sc <= 1.0f
 				? 1.5f * Sc - 0.5f * Sc * Sc * Sc
-				: FMath::Lerp(1.0f, SlideFrac,
+				: FMath::Lerp(1.0f, SlideKeep,
 					FMath::Min((Sc - 1.0f) / 1.5f, 1.0f));
 
 			WheelSlipRatio = SlipRatio;
+			WheelSlipAngle = SlipAngle;
 
 			float Fx = 0.0f, Fy = 0.0f;
 			if (Sc > KINDA_SMALL_NUMBER)
 			{
-				const float F = Mu * Fz * Shape;   // friction circle
+				// load sensitivity - see TireLoadSensitivity
+				const float LoadSens = FMath::Max(1.0f - TireLoadSensitivity
+					* (Fz / (QuarterMassKg * 980.0f) - 1.0f), 0.4f);
+				const float F = Mu * Fz * LoadSens * Shape;   // friction circle
 				Fx = F * Sx / Sc;
 				Fy = F * Sy / Sc;
 			}
@@ -923,6 +1006,7 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 		}
 
 		SlipRatios[i] = WheelSlipRatio;
+		SlipAngles[i] = WheelSlipAngle;
 		EffInertias[i] = EffInertia;
 	}
 
@@ -935,25 +1019,30 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 	// line the instant one wheel locks a frame before its partner, which a
 	// keyboard's all-or-nothing brake input can't trail off to avoid the way
 	// a wheel/pedal driver would. Off = full lock reachable, same as before.
+	// Cornering ABS (2026-09-25): the slip target shrinks with the wheel's
+	// slip angle so braking mid-corner leaves friction-circle room for Fy,
+	// like production cornering-brake control - otherwise ABS parks the
+	// tire at peak LONGITUDINAL slip and the rear has nothing left sideways.
 	float AbsFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 	if (bAbsEnabled)
 	{
+		auto WheelAbsFactor = [&](int32 i)
+		{
+			const float SyN = SlipAngles[i] / PeakSlipAngleRad;
+			const float Target = AbsSlipTarget
+				* FMath::Sqrt(FMath::Max(1.0f - SyN * SyN, 0.05f));
+			if (Wheels[i].bInContact && Wheels[i].BrakeNm > 1.0f
+				&& SlipRatios[i] < -Target)
+			{
+				return FMath::Clamp(
+					1.0f - ((-SlipRatios[i]) - Target) * 6.0f, 0.05f, 1.0f);
+			}
+			return 1.0f;
+		};
 		for (int32 Axle = 0; Axle < 2; ++Axle)   // 0 = front (FL,FR), 1 = rear
 		{
 			const int32 A = Axle * 2, B = Axle * 2 + 1;
-			float FactorA = 1.0f, FactorB = 1.0f;
-			if (Wheels[A].bInContact && Wheels[A].BrakeNm > 1.0f
-				&& SlipRatios[A] < -AbsSlipTarget)
-			{
-				const float Over = (-SlipRatios[A]) - AbsSlipTarget;
-				FactorA = FMath::Clamp(1.0f - Over * 6.0f, 0.05f, 1.0f);
-			}
-			if (Wheels[B].bInContact && Wheels[B].BrakeNm > 1.0f
-				&& SlipRatios[B] < -AbsSlipTarget)
-			{
-				const float Over = (-SlipRatios[B]) - AbsSlipTarget;
-				FactorB = FMath::Clamp(1.0f - Over * 6.0f, 0.05f, 1.0f);
-			}
+			const float FactorA = WheelAbsFactor(A), FactorB = WheelAbsFactor(B);
 			const float Paired = FMath::Min(FactorA, FactorB);
 			AbsFactor[A] = AbsFactor[B] = Paired;
 			bAbsActiveThisTick |= Paired < 0.999f;

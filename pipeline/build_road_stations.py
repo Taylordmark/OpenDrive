@@ -1094,6 +1094,25 @@ def main():
     }
     (OUT / "road_stations.json").write_text(json.dumps(out))
     print(f"{len(segments)} segments, {total_km:.2f} km total -> {OUT / 'road_stations.json'}")
+    warn_if_terrain_stale()
+
+
+def warn_if_terrain_stale():
+    """road_stations.json is gitignored and drives the terrain carve, so a
+    regen without a terrain rebake silently leaves shipped tiles (and the
+    forest grid) on the old road profile - found 2026-09-25 as up to 67m of
+    tree/terrain mismatch. Warn only: rebuild_area.py runs this step first
+    and rebakes terrain right after."""
+    from bin_tile_io import read_generation_id_header
+    from generation_id import compute_generation_id
+    masks = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+    tile = next(masks.glob(f"terrain_{AREA_NAME}_test_tile_*.bin"), None)
+    head = tile and read_generation_id_header(tile)
+    current = compute_generation_id()
+    if head and head[1] != current:
+        print(f"WARNING: shipped terrain was baked against generation {head[1]}, "
+              f"road_stations.json is now {current} - terrain, trees and roads are "
+              f"stale until you run rebuild_area.py (ignore if already running it).")
 
 
 if __name__ == "__main__":

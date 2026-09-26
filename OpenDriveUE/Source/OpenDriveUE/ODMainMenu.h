@@ -183,8 +183,8 @@ private:
 	EODMenuStage Stage = EODMenuStage::CarConfig;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
-	int32 EngineIdx = 0;     // index into the Engines[] table (ODMainMenu.cpp)
-	int32 DriveIdx = 0;      // index into the Layouts[] table
+	int32 EngineIdx = 0;     // index into the Engines[] table (ODMainMenu.cpp), 0 = Stock
+	int32 DriveIdx = 0;      // index into the Layouts[] table, 0 = Stock
 	int32 TuneIdx = 0;       // index into AODTuningManager::Presets
 	int32 HoveredTownIdx = INDEX_NONE;
 

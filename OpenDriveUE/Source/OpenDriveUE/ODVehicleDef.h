@@ -56,6 +56,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Mass")
 	float MassKg = 1500.0f;
 
+	/** Static fraction of weight on the front axle (2026-09-25): InitBody
+	 *  places the COM this far from the rear axle toward the front. */
+	UPROPERTY(EditAnywhere, Category = "Mass", meta = (ClampMin = 0.3, ClampMax = 0.7))
+	float FrontWeightFrac = 0.53f;
+
+	/** Yaw dynamic index k (2026-09-25): Iz = k * Mass * a * b, a/b = COM to
+	 *  front/rear axle. ~0.85 mid-engine, ~1.0 typical, ~1.1 heavy ends. */
+	UPROPERTY(EditAnywhere, Category = "Mass", meta = (ClampMin = 0.6, ClampMax = 1.4))
+	float YawDynamicIndex = 1.0f;
+
 	// ---- engine ----
 	UPROPERTY(EditAnywhere, Category = "Engine")
 	float MaxRpm = 7000.0f;

@@ -9,11 +9,11 @@ class UPrimitiveComponent;
 class UODVehicleDef;
 
 /** Driver-assist level (pause menu; presets pick defaults in stage 3). */
-UENUM()
+UENUM(BlueprintType)   // BlueprintType: apply_tuning_presets.py sets it
 enum class EODTractionMode : uint8
 {
-	High,   // engine torque management - wheels never break loose
-	Low,    // slides allowed; excess yaw damped with single-wheel brakes
+	High,   // torque management + ESC under the grip peak - no slides
+	Low,    // ESC only, lets the rear slide ~EscSlideAllowLowDeg
 	Off
 };
 
@@ -36,7 +36,8 @@ struct FODWheel
 
 	// --- config (filled by UODVehicleMovement's constructor) ---
 	FVector Attach = FVector::ZeroVector;   // body-local strut top, cm
-	float Radius = 34.0f;                   // cm
+	float Radius = 34.0f;                   // cm, BaseRadius * TireDiameterScale
+	float BaseRadius = 34.0f;               // cm, the car's own (def) radius
 	bool bSteer = false;
 	bool bDriven = false;
 	bool bHandbrake = false;
@@ -208,9 +209,31 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	float TcSlipTarget = 0.22f;
 
-	/** ESC Low: yaw-rate excess deadband before the brakes step in (rad/s). */
+	/** ESC (High + Low): how far past the tire's peak slip angle the REAR
+	 *  axle may slide before the brakes step in, degrees. Measured relative
+	 *  to PeakSlipAngleDeg so it means "degrees of actual slide" for every
+	 *  car. High sits just under the peak (grip never breaks); Low allows a
+	 *  sport-mode-style ~10 deg of drift. Replaces the old yaw-rate ESC
+	 *  (2026-09-25, Taylor: rear swings out braking / off the brake into a
+	 *  turn), whose 1 g yaw reference sat far below the 4x-grip car's real
+	 *  cornering limit and was Low-only - High had no yaw control at all. */
 	UPROPERTY(EditAnywhere, Category = "Assists")
-	float EscYawDeadband = 0.4f;
+	float EscSlideAllowHighDeg = -2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Assists")
+	float EscSlideAllowLowDeg = 10.0f;
+
+	/** Degrees past the allowance at which intervention is full. */
+	UPROPERTY(EditAnywhere, Category = "Assists")
+	float EscRampDeg = 4.0f;
+
+	/** Slip-angle growth lookahead, s: catches a snap before it happens
+	 *  (the beta/beta-dot phase-plane idea production ESC uses). 0.2 not
+	 *  0.12 (2026-09-25): short-wheelbase cars (JDM/Rally/Coupe) on the lifted
+	 *  Offroad setup rotate faster than 0.12 s could see coming; 0.2 holds
+	 *  every car x setup in scratchpad/esc_sim.py with no clean-corner hits. */
+	UPROPERTY(EditAnywhere, Category = "Assists")
+	float EscLookahead = 0.2f;
 
 	/** ABS: release brake torque past this lock-slip; off = lockups live. */
 	UPROPERTY(EditAnywhere, Category = "Assists")
@@ -251,6 +274,15 @@ public:
 	 *  keyboard. Real cars sit near or below axle height anyway. */
 	UPROPERTY(EditAnywhere, Category = "Suspension")
 	float ComLocalZ = 4.0f;
+
+	/** Static front-axle weight fraction; sets COM X between the axles
+	 *  (2026-09-25, per car via UODVehicleDef). */
+	UPROPERTY(EditAnywhere, Category = "Mass", meta = (ClampMin = 0.3, ClampMax = 0.7))
+	float FrontWeightFrac = 0.53f;
+
+	/** Yaw (and pitch) inertia as Iz = k * Mass * a * b (2026-09-25). */
+	UPROPERTY(EditAnywhere, Category = "Mass", meta = (ClampMin = 0.6, ClampMax = 1.4))
+	float YawDynamicIndex = 1.0f;
 
 	// --- steering ---
 	UPROPERTY(EditAnywhere, Category = "Steering")
@@ -296,6 +328,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float AirbornePitchDampPerSec = 1.0f;
 
+	/** Tire load sensitivity: grip per unit load falls as load rises,
+	 *  mu *= 1 - k*(Fz/Fz_static - 1) (Pacejka-style; real tires ~0.1-0.3).
+	 *  0 = grip exactly proportional to load, which let brake/lift weight
+	 *  transfer strip the rear far harder than on a real car - the root of
+	 *  "rear swings out braking / off the brake into a turn" (2026-09-25,
+	 *  planar sim: 0.25 took a keyboard trail-brake spin from 31 to 14 deg
+	 *  past peak with assists OFF). */
+	UPROPERTY(EditAnywhere, Category = "Tires")
+	float TireLoadSensitivity = 0.25f;
+
 	/** Wheel + tire rotational inertia, kg m^2. */
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float WheelInertia = 1.5f;
@@ -318,6 +360,55 @@ public:
 	/** Downforce, N per (m/s)^2 of forward speed. */
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DownforceCoeff = 1.1f;
+
+	// --- garage setup (UODTuningPreset owns these; neutral defaults = Street).
+	// Applied at their use sites rather than baked into the per-car fields
+	// above, so switching setups never compounds on the car's own values.
+	/** Surface grip multipliers: asphalt vs everything else. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float OnRoadGrip = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float OffRoadGrip = 0.6f;
+
+	/** Added to PeakSlipAngleDeg: wider peak = softer, catchable limit. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float SlipAngleAddDeg = 0.0f;
+
+	/** Floor on SlideFrac: grip kept once sliding (drift holds slides). */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float SlideFracMin = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float SteerLockScale = 1.0f;
+
+	/** Scales rear pedal brake (brake bias) and the handbrake. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float RearBrakeScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float HandbrakeScale = 1.0f;
+
+	/** Throttle fades out over the last 8 km/h below this; 0 = no cap. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float TopSpeedCapKph = 0.0f;
+
+	/** Physics + visual tire diameter vs the car's WheelRadiusCm. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float TireDiameterScale = 1.0f;
+
+	/** Visual only: negative camber (deg, top leans in) and tire width. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float CamberDeg = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float FrontTireWidthScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float RearTireWidthScale = 1.0f;
+
+	/** Wheel radius incl. TireDiameterScale - visuals size the mesh off it. */
+	float GetWheelRadius(int32 i) const { return Wheels[i].BaseRadius * TireDiameterScale; }
 
 	// --- telemetry (audio, HUD, ghost, pause menu) ---
 	float GetRpm() const { return EngineRpm; }
@@ -361,7 +452,7 @@ public:
 	 *  ground level - it sits this far above it. */
 	float GetRestGroundClearanceCm() const
 	{
-		return RestLengthCm + RideHeightDelta + (Wheels.Num() > 0 ? Wheels[0].Radius : 34.0f);
+		return RestLengthCm + RideHeightDelta + (Wheels.Num() > 0 ? GetWheelRadius(0) : 34.0f);
 	}
 
 	/** Re-derive mass/COM (after mesh swap or ComLocalZ preset change). */
@@ -453,8 +544,10 @@ private:
 
 	// assists state
 	float TcScale = 1.0f;            // High: drive-torque authority [0.15,1]
-	float EscBrakeNm = 0.0f;         // Low: smoothed corrective brake
-	int32 EscWheel = -1;             // Low: which front wheel gets it
+	float EscU = 0.0f;               // smoothed intervention [0,1]
+	int32 EscWheel = -1;             // outside front (gets the brake)
+	float EscPrevSlipDeg = 0.0f;     // rear slip angle last tick
+	float EscSlipRate = 0.0f;        // filtered growth rate, deg/s
 
 	bool bBodyInit = false;
 	double LastTraceTime = 0.0;

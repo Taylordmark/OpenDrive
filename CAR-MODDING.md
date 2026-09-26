@@ -1,6 +1,6 @@
 # Editing the cars visually (Blender round-trip)
 
-The five car bodies are plain OBJ files — you can reshape them in **Blender**
+The seven car bodies are plain OBJ files — you can reshape them in **Blender**
 (free, blender.org) and pull the result back into the game with one command.
 This is the most detailed editing route available: full vertex/face-level
 control, not just parameters.
@@ -14,6 +14,8 @@ Edit these (each is one car, in centimeters, pivot at axle height):
     data\cars\procedural\obj\SM_Car_Super.obj
     data\cars\procedural\obj\SM_Car_Pickup.obj
     data\cars\procedural\obj\SM_Car_Rally.obj
+    data\cars\procedural\obj\SM_Car_Concept.obj
+    data\cars\procedural\obj\SM_Car_LMP.obj
 
 Wheels are a separate mesh (`SM_CarWheel.obj`) — the game places them at the
 axle positions, so don't move where the wheel arches sit vertically (the

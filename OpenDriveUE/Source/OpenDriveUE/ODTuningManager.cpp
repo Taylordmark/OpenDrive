@@ -1,7 +1,5 @@
 #include "ODTuningManager.h"
 
-#include "Components/InputComponent.h"
-#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "TimerManager.h"
@@ -18,16 +16,7 @@ AODTuningManager::AODTuningManager()
 void AODTuningManager::BeginPlay()
 {
 	Super::BeginPlay();
-	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
-	{
-		EnableInput(PC);
-		if (InputComponent)
-		{
-			InputComponent->BindKey(EKeys::T, IE_Pressed, this,
-				&AODTuningManager::CyclePreset);
-		}
-	}
-
+	// setups are garage-only (2026-09-25, Taylor) - no in-drive T key
 	// headless verification: `-odtune=5` cycles a preset every 5 s
 	float Interval = 0.0f;
 	if (FParse::Value(FCommandLine::Get(), TEXT("odtune="), Interval)
@@ -102,10 +91,24 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 	// preset COM heights were tuned around the template's 42 cm street value;
 	// map them as deltas onto the new body's 10 cm default (stage 3 retunes)
 	Move->ComLocalZ = 10.0f + (Preset->CenterOfMassZ - 42.0f);
+
+	Move->OnRoadGrip = Preset->OnRoadGrip;
+	Move->OffRoadGrip = Preset->OffRoadGrip;
+	Move->SlipAngleAddDeg = Preset->SlipAngleAddDeg;
+	Move->SlideFracMin = Preset->SlideFracMin;
+	Move->TractionMode = Preset->DefaultTractionMode;
+	Move->EscSlideAllowLowDeg = Preset->EscSlideAllowLowDeg;
+	Move->SteerLockScale = Preset->SteerLockScale;
+	Move->RearBrakeScale = Preset->RearBrakeScale;
+	Move->HandbrakeScale = Preset->HandbrakeScale;
+	Move->TopSpeedCapKph = Preset->TopSpeedCapKph;
+	Move->TireDiameterScale = Preset->TireDiameterScale;
+	Move->CamberDeg = Preset->CamberDeg;
+	Move->FrontTireWidthScale = Preset->FrontTireWidthScale;
+	Move->RearTireWidthScale = Preset->RearTireWidthScale;
 	Move->MarkBodyDirty();
 
 	CurrentPresetName = Preset->DisplayName;
-	SwapShownAt = GetWorld()->GetTimeSeconds();
 	UE_LOG(LogTemp, Display, TEXT("ODTuningManager: applied '%s'"),
 		*Preset->DisplayName);
 }

@@ -907,20 +907,29 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     return out.reshape(shape)
 
 
+def _footprint_bounds(sample_n, n, factor):
+    """Per-output-vertex [lo, hi) fine-index window, half a fine-cell towards
+    each neighbor. The first/last window collapses to the edge sample itself:
+    a clamped window there would only see THIS tile's side of the boundary,
+    so two neighbors averaged different data for the same shared edge vertex
+    (2026-09-25, verify_terrain_seams.py: far-far seams off by 21m mean, 81m
+    worst). Collapsing only across the edge keeps the window along it, so an
+    edge vertex is a 1D min/mean over the shared boundary row - identical
+    data on both sides - and a corner is the exact shared point."""
+    half = factor // 2
+    bounds = [(max(0, i * factor - half), min(sample_n, i * factor + half + 1)) for i in range(n)]
+    bounds[0] = (0, 1)
+    bounds[-1] = (sample_n - 1, sample_n)
+    return bounds
+
+
 def downsample_min_grid(fine, n, factor):
     """Downsamples a (sample_n, sample_n) fine grid - sample_n = (n-1)*factor+1
     - to an (n, n) coarse grid by taking the MIN value within each output
-    vertex's own footprint (half a fine-cell towards each neighbor, clamped
-    at the tile edges). See FAR_SUPERSAMPLE's comment for why min, not a
-    direct point-sample or an average, is required here."""
-    sample_n = fine.shape[0]
-    half = factor // 2
-    bounds = []
-    for i in range(n):
-        c = i * factor
-        lo = max(0, c - half)
-        hi = min(sample_n, c + half + 1)
-        bounds.append((lo, hi))
+    vertex's own footprint (see _footprint_bounds for the tile-edge rule).
+    See FAR_SUPERSAMPLE's comment for why min, not a direct point-sample or
+    an average, is required here."""
+    bounds = _footprint_bounds(fine.shape[0], n, factor)
     out = np.empty((n, n), dtype=fine.dtype)
     for oi, (ylo, yhi) in enumerate(bounds):
         row_block = fine[ylo:yhi, :]
@@ -935,14 +944,7 @@ def downsample_mean_grid(fine, n, factor):
     the minimum - preserves the true DEM macro-gradient across neighboring
     output vertices instead of independently biasing each one toward its own
     footprint's local low point."""
-    sample_n = fine.shape[0]
-    half = factor // 2
-    bounds = []
-    for i in range(n):
-        c = i * factor
-        lo = max(0, c - half)
-        hi = min(sample_n, c + half + 1)
-        bounds.append((lo, hi))
+    bounds = _footprint_bounds(fine.shape[0], n, factor)
     out = np.empty((n, n), dtype=fine.dtype)
     for oi, (ylo, yhi) in enumerate(bounds):
         row_block = fine[ylo:yhi, :]

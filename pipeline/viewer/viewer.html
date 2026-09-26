@@ -69,12 +69,12 @@
 "use strict";
 
 // ------------------------------------------------------------------ config
-const CARS = ["SM_Car_Sedan", "SM_Car_Coupe", "SM_Car_Sport", "SM_Car_Proto"];
+let CARS = [];   // filled from cars_manifest.json at boot
 const WHEEL_NAME = "SM_CarWheel";
-const ALL_LABEL = "All Four";
+const ALL_LABEL = "All";
 const REF_WHEEL_RADIUS_CM = 34.0;
 
-let currentMode = CARS[0];   // one of CARS, or ALL_LABEL
+let currentMode = null;   // one of CARS, or ALL_LABEL
 let showAll = false;
 
 // ------------------------------------------------------------------ canvas / gl
@@ -534,7 +534,7 @@ function render() {
     if (showAll) {
       const gap = 650;
       CARS.forEach((name, i) => {
-        drawCarAt(name, [0, (i - 1.5) * gap], viewMat, projMat);
+        drawCarAt(name, [0, (i - (CARS.length - 1) / 2) * gap], viewMat, projMat);
       });
     } else {
       drawCarAt(currentMode, [0, 0], viewMat, projMat);
@@ -555,6 +555,8 @@ function makeButton(label, onClick) {
 }
 
 const carButtons = {};
+let allButton = null;
+function buildButtons() {
 CARS.forEach((name) => {
   const label = name.replace(/^SM_Car_/, "");
   carButtons[name] = makeButton(label, () => {
@@ -564,11 +566,13 @@ CARS.forEach((name) => {
     ensureCarLoaded(name);
   });
 });
-const allButton = makeButton(ALL_LABEL, () => {
+allButton = makeButton(ALL_LABEL, () => {
   showAll = true;
   updateButtonStates();
   CARS.forEach(ensureCarLoaded);
 });
+updateButtonStates();
+}
 
 function updateButtonStates() {
   CARS.forEach((name) => {
@@ -576,7 +580,6 @@ function updateButtonStates() {
   });
   allButton.classList.toggle("active", showAll);
 }
-updateButtonStates();
 
 async function ensureCarLoaded(name) {
   if (glMeshes[name]) return;
@@ -657,7 +660,10 @@ async function boot() {
   }
   await loadPaletteTexture("/textures/T_CarPalette2.png");
   await loadManifest();
-  await ensureCarLoaded(currentMode);
+  CARS = Object.keys(manifest || {});
+  currentMode = CARS[0];
+  buildButtons();
+  if (currentMode) await ensureCarLoaded(currentMode);
   await loadWheel().catch(() => {});
   requestAnimationFrame(render);
   pollStatus();

@@ -62,7 +62,7 @@ def log(msg):
 
 # ------------------------------------------------------------------ import
 MESH_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
-              "SM_Car_Rally", "SM_CarWheel")
+              "SM_Car_Rally", "SM_Car_Concept", "SM_Car_LMP", "SM_CarWheel")
 tasks = []
 for name in MESH_NAMES:
     t = unreal.AssetImportTask()
@@ -103,17 +103,17 @@ log(f"imported {len(meshes)} meshes + T_CarPalette2")
 # be used in game", i.e. the whole glass slot silently falls back to the
 # flat grey engine default. These are all low-poly procedural meshes (a few
 # hundred tris) with zero need for Nanite anyway, so just turn it off on
-# all six rather than juggle a mixed Nanite/non-Nanite material set.
+# all eight rather than juggle a mixed Nanite/non-Nanite material set.
 for name, mesh in meshes.items():
     ns = mesh.get_editor_property("nanite_settings")
     ns.set_editor_property("enabled", False)
     mesh.set_editor_property("nanite_settings", ns)
-log("disabled Nanite on all 6 car meshes (required for the translucent glass slot)")
+log("disabled Nanite on all 8 car meshes (required for the translucent glass slot)")
 
-# box collision on all five chassis (SM_CarWheel has no collision - matches
+# box collision on all seven chassis (SM_CarWheel has no collision - matches
 # WheelVisuals' NoCollision setup in AODVehiclePawn's constructor)
 CHASSIS_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
-                  "SM_Car_Rally")
+                  "SM_Car_Rally", "SM_Car_Concept", "SM_Car_LMP")
 for name in CHASSIS_NAMES:
     mesh = meshes[name]
     unreal.EditorStaticMeshLibrary.remove_collisions(mesh)
@@ -246,9 +246,9 @@ for name, mesh in meshes.items():
             f"{len(cats)} slot(s) by encounter order ({cats}) instead")
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
-log("assigned category materials to all 6 meshes")
+log("assigned category materials to all 8 meshes")
 
-# ------------------------------------------------------ the five vehicle defs
+# ------------------------------------------------------ the seven vehicle defs
 wheel_mesh = meshes["SM_CarWheel"]
 
 
@@ -280,18 +280,24 @@ def make_def(name, props):
 
 
 # geometry/mass straight from make_car_meshes.py's printed per-car dicts -
-# visual-only pass: everything else (engine/tire/suspension/aero) stays at
-# UODVehicleDef's defaults, i.e. today's baseline coupe physics envelope,
-# per the "do not touch tuned physics" constraint on this task. Axle
-# geometry + WheelRadiusCm DO need to match each mesh's own footprint (that
-# is geometry, not tuning) so UODVehicleMovement's wheel table lines up with
-# where the visual wheels actually are.
+# axle geometry + WheelRadiusCm match each mesh's own footprint so
+# UODVehicleMovement's wheel table lines up with the visual wheels. On top
+# of that each car now has its own chassis/powertrain character: weight
+# split (front_weight_frac), yaw_dynamic_index (Iz = DI*m*a*b), COM height,
+# drive layout, torque and brakes (total scaled with mass x wheel radius,
+# front share ~ split + 0.1; handbrake 2x rear). Validated in
+# scratchpad/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire,
+# suspension and aero still stay at UODVehicleDef's defaults.
 make_def("DA_Vehicle_Muscle", {
     "display_name": "Muscle",
     "chassis_mesh": meshes["SM_Car_Muscle"],
     "front_axle_x_cm": 140.0, "rear_axle_x_cm": -150.0,
     "half_track_y_cm": 90.0, "wheel_radius_cm": 36.0,
     "mass_kg": 1620.0,
+    # front V8 in a long hood: nose-heavy, heavy ends, tallish; big torque
+    "front_weight_frac": 0.55, "yaw_dynamic_index": 1.05, "com_local_z": 12.0,
+    "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 560.0,
+    "front_brake_nm": 5550.0, "rear_brake_nm": 3000.0, "handbrake_nm": 6000.0,
 })
 make_def("DA_Vehicle_JDM", {
     "display_name": "JDM",
@@ -299,6 +305,11 @@ make_def("DA_Vehicle_JDM", {
     "front_axle_x_cm": 124.0, "rear_axle_x_cm": -114.0,
     "half_track_y_cm": 80.0, "wheel_radius_cm": 32.0,
     "mass_kg": 1380.0,
+    # front-mid turbo six, low. Short 2.38 m wheelbase: COM 4 + DI 1.05 + 66% front
+    # brake share keep Low-assist trail-braking catchable (COM 6 spins it)
+    "front_weight_frac": 0.52, "yaw_dynamic_index": 1.05, "com_local_z": 4.0,
+    "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 450.0,
+    "front_brake_nm": 4300.0, "rear_brake_nm": 2200.0, "handbrake_nm": 4400.0,
 })
 make_def("DA_Vehicle_Super", {
     "display_name": "Super",
@@ -306,6 +317,10 @@ make_def("DA_Vehicle_Super", {
     "front_axle_x_cm": 118.0, "rear_axle_x_cm": -150.0,
     "half_track_y_cm": 94.0, "wheel_radius_cm": 36.0,
     "mass_kg": 1430.0,
+    # mid-engine: rear-biased, mass inside the wheelbase (low DI), low
+    "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
+    "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 650.0,
+    "front_brake_nm": 3950.0, "rear_brake_nm": 3650.0, "handbrake_nm": 7300.0,
 })
 make_def("DA_Vehicle_Pickup", {
     "display_name": "Pickup",
@@ -313,6 +328,10 @@ make_def("DA_Vehicle_Pickup", {
     "front_axle_x_cm": 185.0, "rear_axle_x_cm": -160.0,
     "half_track_y_cm": 98.0, "wheel_radius_cm": 42.0,
     "mass_kg": 2380.0,
+    # empty-bed 4x4 (off-road crew cab -> AWD): nose-heavy, long overhangs, tall
+    "front_weight_frac": 0.57, "yaw_dynamic_index": 1.1, "com_local_z": 20.0,
+    "drive_layout": unreal.ODDriveLayout.AWD, "peak_torque_nm": 650.0,
+    "front_brake_nm": 9850.0, "rear_brake_nm": 4850.0, "handbrake_nm": 9700.0,
 })
 make_def("DA_Vehicle_Rally", {
     "display_name": "Rally",
@@ -320,8 +339,36 @@ make_def("DA_Vehicle_Rally", {
     "front_axle_x_cm": 112.0, "rear_axle_x_cm": -118.0,
     "half_track_y_cm": 78.0, "wheel_radius_cm": 32.0,
     "mass_kg": 1310.0,
+    # rally-prepped AWD hatch: ballast/fuel moved back (56%), kit at both ends (DI 1.1),
+    # sits low; 78% front brakes like a FWD-based hatch; hydraulic handbrake.
+    # Still the twitchiest car (2.30 m wheelbase) - see esc_sim.py LOW_EXTRA
+    "front_weight_frac": 0.56, "yaw_dynamic_index": 1.1, "com_local_z": 6.0,
+    "drive_layout": unreal.ODDriveLayout.AWD, "peak_torque_nm": 440.0,
+    "front_brake_nm": 4800.0, "rear_brake_nm": 1350.0, "handbrake_nm": 5000.0,
+})
+make_def("DA_Vehicle_Concept", {
+    "display_name": "Concept",
+    "chassis_mesh": meshes["SM_Car_Concept"],
+    "front_axle_x_cm": 128.0, "rear_axle_x_cm": -140.0,
+    "half_track_y_cm": 92.0, "wheel_radius_cm": 35.0,
+    "mass_kg": 1150.0,
+    # LMP-style road concept (Furai x GT40): mid-engine RWD, like the Super
+    "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
+    "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 500.0,
+    "front_brake_nm": 3100.0, "rear_brake_nm": 2850.0, "handbrake_nm": 5700.0,
+})
+make_def("DA_Vehicle_LMP", {
+    "display_name": "LMP",
+    "chassis_mesh": meshes["SM_Car_LMP"],
+    "front_axle_x_cm": 150.0, "rear_axle_x_cm": -140.0,
+    "half_track_y_cm": 88.0, "wheel_radius_cm": 34.0,
+    "mass_kg": 1030.0,
+    # Le Mans prototype: mid-engine, aero nose keeps it 45% front, lowest COM
+    "front_weight_frac": 0.45, "yaw_dynamic_index": 0.85, "com_local_z": 3.0,
+    "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 600.0,
+    "front_brake_nm": 2850.0, "rear_brake_nm": 2300.0, "handbrake_nm": 4600.0,
 })
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved 6 meshes, 7 category materials, and 5 new vehicle defs")
+log("DONE - saved 8 meshes, 7 category materials, and 7 vehicle defs")
