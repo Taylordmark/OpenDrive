@@ -8,7 +8,8 @@ class AODRebindMenu;
 
 /**
  * Release settings shell (Arc 4.4, next steps.md SS4.4/SS7.31): graphics
- * (resolution/window mode/quality/upscaler/screen-percentage/vsync), audio
+ * (resolution/window mode/quality/upscaler/screen-percentage/vsync/asset
+ * detail - see ODAssetDetail.h), audio
  * volumes (Master/Vehicle/Ambient), and the Input Device row, all as one
  * canvas-drawn row list - same NumRows()/GetRow()/Adjust() idiom as
  * AODPauseMenu/AODMainMenu (see ODRaceHUD::DrawSettingsMenu for the actual
@@ -53,13 +54,13 @@ public:
 	virtual void BeginPlay() override;
 
 	// Resolution, Window Mode, Quality, Upscaler, Screen %, VSync,
-	// Master Volume, Vehicle Volume, Ambient Volume, Input Device, Controls,
-	// Close.
-	int32 NumRows() const { return 12; }
+	// Asset Detail, Master Volume, Vehicle Volume, Ambient Volume,
+	// Input Device, Controls, Close.
+	int32 NumRows() const { return 13; }
 	/** Row index of "Controls" - the parent menus' Activate() special-cases
 	 *  this exactly like the terminal "Close" row (NumRows()-1) to open the
 	 *  rebind sub-screen instead of cycling a value (Arc 4.1, SS7.32). */
-	int32 ControlsRowIndex() const { return 10; }
+	int32 ControlsRowIndex() const { return 11; }
 	int32 GetSelected() const { return Selected; }
 	/** Forwards to the rebind sub-screen's own MoveSelection while it's open
 	 *  (see IsRebindOpen) - one level of the same "check the sub-screen flag
@@ -86,6 +87,7 @@ private:
 	void ApplyUpscaler(int32 Dir);
 	void ApplyScreenPercent(int32 Dir);
 	void ApplyVSync();
+	void ApplyAssetDetail(int32 Dir);
 	void ApplyAudioVolumes() const;   // pushes Master*Vehicle / Master*Ambient to the audio actors
 	void ApplyInputDevice(int32 Dir);
 
@@ -120,6 +122,13 @@ private:
 	 *  turns TSR on later doesn't need to also hunt down this row for the
 	 *  first time then. */
 	int32 ScreenPercent = 100;
+
+	/** 0 Standard / 1 High / 2 Ultra flora, rock and car meshes - see
+	 *  ODAssetDetail.h. Meshes load in BeginPlay, so a change takes effect
+	 *  on the next level load; AssetDetailAtLoad is what this level actually
+	 *  loaded, so the row can say so. */
+	int32 AssetDetail = 0;
+	int32 AssetDetailAtLoad = 0;
 
 	float MasterVolume = 1.0f;
 	float VehicleVolume = 1.0f;

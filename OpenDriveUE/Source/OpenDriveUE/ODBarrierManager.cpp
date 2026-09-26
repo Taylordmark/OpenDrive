@@ -1,4 +1,5 @@
 #include "ODBarrierManager.h"
+#include "ODAssetDetail.h"
 
 #include "ODBinSidecarUtil.h"
 #include "ODRoadManager.h"
@@ -38,9 +39,9 @@ void AODBarrierManager::BeginPlay()
 
 	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
-		TreeMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
+		TreeMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
 	}
-	BushMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/OpenDrive/Trees/bush.bush"));
+	BushMesh = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/OpenDrive/Trees/bush.bush")));
 
 	// Auto-derive BiomeFilePrefix from the level's own AODRoadManager if the
 	// level (or a designer) hasn't already set one explicitly - see

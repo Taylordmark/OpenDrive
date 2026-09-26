@@ -216,8 +216,8 @@ def make_bough_cell(name, color_dark, color_light, twig_color, n_blobs, elong,
     blobs build up a solid needle mass, mottled dark/light for depth, with a
     thin fringe of individual needle strokes only along the silhouette edge
     to keep it from reading as a smooth cutout blob. Used for pine/spruce/
-    fir only - krummholz keeps the old sparse needle_sprig() cell on
-    purpose (its wind-battered sparseness is intentional)."""
+    fir, and (2026-09-25) krummholz too - its old sparse needle_sprig()
+    cell read as a bare stick in grass, the same defect as above."""
     cv = new_cell_canvas()
     draw = ImageDraw.Draw(cv)
     s = CELL_PX * SS
@@ -312,6 +312,8 @@ def make_atlas():
         "fir_needle": make_bough_cell(
             "fir_needle", (46, 94, 66), (80, 132, 94), (48, 34, 22, 255),
             n_blobs=11, elong=(1.1, 1.0)),
+        # old sparse cell: still drawn (and thrown away below) only so the
+        # shared rng stream - and every cell after this one - is unchanged
         "krummholz_needle": make_conifer_cell(
             "krummholz_needle", (60, 88, 60, 255), (66, 48, 30, 255),
             n_needles=8, needle_len=0.20, spread_deg=50, n_sprigs=5),
@@ -328,6 +330,11 @@ def make_atlas():
             "grass_blade", (120, 148, 74, 255), n_leaves=22,
             leaf_w=0.03, leaf_h=0.34),
     }
+    # krummholz: dense like the other conifers but darker/olive (exposed,
+    # wind-desiccated needles) and squat - wind-compacted mats, not boughs
+    cells["krummholz_needle"] = make_bough_cell(
+        "krummholz_needle", (40, 74, 50), (74, 108, 72), (54, 38, 24, 255),
+        n_blobs=12, elong=(1.0, 0.8), n_edge_needles=160)
     for name, img in cells.items():
         left, top, _, _ = cell_pixel_box(name)
         atlas.alpha_composite(img, (left, top))

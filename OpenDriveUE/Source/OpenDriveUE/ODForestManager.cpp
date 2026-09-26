@@ -1,4 +1,5 @@
 #include "ODForestManager.h"
+#include "ODAssetDetail.h"
 
 #include "Components/CapsuleComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -144,11 +145,11 @@ void AODForestManager::BeginPlay()
 	// array's own comment for why ODForestManager keeps its own superset.
 	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
-		TreeMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
+		TreeMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
 	}
 	for (const TCHAR* Path : ShrubMeshPaths)
 	{
-		ShrubMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
+		ShrubMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
 	}
 
 	// Ground cover (2026-09-03) - see the RockMeshes declaration in
@@ -164,10 +165,10 @@ void AODForestManager::BeginPlay()
 	};
 	for (const TCHAR* Path : RockMeshPaths)
 	{
-		RockMeshes.Add(LoadObject<UStaticMesh>(nullptr, Path));
+		RockMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
 	}
-	ScrubMesh = LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"));
+	ScrubMesh = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(
+		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft")));
 
 	// Real CC0 rock texture (bonus scope, 2026-09-03) - see RockMat's own
 	// header comment. Missing asset (script not yet run) is not fatal - the

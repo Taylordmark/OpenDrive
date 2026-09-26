@@ -6,12 +6,17 @@ background thread - on change it reruns the generator as a subprocess and
 records stdout/stderr/exit code so a syntax error shows up in the browser
 (via /status) instead of failing silently. Stdlib only.
 
+Also serves the other world assets read-only (no rebuild/hot-reload): flora
++ rock OBJs/textures under /files/, and /biomes - BiomeRecipeTable parsed
+from ODForestManager.cpp - for the viewer's Flora/Rocks/Biomes tabs.
+
 Usage:
     python pipeline/preview_cars.py [--port 8123]
 """
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -27,6 +32,15 @@ OBJ_DIR = ROOT / "data" / "cars" / "procedural" / "obj"
 TEX_DIR = ROOT / "data" / "cars" / "procedural" / "textures"
 PALETTE_PNG = TEX_DIR / "T_CarPalette2.png"
 MANIFEST_JSON = OBJ_DIR / "cars_manifest.json"
+STAGE_DIR = ROOT / "data" / "stages" / "tail_of_the_dragon"
+FOREST_CPP = ROOT / "OpenDriveUE" / "Source" / "OpenDriveUE" / "ODForestManager.cpp"
+# /files/<key>/<basename> - read-only static dirs for the non-car assets.
+FILE_DIRS = {
+    "flora": STAGE_DIR / "obj",                     # make_tree_meshes.py
+    "rocks": ROOT / "data" / "flora" / "obj",       # make_rock_meshes.py
+    "tex": STAGE_DIR / "textures",                  # bark/foliage atlas/detail
+    "rocktex": ROOT / "content_src" / "textures" / "ground" / "Rock030",
+}
 
 # --------------------------------------------------------------- shared state
 _lock = threading.Lock()
@@ -96,12 +110,42 @@ def watcher_thread(poll_seconds=0.5):
             run_build()
 
 
+def asset_list():
+    """Flora = stage OBJs that ship an .mtl (skips road_*/calib/legacy
+    tree_green); rocks = every rock OBJ. Standard tier names only - the
+    viewer's Detail toggle picks the _high/_ultra variants itself."""
+    std = lambda p: not p.stem.endswith(("_high", "_ultra"))
+    flora = sorted(p.stem for p in FILE_DIRS["flora"].glob("*.obj")
+                   if p.with_suffix(".mtl").exists() and std(p))
+    rocks = sorted(p.stem for p in FILE_DIRS["rocks"].glob("*.obj") if std(p))
+    return {"flora": flora, "rocks": rocks}
+
+
+def biome_recipes():
+    """Parse BiomeRecipeTable straight out of ODForestManager.cpp so the
+    viewer's biome scenes can't drift from what the game scatters. Each row:
+    /* Name */ {{7 species}, {2 shrub}, tree, bush, rock, scrub[, floor]}."""
+    text = FOREST_CPP.read_text(encoding="utf-8")
+    table = text[text.index("BiomeRecipeTable[] = {"):]
+    table = table[:table.index("};")]
+    out = []
+    for name, species, shrub, rest in re.findall(
+            r"/\*\s*(\w+)\s*\*/\s*\{\{([^}]*)\},\s*\{([^}]*)\},([^}]*)\}", table):
+        nums = lambda t: [float(x.strip().rstrip("f")) for x in t.split(",") if x.strip()]
+        r = nums(rest) + [0.0]
+        out.append({"name": name, "species": nums(species), "shrub": nums(shrub),
+                    "tree": r[0], "bush": r[1], "rock": r[2], "scrub": r[3],
+                    "floor": r[4]})
+    return out
+
+
 # ------------------------------------------------------------------- server
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".obj": "text/plain; charset=utf-8",
     ".png": "image/png",
     ".json": "application/json; charset=utf-8",
+    ".mtl": "text/plain; charset=utf-8",
 }
 
 
@@ -164,6 +208,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_bytes(b"bad request", "text/plain; charset=utf-8", 400)
                 return
             self._send_file(OBJ_DIR / name, "text/plain; charset=utf-8")
+            return
+
+        if path == "/assets":
+            self._send_json(asset_list())
+            return
+
+        if path == "/biomes":
+            try:
+                self._send_json(biome_recipes())
+            except (OSError, ValueError) as exc:
+                self._send_json({"error": repr(exc)}, 500)
+            return
+
+        if path.startswith("/files/"):
+            key, _, name = path[len("/files/"):].partition("/")
+            ext = Path(name).suffix.lower()
+            if (key not in FILE_DIRS or not name or "/" in name or "\\" in name
+                    or ".." in name or ext not in _CONTENT_TYPES):
+                self._send_bytes(b"bad request", "text/plain; charset=utf-8", 400)
+                return
+            self._send_file(FILE_DIRS[key] / name, _CONTENT_TYPES[ext])
             return
 
         if path == "/textures/T_CarPalette2.png":

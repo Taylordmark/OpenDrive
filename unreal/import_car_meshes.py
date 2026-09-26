@@ -61,8 +61,13 @@ def log(msg):
 
 
 # ------------------------------------------------------------------ import
-MESH_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
-              "SM_Car_Rally", "SM_Car_Concept", "SM_Car_LMP", "SM_CarWheel")
+BASE_MESH_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
+                   "SM_Car_Rally", "SM_Car_Concept", "SM_Car_LMP", "SM_CarWheel")
+# Graphics menu "Asset Detail" variants (make_car_meshes.py TIERS). The defs
+# below reference the Standard meshes; AODVehiclePawn swaps in <name>_high/
+# _ultra at runtime (falling back to Standard if a variant is missing).
+TIER_SUFFIXES = ("", "_high", "_ultra")
+MESH_NAMES = tuple(n + sfx for sfx in TIER_SUFFIXES for n in BASE_MESH_NAMES)
 tasks = []
 for name in MESH_NAMES:
     t = unreal.AssetImportTask()
@@ -108,13 +113,13 @@ for name, mesh in meshes.items():
     ns = mesh.get_editor_property("nanite_settings")
     ns.set_editor_property("enabled", False)
     mesh.set_editor_property("nanite_settings", ns)
-log("disabled Nanite on all 8 car meshes (required for the translucent glass slot)")
+log(f"disabled Nanite on all {len(meshes)} car meshes (required for the translucent glass slot)")
 
 # box collision on all seven chassis (SM_CarWheel has no collision - matches
 # WheelVisuals' NoCollision setup in AODVehiclePawn's constructor)
 CHASSIS_NAMES = ("SM_Car_Muscle", "SM_Car_JDM", "SM_Car_Super", "SM_Car_Pickup",
                   "SM_Car_Rally", "SM_Car_Concept", "SM_Car_LMP")
-for name in CHASSIS_NAMES:
+for name in (n + sfx for sfx in TIER_SUFFIXES for n in CHASSIS_NAMES):
     mesh = meshes[name]
     unreal.EditorStaticMeshLibrary.remove_collisions(mesh)
     n_col = unreal.EditorStaticMeshLibrary.add_simple_collisions(
@@ -160,8 +165,28 @@ CATEGORY_MATERIALS = {
     "lights":  ("M_CarLights", 0.30, 0.0, True, None),
 }
 
-category_material_assets = {}
-for cat, (mat_name, roughness, metallic, two_sided, opacity) in CATEGORY_MATERIALS.items():
+# 2026-09-25 "Asset Detail" High/Ultra set (M_Car*_Hi, on the _high/_ultra
+# meshes only - their auto-smoothed normals are what make a mirror finish
+# look like paint instead of a disco ball; Standard's faceted meshes keep
+# the set above). Body = real clear coat: glossy coat (0.03) over a rougher
+# metallic-flake base; chrome/glass/lens near-mirror. Lumen reflections
+# (r.ReflectionMethod=1, DefaultEngine.ini) supply what they reflect.
+# clear_coat = (ClearCoat, ClearCoatRoughness) -> MSM_CLEAR_COAT, bound to
+# CustomData0/1 (NOT verified offline - check M_CarBody_Hi's shading model
+# and pins in the editor on first run).
+CATEGORY_MATERIALS_HI = {
+    # category: (asset_name, roughness, metallic, two_sided, opacity_or_None[, clear_coat])
+    "body":    ("M_CarBody_Hi", 0.35, 0.55, True, None, (1.0, 0.03)),
+    "plastic": ("M_CarPlastic_Hi", 0.55, 0.0, True, None),
+    "glass":   ("M_CarGlass_Hi", 0.02, 0.05, True, 0.80),
+    "chrome":  ("M_CarChrome_Hi", 0.02, 1.0, True, None),
+    "tire":    ("M_CarTire_Hi", 0.85, 0.0, True, None),
+    "rim":     ("M_CarRim_Hi", 0.12, 0.9, True, None),
+    "lights":  ("M_CarLights_Hi", 0.08, 0.0, True, None),
+}
+
+
+def build_material(cat, mat_name, roughness, metallic, two_sided, opacity, clear_coat=None):
     mat_path = f"{CAR_DIR}/{mat_name}"
     mat = None
     if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
@@ -194,6 +219,14 @@ for cat, (mat_name, roughness, metallic, two_sided, opacity) in CATEGORY_MATERIA
     spec.set_editor_property("r", 0.9 if cat in ("body", "glass", "chrome") else 0.5)
     MEL.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
 
+    if clear_coat is not None:
+        mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_CLEAR_COAT)
+        for i, (val, prop) in enumerate(zip(clear_coat, (unreal.MaterialProperty.MP_CUSTOM_DATA0,
+                                                         unreal.MaterialProperty.MP_CUSTOM_DATA1))):
+            c = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -500, 850 + 150 * i)
+            c.set_editor_property("r", val)
+            MEL.connect_material_property(c, "", prop)
+
     if opacity is not None:
         # translucent glass: constant opacity, no Nanite (Nanite requires
         # opaque/masked - leaving used_with_nanite off below for this branch).
@@ -212,9 +245,14 @@ for cat, (mat_name, roughness, metallic, two_sided, opacity) in CATEGORY_MATERIA
     mat.set_editor_property("two_sided", two_sided)
     MEL.recompile_material(mat)
     unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
-    category_material_assets[cat] = mat
     log(f"built {mat_name} (roughness {roughness}, metallic {metallic}"
-        f"{f', opacity {opacity}' if opacity is not None else ''})")
+        f"{f', opacity {opacity}' if opacity is not None else ''}"
+        f"{f', clear coat {clear_coat}' if clear_coat else ''})")
+    return mat
+
+
+category_material_assets = {cat: build_material(cat, *v) for cat, v in CATEGORY_MATERIALS.items()}
+category_material_assets_hi = {cat: build_material(cat, *v) for cat, v in CATEGORY_MATERIALS_HI.items()}
 
 # CATEGORY_ORDER mirrors pipeline/make_car_meshes.py's CATEGORY_ORDER - used
 # as the fallback slot->category mapping (by usemtl-encounter order) if
@@ -230,10 +268,12 @@ for name, mesh in meshes.items():
         continue
 
     slot_names = [str(s.get_editor_property("material_slot_name")) for s in slots]
+    hi = name.endswith(("_high", "_ultra"))
+    mats = category_material_assets_hi if hi else category_material_assets
     named_ok = all(n in CATEGORY_MATERIALS for n in slot_names) and slot_names
     if named_ok:
         for i, cat in enumerate(slot_names):
-            mesh.set_material(i, category_material_assets[cat])
+            mesh.set_material(i, mats[cat])
         log(f"{name}: assigned {len(slot_names)} slot(s) by name ({slot_names})")
     else:
         # fallback: assign in CATEGORY_ORDER, trimmed to however many slots
@@ -241,12 +281,12 @@ for name, mesh in meshes.items():
         # CATEGORY_ORDER by construction on the generator side).
         cats = CATEGORY_ORDER[:len(slots)]
         for i, cat in enumerate(cats):
-            mesh.set_material(i, category_material_assets[cat])
+            mesh.set_material(i, mats[cat])
         log(f"{name}: slot names not usable ({slot_names}) - assigned "
             f"{len(cats)} slot(s) by encounter order ({cats}) instead")
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
-log("assigned category materials to all 8 meshes")
+log(f"assigned category materials to all {len(meshes)} meshes")
 
 # ------------------------------------------------------ the seven vehicle defs
 wheel_mesh = meshes["SM_CarWheel"]

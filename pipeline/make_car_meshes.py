@@ -52,6 +52,14 @@ TEX.mkdir(parents=True, exist_ok=True)
 
 REF_WHEEL_RADIUS_CM = 34.0
 
+# Graphics menu "Asset Detail" tiers: every mesh is also written as
+# <name>_high / <name>_ultra. suffix -> (loft station spacing cm, hull
+# cross-section subdivisions, wheel segments, smooth normals). Standard must
+# stay (8.0, 1, 20, False) - its OBJs are byte-identical to pre-tier output.
+TIERS = {"": (8.0, 1, 20, False), "_high": (4.0, 3, 40, True), "_ultra": (2.5, 4, 60, True)}
+SPACING, SECTION_SUB, WHEEL_SEG, SMOOTH = TIERS[""]
+SMOOTH_COS = math.cos(math.radians(38))   # auto-smooth crease angle
+
 # ---------------------------------------------------------------- palette --
 PALETTE = [
     (0.55, 0.05, 0.04),   # 0  muscle body - RED (continuity: today's placeholder car is red)
@@ -135,6 +143,20 @@ class Mesh:
             cat = CATEGORY_OF[t[3]]
             by_cat[cat].append(t)
 
+        name += SUFFIX
+        smooth = {}
+        if SMOOTH:
+            # auto-smooth: a corner's normal averages every face at that
+            # vertex within SMOOTH_COS of it (sign-aligned - the y-negation
+            # leaves hull winding mixed), same category only so paint/glass/
+            # trim seams stay crisp.
+            for (a, b, c, cell) in self.tris:
+                n = np.cross(b - a, c - a)
+                ln = np.linalg.norm(n)
+                if ln > 1e-6:
+                    for q in (a, b, c):
+                        smooth.setdefault((CATEGORY_OF[cell], *np.round(q, 1)), []).append(n / ln)
+
         lines, f_lines, vi = [], [], 1
         lines.append(f"mtllib {name}.mtl")
         for cat in CATEGORY_ORDER:
@@ -148,9 +170,18 @@ class Mesh:
                 n = n / ln if ln > 1e-6 else np.array([0.0, 0.0, 1.0])
                 u, v = cell_uv(cell)
                 for p in (a, b, c):
+                    pn = n
+                    if smooth:
+                        acc = np.zeros(3)
+                        for o in smooth.get((cat, *np.round(p, 1)), ()):
+                            d = float(np.dot(o, n))
+                            if abs(d) >= SMOOTH_COS:
+                                acc += o if d > 0 else -o
+                        la = np.linalg.norm(acc)
+                        pn = acc / la if la > 1e-6 else n
                     lines.append(f"v {p[0]:.1f} {-p[1]:.1f} {p[2]:.1f}")
                     lines.append(f"vt {u:.4f} {v:.4f}")
-                    lines.append(f"vn {n[0]:.3f} {-n[1]:.3f} {n[2]:.3f}")
+                    lines.append(f"vn {pn[0]:.3f} {-pn[1]:.3f} {pn[2]:.3f}")
                 f_lines.append(f"f {vi}/{vi}/{vi} {vi + 1}/{vi + 1}/{vi + 1} "
                                f"{vi + 2}/{vi + 2}/{vi + 2}")
                 vi += 3
@@ -246,7 +277,7 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
     """
     px, pzb, pzt = (np.array(c) for c in zip(*sorted(profile)))
     wx, wh = (np.array(c) for c in zip(*sorted(plan)))
-    n = max(8, int(round((px[-1] - px[0]) / style["resample_spacing"])))
+    n = max(8, int(round((px[-1] - px[0]) / min(style["resample_spacing"], SPACING))))
     xs = np.linspace(px[-1], px[0], n + 1)          # nose -> tail
     zb = np.interp(xs, px, pzb)
     zt = np.interp(xs, px, pzt)
@@ -274,6 +305,24 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
         Y.append(np.interp(xs, cx, cw))
         Z.append(np.interp(xs, cx, cz))
     Y, Z = np.stack(Y, axis=1), np.stack(Z, axis=1)
+    band = list(range(Y.shape[1] - 1))   # section segment -> authored band
+    if SECTION_SUB > 1:
+        # higher tiers: round the cross-section - uniform Catmull-Rom through
+        # the authored points, SECTION_SUB segments per band (same end points,
+        # so the caps/floor/top attach where they always did)
+        Kp = Y.shape[1]
+        Pt = np.stack([Y, Z], axis=2)                        # (stations, K, 2)
+        rows, band = [], []
+        for k in range(Kp - 1):
+            p0, p1 = Pt[:, max(k - 1, 0)], Pt[:, k]
+            p2, p3 = Pt[:, k + 1], Pt[:, min(k + 2, Kp - 1)]
+            for j in range(SECTION_SUB):
+                t = j / SECTION_SUB
+                rows.append(0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t
+                                   + (3 * p1 - p0 - 3 * p2 + p3) * t ** 3))
+                band.append(k)
+        rows.append(Pt[:, -1])
+        Y, Z = np.stack([r[:, 0] for r in rows], axis=1), np.stack([r[:, 1] for r in rows], axis=1)
     K = Y.shape[1]          # section points; top cap sits on the last one
     zc = Z[:, -1]
 
@@ -291,7 +340,8 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
             cells = [dark_cell, body_cell, body_cell, body_cell, GLASS if glass else body_cell]
         else:
             cells = [dark_cell, body_cell, body_cell, GLASS if glass else body_cell]
-        for k, cell in enumerate(cells):
+        for k, bk in enumerate(band):
+            cell = cells[bk]
             for s in (1, -1):
                 q = [(x0, s * Y[i, k], Z[i, k]), (x1, s * Y[i + 1, k], Z[i + 1, k]),
                      (x1, s * Y[i + 1, k + 1], Z[i + 1, k + 1]), (x0, s * Y[i, k + 1], Z[i, k + 1])]
@@ -690,10 +740,14 @@ def build_wheel():
     """Shared wheel at REF_WHEEL_RADIUS_CM: rounded tire revolved from a
     profile, recessed 5-spoke rim face."""
     w = Mesh()
-    R, HW, SEG = REF_WHEEL_RADIUS_CM, 13.0, 20
+    R, HW, SEG = REF_WHEEL_RADIUS_CM, 13.0, WHEEL_SEG
     RIM_R, HUB_R = 0.64 * R, 0.18 * R
     # (radius, y) tire profile, one sidewall -> tread -> other sidewall
     prof = [(RIM_R, HW - 1), (R - 4, HW), (R, HW - 4), (R, -(HW - 4)), (R - 4, -HW), (RIM_R, -(HW - 1))]
+    if SMOOTH:   # higher tiers: rounded shoulders instead of 45-degree chamfers
+        arc = lambda s, a0, a1: [(R - 4 + 4 * math.cos(a), s * (HW - 4) + 4 * math.sin(a) * s)
+                                 for a in np.linspace(a0, a1, 5)]
+        prof = [prof[0]] + arc(1, math.pi / 2, 0) + arc(-1, 0, math.pi / 2) + [prof[-1]]
 
     def pt(rad, y, a):
         return (rad * math.cos(a), y, rad * math.sin(a))
@@ -702,7 +756,7 @@ def build_wheel():
         a0, a1 = 2 * math.pi * k / SEG, 2 * math.pi * (k + 1) / SEG
         for (r0, y0), (r1, y1) in zip(prof, prof[1:]):
             w.quad(pt(r0, y0, a0), pt(r0, y0, a1), pt(r1, y1, a1), pt(r1, y1, a0), TIRE)
-        spoke = RIM if k % 4 < 2 else TIRE
+        spoke = RIM if (k * 10 // SEG) % 2 == 0 else TIRE   # 5 spokes
         for s in (1, -1):
             yl, yd = s * (HW - 1), s * (HW - 5)       # lip plane, recessed dish plane
             w.quad(pt(RIM_R, yl, a0), pt(RIM_R, yl, a1), pt(RIM_R * 0.9, yd, a1), pt(RIM_R * 0.9, yd, a0), RIM)
@@ -711,16 +765,20 @@ def build_wheel():
     w.save("SM_CarWheel")
 
 
+SUFFIX = ""
+
 if __name__ == "__main__":
     print("Building procedural car set (7 presets, 1 shared wheel)...")
-    muscle = build_muscle()
-    jdm = build_jdm()
-    super_ = build_super()
-    pickup = build_pickup()
-    rally = build_rally()
-    concept = build_concept()
-    lmp = build_lmp()
-    build_wheel()
+    for SUFFIX, (SPACING, SECTION_SUB, WHEEL_SEG, SMOOTH) in list(TIERS.items())[::-1]:
+        # Standard last so the per-car dicts below (manifest) come from it
+        muscle = build_muscle()
+        jdm = build_jdm()
+        super_ = build_super()
+        pickup = build_pickup()
+        rally = build_rally()
+        concept = build_concept()
+        lmp = build_lmp()
+        build_wheel()
     write_palette()
     (OUT / "LICENSE.txt").write_text(
         "Procedural car meshes generated by pipeline/make_car_meshes.py.\n"

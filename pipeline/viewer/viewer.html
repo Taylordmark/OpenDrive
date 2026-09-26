@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenDrive Car Preview</title>
+<title>OpenDrive Asset Preview</title>
 <style>
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
@@ -19,7 +19,9 @@
     display: flex; justify-content: space-between; align-items: flex-start;
     pointer-events: none;
   }
-  #buttons { pointer-events: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  #rows { display: flex; flex-direction: column; gap: 6px; max-width: 60%; }
+  #tabs, #buttons { pointer-events: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  #tabs button { font-weight: bold; }
   button {
     background: #2b2e37; color: #e8e8ec; border: 1px solid #454955;
     padding: 6px 10px; font-family: inherit; font-size: 12px;
@@ -56,9 +58,10 @@
 <div id="wrap">
   <canvas id="gl"></canvas>
   <div id="hud">
-    <div id="buttons"></div>
+    <div id="rows"><div id="tabs"></div><div id="buttons"></div></div>
     <div id="status">
       <div id="buildline">connecting...</div>
+      <div id="info"></div>
     </div>
   </div>
   <div id="hint">drag: orbit &nbsp; wheel: zoom &nbsp; shift/right-drag: pan</div>
@@ -72,6 +75,12 @@
 let CARS = [];   // filled from cars_manifest.json at boot
 const WHEEL_NAME = "SM_CarWheel";
 const ALL_LABEL = "All";
+// Graphics menu "Asset Detail": suffix the generators write per tier
+const DETAILS = [["Standard", ""], ["High", "_high"], ["Ultra", "_ultra"]];
+let detail = "";
+// reflection strength per car material slot on High/Ultra (unreal/
+// import_car_meshes.py's M_Car*_Hi set)
+const CAR_GLOSS = { body: 0.55, glass: 0.8, chrome: 1.0, rim: 0.6, lights: 0.3 };
 const REF_WHEEL_RADIUS_CM = 34.0;
 
 let currentMode = null;   // one of CARS, or ALL_LABEL
@@ -106,8 +115,10 @@ const VERT_SRC = `
   uniform mat3 uNormalMat;
   varying vec3 vNormal;
   varying vec2 vUV;
+  varying vec3 vWorld;
   void main() {
     vec4 world = uModel * vec4(aPos, 1.0);
+    vWorld = world.xyz;
     gl_Position = uProj * uView * world;
     vNormal = normalize(uNormalMat * aNormal);
     vUV = aUV;
@@ -117,17 +128,47 @@ const FRAG_SRC = `
   precision mediump float;
   varying vec3 vNormal;
   varying vec2 vUV;
+  varying vec3 vWorld;
   uniform sampler2D uPalette;
   uniform vec3 uLightDir;
   uniform float uAmbient;
+  uniform vec3 uTint;       // multiplies the texture (OBJ Kd / biome ground color)
+  uniform float uCutoff;    // alpha-cutout threshold (foliage cards); 0 = opaque
+  uniform float uUVScale;
+  uniform float uWater;     // 1 = M_Water stand-in: deep color -> sky tint by fresnel
+  uniform vec3 uEye;
+  uniform float uGloss;     // High/Ultra car paint: clear-coat-ish sky reflection
   void main() {
     vec3 n = normalize(vNormal);
+    if (uWater > 0.5) {
+      // unreal/apply_water_material.py: WATER_COLOR / SKY_TINT_COLOR (linear),
+      // BASE_COLOR_FRESNEL_CAP 0.55; sqrt() is a cheap linear->sRGB
+      float f = pow(1.0 - abs(dot(n, normalize(uEye - vWorld))), 5.0);
+      vec3 c = mix(vec3(0.010, 0.042, 0.055), vec3(0.09, 0.15, 0.21), min(f, 0.55));
+      gl_FragColor = vec4(sqrt(c), 0.9);
+      return;
+    }
     // abs(): double-sided lighting - hull faces have mixed winding so some
     // normals point into the body; without this they shade flat-dark
     float ndl = abs(dot(n, uLightDir));
     float lit = clamp(uAmbient + ndl * (1.0 - uAmbient), 0.0, 1.0);
-    vec3 base = texture2D(uPalette, vUV).rgb;
-    gl_FragColor = vec4(base * lit, 1.0);
+    vec4 tex = texture2D(uPalette, vUV * uUVScale);
+    if (tex.a < uCutoff) discard;
+    vec3 col = tex.rgb * uTint * lit;
+    if (uGloss > 0.0) {
+      // stand-in for the M_Car*_Hi clear-coat set + Lumen reflections: a
+      // ground/horizon/sky gradient by reflection vector, Schlick fresnel,
+      // sun highlight. Faceted Standard meshes would look like a disco ball.
+      vec3 v = normalize(uEye - vWorld);
+      vec3 nn = dot(n, v) < 0.0 ? -n : n;
+      vec3 r = reflect(-v, nn);
+      vec3 sky = mix(vec3(0.80, 0.85, 0.90), vec3(0.32, 0.48, 0.75), clamp(r.z * 1.5, 0.0, 1.0));
+      vec3 env = mix(vec3(0.22, 0.21, 0.20), sky, smoothstep(-0.04, 0.04, r.z));
+      float fr = 0.04 + 0.96 * pow(1.0 - max(dot(nn, v), 0.0), 5.0);
+      float spec = pow(max(dot(r, normalize(-uLightDir)), 0.0), 250.0);
+      col = mix(col, env, clamp(uGloss * (0.3 + 0.7 * fr), 0.0, 1.0)) + spec * uGloss;
+    }
+    gl_FragColor = vec4(col, 1.0);
   }
 `;
 
@@ -179,6 +220,11 @@ function initGL() {
   uniforms.palette = gl.getUniformLocation(prog, "uPalette");
   uniforms.lightDir = gl.getUniformLocation(prog, "uLightDir");
   uniforms.ambient = gl.getUniformLocation(prog, "uAmbient");
+  for (const u of ["Tint", "Cutoff", "UVScale", "Water", "Eye", "Gloss"])
+    uniforms[u] = gl.getUniformLocation(prog, "u" + u);
+  whiteTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, whiteTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
 
   gridProg = linkProgram(GRID_VERT_SRC, GRID_FRAG_SRC);
   gAttribs.pos = gl.getAttribLocation(gridProg, "aPos");
@@ -191,6 +237,7 @@ function initGL() {
   // material (M_Car2) is two-sided - culling here would show phantom holes
   // that don't exist in UE (and vice versa)
   gl.clearColor(0.106, 0.114, 0.133, 1.0);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);   // water only
 }
 
 // ------------------------------------------------------------------ mat4 helpers (minimal)
@@ -251,6 +298,7 @@ function parseOBJ(text) {
   const lines = text.split("\n");
   const outPos = [], outUV = [], outNormal = [];
   let triCount = 0;
+  const groups = [];   // {mtl, start, count} in output vertices, one per usemtl run
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li].trim();
     if (!line || line[0] === "#") continue;
@@ -262,8 +310,11 @@ function parseOBJ(text) {
       uvs.push([parseFloat(parts[1]), parseFloat(parts[2])]);
     } else if (tag === "vn") {
       normals.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+    } else if (tag === "usemtl") {
+      groups.push({ mtl: parts[1], start: outPos.length / 3, count: 0 });
     } else if (tag === "f") {
       triCount++;
+      if (groups.length) groups[groups.length - 1].count += 3;
       for (let k = 1; k <= 3; k++) {
         const idx = parts[k].split("/").map(s => s ? parseInt(s, 10) : 0);
         const vi = idx[0] - 1;
@@ -278,7 +329,14 @@ function parseOBJ(text) {
       }
     }
   }
+  if (!groups.length) groups.push({ mtl: null, start: 0, count: outPos.length / 3 });
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < outPos.length; i++) {
+    min[i % 3] = Math.min(min[i % 3], outPos[i]);
+    max[i % 3] = Math.max(max[i % 3], outPos[i]);
+  }
   return {
+    groups, min, max,
     positions: new Float32Array(outPos),
     uvs: new Float32Array(outUV),
     normals: new Float32Array(outNormal),
@@ -300,10 +358,11 @@ function buildGLMesh(parsed) {
   gl.bindBuffer(gl.ARRAY_BUFFER, nrmBuf);
   gl.bufferData(gl.ARRAY_BUFFER, parsed.normals, gl.STATIC_DRAW);
 
-  return { posBuf, uvBuf, nrmBuf, count: parsed.vertCount };
+  return { posBuf, uvBuf, nrmBuf, count: parsed.vertCount, groups: parsed.groups };
 }
 
-function drawGLMesh(mesh, modelMat, viewMat, projMat) {
+// mats: mtl name -> {tex, tint, cutoff, uvScale, water}; null = car palette.
+function drawGLMesh(mesh, modelMat, viewMat, projMat, mats) {
   gl.useProgram(prog);
   gl.bindBuffer(gl.ARRAY_BUFFER, mesh.posBuf);
   gl.enableVertexAttribArray(attribs.pos);
@@ -323,12 +382,32 @@ function drawGLMesh(mesh, modelMat, viewMat, projMat) {
   gl.uniformMatrix3fv(uniforms.normalMat, false, mat3FromMat4(modelMat));
 
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, paletteTex);
   gl.uniform1i(uniforms.palette, 0);
   gl.uniform3f(uniforms.lightDir, 0.4, 0.6, -0.7);
   gl.uniform1f(uniforms.ambient, 0.35);
+  gl.uniform3fv(uniforms.Eye, orbitEye());
 
-  gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+  if (!mats) {   // car: palette on every slot, gloss per category on High/Ultra
+    for (const g of mesh.groups) {
+      setMaterial({ tex: paletteTex, gloss: detail ? CAR_GLOSS[g.mtl] : 0 });
+      gl.drawArrays(gl.TRIANGLES, g.start, g.count);
+    }
+    return;
+  }
+  for (const g of mesh.groups) {
+    setMaterial(mats[g.mtl] || {});
+    gl.drawArrays(gl.TRIANGLES, g.start, g.count);
+  }
+}
+
+function setMaterial(m) {
+  gl.bindTexture(gl.TEXTURE_2D, m.tex || whiteTex);
+  const t = m.tint || [1, 1, 1];
+  gl.uniform3f(uniforms.Tint, t[0], t[1], t[2]);
+  gl.uniform1f(uniforms.Cutoff, m.cutoff || 0);
+  gl.uniform1f(uniforms.UVScale, m.uvScale || 1);
+  gl.uniform1f(uniforms.Water, m.water ? 1 : 0);
+  gl.uniform1f(uniforms.Gloss, m.gloss || 0);
 }
 
 // ------------------------------------------------------------------ palette texture
@@ -353,6 +432,30 @@ function loadPaletteTexture(url) {
     img.onerror = reject;
     img.src = url + "?t=" + Date.now();
   });
+}
+
+let whiteTex = null;
+const texCache = {};   // url -> texture (flora/rock textures, OBJ V-up so flipY)
+function loadTexture(url) {
+  if (texCache[url]) return texCache[url];
+  const tex = texCache[url] = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([200, 200, 200, 255]));
+  const img = new Image();
+  img.onload = () => {
+    // every asset texture here is power-of-two (checked: 1024/2048), so
+    // REPEAT + mipmaps are legal in WebGL1 - bark UVs tile past 0..1
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  };
+  img.src = url;
+  return tex;
 }
 
 // ------------------------------------------------------------------ camera (orbit)
@@ -413,7 +516,7 @@ window.addEventListener("mousemove", (e) => {
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 canvas.addEventListener("wheel", (e) => {
   camDist *= Math.pow(1.0012, e.deltaY);
-  camDist = Math.max(60, Math.min(6000, camDist));
+  camDist = Math.max(60, Math.min(100000, camDist));
   e.preventDefault();
 }, { passive: false });
 
@@ -421,7 +524,7 @@ canvas.addEventListener("wheel", (e) => {
 const glMeshes = {};       // name -> {mesh, parsed}
 let manifest = null;       // parsed cars_manifest.json, or null
 
-function carURL(name) { return "/obj/" + name + ".obj"; }
+function carURL(name) { return "/obj/" + name + detail + ".obj"; }
 
 async function fetchOBJ(name) {
   const res = await fetch(carURL(name), { cache: "no-store" });
@@ -433,6 +536,172 @@ async function fetchOBJ(name) {
 async function loadCar(name) {
   const parsed = await fetchOBJ(name);
   glMeshes[name] = { mesh: buildGLMesh(parsed), parsed };
+}
+
+// ------------------------------------------------------------------ flora / rocks / biomes
+const assetMeshes = {};   // "flora/tree_blob" -> {mesh, parsed, mats}
+let ASSETS = { flora: [], rocks: [] };   // from /assets
+let BIOMES = [];                          // from /biomes (ODForestManager.cpp's BiomeRecipeTable)
+
+// make_tree_meshes.py re-authored the legacy C++ slot names as Colorado species
+const FLORA_LABELS = {
+  tree_blob: "Aspen A", tree_olive: "Engelmann Spruce", tree_conifer: "Lodgepole Pine A",
+  tree_scrub_oak: "Aspen B", tree_manzanita: "Krummholz", tree_yucca: "Subalpine Fir",
+  tree_canyon_oak: "Lodgepole Pine B", bush: "Willow Scrub", sagebrush: "Sagebrush",
+  grass_tuft: "Grass Tuft",
+};
+// FBiomeRecipe::SpeciesWeight / ShrubWeight fixed order
+const SPECIES_MESHES = ["tree_blob", "tree_olive", "tree_conifer", "tree_scrub_oak",
+                        "tree_manzanita", "tree_yucca", "tree_canyon_oak"];
+const SHRUB_MESHES = ["bush", "sagebrush"];
+// ODForestManager.h per-m^2 baselines the recipe density scales multiply
+const TREES_PER_M2 = 0.05, BUSHES_PER_M2 = 0.03, ROCKS_PER_M2 = 0.02, SCRUB_PER_M2 = 0.06;
+// ponytail: fixed canopy weight - in game it's the per-point imagery
+// ForestWeight (floored by AmbientVegFloor); add a slider if you need to
+// preview sparse vs dense stands of the same biome
+const PREVIEW_FOREST_WEIGHT = 0.7;
+const BIOME_PATCH_M = 60;
+const POND_R_CM = 1000;
+const GROUND_COLORS = {   // rough look-alikes for the ground, not a game value
+  DeciduousForest: [0.33, 0.40, 0.20], EvergreenForest: [0.28, 0.33, 0.20],
+  Chaparral: [0.52, 0.47, 0.32], DesertScrub: [0.70, 0.60, 0.43],
+  PlainsGrassland: [0.52, 0.55, 0.30], Wetland: [0.30, 0.38, 0.24],
+  AlpineBare: [0.52, 0.50, 0.47], ArcticTundra: [0.55, 0.55, 0.45],
+  Farmland: [0.50, 0.52, 0.28], Savanna: [0.66, 0.60, 0.36],
+  Rainforest: [0.22, 0.32, 0.15], CoastalDune: [0.82, 0.75, 0.58],
+  CanyonBadlands: [0.66, 0.44, 0.30], RockyFoothill: [0.48, 0.46, 0.38],
+};
+
+async function loadAsset(key, name) {
+  const id = key + "/" + name + detail;
+  if (assetMeshes[id]) return assetMeshes[id];
+  // tier variant, falling back to Standard like the game does
+  let file = name + detail;
+  let res = await fetch(`/files/${key}/${file}.obj`);
+  if (!res.ok && detail) res = await fetch(`/files/${key}/${file = name}.obj`);
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + id);
+  const [objText, mtlText] = await Promise.all([
+    res.text(),
+    fetch(`/files/${key}/${file}.mtl`).then(r => r.ok ? r.text() : ""),
+  ]);
+  const parsed = parseOBJ(objText);
+  return assetMeshes[id] = { mesh: buildGLMesh(parsed), parsed, mats: parseMTL(mtlText, key) };
+}
+
+// newmtl / Kd / map_Kd; map_d (foliage cards) -> alpha cutout. Rock .mtl has
+// no texture: in game it's M_Rock030 (unreal/apply_rock_material.py, 0.6 tiling).
+function parseMTL(text, key) {
+  const mats = {};
+  let cur = null;
+  for (const line of text.split("\n")) {
+    const [tag, ...rest] = line.trim().split(/\s+/);
+    if (tag === "newmtl") cur = mats[rest[0]] = {};
+    else if (!cur) continue;
+    else if (tag === "Kd") cur.tint = rest.map(parseFloat);
+    else if (tag === "map_Kd") cur.tex = loadTexture("/files/tex/" + rest.join(" ").split("/").pop());
+    else if (tag === "map_d") cur.cutoff = 0.5;
+  }
+  if (key === "rocks") {
+    for (const m of Object.values(mats)) {
+      Object.assign(m, { tex: loadTexture("/files/rocktex/Rock030_2K-PNG_Color.png"),
+                         tint: [1, 1, 1], uvScale: 0.6 });
+    }
+  }
+  return mats;
+}
+
+// Flat single-material mesh (ground quad / pond disc) from a triangle fan list.
+function flatMesh(tris, mtl) {
+  const pos = [], uv = [], nrm = [];
+  for (const [x, y] of tris) { pos.push(x, y, 0); uv.push(x / 500, y / 500); nrm.push(0, 0, 1); }
+  return buildGLMesh({ positions: new Float32Array(pos), uvs: new Float32Array(uv),
+                       normals: new Float32Array(nrm), vertCount: tris.length,
+                       groups: [{ mtl, start: 0, count: tris.length }] });
+}
+
+function mulberry32(a) {
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function pickWeighted(weights, r) {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  let x = r * sum;
+  for (let i = 0; i < weights.length; i++) { x -= weights[i]; if (x < 0) return i; }
+  return weights.length - 1;
+}
+function instanceMat(x, y, yaw, s) {
+  const c = Math.cos(yaw) * s, n = Math.sin(yaw) * s;
+  return new Float32Array([c, n, 0, 0, -n, c, 0, 0, 0, 0, s, 0, x, y, 0, 1]);
+}
+
+// Deterministic patch of one biome: same recipe weights + per-m^2 densities
+// AODForestManager::BuildTile() uses, minus terrain/slope/road/water-mask gates.
+async function buildBiomeScene(biome, withWater) {
+  const half = BIOME_PATCH_M * 50;   // cm
+  const area = BIOME_PATCH_M * BIOME_PATCH_M;
+  const accept = Math.max(biome.floor, PREVIEW_FOREST_WEIGHT);
+  const rand = mulberry32(BIOMES.indexOf(biome) * 7919 + 1);
+  const layers = [
+    { n: area * TREES_PER_M2 * biome.tree * accept, key: "flora", meshes: SPECIES_MESHES, w: biome.species, s: [0.8, 1.2], label: "trees" },
+    { n: area * BUSHES_PER_M2 * biome.bush * accept, key: "flora", meshes: SHRUB_MESHES, w: biome.shrub, s: [0.7, 1.3], label: "shrubs" },
+    { n: area * ROCKS_PER_M2 * biome.rock, key: "rocks", meshes: ASSETS.rocks, w: ASSETS.rocks.map(() => 1), s: [0.5, 1.6], label: "rocks" },
+    { n: area * SCRUB_PER_M2 * biome.scrub, key: "flora", meshes: ["grass_tuft"], w: [1], s: [0.7, 1.3], label: "grass" },
+  ];
+  await Promise.all(layers.flatMap(l => l.meshes.map(m => loadAsset(l.key, m))));
+
+  const scene = [{ entry: { mesh: flatMesh([[-half, -half], [half, -half], [half, half],
+                                           [-half, -half], [half, half], [-half, half]], "ground"),
+                            mats: { ground: { tex: loadTexture("/files/tex/T_DetailGrass.png"),
+                                              tint: GROUND_COLORS[biome.name] || [0.5, 0.5, 0.4] } } },
+                   model: mat4Identity() }];
+  const counts = [];
+  for (const l of layers) {
+    const n = Math.round(l.n);
+    let placed = 0;
+    for (let i = 0; i < n; i++) {
+      const x = (rand() * 2 - 1) * half, y = (rand() * 2 - 1) * half;
+      const mesh = l.meshes[pickWeighted(l.w, rand())];
+      const yaw = rand() * Math.PI * 2, s = l.s[0] + rand() * (l.s[1] - l.s[0]);
+      // the game keeps flora out of open water (ODForestManager lake exclusion)
+      if (withWater && Math.hypot(x, y) < POND_R_CM + 150) continue;
+      scene.push({ entry: assetMeshes[l.key + "/" + mesh + detail], model: instanceMat(x, y, yaw, s) });
+      placed++;
+    }
+    counts.push(placed + " " + l.label);
+  }
+  if (withWater) {
+    const tris = [], seg = 48;
+    for (let i = 0; i < seg; i++) {
+      const a0 = i / seg * Math.PI * 2, a1 = (i + 1) / seg * Math.PI * 2;
+      tris.push([0, 0], [Math.cos(a0) * POND_R_CM, Math.sin(a0) * POND_R_CM],
+                [Math.cos(a1) * POND_R_CM, Math.sin(a1) * POND_R_CM]);
+    }
+    scene.push({ entry: { mesh: flatMesh(tris, "water"), mats: { water: { water: true } } },
+                 model: mat4Translate(0, 0, 8) });
+  }
+  return { scene, info: biome.name + ": " + counts.join(", ") };
+}
+
+// Single asset, or every asset of a group lined up along Y by its own width.
+async function buildRowScene(key, names) {
+  const entries = await Promise.all(names.map(n => loadAsset(key, n)));
+  const widths = entries.map(e => Math.max(e.parsed.max[1] - e.parsed.min[1],
+                                           e.parsed.max[0] - e.parsed.min[0]) * 1.25 + 100);
+  const total = widths.reduce((a, b) => a + b, 0);
+  let y = -total / 2;
+  const scene = entries.map((entry, i) => {
+    y += widths[i] / 2;
+    const m = mat4Translate(0, y, 0);
+    y += widths[i] / 2;
+    return { entry, model: m };
+  });
+  const tris = entries.reduce((a, e) => a + e.parsed.triCount, 0);
+  const height = Math.max(...entries.map(e => e.parsed.max[2]));
+  return { scene, info: names.length + " mesh(es), " + tris + " tris", fit: [Math.max(total, height), height] };
 }
 
 async function loadWheel() {
@@ -469,8 +738,7 @@ function manifestFor(carName) {
 }
 
 // ------------------------------------------------------------------ render
-function drawGrid(viewMat, projMat) {
-  const size = 2000, step = 100, z = -34;
+function drawGrid(viewMat, projMat, z, size, step) {
   const verts = [];
   for (let x = -size; x <= size; x += step) {
     verts.push(x, -size, z, x, size, z);
@@ -524,13 +792,20 @@ function render() {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   const aspect = canvas.width / Math.max(1, canvas.height);
-  const projMat = mat4Perspective(50 * Math.PI / 180, aspect, 10, 20000);
+  const projMat = mat4Perspective(50 * Math.PI / 180, aspect, Math.max(5, camDist * 0.01), camDist * 30);
   const eye = orbitEye();
   const viewMat = mat4LookAt(eye, camTarget, [0, 0, 1]);
 
-  drawGrid(viewMat, projMat);
-
-  if (paletteTex) {
+  if (tab !== "Cars") {
+    if (tab !== "Biomes") drawGrid(viewMat, projMat, 0, 10000, 200);
+    for (const inst of scene) {
+      const water = inst.entry.mats.water;
+      if (water) gl.enable(gl.BLEND);
+      drawGLMesh(inst.entry.mesh, inst.model, viewMat, projMat, inst.entry.mats);
+      if (water) gl.disable(gl.BLEND);
+    }
+  } else if (paletteTex) {
+    drawGrid(viewMat, projMat, -34, 2000, 100);
     if (showAll) {
       const gap = 650;
       CARS.forEach((name, i) => {
@@ -552,6 +827,108 @@ function makeButton(label, onClick) {
   b.addEventListener("click", onClick);
   buttonsEl.appendChild(b);
   return b;
+}
+
+// ------------------------------------------------------------------ UI: tabs (Cars / Flora / Rocks / Biomes)
+const TABS = ["Cars", "Flora", "Rocks", "Biomes"];
+let tab = "Cars";
+let scene = [];          // [{entry: {mesh, mats}, model}] for the non-car tabs
+let sceneToken = 0;      // drops stale async scene builds on fast clicking
+let withWater = true;
+const infoEl = document.getElementById("info");
+const tabButtons = {};
+
+function buildTabs() {
+  const tabsEl = document.getElementById("tabs");
+  for (const t of TABS) {
+    const b = document.createElement("button");
+    b.textContent = t;
+    b.addEventListener("click", () => setTab(t));
+    tabsEl.appendChild(b);
+    tabButtons[t] = b;
+  }
+  const db = document.createElement("button");
+  db.style.marginLeft = "12px";
+  db.textContent = "Detail: Standard";
+  db.addEventListener("click", async () => {
+    const i = (DETAILS.findIndex(d => d[1] === detail) + 1) % DETAILS.length;
+    detail = DETAILS[i][1];
+    db.textContent = "Detail: " + DETAILS[i][0];
+    for (const k in glMeshes) delete glMeshes[k];
+    if (tab === "Cars") {
+      await loadWheel().catch(() => {});
+      (showAll ? CARS : [currentMode]).forEach(ensureCarLoaded);
+    } else {
+      const active = buttonsEl.querySelector("button.active");
+      const item = active && active.title;
+      if (item) showScene(tab, tab === "Flora" ? "flora" : "rocks", item, true);
+    }
+  });
+  tabsEl.appendChild(db);
+}
+
+function setTab(t) {
+  tab = t;
+  for (const k of TABS) tabButtons[k].classList.toggle("active", k === t);
+  buttonsEl.innerHTML = "";
+  infoEl.textContent = "";
+  scene = [];
+  if (t === "Cars") {
+    camDist = 700; camTarget = [0, 0, 20];
+    buildButtons();
+    ensureCarLoaded(currentMode);
+    if (!glMeshes[WHEEL_NAME]) loadWheel().catch(() => {});
+    return;
+  }
+  const items = t === "Flora" ? ASSETS.flora : t === "Rocks" ? ASSETS.rocks : BIOMES.map(b => b.name);
+  const key = t === "Flora" ? "flora" : "rocks";
+  const btns = {};
+  const select = (item) => {
+    for (const k in btns) btns[k].classList.toggle("active", k === item);
+    showScene(t, key, item);
+  };
+  for (const item of items) {
+    btns[item] = makeButton(FLORA_LABELS[item] || item.replace(/^rock_/, ""), () => select(item));
+    btns[item].title = item;
+  }
+  if (t === "Biomes") {
+    const wb = makeButton("Water: on", () => {
+      withWater = !withWater;
+      wb.textContent = "Water: " + (withWater ? "on" : "off");
+      const cur = Object.keys(btns).find(k => btns[k].classList.contains("active"));
+      if (cur) showScene(t, key, cur, true);
+    });
+    wb.style.marginLeft = "12px";
+  } else {
+    btns[ALL_LABEL] = makeButton(ALL_LABEL, () => select(ALL_LABEL));
+    btns[ALL_LABEL].title = ALL_LABEL;
+  }
+  if (items.length) select(items[0]);
+}
+
+async function showScene(t, key, item, keepCamera) {
+  const token = ++sceneToken;
+  infoEl.textContent = "loading...";
+  try {
+    const built = t === "Biomes"
+      ? await buildBiomeScene(BIOMES.find(b => b.name === item), withWater)
+      : await buildRowScene(key, item === ALL_LABEL ? ASSETS[key] : [item]);
+    if (token !== sceneToken) return;
+    scene = built.scene;
+    infoEl.textContent = built.info;
+    if (keepCamera) return;
+    if (built.fit) {
+      camDist = built.fit[0] * 0.9 + 300;
+      camTarget = [0, 0, built.fit[1] * 0.45];
+    } else {
+      camDist = BIOME_PATCH_M * 100 * 1.7;
+      camTarget = [0, 0, 300];
+      camPitch = 0.6;
+    }
+  } catch (e) {
+    console.error(e);
+    infoEl.textContent = "failed: " + e.message;
+  }
 }
 
 const carButtons = {};
@@ -662,7 +1039,12 @@ async function boot() {
   await loadManifest();
   CARS = Object.keys(manifest || {});
   currentMode = CARS[0];
-  buildButtons();
+  [ASSETS, BIOMES] = await Promise.all([
+    fetch("/assets").then(r => r.json()).catch(() => ASSETS),
+    fetch("/biomes").then(r => r.ok ? r.json() : []).catch(() => []),
+  ]);
+  buildTabs();
+  setTab("Cars");
   if (currentMode) await ensureCarLoaded(currentMode);
   await loadWheel().catch(() => {});
   requestAnimationFrame(render);

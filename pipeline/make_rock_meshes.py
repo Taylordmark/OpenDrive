@@ -115,8 +115,15 @@ def _noise(dir_vec, seed):
     return n
 
 
+def _detail_noise(dir_vec, seed):
+    """Higher-frequency chips/ridges for the High/Ultra tiers only."""
+    x, y, z = dir_vec
+    return (0.6 * math.sin(11.3 * x + 4.1 * y + seed) * math.cos(9.7 * z - 0.7 * seed)
+            + 0.4 * math.sin(17.9 * y - 6.3 * z + 2.2 * seed) * math.cos(15.1 * x + seed))
+
+
 def make_boulder(subdiv, noise_amp, seed, scale_xyz, flatten_z=-0.35,
-                  flatten_squash=0.18):
+                  flatten_squash=0.18, detail_amp=0.0):
     """Returns (verts, uvs, faces) - verts/uvs are lists of np.array/tuple,
     faces are index triples into both (shared indices - no separate UV
     seam splitting needed since the spherical projection has no hard seam
@@ -137,6 +144,8 @@ def make_boulder(subdiv, noise_amp, seed, scale_xyz, flatten_z=-0.35,
     disp = []
     for i, v in enumerate(verts):
         r = 1.0 + noise_amp * _noise(v, seed)
+        if detail_amp:
+            r += detail_amp * _detail_noise(v, seed)
         p = v * r
         disp.append(p)
 
@@ -226,10 +235,18 @@ VARIANTS = [
 ]
 
 
+# Graphics menu "Asset Detail" tiers: suffix -> (extra subdivisions, detail
+# noise amplitude). Standard (0, 0.0) stays byte-identical to the shipped
+# boulders; the game falls back to it when a tier variant isn't imported.
+TIERS = {"": (0, 0.0), "_high": (2, 0.035), "_ultra": (3, 0.045)}
+
+
 def main():
-    for name, subdiv, noise_amp, seed, scale_xyz, fz, fs in VARIANTS:
-        verts, uvs, faces = make_boulder(subdiv, noise_amp, seed, scale_xyz, fz, fs)
-        save_obj(name, verts, uvs, faces)
+    for suffix, (extra_subdiv, detail_amp) in TIERS.items():
+        for name, subdiv, noise_amp, seed, scale_xyz, fz, fs in VARIANTS:
+            verts, uvs, faces = make_boulder(subdiv + extra_subdiv, noise_amp, seed,
+                                             scale_xyz, fz, fs, detail_amp)
+            save_obj(name + suffix, verts, uvs, faces)
 
 
 if __name__ == "__main__":

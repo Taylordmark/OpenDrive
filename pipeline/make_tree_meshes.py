@@ -34,7 +34,13 @@ for why that's a C++-side follow-up, out of scope for this pass):
     sagebrush        -> Sagebrush (foliage-only, no bark slot)
     grass_tuft       -> alpine grass tuft (foliage-only, unchanged role)
 
-Outputs: obj/<name>.obj + obj/<name>.mtl for each of the above. Requires
+Detail tiers (Graphics menu "Asset Detail"): every mesh is written three
+times - <name> (Standard, the shipped look), <name>_high, <name>_ultra - the
+higher tiers with more/smaller foliage cards, an extra crossed plane per
+cluster, rounder/smoother trunks and crown-rounded foliage normals. The
+game falls back to <name> when a tier variant isn't imported.
+
+Outputs: obj/<name>{,_high,_ultra}.obj + .mtl for each of the above. Requires
 textures/T_BarkConifer.png, T_BarkAspen.png, T_BarkWillow.png,
 T_FoliageAtlas.png to already exist (run build_flora_textures.py first).
 """
@@ -53,6 +59,17 @@ TEX = STAGE_DIR / "textures"
 OBJ_OUT.mkdir(parents=True, exist_ok=True)
 
 rng = np.random.default_rng(11)
+
+# suffix -> (cluster-count mult, card-size mult, extra crossed planes,
+# extra trunk sides, trunk ring subdivisions). Standard must stay exactly
+# 1/1/0/0/1 so its meshes are byte-identical to the pre-tier outputs.
+TIERS = {"": (1, 1.0, 0, 0, 1), "_high": (2.2, 0.8, 1, 4, 2), "_ultra": (4.0, 0.68, 1, 8, 3)}
+DENS, CARD, XCROSS, SIDES, RINGS = TIERS[""]
+
+
+def nc(n):
+    """Cluster/branch count scaled by the current detail tier."""
+    return n if DENS == 1 else int(round(n * DENS))
 
 BARK_TEX = {
     "bark_conifer": "T_BarkConifer.png",
@@ -93,6 +110,12 @@ class Mesh:
         """profile: [(height, radius), ...] bottom to top, height 0 = ground.
         lean(height)->(dx,dy) optional bend/sway/gnarl offset function.
         Returns the top ring's centroid + radius (for attaching a crown)."""
+        sides += SIDES
+        if RINGS > 1:
+            profile = [profile[0]] + [
+                (h0 + (h1 - h0) * k / RINGS, r0 + (r1 - r0) * k / RINGS)
+                for (h0, r0), (h1, r1) in zip(profile, profile[1:])
+                for k in range(1, RINGS + 1)]
         rings = []
         h0 = profile[0][0]
         total_h = max(profile[-1][0] - h0, 1.0)
@@ -132,6 +155,8 @@ class Mesh:
         computes this per-cluster."""
         if base_az is None:
             base_az = rng.uniform(0, math.pi)
+        n_cross += XCROSS
+        size_w, size_h = size_w * CARD, size_h * CARD
         uv = cell_uv_rect(cell)
         c = np.asarray(center, dtype=float)
         if up_dir is None:
@@ -165,6 +190,7 @@ class Mesh:
         far end only (near end is buried in the trunk/a parent branch, never
         seen); low `sides` (default 4) keeps each branch cheap - this is
         rendered as thousands of HISM instances."""
+        sides += SIDES // 2
         start = np.asarray(start, dtype=float)
         end = np.asarray(end, dtype=float)
         axis = end - start
@@ -201,11 +227,33 @@ class Mesh:
         import_biome_flora.py expects. VERIFY this slot order on first UE
         import (see next steps.md) - OBJ/Interchange material-slot ordering
         isn't something this offline pass can confirm without a UE launch."""
+        tris = self.tris
+        if SIDES:
+            # Higher tiers: bend foliage normals toward "out of the crown"
+            # (from the foliage centroid) - cards then shade like a leafy
+            # volume instead of a stack of flat planes. Standard keeps flat
+            # face normals.
+            fol = [t for t in tris if t[0] == "foliage"]
+            if fol:
+                ctr = np.mean([p for t in fol for p in t[1]], axis=0)
+                tris = []
+                for mat, pts, uvs, ns in self.tris:
+                    if mat == "foliage":
+                        fn = ns[0]
+                        if np.dot(fn, np.mean(pts, axis=0) - ctr) < 0:
+                            fn = -fn
+                        ns = []
+                        for p in pts:
+                            d = p - ctr
+                            d = d / (np.linalg.norm(d) or 1.0)
+                            v = fn * 0.35 + d * 0.65
+                            ns.append(v / (np.linalg.norm(v) or 1.0))
+                    tris.append((mat, pts, uvs, ns))
         lines = [f"# OpenDrive card-based flora: {name}", f"mtllib {name}.mtl"]
         f_lines = []
         vi = 1
         cur_mat = None
-        for mat, (a, b, c), (uva, uvb, uvc), (na, nb, nc) in self.tris:
+        for mat, (a, b, c), (uva, uvb, uvc), (na, nb, nc) in tris:
             if mat != cur_mat:
                 f_lines.append(f"usemtl {mat}")
                 cur_mat = mat
@@ -253,6 +301,9 @@ def scatter_cone_crown(mesh, base_h, apex_h, base_r, top_r_frac, n_clusters,
     (blend of outward radial + downward) instead of straight up - reads as
     a drooping bough instead of a vertical foliage curtain."""
     total_h = apex_h - base_h
+    n_clusters = nc(n_clusters)
+    if n_bands:
+        n_bands = nc(n_bands)
     for i in range(n_clusters):
         if tier_bands:
             lo, hi = tier_bands[rng.integers(0, len(tier_bands))]
@@ -288,7 +339,7 @@ def scatter_cone_crown(mesh, base_h, apex_h, base_r, top_r_frac, n_clusters,
 def scatter_ellipsoid_crown(mesh, center, rx, ry, rz, n_clusters, cell,
                              size_w, size_h, n_cross=2):
     cx0, cy0, cz0 = center
-    for _ in range(n_clusters):
+    for _ in range(nc(n_clusters)):
         theta = rng.uniform(0, 2 * math.pi)
         phi = math.acos(rng.uniform(-1, 1))
         rad = rng.uniform(0.6, 1.02)
@@ -375,33 +426,72 @@ def build_subalpine_fir(name):
 
 
 def build_krummholz(name):
-    """Stunted, wind-bent treeline conifer - short, strongly leaning trunk,
-    lopsided foliage biased to the lee side (wind-shear look), sparse. Crown
-    radius here tracks the SAME t^2 growth as the trunk lean (small near the
-    still-vertical base, widening only as the trunk bends toward the tip) -
-    scatter_cone_crown's normal wide-base/narrow-top taper is for upright
-    conic trees and left krummholz's crown floating off to the side of its
-    still-straight lower trunk, so this species gets its own scatter."""
-    total_h = 380
-    trunk_r0 = 20
+    """Stunted, wind-sculpted treeline conifer ("flag + mat" form): a dense,
+    low needle cushion hugging the ground (the part winter snow protects),
+    a few gnarled stems bent downwind poking out of it, their needles only
+    on the lee side (windward side stripped - a couple of dead bark stubs
+    there instead). The earlier single leaning stick with sparse wisps
+    floating off one side read as a dead sapling in grass."""
+    # Rewound + replayed at the end: the old build drew exactly 24*6 values
+    # from the shared rng, and every species built after this one depends on
+    # that stream (their Standard meshes stay byte-identical).
+    state = rng.bit_generator.state
+    lee = math.pi * 0.1                                  # downwind azimuth
+    ldir = np.array([math.cos(lee), math.sin(lee), 0.0])
+    perp = np.array([-ldir[1], ldir[0], 0.0])
+    zup = np.array([0.0, 0.0, 1.0])
     m = Mesh()
-    lean = krummholz_lean(total_h, bend_amp=140)
-    profile = [(0, trunk_r0), (total_h * 0.5, trunk_r0 * 0.7), (total_h, trunk_r0 * 0.35)]
-    m.trunk(profile, "bark_conifer", sides=7, lean=lean)
-    az_center, az_range = math.pi * 0.15, math.radians(150)
-    n_clusters = 24
-    for _ in range(n_clusters):
-        t = rng.uniform(0.25, 1.0)
-        h = t * total_h
-        dx, dy = lean(h)
-        r = (40 + 170 * t * t) * rng.uniform(0.75, 1.15)
-        ang = az_center + rng.uniform(-az_range / 2, az_range / 2)
-        cx = dx + math.cos(ang) * r
-        cy = dy + math.sin(ang) * r
-        w = rng.uniform(90, 160)
-        hh = rng.uniform(110, 180)
-        m.card_cluster((cx, cy, h), w, hh, "krummholz_needle", n_cross=2)
+
+    stems = []
+    for i in range(3):
+        h = 300.0 if i == 0 else rng.uniform(170, 250)
+        bx, by = rng.uniform(-30, 30), rng.uniform(-30, 30)
+        bend = rng.uniform(0.35, 0.55) * h
+        ang = lee + rng.uniform(-0.35, 0.35)
+
+        def lean(z, h=h, bend=bend, ang=ang, bx=bx, by=by):
+            t = min(z / h, 1.0)
+            g = math.sin(z * 0.045) * 6.0                # gnarl
+            return (bx + math.cos(ang) * bend * t * t - math.sin(ang) * g,
+                    by + math.sin(ang) * bend * t * t + math.cos(ang) * g)
+
+        r0 = rng.uniform(12, 17) * h / 300
+        profile = [(0, r0), (h * 0.3, r0 * 0.8), (h * 0.65, r0 * 0.55), (h, r0 * 0.18)]
+        m.trunk(profile, "bark_conifer", sides=6, u_repeat=1.0, v_repeat=1.5, lean=lean)
+        stems.append((h, lean, ang, r0))
+    for h, lean, ang, r0 in stems:                        # dead windward stubs
+        for _ in range(2):
+            z = h * rng.uniform(0.4, 0.85)
+            dx, dy = lean(z)
+            a = ang + math.pi + rng.uniform(-0.6, 0.6)
+            ln = rng.uniform(25, 50)
+            m.branch((dx, dy, z), (dx + math.cos(a) * ln, dy + math.sin(a) * ln,
+                                   z + rng.uniform(0, 15)), r0 * 0.3, r0 * 0.08,
+                     "bark_conifer", sides=3)
+
+    for _ in range(nc(28)):                               # ground mat
+        a = rng.uniform(0, 2 * math.pi)
+        rad = math.sqrt(rng.uniform(0.05, 1.0))
+        p = ldir * (70 + math.cos(a) * rad * 230) + perp * (math.sin(a) * rad * 150)
+        z = rng.uniform(15, 55) * (1.15 - rad * 0.6)      # domed cushion
+        out = p / (np.linalg.norm(p) or 1.0)
+        m.card_cluster((p[0], p[1], z), rng.uniform(110, 170), rng.uniform(70, 110),
+                       "krummholz_needle", up_dir=out * 0.7 + zup * 0.5)
+    for h, lean, ang, r0 in stems:                        # lee-side flags
+        n = nc(9)
+        for k in range(n):
+            t = 0.3 + 0.7 * (k + rng.uniform(0, 1)) / n
+            z = t * h
+            dx, dy = lean(z)
+            a = ang + rng.uniform(-0.6, 0.6)
+            reach = rng.uniform(25, 70) * (1.1 - 0.5 * t)
+            out = np.array([math.cos(a), math.sin(a), 0.0])
+            m.card_cluster((dx + out[0] * reach, dy + out[1] * reach, z),
+                           rng.uniform(80, 130) * (1.1 - 0.4 * t), rng.uniform(70, 110),
+                           "krummholz_needle", up_dir=out * 0.8 + zup * 0.45)
     m.save(name, {"bark_conifer": BARK_TEX["bark_conifer"], "foliage": FOLIAGE_TEX})
+    rng.bit_generator.state = state
+    rng.random(24 * 6)
 
 
 def add_deciduous_branches(m, trunk_top_h, crown_center, crown_rx, crown_rz,
@@ -417,6 +507,7 @@ def add_deciduous_branches(m, trunk_top_h, crown_center, crown_rx, crown_rz,
     material slot."""
     start = np.array([0.0, 0.0, trunk_top_h])
     cx, cy, cz = crown_center
+    n_branches = nc(n_branches)
     for i in range(n_branches):
         az = 2 * math.pi * i / n_branches + rng.uniform(-0.3, 0.3)
         reach = rng.uniform(0.7, 1.0)
@@ -480,7 +571,7 @@ def build_willow_scrub(name, tree_form=False):
                           v_repeat=1.2, lean=lean)
         centroid = np.mean(top, axis=0)
         n_clusters = 5 if tree_form else 4
-        for _ in range(n_clusters):
+        for _ in range(nc(n_clusters)):
             off = np.array([rng.uniform(-40, 40), rng.uniform(-40, 40),
                              rng.uniform(-20, 60)])
             w = rng.uniform(70, 130) * (1.3 if tree_form else 1.0)
@@ -494,7 +585,7 @@ def build_sagebrush(name):
     sagebrush reads almost entirely as leaf mass at this texture scale."""
     m = Mesh()
     n_clusters = 16
-    for _ in range(n_clusters):
+    for _ in range(nc(n_clusters)):
         ang = rng.uniform(0, 2 * math.pi)
         r = rng.uniform(0, 32)
         cx, cy = math.cos(ang) * r, math.sin(ang) * r
@@ -509,7 +600,7 @@ def build_grass_tuft(name):
     """Tiny ground-cover tuft - foliage-only, a handful of crossed blade
     cards. Left at the same minimal scale/role as the old blob version."""
     m = Mesh()
-    for _ in range(5):
+    for _ in range(nc(5)):
         cx, cy = rng.uniform(-14, 14), rng.uniform(-14, 14)
         w = rng.uniform(26, 40)
         hh = rng.uniform(34, 52)
@@ -518,16 +609,24 @@ def build_grass_tuft(name):
 
 
 def main():
-    build_aspen("tree_blob", height_scale=0.92, trunk_clear_frac=0.48, with_branches=True)
-    build_engelmann_spruce("tree_olive")
-    build_lodgepole_pine("tree_conifer", height_scale=1.0)
-    build_aspen("tree_scrub_oak", height_scale=1.22, trunk_clear_frac=0.62)
-    build_krummholz("tree_manzanita")
-    build_subalpine_fir("tree_yucca")
-    build_lodgepole_pine("tree_canyon_oak", height_scale=1.35, crown_start_frac=0.5)
-    build_willow_scrub("bush", tree_form=False)
-    build_sagebrush("sagebrush")
-    build_grass_tuft("grass_tuft")
+    global rng, DENS, CARD, XCROSS, SIDES, RINGS
+    for suffix, tier in TIERS.items():
+        rng = np.random.default_rng(11)
+        DENS, CARD, XCROSS, SIDES, RINGS = tier
+        build_all(suffix)
+
+
+def build_all(sfx):
+    build_aspen("tree_blob" + sfx, height_scale=0.92, trunk_clear_frac=0.48, with_branches=True)
+    build_engelmann_spruce("tree_olive" + sfx)
+    build_lodgepole_pine("tree_conifer" + sfx, height_scale=1.0)
+    build_aspen("tree_scrub_oak" + sfx, height_scale=1.22, trunk_clear_frac=0.62)
+    build_krummholz("tree_manzanita" + sfx)
+    build_subalpine_fir("tree_yucca" + sfx)
+    build_lodgepole_pine("tree_canyon_oak" + sfx, height_scale=1.35, crown_start_frac=0.5)
+    build_willow_scrub("bush" + sfx, tree_form=False)
+    build_sagebrush("sagebrush" + sfx)
+    build_grass_tuft("grass_tuft" + sfx)
 
 
 if __name__ == "__main__":

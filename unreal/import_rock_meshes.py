@@ -38,6 +38,10 @@ VARIANTS = {
     "SM_RockBoulderC": "rock_boulder_c.obj",
     "SM_RockBoulderD": "rock_boulder_d.obj",
 }
+# Graphics menu "Asset Detail" variants (make_rock_meshes.py TIERS):
+# SM_RockBoulderA_high <- rock_boulder_a_high.obj etc.
+VARIANTS = {m + sfx: o.replace(".obj", sfx + ".obj")
+            for sfx in ("", "_high", "_ultra") for m, o in VARIANTS.items()}
 
 
 def log(msg):
@@ -83,7 +87,7 @@ for name, mesh in meshes.items():
     ns = mesh.get_editor_property("nanite_settings")
     ns.set_editor_property("enabled", False)
     mesh.set_editor_property("nanite_settings", ns)
-log("disabled Nanite on all 4 boulder meshes")
+log(f"disabled Nanite on all {len(meshes)} boulder meshes")
 
 rock_mat = unreal.load_asset("/Game/OpenDrive/Materials/M_Rock030")
 if rock_mat is None:
@@ -96,8 +100,8 @@ else:
             mesh.set_material(0, rock_mat)
         except Exception as exc:  # pragma: no cover - defensive
             log(f"{name}: could not set material slot 0 ({exc})")
-    log("assigned M_Rock030 to slot 0 of all 4 boulder meshes")
+    log(f"assigned M_Rock030 to slot 0 of all {len(meshes)} boulder meshes")
 
 unreal.EditorAssetLibrary.save_directory(ROCK_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved 4 boulder meshes to " + ROCK_DIR)
+log(f"DONE - saved {len(meshes)} boulder meshes to " + ROCK_DIR)

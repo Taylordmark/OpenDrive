@@ -58,6 +58,9 @@ FLORA = {
     "sagebrush":      (None, None),
     "grass_tuft":     (None, None),
 }
+# Graphics menu "Asset Detail" variants (make_tree_meshes.py TIERS) - same
+# materials; the game falls back to the base mesh if these aren't imported.
+FLORA = {n + sfx: v for sfx in ("", "_high", "_ultra") for n, v in FLORA.items()}
 FOLIAGE_TEXTURES = ("T_FoliageAtlas.png", "T_BarkConifer.png", "T_BarkAspen.png",
                      "T_BarkWillow.png")
 

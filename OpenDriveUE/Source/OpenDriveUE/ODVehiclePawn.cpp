@@ -1,4 +1,5 @@
 #include "ODVehiclePawn.h"
+#include "ODAssetDetail.h"
 
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -89,7 +90,7 @@ void AODVehiclePawn::EnsureMeshes()
 {
 	if (!Body->GetStaticMesh())
 	{
-		if (UStaticMesh* Chassis = LoadObject<UStaticMesh>(nullptr, ChassisPath))
+		if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, ChassisPath)))
 		{
 			Body->SetStaticMesh(Chassis);
 			Body->BodyInstance.bOverrideMass = true;
@@ -105,7 +106,7 @@ void AODVehiclePawn::EnsureMeshes()
 	}
 	if (WheelVisuals.Num() > 0 && !WheelVisuals[0]->GetStaticMesh())
 	{
-		if (UStaticMesh* Wheel = LoadObject<UStaticMesh>(nullptr, WheelPath))
+		if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, WheelPath)))
 		{
 			for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 			{
@@ -186,7 +187,7 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	const FVector AngVel = bWasSimulating
 		? Body->GetPhysicsAngularVelocityInDegrees() : FVector::ZeroVector;
 
-	if (UStaticMesh* Chassis = Def->ChassisMesh.LoadSynchronous())
+	if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(Def->ChassisMesh.LoadSynchronous()))
 	{
 		Body->SetStaticMesh(Chassis);
 	}
@@ -201,7 +202,7 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 
-	if (UStaticMesh* Wheel = Def->WheelMesh.LoadSynchronous())
+	if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(Def->WheelMesh.LoadSynchronous()))
 	{
 		// visual-only scale to match this car's WheelRadiusCm against the
 		// mesh's own authored radius (see ReferenceWheelMeshRadiusCm above) -

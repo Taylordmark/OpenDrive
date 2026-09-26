@@ -8,6 +8,7 @@
 #include "Kismet/GameplayStatics.h"
 
 #include "ODAmbientSoundManager.h"
+#include "ODAssetDetail.h"
 #include "ODRebindMenu.h"
 #include "ODVehicleAudio.h"
 #include "ODVehiclePawn.h"
@@ -42,6 +43,7 @@ const FWinModeDef WindowModes[] = {
 constexpr int32 NumWindowModes = UE_ARRAY_COUNT(WindowModes);
 
 const TCHAR* QualityNames[] = {TEXT("Low"), TEXT("Medium"), TEXT("High"), TEXT("Epic")};
+const TCHAR* AssetDetailNames[] = {TEXT("Standard"), TEXT("High"), TEXT("Ultra")};
 constexpr int32 NumQualityLevels = UE_ARRAY_COUNT(QualityNames);
 
 // r.AntiAliasingMethod's own integer values (stable across UE4/5, not an
@@ -82,6 +84,7 @@ void AODSettingsMenu::BeginPlay()
 {
 	Super::BeginPlay();
 	LoadGraphicsConfig();
+	AssetDetailAtLoad = AssetDetail;
 	LoadAudioConfig();
 	ApplyUpscalerCvars();
 	ApplyAudioVolumes();
@@ -120,23 +123,24 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 	case 3: ApplyUpscaler(Dir); break;
 	case 4: ApplyScreenPercent(Dir); break;
 	case 5: ApplyVSync(); break;
-	case 6:
+	case 6: ApplyAssetDetail(Dir); break;
+	case 7:
 		MasterVolume = FMath::Clamp(MasterVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 7:
+	case 8:
 		VehicleVolume = FMath::Clamp(VehicleVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 8:
+	case 9:
 		AmbientVolume = FMath::Clamp(AmbientVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 9: ApplyInputDevice(Dir); break;
-	default: break;   // row 10 "Controls" / row 11 "Close" - no value, handled by the parent menu's Activate()
+	case 10: ApplyInputDevice(Dir); break;
+	default: break;   // row 11 "Controls" / row 12 "Close" - no value, handled by the parent menu's Activate()
 	}
 }
 
@@ -282,6 +286,12 @@ void AODSettingsMenu::ApplyVSync()
 	GS->SaveSettings();
 }
 
+void AODSettingsMenu::ApplyAssetDetail(int32 Dir)
+{
+	AssetDetail = (AssetDetail + Dir + 3) % 3;
+	SaveGraphicsConfig();
+}
+
 // ---- audio --------------------------------------------------------------
 
 void AODSettingsMenu::ApplyAudioVolumes() const
@@ -326,6 +336,7 @@ void AODSettingsMenu::SaveGraphicsConfig() const
 {
 	GConfig->SetInt(GraphicsConfigSection, TEXT("UpscalerIdx"), UpscalerIdx, GGameUserSettingsIni);
 	GConfig->SetInt(GraphicsConfigSection, TEXT("ScreenPercent"), ScreenPercent, GGameUserSettingsIni);
+	GConfig->SetInt(ODAssetDetail::ConfigSection, ODAssetDetail::ConfigKey, AssetDetail, GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -333,6 +344,7 @@ void AODSettingsMenu::LoadGraphicsConfig()
 {
 	GConfig->GetInt(GraphicsConfigSection, TEXT("UpscalerIdx"), UpscalerIdx, GGameUserSettingsIni);
 	GConfig->GetInt(GraphicsConfigSection, TEXT("ScreenPercent"), ScreenPercent, GGameUserSettingsIni);
+	AssetDetail = ODAssetDetail::Level();
 	UpscalerIdx = FMath::Clamp(UpscalerIdx, 0, 1);
 	ScreenPercent = FMath::Clamp(ScreenPercent, 50, 100);
 }
@@ -413,18 +425,26 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		break;
 	}
 	case 6:
+		OutLabel = TEXT("Asset Detail");
+		OutValue = AssetDetailNames[AssetDetail];
+		if (AssetDetail != AssetDetailAtLoad)
+		{
+			OutValue += TEXT(" (next load)");
+		}
+		break;
+	case 7:
 		OutLabel = TEXT("Master Volume");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(MasterVolume * 100.0f));
 		break;
-	case 7:
+	case 8:
 		OutLabel = TEXT("Vehicle Volume");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(VehicleVolume * 100.0f));
 		break;
-	case 8:
+	case 9:
 		OutLabel = TEXT("Ambient Volume");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(AmbientVolume * 100.0f));
 		break;
-	case 9:
+	case 10:
 	{
 		OutLabel = TEXT("Input Device");
 		OutValue = TEXT("Auto");
@@ -440,11 +460,11 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		}
 		break;
 	}
-	case 10:
+	case 11:
 		OutLabel = TEXT("Controls");
 		OutValue.Empty();
 		break;
-	case 11:
+	case 12:
 		OutLabel = TEXT("Close");
 		OutValue.Empty();
 		break;
