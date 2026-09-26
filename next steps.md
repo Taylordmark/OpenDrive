@@ -6769,6 +6769,8 @@ closing unpauses.
 
 ## Weather plan (2026-09-25): biome + location driven
 
+**Status (2026-09-25):** W0 done, W1 done (sec 7.39), W2 done (sec 7.40), W3 done (sec 7.41), W4 done, W5 partial (sec 7.42: rough water has no Oahu ocean to show on). None of it has been looked at in-game yet (no-launch rule).
+
 **Today:** the only weather is falling snow (`AODSeasonController`,
 a pool of sphere particles around the pawn). It follows the global season
 clock and is the same everywhere. `road_moisture` in `climate.json` is a
@@ -7177,3 +7179,107 @@ and hear.
   - Wind and dust share one reused loop, and there is no distinct dust
     hiss.
   - Lightning has no visible bolt or cloud flash, only the light spike.
+
+### 7.42 Weather W4/W5: tornado + hurricane events (2026-09-25)
+Implements W4 and W5 above, on top of the W1 controller and the W2/W3
+consumers. Nothing new is spawned by `AODGameMode`; everything hangs off
+`AODWeatherController`.
+- **Tornado (W4):** entering the Tornado state (the walk only reaches it
+  from Thunderstorm, on eligible stages) calls `SpawnFunnel()`.
+  - **Funnel:** it spawns 2-5 km from the player at a random bearing,
+    heads toward the player ±25°, and moves at 15 m/s on a constant gentle
+    curve (±0.15°/s). If it wanders more than 6 km away during a long
+    forced hold, it respawns. Its ground Z comes from a line trace down,
+    falling back to the player's Z.
+  - **Visuals:** two ISMs of engine basic shapes on the controller:
+    - 14 `Cylinder` segments, 900 m tall, radius 35 → 260 m. Each segment
+      orbits the axis by up to 25 m, phase-shifted by height, so the column
+      twists.
+    - 40 tumbling `Cube`s orbiting the base at 40-130 m.
+
+    Both use the new `M_TornadoFunnel`: translucent default-lit, with one
+    `Opacity` param that the MID fades over 20 s. It's built by the new
+    `unreal/apply_tornado_material.py`.
+  - **Sky:** `STATE_TARGETS` gains a 7th column, `StormTint` (Tornado 1,
+    everything else 0). It ramps like the other scalars.
+    `AODAtmosphereController` multiplies the sky luminance and the fog's
+    ambient inscatter by a green (0.62, 0.9, 0.55) at that weight.
+  - **Visibility:** the Tornado state's visibility went from 800 m to
+    6 km so the funnel can be seen from its spawn distance. The heavy loss
+    is local instead: visibility smoothsteps down to 40 m within 600 m of
+    the funnel.
+  - **Wind:** new `AODWeatherController::WindAtMs(pos)` returns the
+    published wind plus a Rankine vortex: 60 m/s peak at the 50 m core,
+    1/r outside it, faded to 0 between 150 and 300 m, cyclonic, plus a 0.5x
+    inflow toward the core. `UODVehicleMovement::TickWeather` now reads it
+    at the body instead of `WindSpeedMs`/`WindDirDeg`, so the W3 crosswind
+    path and `WindSideForceCoeff` are unchanged. Fully side-on, that is up to ~9 kN (~0.55 g) at
+    the core edge and ~2.2 kN at 100 m.
+  - **HUD:** "TORNADO WARNING - 3.4 km NE" (distance + compass).
+- **Hurricane (W5):** coastal only, through the existing W1 `storms.hurricane`
+  weight.
+  - **Bands:** `HurricaneEnvelope(phase, eye)` runs over the hold, 10-20
+    min (a forced one loops every 900 s). It's a 0.35 lull floor plus two
+    raised-cosine rain bands at 25% and 72% of the hold, and an optional
+    calm eye (0.05) between them. The eye happens 50% of the time, and a
+    forced hurricane always has one.
+  - **Scalars:** the envelope E modulates the Hurricane targets (blended in
+    by the ramp, so it's continuous both ways):
+    - precip x E;
+    - wind x sqrt(E) x (1 + 0.3 gust), which is ~21 m/s sustained in a
+      lull and up to ~45 m/s in a band gust;
+    - visibility lerps 3 km → 300 m with E, and a gust takes it down to
+      x0.15 (~45 m).
+
+    The gust is Perlin noise x E.
+  - **Water:** `apply_water_material.py` gains a `WaveRoughness` param
+    (default 0 = the calm graph): the ripple normal lerps to 4.5x strength
+    and the deep color greys. `AODSeasonController` pushes
+    clamp((wind - 10) / 25) into it next to FreezeBlend, so it builds with
+    any strong wind and is full in a Hurricane.
+  - **HUD:** "HURRICANE WARNING".
+- **HUD:** `ODRaceHUD` draws `AODWeatherController::WarningText` for 6 s
+  after `WarningShownAt`. It's the same banner style as the out-of-bounds
+  countdown (the HUD had no generic message mechanism to reuse). Each
+  warning is also logged.
+- **QA:** `od.Weather Tornado` / `od.Weather Hurricane` already forced any
+  state on any stage (the eligibility is only in the walk's weights). Both
+  now run the full event.
+- **Offline check:** `pipeline/sim_weather.py` mirrors the envelope
+  constants (`HURR_*`, same names) and asserts:
+  - no tornado on Oahu, Summit, Palmdale, Green Valley or Skagit;
+  - hurricane > 0 only on Oahu;
+  - the envelope has ≥ 2 bands, a lull, stays within 0..1, and wraps
+    continuously, with and without the eye.
+
+  Result: `2 bands, lull min 0.35 (eye 0.05), range 0.05..1.00`,
+  `sanity ok` (`scratchpad/weather_w45_sim.txt`). Dragon keeps its 0.2%
+  summer tornado.
+- **Files:**
+  - `ODWeatherController.h/.cpp`, `ODVehicleMovement.cpp`,
+    `ODAtmosphereController.h/.cpp`, `ODSeasonController.cpp`,
+    `ODRaceHUD.cpp`
+  - `unreal/apply_tornado_material.py` (new), `unreal/apply_water_material.py`
+  - `pipeline/sim_weather.py`
+  - Assets rebuilt headless: `M_TornadoFunnel` (new), `M_Water`.
+- **Verified:**
+  - Both commandlets ran clean, and their post-save checks show the
+    `Opacity` param on MP_OPACITY and M_Water's four properties wired.
+  - Headless `Build.bat OpenDriveUEEditor Win64 Development`: `Result:
+    Succeeded`, no warnings (`scratchpad/weather_w45_build.log`).
+  - Not run in-game, per the no-launch rule.
+- **Gaps:**
+  - Nothing is tuned by eye: funnel size/opacity, debris, the green
+    strength and the vortex numbers are first guesses.
+  - Engine shapes with flat shading won't show the funnel's own spin, only
+    the sway and the debris orbit. There's no panning noise material.
+  - The wind force stays lateral-only, like W3, so the vortex pulls
+    sideways, not along the car's heading. Rain streaks still use the
+    global wind, not the vortex.
+  - Oahu has no `water_oahu_test_*` tiles (only green_valley and summit
+    do), so the rough-water param has nothing to show on in the hurricane
+    test stage until ocean/lake water exists there.
+  - No hail, no tornado audio (it reuses the W2 wind layer via
+    WindSpeedMs), and no storm surge.
+  - The HUD banner is a fixed left offset, not text-measured (same as the
+    OOB countdown).

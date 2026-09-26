@@ -1133,11 +1133,11 @@ void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
 		Season ? Season->SnowCover : 0.0f, Season ? Season->FreezeBlend : 0.0f,
 		OffRoadGrip);
 
-	// crosswind: the wind component across the car, quadratic, at the COM
+	// crosswind: the wind component across the car, quadratic, at the COM.
+	// WindAtMs includes the W4 tornado vortex near the funnel (sec 7.42).
 	const FVector Right = Body->GetRightVector();
-	const float Rad = FMath::DegreesToRadians(Wx->WindDirDeg);
-	const float LatMs = Wx->WindSpeedMs
-		* (FMath::Cos(Rad) * Right.X + FMath::Sin(Rad) * Right.Y);
+	const FVector2D Wind = Wx->WindAtMs(Body->GetComponentLocation());
+	const float LatMs = Wind.X * Right.X + Wind.Y * Right.Y;
 	Body->AddForce(Right * WindSideForceCoeff * LatMs * FMath::Abs(LatMs) * 100.0f);
 }
 

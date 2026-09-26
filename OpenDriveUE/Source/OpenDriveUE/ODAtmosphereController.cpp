@@ -39,6 +39,7 @@ constexpr float AerialPerspectiveViewDistanceScale = 0.8f;
 
 // ---- Weather W2 (sec 7.40) targets at full weight ----
 const FLinearColor DustTan(1.0f, 0.72f, 0.42f);
+const FLinearColor StormGreen(0.62f, 0.9f, 0.55f);   // W4 tornado sky (StormTint)
 constexpr float FullCloudCoverage = 0.5f;     // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
 constexpr float OvercastSkyLuminance = 0.35f; // x SkyLuminanceFactor
 constexpr float OvercastSun = 0.25f;          // x sun intensity
@@ -349,16 +350,19 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	const float FogW = Weight((20000.0f - Weather->VisibilityM) / 15000.0f);
 	const float CloudW = Weight((Weather->CloudCover - 0.1f) / 0.9f);
 	const float DustW = Weight(Weather->DustAmount);
+	const float TintW = Weight(Weather->StormTint);
+	const FLinearColor Green = FMath::Lerp(FLinearColor::White, StormGreen, TintW);
 	const float Flash = UpdateLightning(DeltaSeconds, *Weather);
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
 	// nothing moved (most frames).
 	if (FMath::IsNearlyEqual(FogW, LastFogW, 1e-4f) && FMath::IsNearlyEqual(CloudW, LastCloudW, 1e-4f)
-		&& FMath::IsNearlyEqual(DustW, LastDustW, 1e-4f) && Flash == LastFlash)
+		&& FMath::IsNearlyEqual(DustW, LastDustW, 1e-4f) && FMath::IsNearlyEqual(TintW, LastTintW, 1e-4f)
+		&& Flash == LastFlash)
 	{
 		return;
 	}
-	LastFogW = FogW; LastCloudW = CloudW; LastDustW = DustW; LastFlash = Flash;
+	LastFogW = FogW; LastCloudW = CloudW; LastDustW = DustW; LastTintW = TintW; LastFlash = Flash;
 
 	if (UExponentialHeightFogComponent* F = FogComp.Get())
 	{
@@ -374,13 +378,13 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		// Dust: tint the sky-atmosphere-lit inscatter (r.SupportSky
 		// AtmosphereAffectsHeightFog, default on) and the volumetric albedo tan.
 		F->SetSkyAtmosphereAmbientContributionColorScale(
-			FMath::Lerp(BaseFogAmbientScale, BaseFogAmbientScale * DustTan, DustW));
+			FMath::Lerp(BaseFogAmbientScale, BaseFogAmbientScale * DustTan, DustW) * Green);
 		F->SetVolumetricFogAlbedo(DustW > 0.0f
 			? FMath::Lerp(FLinearColor(BaseFogAlbedo), DustTan, DustW).ToFColor(true) : BaseFogAlbedo);
 	}
 	if (USkyAtmosphereComponent* A = AtmoComp.Get())
 	{
-		const FLinearColor Tint = FMath::Lerp(FLinearColor::White, DustTan, 0.7f * DustW);
+		const FLinearColor Tint = FMath::Lerp(FLinearColor::White, DustTan, 0.7f * DustW) * Green;
 		A->SetSkyLuminanceFactor(BaseSkyLuminance * FMath::Lerp(1.0f, OvercastSkyLuminance, CloudW) * Tint);
 	}
 	if (CloudMID)

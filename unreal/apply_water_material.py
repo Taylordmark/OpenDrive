@@ -171,6 +171,13 @@ NORMAL_BLEND_ALPHA = 0.5   # even mix - both layers contribute (large rolling sh
 ICE_COLOR = (0.62, 0.68, 0.72)
 ICE_ROUGHNESS = 0.75
 
+# ---- Weather W5: storm chop (2026-09-25, next steps.md sec 7.42) ---------
+# AODSeasonController pushes WaveRoughness 0..1 from AODWeatherController's
+# wind speed (hurricane = 1). 0 = byte-for-byte the calm graph above. Ripple
+# normal pushed much harder and the deep color greyed toward churned water.
+STORM_NORMAL_STRENGTH = 4.5
+STORM_COLOR = (0.035, 0.050, 0.050)
+
 
 def log(msg):
     # unreal.log() doesn't reliably surface in this project's headless
@@ -364,7 +371,10 @@ ripple_normal_amplified = g.mul(ripple_normal_raw, g.const3(NORMAL_STRENGTH, NOR
 # lake freezes over - ice doesn't show wind-driven surface chop.
 freeze_blend = g.scalar_param("FreezeBlend", 0.0)
 flat_normal = g.const3(0.0, 0.0, 1.0)
-ripple_normal_frozen = g.lerp(ripple_normal_amplified, flat_normal, freeze_blend, a_out="", b_out="")
+wave_rough = g.scalar_param("WaveRoughness", 0.0)
+ripple_normal_storm = g.mul(ripple_normal_raw, g.const3(STORM_NORMAL_STRENGTH, STORM_NORMAL_STRENGTH, 1.0))
+ripple_normal_chop = g.lerp(ripple_normal_amplified, ripple_normal_storm, wave_rough)
+ripple_normal_frozen = g.lerp(ripple_normal_chop, flat_normal, freeze_blend, a_out="", b_out="")
 
 # flip Z on backfaces (see two_sided_sign_vec() docstring) - fixes the
 # unlit-black backface wedge a two-sided flat water plane otherwise shows
@@ -374,7 +384,7 @@ ripple_normal = g.mul(ripple_normal_frozen, g.two_sided_sign_vec())
 # ---------------------------------------------------------------- fresnel-driven color/specular
 fresnel = g.fresnel(FRESNEL_EXPONENT, FRESNEL_BASE_REFLECT)
 
-deep_color_liquid = g.const3(*WATER_COLOR)
+deep_color_liquid = g.lerp(g.const3(*WATER_COLOR), g.const3(*STORM_COLOR), wave_rough)
 ice_color = g.const3(*ICE_COLOR)
 deep_color = g.lerp(deep_color_liquid, ice_color, freeze_blend, b_out="")
 sky_color = g.const3(*SKY_TINT_COLOR)
@@ -427,4 +437,4 @@ log(f"built + saved {MAT_NAME} (color={WATER_COLOR}, sky_tint={SKY_TINT_COLOR}, 
     f"specular={SPECULAR_BASE}-{SPECULAR_GRAZING}, fresnel_exp={FRESNEL_EXPONENT}, "
     f"normal_strength={NORMAL_STRENGTH}, two_sided=True+TwoSidedSign normal fix, "
     f"blend=Opaque, ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm, "
-    f"seasons_param=FreezeBlend)")
+    f"seasons_param=FreezeBlend, storm_param=WaveRoughness)")

@@ -20,6 +20,7 @@
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
+#include "ODWeatherController.h"
 
 static FString FormatTime(float T)
 {
@@ -1357,6 +1358,22 @@ void AODRaceHUD::DrawHUD()
 			Warn.EnableShadow(FLinearColor::Black);
 			Canvas->DrawItem(Warn);
 		}
+	}
+
+	// ---- weather event warning (W4/W5, sec 7.42) - AODWeatherController
+	// sets the text on tornado spawn / hurricane onset; same banner style as
+	// the out-of-bounds countdown, shown for 6 s.
+	for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It)
+	{
+		if (Now - It->WarningShownAt < 6.0f)
+		{
+			FCanvasTextItem Warn(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
+				FText::FromString(It->WarningText), Font, FLinearColor(1.0f, 0.8f, 0.2f));
+			Warn.Scale = FVector2D(2.0f, 2.0f);
+			Warn.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(Warn);
+		}
+		break;
 	}
 
 	// ---- speed readout - only needs the owning pawn

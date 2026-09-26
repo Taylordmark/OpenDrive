@@ -416,6 +416,11 @@ void AODSeasonController::PushParamsToMIDs()
 		if (UMaterialInstanceDynamic* WaterMID = Water->GetWaterMID())
 		{
 			WaterMID->SetScalarParameterValue(TEXT("FreezeBlend"), FreezeBlend);
+			// Weather W5 (sec 7.42): wind-driven chop, 10 m/s calm .. 35 m/s
+			// (Hurricane) full (apply_water_material.py's "WaveRoughness").
+			const AODWeatherController* Weather = WeatherCtl.Get();
+			WaterMID->SetScalarParameterValue(TEXT("WaveRoughness"),
+				Weather ? FMath::Clamp((Weather->WindSpeedMs - 10.0f) / 25.0f, 0.0f, 1.0f) : 0.0f);
 		}
 	}
 	if (AODForestManager* Forest = ForestMgr.Get())

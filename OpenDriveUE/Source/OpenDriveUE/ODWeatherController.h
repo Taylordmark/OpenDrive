@@ -4,10 +4,13 @@
 #include "GameFramework/Actor.h"
 #include "ODWeatherController.generated.h"
 
+class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
+
 /** Weather states (next steps.md "Weather plan", W1). Order MUST match
  *  pipeline/sim_weather.py's STATES - it indexes the same weight/target
  *  tables. Tornado/Hurricane are event states: rolled and held like the
- *  others, their visuals are W4/W5. */
+ *  others, plus their W4/W5 event layer (funnel, bands - sec 7.42). */
 UENUM()
 enum class EODWeatherState : uint8
 {
@@ -115,6 +118,20 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float DustAmount = 0.0f;
 
+	/** 0..1 green tornado-sky tint (W4) - ODAtmosphereController. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float StormTint = 0.0f;
+
+	/** Wind at a world position, m/s in world XY: the published
+	 *  WindSpeedMs/WindDirDeg plus the tornado vortex (W4) within
+	 *  TORNADO_REACH_M of the funnel. UODVehicleMovement's crosswind reads it. */
+	FVector2D WindAtMs(const FVector& WorldPos) const;
+
+	/** HUD banner (W4/W5 onset) - ODRaceHUD draws it for a few seconds after
+	 *  WarningShownAt (world time). */
+	FString WarningText;
+	float WarningShownAt = -100.0f;
+
 	/** QA: a state name forces and holds it; "Auto" (or empty) resumes the
 	 *  random walk with an immediate roll. False on an unknown name. */
 	bool ForceState(const FString& Name);
@@ -126,13 +143,34 @@ private:
 	struct FTargets
 	{
 		float Precip = 0.0f, PrecipType = 0.0f, Wind = 0.0f, WindDir = 0.0f,
-			Visibility = 0.0f, Cloud = 0.0f, Dust = 0.0f;
+			Visibility = 0.0f, Cloud = 0.0f, Dust = 0.0f, Tint = 0.0f;
 	};
 
 	void LoadClimate();
 	void Roll();
 	void EnterState(EODWeatherState NewState, float HoldSeconds);
 	FTargets Published() const;
+	void Warn(const FString& Text);
+
+	// ---- W4 tornado: funnel at FunnelPos (world XY cm) walking a gently
+	// curving path; visuals = two ISMs of engine basic shapes (M_TornadoFunnel).
+	void SpawnFunnel();
+	void TickTornado(float DeltaSeconds);
+
+	FVector2D FunnelPos = FVector2D::ZeroVector;
+	float FunnelHeadingDeg = 0.0f, FunnelTurnDegS = 0.0f, FunnelGroundZ = 0.0f;
+	float TornadoFade = 0.0f;   // 0..1, funnel opacity + vortex strength
+	float FunnelSpin = 0.0f;
+	UPROPERTY()
+	TObjectPtr<UInstancedStaticMeshComponent> FunnelISM;
+	UPROPERTY()
+	TObjectPtr<UInstancedStaticMeshComponent> DebrisISM;
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> FunnelMID;
+
+	// ---- W5 hurricane: band envelope over the hold (HurricaneEnvelope) ----
+	float HurricaneAge = 0.0f, HurricaneLen = 900.0f;
+	bool bHurricaneEye = false;
 
 	FODClimate Climate;
 	FTargets From, To;

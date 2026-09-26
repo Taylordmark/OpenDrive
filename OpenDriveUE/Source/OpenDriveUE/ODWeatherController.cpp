@@ -1,9 +1,12 @@
 #include "ODWeatherController.h"
 
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Dom/JsonObject.h"
+#include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODForestManager.h"
@@ -63,21 +66,73 @@ namespace
 	static_assert(UE_ARRAY_COUNT(BIOME_MULT) == (int32)EODBiome::RockyFoothill + 1, "one row per EODBiome");
 
 	// Per-state scalar targets (not mirrored - the sim only needs states):
-	// { PrecipIntensity, PrecipType, Wind m/s, Visibility m, CloudCover, Dust }
-	constexpr float STATE_TARGETS[NumStates][6] = {
-		{ 0.0f,  0.0f,  3.0f, 20000.0f, 0.10f, 0.0f },   // Clear
-		{ 0.0f,  0.0f,  5.0f, 12000.0f, 0.85f, 0.0f },   // Overcast
-		{ 0.45f, 0.0f,  6.0f,  4000.0f, 0.90f, 0.0f },   // Rain
-		{ 0.9f,  0.0f, 10.0f,  1200.0f, 1.00f, 0.0f },   // HeavyRain
-		{ 0.5f,  0.5f,  7.0f,  2500.0f, 0.95f, 0.0f },   // Sleet
-		{ 0.5f,  1.0f,  4.0f,  2000.0f, 0.95f, 0.0f },   // Snow
-		{ 1.0f,  1.0f, 18.0f,   250.0f, 1.00f, 0.0f },   // Blizzard
-		{ 0.0f,  0.0f,  1.0f,   250.0f, 0.70f, 0.0f },   // Fog
-		{ 0.0f,  0.0f, 16.0f,   600.0f, 0.30f, 1.0f },   // DustStorm
-		{ 0.85f, 0.0f, 12.0f,  1500.0f, 1.00f, 0.0f },   // Thunderstorm
-		{ 0.7f,  0.0f, 25.0f,   800.0f, 1.00f, 0.3f },   // Tornado
-		{ 1.0f,  0.0f, 35.0f,   300.0f, 1.00f, 0.0f },   // Hurricane
+	// { PrecipIntensity, PrecipType, Wind m/s, Visibility m, CloudCover, Dust, StormTint }
+	// Tornado visibility is 6 km so the funnel reads from its 2-5 km spawn;
+	// the heavy loss is local, near the funnel (TickTornado).
+	constexpr float STATE_TARGETS[NumStates][7] = {
+		{ 0.0f,  0.0f,  3.0f, 20000.0f, 0.10f, 0.0f, 0.0f },   // Clear
+		{ 0.0f,  0.0f,  5.0f, 12000.0f, 0.85f, 0.0f, 0.0f },   // Overcast
+		{ 0.45f, 0.0f,  6.0f,  4000.0f, 0.90f, 0.0f, 0.0f },   // Rain
+		{ 0.9f,  0.0f, 10.0f,  1200.0f, 1.00f, 0.0f, 0.0f },   // HeavyRain
+		{ 0.5f,  0.5f,  7.0f,  2500.0f, 0.95f, 0.0f, 0.0f },   // Sleet
+		{ 0.5f,  1.0f,  4.0f,  2000.0f, 0.95f, 0.0f, 0.0f },   // Snow
+		{ 1.0f,  1.0f, 18.0f,   250.0f, 1.00f, 0.0f, 0.0f },   // Blizzard
+		{ 0.0f,  0.0f,  1.0f,   250.0f, 0.70f, 0.0f, 0.0f },   // Fog
+		{ 0.0f,  0.0f, 16.0f,   600.0f, 0.30f, 1.0f, 0.0f },   // DustStorm
+		{ 0.85f, 0.0f, 12.0f,  1500.0f, 1.00f, 0.0f, 0.0f },   // Thunderstorm
+		{ 0.7f,  0.0f, 25.0f,  6000.0f, 1.00f, 0.3f, 1.0f },   // Tornado
+		{ 1.0f,  0.0f, 35.0f,   300.0f, 1.00f, 0.0f, 0.0f },   // Hurricane
 	};
+
+	// ---- W4 tornado (sec 7.42) ----
+	constexpr float TORNADO_SPAWN_M[2] = { 2000.0f, 5000.0f };   // funnel spawn distance from the player
+	constexpr float TORNADO_RESPAWN_M = 6000.0f;   // walked this far off -> new funnel (long QA holds)
+	constexpr float TORNADO_SPEED_MS = 15.0f;
+	constexpr float TORNADO_AIM_DEG = 25.0f;       // spawn heading = toward the player +- this
+	constexpr float TORNADO_TURN_DEG_S = 0.15f;    // max constant path curvature (~45 deg per 5 min)
+	constexpr float TORNADO_REACH_M = 300.0f;      // vortex wind reach, fades out over the outer half
+	constexpr float TORNADO_CORE_M = 50.0f;        // Rankine core radius (peak wind)
+	constexpr float TORNADO_VMAX_MS = 60.0f;       // peak tangential wind
+	constexpr float TORNADO_INFLOW = 0.5f;         // radial inflow / tangential (the pull toward the core)
+	constexpr float TORNADO_VIS_M = 40.0f, TORNADO_VIS_REACH_M = 600.0f;
+	constexpr float TORNADO_FADE_S = 20.0f;
+	constexpr int32 FUNNEL_SEGMENTS = 14;
+	constexpr float FUNNEL_HEIGHT_M = 900.0f;
+	constexpr float FUNNEL_R_M[2] = { 35.0f, 260.0f };   // bottom, top radius
+	constexpr float FUNNEL_SWAY_M = 25.0f;
+	constexpr float FUNNEL_OPACITY = 0.55f;        // unreal/apply_tornado_material.py's default
+	constexpr int32 DEBRIS_COUNT = 40;
+
+	// ---- W5 hurricane band envelope: MIRRORED in pipeline/sim_weather.py
+	// (hurricane_envelope), same names - its asserts check >= 2 bands, a lull
+	// and 0..1. Phase = fraction of the hold (forced: HURR_FORCED_LEN_S, looping).
+	constexpr float HURR_BANDS[2] = { 0.25f, 0.72f };   // rain band centers
+	constexpr float HURR_BAND_HALF = 0.14f;
+	constexpr float HURR_LULL = 0.35f;                  // envelope between bands
+	constexpr float HURR_EYE_C = 0.485f, HURR_EYE_HALF = 0.06f, HURR_EYE_LEVEL = 0.05f;
+	constexpr float HURR_EYE_CHANCE = 0.5f;             // forced (QA) always has the eye
+	constexpr float HURR_FORCED_LEN_S = 900.0f;
+	constexpr float HURR_GUST = 0.3f;                   // wind boost at a full gust
+	constexpr float HURR_VIS_M[2] = { 3000.0f, 300.0f }; // visibility at envelope 0 .. 1
+	constexpr float HURR_GUST_VIS = 0.15f;              // x visibility at a full gust in a band
+
+	/** Raised-cosine bump, 1 at D = 0, 0 beyond +-H. */
+	float Bump(float D, float H)
+	{
+		return FMath::Abs(D) < H ? 0.5f * (1.0f + FMath::Cos(PI * D / H)) : 0.0f;
+	}
+
+	/** 0..1 storm strength over the hold: band -> lull (-> eye) -> band. */
+	float HurricaneEnvelope(float Phase, bool bEye)
+	{
+		float E = HURR_LULL + (1.0f - HURR_LULL)
+			* FMath::Max(Bump(Phase - HURR_BANDS[0], HURR_BAND_HALF), Bump(Phase - HURR_BANDS[1], HURR_BAND_HALF));
+		if (bEye)
+		{
+			E = FMath::Lerp(E, HURR_EYE_LEVEL, Bump(Phase - HURR_EYE_C, HURR_EYE_HALF));
+		}
+		return E;
+	}
 
 	/** Linear between month centers (i + 0.5) - sim_weather.py's monthly(). */
 	float Monthly(const float (&Vals)[12], float Month)
@@ -220,6 +275,21 @@ void AODWeatherController::Tick(float DeltaSeconds)
 	VisibilityM = FMath::Lerp(From.Visibility, To.Visibility, A);
 	CloudCover = FMath::Lerp(From.Cloud, To.Cloud, A);
 	DustAmount = FMath::Lerp(From.Dust, To.Dust, A);
+	StormTint = FMath::Lerp(From.Tint, To.Tint, A);
+
+	// W5: the bands modulate the Hurricane targets. Blended in by the ramp so
+	// entering from any state stays continuous; leaving starts From here.
+	if (State == EODWeatherState::Hurricane)
+	{
+		HurricaneAge += DeltaSeconds;
+		const float E = HurricaneEnvelope(FMath::Fmod(HurricaneAge / HurricaneLen, 1.0f), bHurricaneEye);
+		const float Gust = FMath::Clamp(FMath::PerlinNoise1D(HurricaneAge * 0.3f) * 2.0f, 0.0f, 1.0f) * E;
+		PrecipIntensity = FMath::Lerp(PrecipIntensity, PrecipIntensity * E, A);
+		WindSpeedMs = FMath::Lerp(WindSpeedMs, WindSpeedMs * FMath::Sqrt(E) * (1.0f + HURR_GUST * Gust), A);
+		VisibilityM = FMath::Lerp(VisibilityM,
+			FMath::Lerp(HURR_VIS_M[0], HURR_VIS_M[1], E) * FMath::Lerp(1.0f, HURR_GUST_VIS, Gust), A);
+	}
+	TickTornado(DeltaSeconds);
 
 	// Snow/sleet wet the road too (slush) - W3 decides grip per PrecipType.
 	Wetness = PrecipIntensity > 0.05f
@@ -312,7 +382,7 @@ AODWeatherController::FTargets AODWeatherController::Published() const
 {
 	FTargets P;
 	P.Precip = PrecipIntensity; P.PrecipType = PrecipType; P.Wind = WindSpeedMs; P.WindDir = WindDirDeg;
-	P.Visibility = VisibilityM; P.Cloud = CloudCover; P.Dust = DustAmount;
+	P.Visibility = VisibilityM; P.Cloud = CloudCover; P.Dust = DustAmount; P.Tint = StormTint;
 	return P;
 }
 
@@ -321,7 +391,7 @@ void AODWeatherController::EnterState(EODWeatherState NewState, float HoldSecond
 	const float* Tg = STATE_TARGETS[(int32)NewState];
 	From = Published();
 	To.Precip = Tg[0]; To.PrecipType = Tg[1]; To.Wind = Tg[2];
-	To.Visibility = Tg[3]; To.Cloud = Tg[4]; To.Dust = Tg[5];
+	To.Visibility = Tg[3]; To.Cloud = Tg[4]; To.Dust = Tg[5]; To.Tint = Tg[6];
 	// Wind direction wanders a little each roll instead of jumping.
 	To.WindDir = FMath::UnwindDegrees(From.WindDir + FMath::FRandRange(-40.0f, 40.0f));
 	// Precip type only ramps while something is falling - a Clear roll keeps
@@ -330,9 +400,170 @@ void AODWeatherController::EnterState(EODWeatherState NewState, float HoldSecond
 	{
 		To.PrecipType = From.PrecipType;
 	}
+	if (NewState != State && NewState == EODWeatherState::Tornado)
+	{
+		SpawnFunnel();
+	}
+	if (NewState != State && NewState == EODWeatherState::Hurricane)
+	{
+		HurricaneAge = 0.0f;
+		HurricaneLen = HoldSeconds > 0.0f ? HoldSeconds : HURR_FORCED_LEN_S;
+		bHurricaneEye = bForced || FMath::FRand() < HURR_EYE_CHANCE;
+		Warn(TEXT("HURRICANE WARNING"));
+	}
 	State = NewState;
 	HoldLeft = HoldSeconds;
 	RampT = 0.0f;
+}
+
+void AODWeatherController::Warn(const FString& Text)
+{
+	WarningText = Text;
+	WarningShownAt = GetWorld()->GetTimeSeconds();
+	UE_LOG(LogTemp, Display, TEXT("ODWeatherController: HUD warning '%s'"), *Text);
+}
+
+void AODWeatherController::SpawnFunnel()
+{
+	// Components once, reused by every later tornado (hidden in between).
+	if (!FunnelISM)
+	{
+		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_TornadoFunnel.M_TornadoFunnel"));
+		if (!Mat)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODWeatherController: M_TornadoFunnel missing (unreal/apply_tornado_material.py) - default material"));
+		}
+		FunnelMID = Mat ? UMaterialInstanceDynamic::Create(Mat, this) : nullptr;
+		auto Make = [this](const TCHAR* MeshPath, int32 Count)
+		{
+			UInstancedStaticMeshComponent* C = NewObject<UInstancedStaticMeshComponent>(this);
+			C->SetupAttachment(RootComponent);
+			C->SetUsingAbsoluteLocation(true);
+			C->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, MeshPath));
+			if (FunnelMID)
+			{
+				C->SetMaterial(0, FunnelMID);
+			}
+			C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			C->SetCastShadow(false);
+			C->RegisterComponent();
+			TArray<FTransform> Xf;
+			Xf.Init(FTransform::Identity, Count);
+			C->AddInstances(Xf, false);
+			return C;
+		};
+		FunnelISM = Make(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"), FUNNEL_SEGMENTS);
+		DebrisISM = Make(TEXT("/Engine/BasicShapes/Cube.Cube"), DEBRIS_COUNT);
+	}
+
+	// 2-5 km out, heading roughly at the player, curving gently.
+	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	const FVector P = Player ? Player->GetActorLocation() : GetActorLocation();
+	const float Bearing = FMath::FRandRange(0.0f, 360.0f);
+	const float DistM = FMath::FRandRange(TORNADO_SPAWN_M[0], TORNADO_SPAWN_M[1]);
+	const float Rad = FMath::DegreesToRadians(Bearing);
+	FunnelPos = FVector2D(P) + FVector2D(FMath::Cos(Rad), FMath::Sin(Rad)) * DistM * 100.0f;
+	FunnelHeadingDeg = Bearing + 180.0f + FMath::FRandRange(-TORNADO_AIM_DEG, TORNADO_AIM_DEG);
+	FunnelTurnDegS = FMath::FRandRange(-TORNADO_TURN_DEG_S, TORNADO_TURN_DEG_S);
+	FunnelGroundZ = P.Z;
+	// World frame is X = east, Y = south (ODRaceHUD), so yaw 0 = E, 90 = S.
+	static const TCHAR* Compass[8] = { TEXT("E"), TEXT("SE"), TEXT("S"), TEXT("SW"), TEXT("W"), TEXT("NW"), TEXT("N"), TEXT("NE") };
+	Warn(FString::Printf(TEXT("TORNADO WARNING - %.1f km %s"), DistM / 1000.0f,
+		Compass[FMath::RoundToInt(Bearing / 45.0f) % 8]));
+}
+
+void AODWeatherController::TickTornado(float DeltaSeconds)
+{
+	const bool bOn = State == EODWeatherState::Tornado;
+	TornadoFade = FMath::Clamp(TornadoFade + (bOn ? DeltaSeconds : -DeltaSeconds) / TORNADO_FADE_S, 0.0f, 1.0f);
+	if (!FunnelISM)
+	{
+		return;
+	}
+	const bool bVisible = TornadoFade > 0.0f;
+	if (FunnelISM->IsVisible() != bVisible)
+	{
+		FunnelISM->SetVisibility(bVisible);
+		DebrisISM->SetVisibility(bVisible);
+	}
+	if (!bVisible)
+	{
+		return;
+	}
+
+	FunnelHeadingDeg += FunnelTurnDegS * DeltaSeconds;
+	const float Rad = FMath::DegreesToRadians(FunnelHeadingDeg);
+	FunnelPos += FVector2D(FMath::Cos(Rad), FMath::Sin(Rad)) * TORNADO_SPEED_MS * 100.0f * DeltaSeconds;
+	FunnelSpin += DeltaSeconds;
+
+	if (const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+	{
+		const float DistM = FVector2D::Distance(FunnelPos, FVector2D(Player->GetActorLocation())) / 100.0f;
+		if (bOn && DistM > TORNADO_RESPAWN_M)
+		{
+			SpawnFunnel();   // walked off the stage during a long (forced) hold
+		}
+		// Heavy visibility loss near the funnel (rain wrap + debris).
+		VisibilityM = FMath::Lerp(VisibilityM,
+			FMath::Lerp(TORNADO_VIS_M, VisibilityM, FMath::SmoothStep(0.0f, TORNADO_VIS_REACH_M, DistM)), TornadoFade);
+	}
+	FHitResult Hit;
+	if (GetWorld()->LineTraceSingleByChannel(Hit, FVector(FunnelPos, 1.0e6), FVector(FunnelPos, -1.0e6), ECC_WorldStatic))
+	{
+		FunnelGroundZ = Hit.ImpactPoint.Z;
+	}
+
+	const FVector Base(FunnelPos, FunnelGroundZ);
+	FunnelISM->SetWorldLocation(Base);
+	DebrisISM->SetWorldLocation(Base);
+	if (FunnelMID)
+	{
+		FunnelMID->SetScalarParameterValue(TEXT("Opacity"), FUNNEL_OPACITY * TornadoFade);
+	}
+	// Funnel: cylinders (1 m basic shape) widening upward; each segment
+	// orbits the axis a little, phase-shifted by height, so the column twists.
+	const float SegH = FUNNEL_HEIGHT_M / FUNNEL_SEGMENTS;
+	for (int32 i = 0; i < FUNNEL_SEGMENTS; ++i)
+	{
+		const float F = (i + 0.5f) / FUNNEL_SEGMENTS;
+		const float R = FMath::Lerp(FUNNEL_R_M[0], FUNNEL_R_M[1], F * F);
+		const float A = FunnelSpin * 0.8f + i * 0.45f;
+		const FVector Off(FMath::Cos(A) * FUNNEL_SWAY_M * F, FMath::Sin(A) * FUNNEL_SWAY_M * F, F * FUNNEL_HEIGHT_M);
+		FunnelISM->UpdateInstanceTransform(i, FTransform(FQuat::Identity, Off * 100.0f,
+			FVector(2.0f * R, 2.0f * R, SegH * 1.15f)), false, i == FUNNEL_SEGMENTS - 1, true);
+	}
+	// Debris ring: tumbling cubes orbiting the base (golden-ratio spread).
+	for (int32 j = 0; j < DEBRIS_COUNT; ++j)
+	{
+		const float U1 = FMath::Frac(j * 0.618034f), U2 = FMath::Frac(j * 0.414214f), U3 = FMath::Frac(j * 0.732051f);
+		const float OrbitM = FMath::Lerp(40.0f, 130.0f, U1);
+		const float A = j * 2.4f + FunnelSpin * FMath::Lerp(0.5f, 1.1f, U3) * 60.0f / OrbitM;
+		const FVector Off(FMath::Cos(A) * OrbitM, FMath::Sin(A) * OrbitM, FMath::Lerp(2.0f, 80.0f, U2 * U2));
+		DebrisISM->UpdateInstanceTransform(j, FTransform(FRotator(FunnelSpin * 97.0f * U1, FunnelSpin * 131.0f * U2, 0.0f),
+			Off * 100.0f, FVector(FMath::Lerp(0.6f, 2.5f, U3))), false, j == DEBRIS_COUNT - 1, true);
+	}
+}
+
+FVector2D AODWeatherController::WindAtMs(const FVector& WorldPos) const
+{
+	const float Rad = FMath::DegreesToRadians(WindDirDeg);
+	FVector2D W = FVector2D(FMath::Cos(Rad), FMath::Sin(Rad)) * WindSpeedMs;
+	if (TornadoFade > 0.0f)
+	{
+		// Rankine vortex (solid core, 1/r outside) faded to 0 at the reach,
+		// cyclonic (CCW from above; Y = south) plus an inflow toward the core.
+		const FVector2D D = (FVector2D(WorldPos) - FunnelPos) / 100.0f;
+		const float R = D.Size();
+		if (R > 1.0f && R < TORNADO_REACH_M)
+		{
+			const float Vt = TORNADO_VMAX_MS * (R < TORNADO_CORE_M ? R / TORNADO_CORE_M : TORNADO_CORE_M / R)
+				* (1.0f - FMath::SmoothStep(0.5f * TORNADO_REACH_M, TORNADO_REACH_M, R)) * TornadoFade;
+			const FVector2D Out = D / R;
+			W += FVector2D(Out.Y, -Out.X) * Vt - Out * (Vt * TORNADO_INFLOW);
+		}
+	}
+	return W;
 }
 
 bool AODWeatherController::ForceState(const FString& Name)

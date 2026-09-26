@@ -51,7 +51,8 @@ class USkyLightComponent;
  * Lerp(baseline captured at BeginPlay, weather target, weight) - so Clear
  * writes back the exact pre-weather values. Thunderstorm adds lightning: a
  * short sun/sky light flash, thunder queued on AODAmbientSoundManager
- * delayed by distance / 343 m/s.
+ * delayed by distance / 343 m/s. W4 (sec 7.42): StormTint greens the sky
+ * luminance + fog inscatter during a tornado.
  */
 UCLASS()
 class OPENDRIVEUE_API AODAtmosphereController : public AActor
@@ -95,7 +96,7 @@ private:
 	float BaseCloudCoverage = 0.0f, BaseStormClouds = 0.0f;
 	float BaseSunIntensity = 0.0f, BaseSkyLightIntensity = 0.0f;
 
-	float LastFogW = -1.0f, LastCloudW = -1.0f, LastDustW = -1.0f, LastFlash = -1.0f;
+	float LastFogW = -1.0f, LastCloudW = -1.0f, LastDustW = -1.0f, LastTintW = -1.0f, LastFlash = -1.0f;
 	float StrikeCountdown = 5.0f;
 	float FlashAge = -1.0f;   // < 0 = no flash running
 	float FlashPeak = 0.0f;

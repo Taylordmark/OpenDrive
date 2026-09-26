@@ -1,7 +1,8 @@
 """Offline mirror of AODWeatherController's state walk (Weather W1, next
 steps.md sec 7.39). Simulates the 4 h season loop per stage/test road and
 prints each state's time share per season, then asserts the plan's sanity
-expectations. No game launch needed.
+expectations (plus W4/W5, sec 7.42: tornado/hurricane eligibility and the
+hurricane band envelope). No game launch needed.
 
 Every constant below is duplicated in ODWeatherController.cpp under the same
 name - change both together.
@@ -70,6 +71,44 @@ BIOME_MULT = [
     (1.0, 0.8, 0.3),   # RockyFoothill
 ]
 NEUTRAL_MULT = (1.0, 1.0, 1.0)
+
+# ---- W5 hurricane band envelope (ODWeatherController.cpp, same names, sec 7.42) ----
+HURR_BANDS = (0.25, 0.72)   # rain band centers, fraction of the hold
+HURR_BAND_HALF = 0.14
+HURR_LULL = 0.35            # envelope between bands
+HURR_EYE_C, HURR_EYE_HALF, HURR_EYE_LEVEL = 0.485, 0.06, 0.05
+
+
+def bump(d, h):
+    """Raised-cosine bump, 1 at d = 0, 0 beyond +-h."""
+    return 0.5 * (1.0 + math.cos(math.pi * d / h)) if abs(d) < h else 0.0
+
+
+def hurricane_envelope(phase, eye):
+    e = HURR_LULL + (1.0 - HURR_LULL) * max(bump(phase - HURR_BANDS[0], HURR_BAND_HALF),
+                                            bump(phase - HURR_BANDS[1], HURR_BAND_HALF))
+    if eye:
+        b = bump(phase - HURR_EYE_C, HURR_EYE_HALF)
+        e = e * (1 - b) + HURR_EYE_LEVEL * b
+    return e
+
+
+def check_hurricane_envelope():
+    """>= 2 bands (rising through 0.9) with a lull (<= HURR_LULL) between them,
+    within 0..1, the eye dips below the lull, and the phase wraps continuously
+    (the forced QA hurricane loops)."""
+    for eye in (False, True):
+        env = [hurricane_envelope(i / 1000.0, eye) for i in range(1001)]
+        assert all(0.0 <= e <= 1.0 for e in env), eye
+        bands = sum(1 for a, b in zip(env, env[1:]) if a < 0.9 <= b)
+        assert bands >= 2, (eye, bands)
+        lo, hi = int(HURR_BANDS[0] * 1000), int(HURR_BANDS[1] * 1000)
+        assert min(env[lo:hi]) <= HURR_LULL + 1e-6, eye
+        assert abs(env[0] - env[-1]) < 1e-6
+        if eye:
+            assert min(env) <= HURR_EYE_LEVEL + 1e-6
+        print(f"hurricane envelope eye={eye}: {bands} bands, lull min {min(env[lo:hi]):.2f}, "
+              f"range {min(env):.2f}..{max(env):.2f}")
 
 
 def clamp01(v):
@@ -202,6 +241,13 @@ def main():
     assert pct("summit_county_test", "winter", SNOW, BLIZZARD) > 50
     assert all_seasons("skagit_cascades_test", *wet) > 30
     assert all_seasons("summit_county_test", HURRICANE, TORNADO, DUST_STORM) == 0
+    # W4/W5 (sec 7.42): event eligibility
+    for name in ("oahu_test", "summit_county_test", "palmdale_test", "green_valley_test",
+                 "skagit_cascades_test"):
+        assert all_seasons(name, TORNADO) == 0, name
+    for name in results:
+        assert (all_seasons(name, HURRICANE) > 0) == (name == "oahu_test"), name
+    check_hurricane_envelope()
     print("\nsanity ok")
 
 
