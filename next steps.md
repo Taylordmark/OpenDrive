@@ -6766,3 +6766,122 @@ closing unpauses.
   structure gates.
 - Blue River and Jefferson (and some small pieces) are not on the main
   graph component. Picking them shows "no road route to there".
+
+## Weather plan (2026-09-25): biome + location driven
+
+**Today:** the only weather is falling snow (`AODSeasonController`,
+a pool of sphere particles around the pawn). It follows the global season
+clock and is the same everywhere. `road_moisture` in `climate.json` is a
+fixed road tint, not rain. Fog values are fixed (`ODAtmosphereController`).
+Grip ignores weather (`UODVehicleMovement::SurfaceGrip`).
+
+**Core idea: two inputs, two jobs.**
+- **Location decides which storms can happen.** It comes from the stage's
+  `origin_latlon` plus distance to the coast. Hurricanes and tornadoes are
+  geography, not vegetation: a Plains biome in Colorado at 3000 m never
+  gets a hurricane, and Oahu's Coastal/Rainforest biome can.
+- **Biome decides how weather looks locally.** It comes from `BiomeAt(x,y)`
+  (`ODBarrierManager.h:164`, currently private, needs making public) or the
+  forest manager's biome data. Desert gives dust instead of rain, Alpine
+  and Arctic give snow, Wetland gives more fog, and so on.
+- **Season plus elevation decides the precipitation type:**
+  rain → sleet → snow, using a temperature estimate.
+
+### W0. Per-stage climate profile (pipeline, ~1 session)
+Generalize `fetch_climate.py` (it's hardcoded to tail_of_the_dragon) to
+run on every stage and test road (`road_test_meta.json` already carries
+`origin_latlon`). Add these to `climate.json`:
+- monthly temperature and precipitation (NASA POWER, same API, monthly
+  climatology instead of the annual value), mapped onto the season clock;
+- `coast_km` (from the OSM coastline, or distance to the nearest ocean
+  water in the existing water data);
+- storm eligibility flags computed offline from lat/lon:
+  - **hurricane:** `coast_km < ~150`, |lat| between 8° and 40°, and a
+    known basin (N Atlantic, E/W Pacific, N Indian, S Pacific/Indian).
+    Oahu and Gulf/Atlantic coast stages qualify. Summit, Skagit, Palmdale
+    and Dragon don't.
+  - **tornado:** continental interior with Plains/Farmland biome share
+    above a threshold and latitude 25–50°. Allow it weakly on
+    Dragon/Green Valley (the SE US gets them). Never on Oahu or in the
+    Alpine band.
+  - **dust storm:** Desert/Savanna/Canyon share high and precipitation
+    under ~350 mm/year (Palmdale).
+
+The runtime then reads flags instead of doing geography math, and one
+JSON edit overrides a stage.
+
+### W1. `AODWeatherController`: state machine, no visuals (~1 session)
+Same find-or-spawn-from-`AODGameMode` shape as the season/day-night
+controllers.
+- States: Clear, Overcast, Rain, HeavyRain, Sleet, Snow, Blizzard, Fog,
+  DustStorm, Thunderstorm, Tornado (event), Hurricane (event).
+- Weighted random walk between states on a timescale of minutes. The
+  weights come from the season clock's month (via W0's monthly precip)
+  multiplied by the biome at the player. Transitions reuse the season
+  controller's smoothstep ramps, so nothing snaps.
+- Publishes a few scalars: `PrecipIntensity`, `PrecipType` (rain 0 → snow
+  1, sleet in between), `Wind` (speed + dir), `Visibility`, `Wetness`
+  (accumulates, dries slowly), `CloudCover`, `DustAmount`.
+- Takes over from season snowfall: `SnowfallIntensity` becomes
+  `PrecipIntensity * PrecipType`, and the season clock stops owning
+  falling snow (it keeps ground cover, freeze and green-up).
+- Debug: a console command to force a state (`od.Weather Hurricane`).
+
+### W2. Visual consumers (~2 sessions)
+- **Precipitation particles:** generalize the snowfall pool (spheres →
+  stretched streaks for rain, and a sleet mix) before reaching for Niagara.
+  One pool around the pawn and one component.
+- **Atmosphere:** `ODAtmosphereController` reads `Visibility`,
+  `CloudCover` and `DustAmount`. That covers fog density, tan/orange fog
+  inscatter for dust, VolumetricCloud coverage and a darker sky.
+- **Road wetness:** the existing `road_moisture` roughness term becomes a
+  runtime MID parameter driven by `Wetness`, plus puddle darkening.
+  Terrain/foliage get the same parameter.
+- **Lightning:** a flash from a DirectionalLight intensity spike plus
+  delayed thunder in the ambient audio manager.
+- **Audio:** rain, wind and dust loops layered into `ODAmbientSoundManager`.
+
+### W3. Driving consequences (~0.5 session)
+`SurfaceGrip()` gets a weather multiplier on the on-road tier: wet about
+0.8, sleet/slush 0.6, snow 0.45, ice (FreezeBlend + sleet) 0.3. Wind adds
+a small lateral force on the pawn. Keep it gentle, since the corridor
+design wants the player on the road, not in a ditch. The garage tire tiers
+already exist, so rally tires could lose less grip.
+
+### W4. Tornado event (~2 sessions, only where eligible)
+- A funnel from a stack of rotating billboard/cylinder meshes with a
+  debris particle ring, spawned at 2–5 km and tracking across the stage.
+  It's always preceded by Thunderstorm state (green sky tint, hail
+  optional).
+- Gameplay: strong wind force within ~300 m that pulls toward the core,
+  plus heavy visibility loss. No terrain or building destruction: out of
+  scope and expensive.
+- HUD warning when it spawns.
+
+### W5. Hurricane event (~1–2 sessions, coastal only)
+It's mostly a scaled-up HeavyRain + Wind: sustained crosswind, driving
+rain, near-zero visibility on gusts, and a rough water surface (a
+`ODWaterManager` wave-amplitude param). It arrives in bands of
+rain → lull → rain over ~10–20 min, and optionally has a calm "eye"
+phase. Test on `oahu_test`.
+
+### Order and verification
+Order: W0 → W1 → W2 → W3, then W4/W5 as optional events. Each step is
+verified with backend output only: dump the W0 JSON per stage and check
+the eligibility table matches expectations (Oahu: hurricane yes;
+Palmdale: dust yes; Summit: blizzard-heavy, no tornado). For W1, log a
+simulated 4-hour state trace per stage and plot state vs. season clock.
+
+### Decisions (Taylor, 2026-09-25)
+- **Random but realistic.** No live weather API. W1's weighted state walk
+  (location flags × season month × biome) is the whole design.
+- **No weather picker** anywhere. Weather is always automatic.
+- **Season selection lives in the garage menu** (the only player-facing
+  control). There's no season UI today; the only way to set it is the
+  `-odseason=` QA override, which sets `ClockSeconds` and freezes the
+  clock. Plan: a garage "Season" row with Auto (default, 4 h loop) /
+  Summer / Fall / Winter / Spring. A fixed pick reuses that same
+  freeze path at the season's hold midpoint, and it's saved with the
+  other garage settings. Weather then rolls within the chosen season
+  (for example, Winter at Summit means snow or blizzard; Winter at
+  Palmdale means clear or rare rain).
