@@ -1,11 +1,54 @@
 #include "ODVehicleMovement.h"
 
 #include "ODVehicleDef.h"
+#include "ODSeasonController.h"
+#include "ODWeatherController.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "Misc/CommandLine.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
+
+namespace
+{
+	// Weather grip (W3, next steps.md sec 7.41). MIRRORED in
+	// pipeline/check_weather_grip.py - change both. Each hazard is a grip
+	// LOSS that scales with road Wetness, so a dry road is always 1.0 and
+	// every blend is continuous (max of continuous terms, no snapping):
+	//   wet   : any water on the road                      -> 0.80
+	//   slush : sleet (PrecipType 0.5 peak of a triangle)   -> 0.60
+	//   snow  : wet road under snow, or on snow-covered ground -> 0.45
+	//   ice   : wet road on frozen ground (FreezeBlend), rain/sleet
+	//           rather than dry snow (fades out PrecipType 0.5 -> 1) -> 0.30
+	// Tread relief: rally/offroad tires (OffRoadGrip 0.9/1.0 vs street 0.6)
+	// lose up to 40% less. Stays gentle - the corridor wants the player on
+	// the road, and these are the on-road tier only.
+	constexpr float WET_LOSS = 0.20f;
+	constexpr float SLUSH_LOSS = 0.40f;
+	constexpr float SNOW_LOSS = 0.55f;
+	constexpr float ICE_LOSS = 0.70f;
+	constexpr float TREAD_RELIEF = 0.40f;
+	constexpr float TREAD_OFFROAD_LO = 0.6f;   // street OffRoadGrip = no relief
+	constexpr float TREAD_OFFROAD_HI = 1.0f;   // offroad OffRoadGrip = full relief
+
+	float WeatherGrip(float Wetness, float PrecipType, float SnowCover,
+		float FreezeBlend, float OffRoadGrip)
+	{
+		const float W = FMath::Clamp(Wetness, 0.0f, 1.0f);
+		const float T = FMath::Clamp(PrecipType, 0.0f, 1.0f);
+		const float Slush = 1.0f - FMath::Abs(2.0f * T - 1.0f);
+		const float Snow = FMath::Max(T, FMath::Clamp(SnowCover, 0.0f, 1.0f));
+		const float Ice = FMath::Clamp(FreezeBlend, 0.0f, 1.0f)
+			* FMath::Clamp(2.0f * (1.0f - T), 0.0f, 1.0f);
+		const float Loss = W * FMath::Max(
+			FMath::Max(WET_LOSS, SLUSH_LOSS * Slush),
+			FMath::Max(SNOW_LOSS * Snow, ICE_LOSS * Ice));
+		const float Tread = FMath::Clamp((OffRoadGrip - TREAD_OFFROAD_LO)
+			/ (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO), 0.0f, 1.0f);
+		return 1.0f - Loss * (1.0f - TREAD_RELIEF * Tread);
+	}
+}
 
 UODVehicleMovement::UODVehicleMovement()
 {
@@ -227,6 +270,7 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	FwdSpeedCmS = FVector::DotProduct(
 		Body->GetPhysicsLinearVelocity(), Body->GetForwardVector());
 
+	TickWeather(Body);
 	TickSuspension(Body, Dt);
 	TickDrivetrain(Body, Dt);
 	TickTires(Body, Dt);
@@ -794,9 +838,11 @@ float UODVehicleMovement::SurfaceGrip(const UPhysicalMaterial* Mat) const
 	// this just stops branching physics on them.
 	// The two tiers are the garage setup's (rally/offroad tires keep far
 	// more of their grip off the tarmac than street/drag tires do).
+	// Weather (W3) only touches the on-road tier - off-road is already the
+	// "that was a mistake" grip.
 	if (Mat && Mat->GetName().Contains(TEXT("Asphalt")))
 	{
-		return OnRoadGrip;   // on-road
+		return OnRoadGrip * WeatherGripMult;   // on-road
 	}
 	return OffRoadGrip;   // off-road (any surface that isn't the road)
 }
@@ -1065,6 +1111,34 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			W.Omega = FMath::Clamp(W.Omega, -MaxOmega, MaxOmega);
 		}
 	}
+}
+
+void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
+{
+	UWorld* World = GetWorld();
+	if (!WeatherCtl.IsValid() && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
+	{
+		LastWeatherSearch = World->GetTimeSeconds();
+		for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
+		for (TActorIterator<AODSeasonController> It(World); It; ++It) { SeasonCtl = *It; break; }
+	}
+	const AODWeatherController* Wx = WeatherCtl.Get();
+	if (!Wx)
+	{
+		WeatherGripMult = 1.0f;   // no weather (garage, bare levels): dry road
+		return;
+	}
+	const AODSeasonController* Season = SeasonCtl.Get();
+	WeatherGripMult = WeatherGrip(Wx->Wetness, Wx->PrecipType,
+		Season ? Season->SnowCover : 0.0f, Season ? Season->FreezeBlend : 0.0f,
+		OffRoadGrip);
+
+	// crosswind: the wind component across the car, quadratic, at the COM
+	const FVector Right = Body->GetRightVector();
+	const float Rad = FMath::DegreesToRadians(Wx->WindDirDeg);
+	const float LatMs = Wx->WindSpeedMs
+		* (FMath::Cos(Rad) * Right.X + FMath::Sin(Rad) * Right.Y);
+	Body->AddForce(Right * WindSideForceCoeff * LatMs * FMath::Abs(LatMs) * 100.0f);
 }
 
 void UODVehicleMovement::TickAero(UPrimitiveComponent* Body)

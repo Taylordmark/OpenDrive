@@ -7,6 +7,8 @@
 class UPhysicalMaterial;
 class UPrimitiveComponent;
 class UODVehicleDef;
+class AODWeatherController;
+class AODSeasonController;
 
 /** Driver-assist level (pause menu; presets pick defaults in stage 3). */
 UENUM(BlueprintType)   // BlueprintType: apply_tuning_presets.py sets it
@@ -361,6 +363,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DownforceCoeff = 1.1f;
 
+	/** Weather crosswind (W3), N per (m/s)^2 of wind across the car's side:
+	 *  ~0.5 * rho * Cd * side area, scaled down to stay gentle. Quadratic, so
+	 *  Clear/Rain (3-10 m/s) is noise and only Tornado/Hurricane (25-35 m/s)
+	 *  push noticeably (35 m/s ~ 2.4 kN, ~0.15 g on a 1.6 t car). 0 = off. */
+	UPROPERTY(EditAnywhere, Category = "Aero")
+	float WindSideForceCoeff = 2.0f;
+
 	// --- garage setup (UODTuningPreset owns these; neutral defaults = Street).
 	// Applied at their use sites rather than baked into the per-car fields
 	// above, so switching setups never compounds on the car's own values.
@@ -511,6 +520,8 @@ private:
 	void TickDrivetrain(UPrimitiveComponent* Body, float Dt);
 	void TickTires(UPrimitiveComponent* Body, float Dt);
 	void TickAero(UPrimitiveComponent* Body);
+	/** W3: refresh WeatherGripMult + apply the crosswind force. */
+	void TickWeather(UPrimitiveComponent* Body);
 	float TorqueCurve(float Rpm) const;
 	float SurfaceGrip(const UPhysicalMaterial* Mat) const;
 	/** Highest gear that keeps rpm in the band at this road speed. */
@@ -551,6 +562,13 @@ private:
 
 	bool bBodyInit = false;
 	double LastTraceTime = 0.0;
+
+	// weather (W3): cached controllers, re-searched every 2 s while missing
+	// (spawned by AODGameMode, may come up after us; absent in the garage)
+	TWeakObjectPtr<AODWeatherController> WeatherCtl;
+	TWeakObjectPtr<AODSeasonController> SeasonCtl;
+	double LastWeatherSearch = -10.0;
+	float WeatherGripMult = 1.0f;    // on-road tier multiplier, this tick
 
 	// trace fields (-odtrace)
 	float TraceSlip = 0.0f;

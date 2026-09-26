@@ -7043,3 +7043,45 @@ within whatever season the garage Season row gives the clock.
 - **Verified:** headless `Build.bat OpenDriveUEEditor Win64 Development`,
   `Result: Succeeded`, no warnings (`scratchpad/weather_w1_build.log`).
   Not run in-game, per the no-launch rule.
+
+### 7.41 Weather W3: grip + wind (2026-09-25)
+Implements W3 above. All in `UODVehicleMovement`; the pawn is unchanged.
+- **Grip:** `SurfaceGrip()` returns `OnRoadGrip * WeatherGripMult` on the
+  asphalt tier only (off-road is untouched). `TickWeather` recomputes the
+  multiplier each tick from `AODWeatherController::Wetness`/`PrecipType`
+  and `AODSeasonController::SnowCover`/`FreezeBlend`. Each hazard is a
+  loss times `Wetness`, and the largest one wins, so a dry road is always
+  1.0 and every blend is continuous:
+  - wet 0.20; slush 0.40 x a sleet triangle (peak at PrecipType 0.5);
+  - snow 0.55 x max(PrecipType, SnowCover);
+  - ice 0.70 x FreezeBlend x (rain/sleet, fading out toward dry snow).
+
+  Black ice falls out of it: a wet road left over after rain on frozen
+  ground. A dry winter road stays at 1.0.
+- **Tires:** tread relief comes from the garage `OffRoadGrip` (street 0.6
+  gets none, offroad 1.0 gets full), and cuts the loss by up to 40%.
+
+| case | street/drift/drag | rally | offroad |
+|---|---|---|---|
+| dry (any season) | 1.00 | 1.00 | 1.00 |
+| wet | 0.80 | 0.86 | 0.88 |
+| sleet/slush | 0.60 | 0.72 | 0.76 |
+| snow (falling, or wet on snow cover) | 0.45 | 0.62 | 0.67 |
+| ice (freezing rain/sleet on frozen ground) | 0.30 | 0.51 | 0.58 |
+
+- **Wind:** `WindSideForceCoeff` (Aero, default 2.0 N per (m/s)^2) times
+  the signed square of the wind component across the car, applied at the
+  COM. That's ~50 N in Rain, ~1.25 kN in Tornado, and ~2.4 kN in
+  Hurricane (about 0.15 g). Set it to 0 to turn wind off.
+- **Lookup:** weak ptrs to the weather/season controllers, re-searched every
+  2 s while missing. Without them (garage, bare levels) the multiplier is
+  1.0 and there's no wind.
+- **Offline mirror:** `pipeline/check_weather_grip.py` (same constant names,
+  comments on both sides) asserts the table, that rally < offroad loss <
+  street loss, monotonic in Wetness, and continuous in Wetness/PrecipType.
+  Result: `weather grip ok`.
+- **Files:** `ODVehicleMovement.h/.cpp`, `pipeline/check_weather_grip.py`
+  (new).
+- **Verified:** headless `Build.bat OpenDriveUEEditor Win64 Development`,
+  `Result: Succeeded`, no warnings (`scratchpad/weather_w3_build.log`).
+  Not run in-game, per the no-launch rule.
