@@ -119,6 +119,71 @@ const FBiomeRecipe BiomeRecipeTable[] = {
 static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::RockyFoothill + 1,
 	"BiomeRecipeTable must have one entry per EODBiome value, in enum order");
 
+// ---- Terrain variety V2/V5 (2026-09-25, next steps.md sec 7.35) ----
+// V5 elevation banding WITHIN EvergreenForest (recipe interpolation, no new
+// enum entries): BiomeRecipeTable's Evergreen row is the low lodgepole band
+// (so ODB1 data - ElevM 0 - is unchanged), blending to spruce-fir, then to
+// krummholz at treeline. Slots per make_tree_meshes.py: Blob=Aspen A,
+// Olive=Engelmann Spruce, Conifer=Lodgepole A, ScrubOak=Aspen B,
+// Manzanita=Krummholz, Yucca=Subalpine Fir, CanyonOak=Lodgepole B. Bands
+// are Summit County (39.5N) numbers; lower-elevation areas never reach them.
+const FBiomeRecipe EvergreenSubalpineRecipe =
+	{{0.02f, 0.50f, 0.08f, 0.01f, 0.02f, 0.35f, 0.02f}, {0.90f, 0.10f}, 1.0f, 0.5f, 0.30f, 0.9f};
+const FBiomeRecipe EvergreenTreelineRecipe =
+	{{0.00f, 0.15f, 0.00f, 0.00f, 0.70f, 0.15f, 0.00f}, {0.60f, 0.40f}, 0.35f, 0.4f, 1.20f, 0.8f};
+constexpr float SubalpineLowM = 2950.0f, SubalpineHighM = 3200.0f;
+constexpr float TreelineLowM = 3350.0f, TreelineHighM = 3550.0f; // TREELINE_LOW_M in apply_ground_material.py
+// V5 aspen: patches where the V2 moisture/north-aspect signal AND a coarse
+// noise mask agree, inside the montane aspen elevation window.
+constexpr float AspenLowM = 2450.0f, AspenHighM = 3350.0f, AspenFadeM = 150.0f;
+constexpr float AspenNoiseScaleCm = 50000.0f;   // 500 m lattice -> grove-sized patches
+constexpr float AspenMaxShare = 0.75f;          // max fraction of the tree mix turned to aspen
+
+FBiomeRecipe LerpRecipe(const FBiomeRecipe& A, const FBiomeRecipe& B, float T)
+{
+	FBiomeRecipe R = A;
+	for (int32 s = 0; s < 7; ++s) { R.SpeciesWeight[s] = FMath::Lerp(A.SpeciesWeight[s], B.SpeciesWeight[s], T); }
+	for (int32 s = 0; s < 2; ++s) { R.ShrubWeight[s] = FMath::Lerp(A.ShrubWeight[s], B.ShrubWeight[s], T); }
+	R.TreeDensityScale = FMath::Lerp(A.TreeDensityScale, B.TreeDensityScale, T);
+	R.BushDensityScale = FMath::Lerp(A.BushDensityScale, B.BushDensityScale, T);
+	R.RockDensityScale = FMath::Lerp(A.RockDensityScale, B.RockDensityScale, T);
+	R.ScrubDensityScale = FMath::Lerp(A.ScrubDensityScale, B.ScrubDensityScale, T);
+	R.AmbientVegFloor = FMath::Lerp(A.AmbientVegFloor, B.AmbientVegFloor, T);
+	return R;
+}
+
+/** One classified point's recipe after V5 elevation banding + V2
+ *  aspect/moisture bias. AspenMask is the tile-level noise gate in [0,1].
+ *  Every term is neutral at ODB1's defaults (Northness=Moisture=ElevM=0). */
+FBiomeRecipe VarietyRecipe(EODBiome Biome, float Northness, float Moisture, float ElevM, float AspenMask)
+{
+	FBiomeRecipe R = BiomeRecipeTable[(uint8)Biome];
+	const float North = FMath::Max(0.0f, Northness), South = FMath::Max(0.0f, -Northness);
+	if (Biome == EODBiome::EvergreenForest)
+	{
+		R = LerpRecipe(R, EvergreenSubalpineRecipe, FMath::SmoothStep(SubalpineLowM, SubalpineHighM, ElevM));
+		R = LerpRecipe(R, EvergreenTreelineRecipe, FMath::SmoothStep(TreelineLowM, TreelineHighM, ElevM));
+		const float Window = FMath::SmoothStep(AspenLowM - AspenFadeM, AspenLowM, ElevM)
+			* (1.0f - FMath::SmoothStep(AspenHighM - AspenFadeM, AspenHighM, ElevM));
+		const float Suit = FMath::Clamp(0.7f * Moisture + 0.6f * North, 0.0f, 1.0f);
+		const float Aspen = AspenMaxShare * Suit * AspenMask * Window;
+		float Total = 0.0f;
+		for (float W : R.SpeciesWeight) { Total += W; }
+		for (float& W : R.SpeciesWeight) { W *= 1.0f - Aspen; }
+		R.SpeciesWeight[0] += Aspen * Total * 0.6f;   // Aspen A (young grove clump)
+		R.SpeciesWeight[3] += Aspen * Total * 0.4f;   // Aspen B (mature)
+	}
+	// V2 density bias (all biomes): north aspects denser, south aspects
+	// sparser + sagebrush, valley bottoms open into willow/meadow. Moisture
+	// term kept mild: the road corridor IS the valley bottom (mean M 0.59),
+	// 0.35 thinned the median corridor tile 26%; 0.20 thins ~13%.
+	R.TreeDensityScale *= (1.0f + 0.25f * North - 0.35f * South) * (1.0f - 0.20f * Moisture);
+	R.BushDensityScale *= 1.0f + 0.5f * Moisture;
+	R.ShrubWeight[0] += 0.5f * Moisture;   // willow/streamside bush
+	R.ShrubWeight[1] += 0.5f * South;      // sagebrush
+	return R;
+}
+
 // PickWeightedIndex (used both for the 7-way tree pick and the 2-way shrub
 // pick below) now lives in ODBinSidecarUtil.h - see this file's
 // ExtendedTreeMeshPaths comment above for why it moved.
@@ -357,18 +422,21 @@ bool AODForestManager::LoadBiomePoints()
 		return false;   // Tail of the Dragon's actor instance - unaffected
 	}
 	// 'ODB1', uint32 LE N, N * (float32 X_cm, float32 Y_cm, uint8 Biome,
-	// uint8 ForestWeight255) - pipeline/classify_biomes.py + export_biome_bin.py
+	// uint8 ForestWeight255) - pipeline/classify_biomes.py + export_biome_bin.py.
+	// 'ODB2' (2026-09-25, sec 7.35) appends uint8 Northness255, uint8
+	// Moisture255, uint16 ElevM; ODB1 keeps the neutral FBiomePoint defaults.
 	TArray<uint8> Bin;
 	const FString BinPath = FPaths::ProjectContentDir()
 		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || Bin[3] != '1')
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
 		return false;
 	}
+	const bool bV2 = Bin[3] == '2';
 	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
 		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
-	constexpr int32 RecordBytes = 4 + 4 + 1 + 1;   // X_cm, Y_cm, Biome, ForestWeight255
+	const int32 RecordBytes = bV2 ? 14 : 10;   // X_cm, Y_cm, Biome, ForestWeight255 [, Northness255, Moisture255, ElevM]
 	if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -376,7 +444,7 @@ bool AODForestManager::LoadBiomePoints()
 			*BinPath, N, Bin.Num());
 		return false;
 	}
-	BiomePoints.SetNumUninitialized(N);
+	BiomePoints.SetNum(N);   // not Uninitialized - ODB1 relies on the V2 field defaults
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
@@ -386,6 +454,12 @@ bool AODForestManager::LoadBiomePoints()
 		BiomePoints[i].WorldXY = FVector2D(X, Y);
 		BiomePoints[i].Biome = (EODBiome)P[8];
 		BiomePoints[i].ForestWeight = P[9] / 255.0f;
+		if (bV2)
+		{
+			BiomePoints[i].Northness = P[10] / 127.5f - 1.0f;
+			BiomePoints[i].Moisture = P[11] / 255.0f;
+			BiomePoints[i].ElevM = (float)((uint16)P[12] | (uint16)P[13] << 8);
+		}
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d biome point(s) from %s, blend radius %.0f m"),
@@ -1191,7 +1265,12 @@ void AODForestManager::BlendAt(double WorldX, double WorldY,
 	EODBiome NearestBiome = DefaultBiome;
 	float NearestForestWeight = 0.0f;
 	const float RadiusSq = BiomeBlendRadiusCm * BiomeBlendRadiusCm;
+	// V5 aspen-patch noise gate, once per tile (sec 7.35).
+	const float AspenMask = FMath::SmoothStep(0.55f, 0.70f, ValueNoise2D(WorldX, WorldY, AspenNoiseScaleCm, 7));
+	const FBiomePoint* Nearest = nullptr;
 
+	// ponytail: linear scan over every point (81k for summit_county since
+	// V1's grid, ~0.1 ms/tile); bucket like ODBarrierManager if it shows up.
 	for (const FBiomePoint& Pt : BiomePoints)
 	{
 		const float D2 = FVector2D::DistSquared(Pt.WorldXY, Here);
@@ -1200,13 +1279,14 @@ void AODForestManager::BlendAt(double WorldX, double WorldY,
 			BestD2 = D2;
 			NearestBiome = Pt.Biome;
 			NearestForestWeight = Pt.ForestWeight;
+			Nearest = &Pt;
 		}
 		if (D2 > RadiusSq)
 		{
 			continue;
 		}
 		const float W = 1.0f / FMath::Max(1.0f, D2);
-		const FBiomeRecipe& R = BiomeRecipeTable[(uint8)Pt.Biome];
+		const FBiomeRecipe R = VarietyRecipe(Pt.Biome, Pt.Northness, Pt.Moisture, Pt.ElevM, AspenMask);
 		for (int32 s = 0; s < UE_ARRAY_COUNT(SpeciesAcc); ++s)
 		{
 			SpeciesAcc[s] += R.SpeciesWeight[s] * W;
@@ -1230,7 +1310,7 @@ void AODForestManager::BlendAt(double WorldX, double WorldY,
 		// blend, so just use the nearest point outright rather than
 		// silently falling back to DefaultBiome (which could be a totally
 		// different region's default).
-		OutRecipe = BiomeRecipeTable[(uint8)NearestBiome];
+		OutRecipe = VarietyRecipe(NearestBiome, Nearest->Northness, Nearest->Moisture, Nearest->ElevM, AspenMask);
 		OutForestWeight = NearestForestWeight * TownForestDampen(WorldX, WorldY);
 		return;
 	}

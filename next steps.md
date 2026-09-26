@@ -350,7 +350,8 @@ collaborative editor sessions; widget logic in C++, layouts by hand together.*
   — see Arc 7's map-texture entry below for the full pipeline/runtime
   account; NA-scale map still arrives with Arc 7.4 (tile-based).
 - We need to have a mini map, world map, and navigation between locations on the map/mini map
-  *(mini map ✅ v2 + terrain-color background; world map + navigation = Arc 7.4)*
+  *(mini map ✅ v2 + terrain-color background; world map + A* navigation ✅ built 2026-09-25,
+  open-world levels, needs Taylor's live drive-test — see §7.37; NA-scale tiled map still Arc 7.4)*
 
 ### 4.3 Garage (#7 cars + cosmetics, consumes 1.5 presets)
 - **Live car/engine/drivetrain/tuning picker ✅** *(2026-07-25 via
@@ -3817,6 +3818,7 @@ systems light up on their own.** Plan, in dependency order:
 
 ### V1. Off-corridor biome coverage *(1 session — unblocks everything visual
 behind the corridor)*
+**Status 2026-09-25: done (300 m grid, ODB2 re-bake, offline-verified) — see §7.35.**
 Extend `classify_biomes.py` with a coarse full-bbox sample grid (the z13
 imagery mosaic is ~19 m/px and cheap; classify on a ~200–400 m grid across
 the whole terrain bbox, keep the dense corridor samples as-is) and write
@@ -3826,6 +3828,8 @@ Gate: per-tile `distinctBiomes` log > 0 on background-hill tiles;
 render-matrix diff shows background tint actually moving.
 
 ### V2. Within-biome variation drivers: aspect + moisture *(1 session)*
+**Status 2026-09-25: done (ODB2 sidecar, tint + forest bias), offline-verified;
+palette needs Taylor's eyes — see §7.35.**
 87% Evergreen is CORRECT classification — the variety inside a real
 evergreen zone comes from aspect and moisture, not land-cover class. Compute
 per-sample **aspect** (from the DEM normal; south-facing → dry/tan/sparser,
@@ -3840,6 +3844,8 @@ single highest-leverage item for "real Colorado hillside" reads.
 
 ### V3. Material macro-variation + distant-flat darkening *(1 session —
 doubles as the Vail pale-hills fix)*
+**Status 2026-09-25: implemented + material re-applied, offline-verified;
+awaiting Taylor's live look — see §7.36.**
 In `apply_ground_material.py`: add a 2-octave world-space `value_noise`
 (~300 m and ~1200 m periods) lerping the flat albedo between 2–3 variants
 (dry meadow / green meadow / bare dirt) and darkening+saturating the blend
@@ -3850,6 +3856,9 @@ stats over hillside crops — variance should INCREASE, mean value DROP
 slightly at distance.
 
 ### V4. Aerial-perspective tuning *(hours — the Silverthorne pale-hills fix)*
+**Status 2026-09-25: first step in (view-distance scale 1.0 → 0.8 in
+ODAtmosphereController.cpp, compiled); parameter-only, needs Taylor's eyes —
+see §7.36.**
 Reduce the SkyAtmosphere COMPONENT's aerial-perspective contribution
 (aerial perspective view distance scale / Mie scattering) in
 `build_openworld_test_level.py` or wherever the component is configured —
@@ -3859,6 +3868,8 @@ not variety, and too much kills depth cueing. Needs Taylor's live eyes for
 final level (same rule as audio character).
 
 ### V5. Vegetation banding polish *(1–2 sessions, after V1+V2 land)*
+**Status 2026-09-25: first pass in (elevation bands + aspen patches on existing
+aspen meshes), offline-verified; aspen read needs Taylor's eyes — see §7.35.**
 With real biome + aspect/moisture data flowing, tune the summit_county
 read: elevation-banded species mix within Evergreen (lodgepole low,
 spruce-fir high, krummholz at treeline — recipe interpolation by elevation,
@@ -3883,72 +3894,6 @@ item 6 as a side effect; V5 is art tuning that needs Taylor live.
   usual "pipeline output and C++ must move together" coupling.
 
 ---
-
-## Car editor feature (2026-09-07) — visual car customization in the garage
-
-*Taylor: "I want to be able to visually edit my own cars. this is a new
-feature to add to the game." Plan below builds on what already exists: the
-garage scene (`ODGarageEnvironment`, camera + lit bay, reachable from main
-menu and pause), the row-based car-config screen in `ODMainMenu`
-(Car/Engine/Drivetrain/Tuning, live-applies), and the fact that every car
-body is already PARAMETRIC — `make_car_meshes.py` builds each archetype
-from three authored curves (side profile / plan view / cross-section) plus
-a style dict (wheel radius, ride height, wing, mirrors...). "Editing a
-car" therefore means editing parameters the generator already understands,
-not free-form modeling.*
-
-### C1. Paint & trim editor *(1 session — immediate "my car" payoff)*
-New garage rows/sub-screen: body color, accent/stripe color, wheel color,
-glass tint. Runtime-only — dynamic material instance parameters on the
-existing car materials (`apply_garage_material.py` defines the slots; add
-scalar/vector params if any are baked constants today). Persist per-car in
-a JSON profile under `Saved/` (same pattern as existing settings). No
-pipeline round-trip, applies live in the garage view.
-
-### C2. Part & stance toggles *(1 session)*
-Expose the discrete style knobs the generator already has: rear wing
-on/off, mirrors, ride height, wheel radius, track width. Two
-implementation options — decide by C1's experience with the garage UI:
-  (a) BAKE VARIANTS: pipeline pre-generates the small combinatorial set
-      (e.g. wing x2, stance x3 per archetype) via `make_car_meshes.py` +
-      `import_car_meshes.py`, garage swaps static meshes. Zero new runtime
-      mesh code, but combinatorics cap how many knobs can join.
-  (b) RUNTIME BOLT-ONS: keep one hull mesh, spawn wing/mirror/wheel bits
-      as separate components positioned by the same parameters. Ride
-      height/track are already runtime-adjustable physics-side
-      (`ODVehicleMovement` suspension params) — only visuals need moving.
-Recommendation: (b) for wing/mirrors/stance (they're already separate
-primitives in the generator), no variant explosion.
-
-### C3. Shape sliders — the real "edit my own car" *(2–3 sessions, the
-headline)*
-Port `make_car_meshes.py`'s `build_hull()` 3-curve loft to C++ building a
-`UDynamicMeshComponent` live (the codebase already builds dynamic meshes
-at runtime everywhere — buildings, terrain, roads — so the machinery and
-material plumbing exist). Expose per-archetype sliders that move the
-authored control points within safe ranges: hood height, roofline peak,
-greenhouse start/end, haunch width, arch radius, overhangs, wheelbase.
-The Python generator stays the source of truth for the five STOCK cars
-(pipeline still bakes those); the C++ port only re-lofts EDITED cars in
-the garage, from the stock car's control points + the player's deltas.
-Slider deltas persist in the same JSON profile; the drive spawns the
-edited mesh. Collision/physics: keep the stock car's collision + mass —
-edits are visual-only in v1 (prevents editor-driven physics exploits and
-keeps the port small).
-Risks to watch: keeping the C++ loft numerically identical to numpy's
-(UV/cell mapping, arch clipping order), and hull self-intersection at
-slider extremes — clamp ranges conservatively and add a "reset to stock"
-row.
-
-### C4. Polish/persistence pass *(1 session, after C1–C3 settle)*
-Multiple save slots per archetype ("my Muscle #2"), name-your-car text
-row, garage turntable/orbit camera QoL, and a small stat readout row
-(mass/power — unchanged in v1, but the screen should say so).
-
-**Order: C1 → C2 → C3 → C4.** C1/C2 ship value fast with near-zero risk;
-C3 is where "visually edit" is really delivered and its scope is the main
-open question for Taylor: paint+parts only (stop after C2), or full shape
-sliders (C3)?
 
 ## Drive-test fix queue (2026-09-07) - CLOSED
 
@@ -6533,3 +6478,291 @@ per that brief's own instruction, no pipeline code changed by this audit.
 Committed: this note only (`next steps.md`). Bakes/scratchpad analysis
 outputs are gitignored/scratchpad-local, not committed, matching
 §7.18-7.23 precedent. Not pushed.
+
+---
+
+### 7.35 Terrain variety V1/V2/V5 (2026-09-25)
+
+Backend-only verification (standing no-run rule — nothing rendered). All
+artifacts in `scratchpad/terrain_variety/`; pre-change sidecar + JSON kept in
+`scratchpad/terrain_variety/before/`.
+
+**V1 — off-corridor coverage.** `classify_biomes.py` adds a 300 m lattice over
+the BACKGROUND bbox padded by one terrain tile (2 km), dropping lattice points
+within 150 m of a corridor sample; the dense corridor samples are unchanged. The
+grid points get elevation and grade from a z12 Terrarium DEM mosaic. Re-baked
+summit_county: 27,465 corridor + 53,244 grid = 80,709 samples. The run took
+about 50 s (120 DEM + 418 imagery tiles). `FarBiomeFallbackCm` is unchanged
+because the grid makes it cover only tile-edge gaps.
+- Two classifier fixes were needed:
+  - **Wetland false positives on the grid.** Shaded north-facing conifer
+    slopes matched the dark+blue water heuristic (21% of the grid). Wetland now
+    also requires `grade < 0.10`, which brings the grid down to 643 Wetland.
+  - **Imagery row sampling.** Rows used to be linear in latitude, which put
+    them 60–80 m off, with the error depending on the mosaic bbox. They are now
+    exact web-mercator rows (0.000 px error). **Side effect:** 3,874 of 27,465
+    corridor samples change biome vs the 09-06 bake, and forest_weight shifts by
+    a mean |Δ| of 0.165. This is a correctness fix, but corridor forest density
+    and tint will move a little. See `diag_wetland.py/.log`.
+- Tint replica (`verify_v1_v2_tint.py/.log`) of `ApplyBiomeTint` over all
+  1,221 real terrain tiles:
+  - Tiles with any biome: 330 → 1,221.
+  - Default/no-data vertices: 30.3% → 0.0%.
+  - Background tiles (898): default vertices 99.8% → 0.1%; in-tile luma std
+    0.0001 → 0.051; across-tile luma std 0.0012 → 0.036.
+  - Plots: `biome_map_before_after.png`, `tint_tiles_before_after.png`.
+
+**V2 — aspect + moisture.** The sidecar is now **ODB2**. It adds 4 bytes per
+record: u8 northness, u8 moisture and u16 elevation in metres.
+- Northness is the north component of the gradient on a DEM smoothed over
+  150 m, and saturates at a grade of 0.35.
+- Moisture = 1 − (height above the local 1 km minimum)/150 m.
+- `ODTerrainManager`, `ODForestManager` and `ODBarrierManager` parse ODB1 and
+  ODB2 by magic, and ODB1 reads as neutral.
+- `ApplyBiomeTint`: south slopes lerp toward a dry tan (strength 0.45),
+  north slopes darken (up to 30%), and moisture lerps toward a meadow green
+  (0.40).
+- `BlendAt`: tree density ×(1 + 0.25N − 0.35S)·(1 − 0.20M), bush density
+  ×(1 + 0.5M), willow +0.5M, sagebrush +0.5S.
+  - The first cut used −0.45S and −0.35M, which thinned the median corridor
+    tile by 26%, because the road corridor *is* the valley bottom (mean
+    moisture 0.59). The softened values give a median of 0.82.
+- Stats: grid northness std 0.52 (27% of samples |n| > 0.5); moisture mean is
+  0.59 on the corridor and 0.16 on the grid. Plot: `aspect_moisture_hist.png`.
+- `HashLattice`/`ValueNoise2D` moved from ODTerrainManager.cpp into the shared
+  `ODBinSidecarUtil.h` (verbatim) so the forest can reuse them.
+
+**V5 — species banding + aspen.** This is recipe interpolation inside
+`VarietyRecipe` in ODForestManager.cpp; no new enum entries.
+- Bands: the Evergreen table row (lodgepole) blends to a spruce-fir recipe over
+  2,950→3,200 m, then to krummholz over 3,350→3,550 m.
+- Aspen: `0.75 · clamp(0.7M + 0.6N) · noiseMask · window(2,450–3,350 m)`
+  moves share into the two aspen meshes (Blob/ScrubOak, already Colorado
+  aspen). The noise mask is `ValueNoise2D` on a 500 m lattice, smoothstepped
+  over 0.55–0.70, evaluated once per tile.
+- Replica `verify_v5_species.py/.log` + `species_vs_elevation.png`, run over
+  the 13,887 real 96 m forest tiles that contain a road station:
+  - ODB1-neutral assert passes.
+  - Aspen mask is non-zero on 42% of tiles.
+  - Aspen share ≥ 20% on 32% of tiles and ≥ 40% on 12%. The table baseline is 8%.
+  - Spruce + fir go from 5% at 2,400–2,800 m to 72% at 3,200–3,350 m.
+  - Krummholz reaches 41–49% above 3,450 m.
+  - TreeDensityScale p10/p50/p90 is 0.47/0.82/0.99.
+
+**Build:** the `ApplyBiomeTint`/ODB2 parsers built "Succeeded" earlier. The
+final density-coefficient edit compiled `ODForestManager.cpp` cleanly, but
+the full build is blocked by another agent's in-flight map/nav work, not by this
+change:
+- First attempt: compile errors in **ODRaceHUD.cpp** (`build_v5.log`).
+- Retry: every translation unit compiles, but linking fails on the undefined
+  `AODRaceHUD::OpenWorldMap`/`CloseWorldMap` (`build_v5_retry.log`).
+
+Re-run Build.bat once that work lands.
+
+**Needs Taylor live:**
+- The tint palette: `DrySlopeTint`, `MoistMeadowTint` and their strengths.
+- Whether the aspen patches read as groves: patch size (500 m noise lattice)
+  and share (`AspenMaxShare`).
+- Corridor density after the softened moisture term.
+- Band elevations vs the real Summit Co. treeline.
+
+**Open:**
+- `build_ambient_zones.py` will pick up the grid samples on its next rebuild;
+  it was not rerun.
+- Other areas stay ODB1 (neutral) until they are re-exported.
+- `BlendAt` does a linear scan over 81k points per forest tile (marked
+  `ponytail:`). Bucket it like ODBarrierManager if it shows up in a profile.
+
+---
+
+### 7.36 Terrain variety V3/V4 — pale-hills fixes (2026-09-25)
+
+Closes the two item-6 carriers (Vail = pale flat albedo, Silverthorne = aerial
+perspective) at the mechanism level. Both need Taylor's live look for the final
+level; nothing here was rendered (standing no-run rule) — verification is
+offline math only.
+
+**V3 — `unreal/apply_ground_material.py` (flat/vegetated layer only).**
+- New block after the spring-green lerp, before the alpine scree blend: a
+  2-octave world-space `value_noise` (300 m + 1200 m, both through
+  `wrap_lattice_uv`) → contrast-stretched → 3-stop multiplier over the existing
+  biome-tinted blend: green meadow (macro 0) → dry meadow (0.5) → bare dirt
+  (1, darker brown, not khaki). Then `PixelDepth`-driven far shaping: saturation
+  extrapolated past 1 (Lerp(Desaturation, color, 1+boost·far_t)) and value
+  multiplied down. Steep rock, alpine scree, snow, sand untouched.
+- Side fix: the existing 120 m dirt-patch noise now also goes through
+  `wrap_lattice_uv` (it fed the same large-magnitude sin() hash the 2026-09-08
+  snow fix proved degenerate on GPU — likely one uniform dirt amount
+  everywhere). If dirt patches suddenly read as NEW patchiness, this is why.
+- Tunables (all module-level constants, one block): `MACRO_FINE_SCALE_CM`
+  30000, `MACRO_COARSE_SCALE_CM` 120000, `MACRO_COARSE_WEIGHT` 0.6,
+  `MACRO_CONTRAST` 2.2, `MACRO_GREEN_MUL` (0.75,1.10,0.70), `MACRO_DRY_MUL`
+  (1.10,1.00,0.80), `MACRO_DIRT_MUL` (0.75,0.62,0.50), `FAR_START_CM` 150000,
+  `FAR_END_CM` 800000, `FAR_DARKEN` 0.25, `FAR_SAT_BOOST` 0.25.
+- Applied: `UnrealEditor-Cmd -run=pythonscript` (the standard pipeline apply
+  step, -nullrhi) re-built + saved M_GroundStylized, post-save verify OK
+  (`scratchpad/v3_apply_ground_material.log`). -nullrhi means the HLSL was
+  NOT shader-compiled here — first editor/game load compiles it.
+- Offline verification (`scratchpad/verify_v3_ground_macro.py` → `.log`,
+  `.png`): far-field albedo model (textures → linear mip mean; off-corridor
+  ApplyBiomeTint port; material constants parsed from the script itself) over
+  all 305 summit_county coarse terrain tiles (100 m grid, 116,559 flat pts,
+  camera at area origin). Before → after, flat pts, sRGB HSV:
+  - macro variants alone (depth 0): hue circ-std 9.55° → 11.17°, sat std
+    0.092 → 0.115, value std 0.045 → 0.050.
+  - with distance shaping (camera view): hue std 9.55° → 10.59°, sat mean
+    0.353 → 0.523, sat std 0.092 → 0.193, value mean 0.304 → 0.272; mean
+    albedo sRGB8 (74,78,53) → (67,70,40).
+  - mean V vs depth: −2.5 % at 0–1.5 km, −6.9 % at 5 km, −10.9 % from 8 km on.
+  - Texture means confirm the khaki source: Ground037 (dirt) linear
+    (0.32,0.29,0.10) is by far the palest flat-layer input.
+  - Caveats: "before" uses a WORKING (float64) dirt-noise hash, so if the GPU
+    hash really was degenerate the true before-variance is lower still; the
+    100 m grid aliases the 120 m dirt noise; no lighting/AP in the model.
+
+**V4 — `OpenDriveUE/Source/OpenDriveUE/ODAtmosphereController.cpp`.**
+- The component is configured here at BeginPlay (level scripts only spawn the
+  actor). Added one named constant `AerialPerspectiveViewDistanceScale = 0.8f`
+  (engine default 1.0) → `SetAerialPespectiveViewDistanceScale` (engine's
+  spelling). Mie (0.009), Rayleigh (0.028), start depth (0.07 km) unchanged —
+  the distance scale affects geometry AP only, not the sky dome, so it's the
+  least collateral single knob. Next steps if 0.8 isn't enough: 0.7, then
+  consider Mie 0.009 → 0.007.
+- Offline estimate (`scratchpad/verify_v4_aerial_perspective.py` → `.log`,
+  `.png`; homogeneous ground-density path, single extinction, no multiple
+  scattering/fog): blue veil (1−T) at 5 km 0.169 → 0.137 (−19 %), 10 km
+  0.311 → 0.257 (−17 %), 20 km 0.526 → 0.449 (−15 %). Parameter-only
+  estimate — the actual on-screen delta needs Taylor's eyes.
+- Compiled: headless Build.bat, `Result: Succeeded`
+  (`scratchpad/v4_build.log`). NOTE: the first build failed on a latent
+  unity-build collision — ODSettingsMenu.cpp and ODMainMenu.cpp both define
+  an anonymous-namespace `FindActor<T>` template, which only collides once
+  adaptive unity regroups files (triggered by any edited .cpp). Fixed by
+  renaming ODSettingsMenu.cpp's copy to `FindSettingsActor` (4 lines, no
+  behavior change).
+
+**Needs Taylor live:** V3 palette (variant multipliers, far darken/sat) and
+V4 haze level at Silverthorne (Ruby Ranch Rd) / Vail (Piney Lake Rd) /
+Frisco / Dillon; watch that far ridges don't go too saturated-yellow
+(`FAR_SAT_BOOST`) and depth cueing still reads (V4 scale).
+
+### 7.37 Arc 4.2 v3: world map + navigation (2026-09-25)
+
+**Built.** Full-screen world map, destinations (towns + road-snapped
+waypoints), A* navigation with the route drawn on every map panel, a HUD
+next-turn/distance panel, auto-reroute, and fast travel. Open-world
+(`AODRoadManager`-with-route-graph) levels only. Tail of the Dragon has no
+graph, so the key is a no-op there.
+
+- **Road graph sidecar (new):** `pipeline/export_road_centerline_bin.py`
+  writes a third file, `routegraph_<AREA>_test.bin`.
+  - Format: `ODG1`, then u32 N and N×(f32 x_cm, y_cm), then u32 E and
+    E×(u32 a, u32 b, f32 len_cm). Edges are undirected.
+  - It is already stage 11 of `rebuild_area.py`, so rebakes regenerate it.
+  - The existing ODC1/ODM1 outputs are byte-identical to before (md5
+    unchanged).
+  - `road_stations.json` has no junction topology, so `build_route_graph()`
+    rebuilds it by proximity:
+    - (a) Segment end → nearest station of each other segment, ≤12 m and
+      |dz| ≤12 m. Motorway_link ends sit 5-10 m off the motorway.
+    - (b) Interior crossings ≤4 m, |dz| ≤2.5 m, neither station a real OSM
+      bridge/tunnel (`is_struct`/`is_tunnel`). Not `is_bridge`, which flags
+      49 % of stations.
+    - (c) End↔end ≤30 m, |dz| ≤3 m, to cover junction pullback.
+    - (d) A Kruskal-style bridge: the shortest end↔end pair ≤60 m, added
+      only when it joins two still-separate pieces. Silverthorne was an
+      island until this.
+  - Nodes are every 4th station (~20 m) plus segment ends and link
+    stations. summit_county: 72 617 nodes, 74 872 edges, 1.48 MB.
+  - Largest component = 93.2 % of nodes. 27/29 towns sit on it; Blue River
+    and Jefferson do not.
+- **Runtime (`AODRoadManager`):**
+  - `LoadRouteGraph` derives the path from `CenterlineFilePrefix`
+    (`centerline_` → `routegraph_`) and builds CSR adjacency.
+  - `FindRoutePath` is A* with a Euclidean heuristic.
+  - `SetRouteDestination` / `ClearRoute` / `SnapToRouteGraph` /
+    `GetNextTurn`.
+  - `Tick` runs `UpdateRouteProgress`:
+    - Windowed nearest-segment progress and remaining distance.
+    - Reroutes when more than 50 m off the line, with a 2 s cooldown.
+    - Arrival at 30 m clears the route and shows a 4 s "ARRIVED" toast.
+  - Turns: a route node with graph degree ≥3 whose heading 25 m before vs
+    25 m after bends ≥35°. Turns within 30 m merge.
+    - Wording: "Keep" <60°, "Turn" <120°, "Sharp" ≥120°.
+  - `ponytail:` nearest-node lookup is a brute-force O(N) scan. It runs only
+    on a pick or a throttled reroute.
+- **HUD (`AODRaceHUD`):**
+  - `DrawStageMap` draws the route as a magenta line plus a destination dot
+    on the mini-map, the pause map and the world map.
+  - It takes an optional view-center override.
+  - The terrain texture now draws only where the view overlaps the texture.
+    Before, `WorldToUV` clamping stretched the edge texels whenever the view
+    extended past the texture.
+  - New `DrawWorldMap`, `DrawNavPanel` (top-center arrow + "Turn right in
+    0.3 mi" + destination · remaining mi/ft), `Open/CloseWorldMap`.
+- **Pause menu:** new row 1 "World Map" (rows renumbered, 9 total).
+  Escape/P close the world map first.
+- **Input (§7.32 layer):** new rebindable actions `WorldMap` (Tab / gamepad
+  Back = `Gamepad_Special_Left`) and `ClearRoute` (Backspace). Backspace was
+  added to the rebind capture list.
+- **Main menu:** `TravelToTown()` is public; it wraps `StartAt`, so fast
+  travel uses the same teleport + loading screen. `SetCursorVisible` is now
+  public.
+
+**Controls (world map).** Opening pauses the game and shows the cursor;
+closing unpauses.
+
+| Action | Keyboard / mouse | Gamepad |
+|---|---|---|
+| Open / close | Tab (rebindable), or pause → World Map | Back (rebindable) |
+| Close | Esc / P | B |
+| Pan | Drag, or arrows / WASD | Left stick / d-pad |
+| Zoom | Wheel (about the cursor), `[` `]` | LB / RB |
+| Route to town / road waypoint | Left-click (snaps to the nearest graph node) | — |
+| Route to crosshair | Enter | A |
+| Clear route | Right-click, or Backspace (anytime, rebindable) | X |
+| Fast travel to hovered town | F | Y |
+
+**Verification (backend only; the game was not run).**
+- `scratchpad/nav/verify_route_graph.py` → `routes_summit_county.log` and
+  `.png`. It loads the same ODG1/ODL1/ODC1/ODM1 sidecars and mirrors
+  FindRoutePath, the turn loop and UpdateRouteProgress. **ALL CHECKS
+  PASSED.**
+- Each of the 8 town pairs checks: connected, A* length equals scipy
+  Dijkstra, length ≥ straight line, endpoints within 50 m.
+
+| Route | Length | Straight line | Nodes | Turns |
+|---|---|---|---|---|
+| Frisco→Breckenridge | 17.23 km | 11.51 km | 929 | 12 |
+| Frisco→Vail | 51.69 km | 27.34 km | 2664 | 7 |
+| Dillon→Keystone | 10.24 km | 5.88 km | 540 | 4 |
+| Silverthorne→Copper Mountain | 22.60 km | 18.04 km | 1203 | 8 |
+| Breckenridge→Vail | 68.50 km | 36.15 km | 3566 | 18 |
+| Keystone→Breckenridge | 22.26 km | 15.05 km | 1160 | 13 |
+| Silverthorne→Frisco | 10.66 km | 7.65 km | 605 | 10 |
+| Vail→Keystone | 68.44 km | 36.80 km | 3545 | 13 |
+
+- Drive simulation along Frisco→Breckenridge:
+  - Remaining distance falls monotonically and arrival fires.
+  - A stray point 97 m off the line trips the reroute. The new route from
+    there is 9.03 km to the same destination.
+- Build: headless `Build.bat OpenDriveUEEditor Win64 Development`,
+  `Result: Succeeded` (`scratchpad/nav/build.log`). All six touched .cpp
+  files have objects newer than their sources.
+
+**Needs Taylor live.**
+- **World map:** check that the controls feel right, especially
+  drag-vs-click, wheel zoom while paused, and the gamepad mapping.
+- **Turn prompts and false positives:** make sure prompts fire at real
+  intersections. Complex interchanges and roundabouts may produce odd
+  "Sharp" prompts.
+- **Reroute:** the 50 m / 2 s thresholds.
+- **Fast travel:** make sure it lands cleanly.
+
+**Known limits.**
+- One-way restrictions are ignored, so routes may go the wrong way down
+  divided-highway carriageways and ramps.
+- Grade-separated crossings are only kept apart by the elevation and
+  structure gates.
+- Blue River and Jefferson (and some small pieces) are not on the main
+  graph component. Picking them shows "no road route to there".

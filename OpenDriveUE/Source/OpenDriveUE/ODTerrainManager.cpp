@@ -178,6 +178,18 @@ static constexpr float BiomeBlendRadiusCm = FBiomeSpatialHash::CellSizeCm * 1.5f
 // so distant background terrain reads as consistent forest-floor green
 // instead of inheriting whatever's nearest along a road that may be km away.
 static constexpr float FarBiomeFallbackCm = 100000.0f; // 1 km
+// (2026-09-25, V1: classify_biomes.py now also samples a 300 m grid over the
+// whole terrain bbox, so this fallback only covers tile-edge query-box gaps.)
+
+// V2 aspect/moisture tint modulation (sec 7.35) - palette is a first pass,
+// needs Taylor's live eyes. Strengths are the blend at |Northness|=1 /
+// Moisture=1; real samples mostly sit well inside that (see the sec 7.35
+// histograms).
+static const FLinearColor DrySlopeTint(0.30f, 0.27f, 0.13f);   // dry grass/sage
+static constexpr float AspectDryStrength = 0.45f;
+static constexpr float AspectShadeStrength = 0.30f;
+static const FLinearColor MoistMeadowTint(0.09f, 0.22f, 0.06f); // wet meadow green
+static constexpr float MoistureStrength = 0.40f;
 
 namespace
 {
@@ -207,31 +219,8 @@ const FBiomeGroundTint BiomeGroundTintTable[] = {
 static_assert(UE_ARRAY_COUNT(BiomeGroundTintTable) == (uint8)EODBiome::RockyFoothill + 1,
 	"BiomeGroundTintTable must have one entry per EODBiome value, in enum order");
 
-/** Integer-lattice value noise, smoothstep-interpolated - a pure function of
- *  (X, Y, Seed), no engine RNG state, so two threads (or two runs) tinting
- *  the same vertex always agree. Deliberately NOT Perlin/Simplex - this only
- *  needs cheap large-scale patchiness, not gradient-continuity guarantees. */
-float HashLattice(int32 X, int32 Y, int32 Seed)
-{
-	uint32 H = (uint32)X * 374761393u + (uint32)Y * 668265263u + (uint32)Seed * 2246822519u;
-	H = (H ^ (H >> 13)) * 1274126177u;
-	H ^= H >> 16;
-	return (float)(H & 0x00FFFFFFu) / (float)0x00FFFFFFu; // [0,1]
-}
-
-float ValueNoise2D(float X, float Y, float ScaleCm, int32 Seed)
-{
-	const float Gx = X / ScaleCm, Gy = Y / ScaleCm;
-	const int32 Ix = FMath::FloorToInt(Gx), Iy = FMath::FloorToInt(Gy);
-	const float Fx = Gx - Ix, Fy = Gy - Iy;
-	const float V00 = HashLattice(Ix, Iy, Seed);
-	const float V10 = HashLattice(Ix + 1, Iy, Seed);
-	const float V01 = HashLattice(Ix, Iy + 1, Seed);
-	const float V11 = HashLattice(Ix + 1, Iy + 1, Seed);
-	const float Sx = Fx * Fx * (3.0f - 2.0f * Fx);
-	const float Sy = Fy * Fy * (3.0f - 2.0f * Fy);
-	return FMath::Lerp(FMath::Lerp(V00, V10, Sx), FMath::Lerp(V01, V11, Sx), Sy);
-}
+// HashLattice/ValueNoise2D moved to ODBinSidecarUtil.h (2026-09-25) -
+// AODForestManager's V5 aspen mask reuses the same noise.
 }
 
 AODTerrainManager::AODTerrainManager()
@@ -383,19 +372,23 @@ bool AODTerrainManager::ParseBiomeSidecarFile(const FString& Path, TArray<FBiome
 	// export_biome_bin.py, the SAME format/file AODForestManager::
 	// LoadBiomePoints reads (see that function). No generation-id field in
 	// this header (unlike ODS1/ODT1) - export_biome_bin.py never added one.
+	// 'ODB2' (2026-09-25, sec 7.35 V2) appends uint8 Northness255, uint8
+	// Moisture255, uint16 ElevM to each record; ODB1 still parses (neutral
+	// defaults).
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || Bin[3] != '1')
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
 		return false;
 	}
+	const bool bV2 = Bin[3] == '2';
 	const int32 N = (int32)ReadU32LE(Bin.GetData() + 4);
-	constexpr int32 RecordBytes = 4 + 4 + 1 + 1; // X_cm, Y_cm, Biome, ForestWeight255
+	const int32 RecordBytes = bV2 ? 14 : 10; // X_cm, Y_cm, Biome, ForestWeight255 [, Northness255, Moisture255, ElevM]
 	if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
 	{
 		return false;
 	}
-	OutPoints.SetNumUninitialized(N);
+	OutPoints.SetNum(N); // not Uninitialized - ODB1 relies on the V2 field defaults
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
@@ -404,6 +397,11 @@ bool AODTerrainManager::ParseBiomeSidecarFile(const FString& Path, TArray<FBiome
 		OutPoints[i].Biome = P[8];
 		// P[9] (ForestWeight255) is AODForestManager's own scatter-density
 		// signal - not read here, this manager only wants the biome id.
+		if (bV2)
+		{
+			OutPoints[i].Northness = P[10] / 127.5f - 1.0f;
+			OutPoints[i].Moisture = P[11] / 255.0f;
+		}
 	}
 	return true;
 }
@@ -1060,13 +1058,15 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 		// BlendAt()'s own species-weight blend, just over ground-color
 		// entries instead. ----
 		FLinearColor GroundTint = BiomeGroundTintTable[(uint8)EODBiome::DeciduousForest].Tint;
+		float Northness = 0.0f, Moisture = 0.0f; // V2 drivers, neutral when no data
 		if (BiomeCandidates.Num() > 0)
 		{
 			const FVector2D Here(X, Y);
 			float WeightSum = 0.0f;
 			FLinearColor Acc(0.0f, 0.0f, 0.0f, 0.0f);
+			float NorthAcc = 0.0f, MoistAcc = 0.0f;
 			float BestD2 = TNumericLimits<float>::Max();
-			uint8 NearestBiome = BiomeHash.Points[BiomeCandidates[0]].Biome;
+			const FBiomeSample* Nearest = &BiomeHash.Points[BiomeCandidates[0]];
 			for (int32 Idx : BiomeCandidates)
 			{
 				const FBiomeSample& Pt = BiomeHash.Points[Idx];
@@ -1074,7 +1074,7 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 				if (D2 < BestD2)
 				{
 					BestD2 = D2;
-					NearestBiome = Pt.Biome;
+					Nearest = &Pt;
 				}
 				if (D2 > BiomeRadiusSq)
 				{
@@ -1082,11 +1082,16 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 				}
 				const float W = 1.0f / FMath::Max(1.0f, D2);
 				Acc += BiomeGroundTintTable[Pt.Biome].Tint * W;
+				NorthAcc += Pt.Northness * W;
+				MoistAcc += Pt.Moisture * W;
 				WeightSum += W;
 			}
+			const uint8 NearestBiome = Nearest->Biome;
 			if (WeightSum > 0.0f)
 			{
 				GroundTint = Acc / WeightSum;
+				Northness = NorthAcc / WeightSum;
+				Moisture = MoistAcc / WeightSum;
 			}
 			else if (BestD2 <= FarBiomeFallbackCm * FarBiomeFallbackCm)
 			{
@@ -1096,6 +1101,8 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 				// fallback BlendAt() uses rather than silently reverting to a
 				// fixed default biome.
 				GroundTint = BiomeGroundTintTable[NearestBiome].Tint;
+				Northness = Nearest->Northness;
+				Moisture = Nearest->Moisture;
 			}
 			// else: nearest sample is beyond FarBiomeFallbackCm (this vertex
 			// is background terrain far from any road) - keep the
@@ -1104,6 +1111,15 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 			// biome (see FarBiomeFallbackCm's comment above).
 			SeenBiomes.Add(NearestBiome);
 		}
+
+		// ---- ASPECT + MOISTURE (V2, sec 7.35): within-biome variation on
+		// top of the biome base color. South-facing -> sun-baked dry grass/
+		// sage; north-facing -> darker (denser, shaded canopy); valley
+		// bottoms -> lusher meadow green. ----
+		const float South = FMath::Max(0.0f, -Northness);
+		GroundTint = FMath::Lerp(GroundTint, DrySlopeTint, South * AspectDryStrength);
+		GroundTint *= 1.0f - FMath::Max(0.0f, Northness) * AspectShadeStrength;
+		GroundTint = FMath::Lerp(GroundTint, MoistMeadowTint, Moisture * MoistureStrength);
 
 		// ---- ELEVATION: subtle shift, richer/darker low, greyer/rockier
 		// high - smoothstep across the bands so there's no visible seam. ----

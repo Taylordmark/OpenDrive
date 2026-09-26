@@ -30,6 +30,34 @@ inline float ReadF32LE(const uint8* P)
 	return V;
 }
 
+/** Integer-lattice value noise, smoothstep-interpolated - a pure function of
+ *  (X, Y, Seed), no engine RNG state, so two threads (or two runs) tinting
+ *  the same vertex always agree. Deliberately NOT Perlin/Simplex - this only
+ *  needs cheap large-scale patchiness, not gradient-continuity guarantees.
+ *  Moved here from ODTerrainManager.cpp (2026-09-25) so AODForestManager's
+ *  aspen-patch mask shares it - same inline/ODR reasoning as ReadU32LE. */
+inline float HashLattice(int32 X, int32 Y, int32 Seed)
+{
+	uint32 H = (uint32)X * 374761393u + (uint32)Y * 668265263u + (uint32)Seed * 2246822519u;
+	H = (H ^ (H >> 13)) * 1274126177u;
+	H ^= H >> 16;
+	return (float)(H & 0x00FFFFFFu) / (float)0x00FFFFFFu; // [0,1]
+}
+
+inline float ValueNoise2D(float X, float Y, float ScaleCm, int32 Seed)
+{
+	const float Gx = X / ScaleCm, Gy = Y / ScaleCm;
+	const int32 Ix = FMath::FloorToInt(Gx), Iy = FMath::FloorToInt(Gy);
+	const float Fx = Gx - Ix, Fy = Gy - Iy;
+	const float V00 = HashLattice(Ix, Iy, Seed);
+	const float V10 = HashLattice(Ix + 1, Iy, Seed);
+	const float V01 = HashLattice(Ix, Iy + 1, Seed);
+	const float V11 = HashLattice(Ix + 1, Iy + 1, Seed);
+	const float Sx = Fx * Fx * (3.0f - 2.0f * Fx);
+	const float Sy = Fy * Fy * (3.0f - 2.0f * Fy);
+	return FMath::Lerp(FMath::Lerp(V00, V10, Sx), FMath::Lerp(V01, V11, Sx), Sy);
+}
+
 /** Fixed-width ASCII-hex generation-id field every sidecar header now
  *  carries immediately after its magic (pipeline/generation_id.py,
  *  2026-08-21, AUDIT-RELIABILITY.md SS3.1/SS5.1) - a short hash of

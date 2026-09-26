@@ -1,0 +1,9 @@
+V4: AerialPespectiveViewDistanceScale 1.0 -> 0.8 (all other SkyAtmosphere params unchanged: Rayleigh 0.028, Mie 0.009, MieAnisotropy 0.82, APStartDepth 0.07 km)
+extinction per km RGB = [0.01435, 0.02091, 0.03744]
+  d= 1 km  veil(1-T) RGB before=[0.013, 0.019, 0.034] after=[0.01, 0.015, 0.027]  blue-veil change=-21.2%
+  d= 2 km  veil(1-T) RGB before=[0.027, 0.04, 0.07] after=[0.022, 0.031, 0.056]  blue-veil change=-20.1%
+  d= 5 km  veil(1-T) RGB before=[0.068, 0.098, 0.169] after=[0.055, 0.079, 0.137]  blue-veil change=-18.8%
+  d=10 km  veil(1-T) RGB before=[0.133, 0.188, 0.311] after=[0.108, 0.153, 0.257]  blue-veil change=-17.3%
+  d=15 km  veil(1-T) RGB before=[0.193, 0.268, 0.428] after=[0.157, 0.221, 0.36]  blue-veil change=-15.9%
+  d=20 km  veil(1-T) RGB before=[0.249, 0.341, 0.526] after=[0.204, 0.283, 0.449]  blue-veil change=-14.6%
+  d=30 km  veil(1-T) RGB before=[0.349, 0.465, 0.674] after=[0.291, 0.394, 0.592]  blue-veil change=-12.2%

@@ -1,0 +1,15 @@
+ODB1 neutrality: VarietyRecipe(N=0,M=0,E=0) == BiomeRecipeTable for all rows, mask 0 and 1: OK
+forest tiles containing a road station: 13887
+aspen noise mask > 0: 42.4% of tiles, == 1: 19.8%
+tiles with aspen share >= 20%: 31.9%; >= 40%: 12.1%; baseline aspen share (Evergreen table row) = 8%
+TreeDensityScale across tiles: p10 0.47 p50 0.82 p90 0.99 (Evergreen table = 1.0)
+
+elev band      n    AspenA(Blo  Spruce(Oli  LodgepoleA  AspenB(Scr  Krummholz(  SubalpFir(  LodgepoleB   treeDens
+2400-2800   4416        0.11        0.05        0.61        0.11        0.01        0.00        0.10   0.73
+2800-2950   2935        0.12        0.07        0.68        0.07        0.00        0.00        0.05   0.81
+2950-3100   2502        0.10        0.15        0.56        0.06        0.01        0.07        0.05   0.83
+3100-3200   1287        0.09        0.38        0.18        0.05        0.02        0.25        0.03   0.82
+3200-3350   1249        0.07        0.44        0.11        0.04        0.02        0.28        0.04   0.80
+3350-3450    719        0.05        0.40        0.11        0.02        0.11        0.26        0.04   0.75
+3450-3550    244        0.05        0.23        0.09        0.02        0.41        0.16        0.03   0.44
+3550-3700     55        0.06        0.17        0.11        0.03        0.49        0.10        0.05   0.29

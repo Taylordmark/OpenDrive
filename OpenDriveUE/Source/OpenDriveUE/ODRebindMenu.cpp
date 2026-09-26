@@ -61,7 +61,7 @@ const FKey KeyboardCandidates[] = {
 	EKeys::Semicolon, EKeys::Quote, EKeys::Comma, EKeys::Period,
 	EKeys::LeftBracket, EKeys::RightBracket, EKeys::Hyphen, EKeys::Equals,
 	EKeys::Tilde, EKeys::Insert, EKeys::Delete, EKeys::Home, EKeys::End,
-	EKeys::PageUp, EKeys::PageDown,
+	EKeys::PageUp, EKeys::PageDown, EKeys::BackSpace,
 	EKeys::F1, EKeys::F2, EKeys::F3, EKeys::F4, EKeys::F5, EKeys::F6,
 	EKeys::F7, EKeys::F8, EKeys::F9, EKeys::F10, EKeys::F11, EKeys::F12,
 	EKeys::LeftMouseButton, EKeys::RightMouseButton, EKeys::MiddleMouseButton,

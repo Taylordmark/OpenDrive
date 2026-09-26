@@ -53,7 +53,9 @@ enum class EODInputAction : uint8
 	ToggleMap,
 	ZoomMapIn,
 	ZoomMapOut,
-	Count   // sentinel, not a real action
+	WorldMap,     // SS7.37 full-screen world map + navigation
+	ClearRoute,
+	Count  // sentinel, not a real action
 };
 
 struct FODInputBinding

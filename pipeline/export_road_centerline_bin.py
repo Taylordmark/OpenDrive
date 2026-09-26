@@ -33,6 +33,29 @@ points instead of one every 5 m, and (b) inserting a NaN sentinel point
 between segments that AODRoadManager/DrawStageMap must skip past rather
 than draw through - never generated from a flattened array, always from
 each segment's own point list, so it can't reintroduce the bug.
+
+ALSO writes a third, navigation-only sidecar (2026-09-25, Arc 4.2 v3 world
+map + navigation, next steps.md SS7.37):
+    OpenDriveUE/Content/OpenDrive/Masks/routegraph_<AREA_NAME>_test.bin
+    'ODG1' + uint32 N + N * (float32 X_cm, float32 Y_cm)
+           + uint32 E + E * (uint32 a, uint32 b, float32 len_cm)   (undirected)
+road_stations.json has no junction topology: segments only break at OSM
+way-END nodes of degree>=3 (merge_way_chains), so a side street whose end
+lands on the INTERIOR of a through-road, or two through-ways crossing at a
+shared interior node, share no explicit node here. build_route_graph()
+recovers that by proximity: nodes are every ROUTE_STRIDE-th station (plus
+segment ends and any station a link lands on); along-segment edges carry
+the real arc length; link edges join (a) each segment end to the nearest
+station of every other segment within ROUTE_ENDPOINT_JOIN_M, and (b) any two
+interior stations of different segments within ROUTE_CROSS_JOIN_M, (c) two
+segment ends within ROUTE_END_END_JOIN_M (junction pullback), (d) the
+shortest end-end pair within ROUTE_BRIDGE_JOIN_M that joins two still-separate
+pieces (Kruskal-style) - all
+gated on elevation (and, for (b)-(d), neither being a bridge/tunnel/structure)
+so a grade-separated overpass never becomes a fake intersection. Oneway is
+ignored (known limitation - see SS7.37). AODRoadManager loads this at
+BeginPlay (path derived from CenterlineFilePrefix, centerline_ -> routegraph_)
+and runs A* on it; scratchpad/nav/verify_route_graph.py is the Python mirror.
 """
 
 import json
@@ -51,6 +74,23 @@ OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 # not a driving surface, so an aggressive tolerance is fine (matches the
 # project's existing stylized/low-poly art direction elsewhere). 30 m.
 MAP_SIMPLIFY_TOLERANCE_CM = 3000.0
+
+# Route graph (see module docstring). Stride 4 = ~20 m node spacing - plenty
+# for a map route line and turn detection, ~4x fewer nodes for A*.
+ROUTE_STRIDE = 4
+ROUTE_ENDPOINT_JOIN_M = 12.0   # segment ends sit 3-10 m off the road they join
+ROUTE_ENDPOINT_DZ_M = 12.0     # motorway_link ends disagree with the motorway by 5-10 m
+ROUTE_CROSS_JOIN_M = 4.0       # stations are <=5 m apart, so a real shared node is <~3.5 m
+ROUTE_CROSS_DZ_M = 2.5
+# segment ends pulled back from a junction (e.g. Silverthorne exit 205:
+# Blue River Pkwy / US 6 ends sit 14-30 m apart) - end-to-end only, so a
+# 30 m radius can't snag a random interior station of a passing road
+ROUTE_END_END_JOIN_M = 30.0
+ROUTE_END_END_DZ_M = 3.0
+# last resort, Kruskal-style: an end-end pair up to this far apart is added
+# ONLY when it joins two still-disconnected pieces (road filtering drops some
+# short interchange connectors, leaving e.g. Silverthorne an island)
+ROUTE_BRIDGE_JOIN_M = 60.0
 
 
 def simplify_rdp(points, epsilon):
@@ -86,6 +126,104 @@ def simplify_rdp(points, epsilon):
             stack.append((i0, mid))
             stack.append((mid, i1))
     return points[keep]
+
+
+def build_route_graph(segments):
+    """-> (nodes_cm Nx2 float64, edges list of (a, b, len_cm)). See the
+    module docstring for the node/link rules."""
+    from scipy.spatial import cKDTree
+
+    xy, z, seg_id, s_m, structural, ends = [], [], [], [], [], []
+    off = 0
+    for k, seg in enumerate(segments):
+        n = len(seg["east_m"])
+        xy.append(np.stack([seg["east_m"], seg["north_m"]], axis=1))
+        z.extend(seg["elev_m"])
+        s_m.extend(seg["s_m"])
+        seg_id.extend([k] * n)
+        # is_struct (real OSM bridge/tunnel ways), NOT is_bridge - that one
+        # flags ~49% of summit_county stations (see build_road_stations.py)
+        structural.extend(bool(a or b) for a, b in zip(seg["is_struct"], seg["is_tunnel"]))
+        if n >= 2:
+            ends.extend([off, off + n - 1])
+        off += n
+    xy = np.concatenate(xy)
+    z, s_m, seg_id = np.array(z), np.array(s_m), np.array(seg_id)
+    structural = np.array(structural)
+    starts = np.concatenate([[0], np.flatnonzero(seg_id[1:] != seg_id[:-1]) + 1])
+    local = np.arange(len(xy)) - np.repeat(starts, np.diff(np.append(starts, len(xy))))
+    is_last = np.append(seg_id[1:] != seg_id[:-1], True)
+    keep = (local % ROUTE_STRIDE == 0) | is_last
+
+    tree = cKDTree(xy)
+    links = set()
+    for e in ends:
+        best = {}   # other segment -> (dist, station)
+        for j in tree.query_ball_point(xy[e], ROUTE_ENDPOINT_JOIN_M):
+            if seg_id[j] == seg_id[e] or abs(z[j] - z[e]) > ROUTE_ENDPOINT_DZ_M:
+                continue
+            d = float(np.hypot(*(xy[j] - xy[e])))
+            if seg_id[j] not in best or d < best[seg_id[j]][0]:
+                best[seg_id[j]] = (d, j)
+        for _, j in best.values():
+            links.add((min(e, j), max(e, j)))
+    ends_arr = np.array(ends)
+    etree = cKDTree(xy[ends_arr])
+    for a, b in etree.query_pairs(ROUTE_END_END_JOIN_M, output_type="ndarray"):
+        a, b = ends_arr[a], ends_arr[b]
+        if (seg_id[a] != seg_id[b] and not structural[a] and not structural[b]
+                and abs(z[a] - z[b]) <= ROUTE_END_END_DZ_M):
+            links.add((min(a, b), max(a, b)))
+    for a, b in tree.query_pairs(ROUTE_CROSS_JOIN_M, output_type="ndarray"):
+        if (seg_id[a] != seg_id[b] and not structural[a] and not structural[b]
+                and abs(z[a] - z[b]) <= ROUTE_CROSS_DZ_M):
+            links.add((min(a, b), max(a, b)))
+    # (d) bridge still-separate pieces: union-find over segments (each segment
+    # is internally connected), shortest candidate first
+    parent = list(range(len(segments)))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for a, b in links:
+        parent[find(seg_id[a])] = find(seg_id[b])
+    cands = []
+    for a, b in etree.query_pairs(ROUTE_BRIDGE_JOIN_M, output_type="ndarray"):
+        a, b = ends_arr[a], ends_arr[b]
+        if (not structural[a] and not structural[b]
+                and abs(z[a] - z[b]) <= ROUTE_END_END_DZ_M):
+            cands.append((float(np.hypot(*(xy[a] - xy[b]))), a, b))
+    for _, a, b in sorted(cands):
+        ra, rb = find(seg_id[a]), find(seg_id[b])
+        if ra != rb:
+            parent[ra] = rb
+            links.add((min(a, b), max(a, b)))
+    for a, b in links:
+        keep[a] = keep[b] = True
+
+    kept = np.flatnonzero(keep)
+    node_of = np.full(len(xy), -1, dtype=np.int64)
+    node_of[kept] = np.arange(len(kept))
+    edges = []
+    for i0, i1 in zip(kept[:-1], kept[1:]):
+        if seg_id[i0] == seg_id[i1]:
+            edges.append((int(node_of[i0]), int(node_of[i1]),
+                          max(float(s_m[i1] - s_m[i0]) * 100.0, 1.0)))
+    for a, b in sorted(links):
+        edges.append((int(node_of[a]), int(node_of[b]),
+                      max(float(np.hypot(*(xy[a] - xy[b]))) * 100.0, 1.0)))
+    nodes_cm = np.stack([xy[kept, 0] * 100.0, -xy[kept, 1] * 100.0], axis=1)
+    return nodes_cm, edges
+
+
+def write_route_graph(path, nodes_cm, edges):
+    with open(path, "wb") as f:
+        f.write(b"ODG1")
+        f.write(struct.pack("<I", len(nodes_cm)))
+        f.write(np.asarray(nodes_cm, dtype="<f4").tobytes())
+        f.write(struct.pack("<I", len(edges)))
+        f.write(np.array(edges, dtype=[("a", "<u4"), ("b", "<u4"), ("l", "<f4")]).tobytes())
 
 
 def main():
@@ -129,6 +267,11 @@ def main():
     print(f"wrote {map_out_path} ({len(map_points)} points incl. breaks, "
           f"simplified from {total_raw} raw stations across "
           f"{len(data['segments'])} segment(s), {8 + len(map_points) * 8} bytes)")
+
+    nodes_cm, edges = build_route_graph(data["segments"])
+    graph_path = OUT_DIR / f"routegraph_{AREA_NAME}_test.bin"
+    write_route_graph(graph_path, nodes_cm, edges)
+    print(f"wrote {graph_path} ({len(nodes_cm)} nodes, {len(edges)} edges)")
 
 
 if __name__ == "__main__":

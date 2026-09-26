@@ -125,6 +125,13 @@ public:
 	 *  map-select, and there's no re-teleport/loading screen involved. */
 	void OpenGarage();
 
+	/** World-map fast travel (SS7.37): the same teleport + Loading-screen path
+	 *  as picking a town on the front-end map. */
+	void TravelToTown(int32 TownIdx) { StartAt(TownIdx); }
+
+	/** Cursor + input mode for a menu/map (also used by AODRaceHUD's world map). */
+	void SetCursorVisible(bool bVisible);
+
 private:
 	// input
 	void Up();
@@ -161,7 +168,6 @@ private:
 	UODVehicleMovement* FindMovement() const;
 	int32 NumCars() const;
 	int32 NumPresets() const;
-	void SetCursorVisible(bool bVisible);
 
 	// spawned lazily on first use (see EnsureGarageEnvironment()) - not from
 	// BeginPlay, to avoid racing pawn/level discovery at boot.

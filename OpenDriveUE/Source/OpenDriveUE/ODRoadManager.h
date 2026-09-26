@@ -327,12 +327,61 @@ public:
 		OutTotal = Tiles.Num() + PendingTiles.Num();
 	}
 
+	// ---- Arc 4.2 v3 navigation (next steps.md SS7.37) ----
+	// Road graph = routegraph_<area>_test.bin (ODG1, pipeline/
+	// export_road_centerline_bin.py's build_route_graph), path derived from
+	// CenterlineFilePrefix (centerline_ -> routegraph_). A* over it from the
+	// player's nearest graph node; scratchpad/nav/verify_route_graph.py is the
+	// Python mirror of FindRoutePath/BuildRouteTurns - keep in sync.
+
+	bool HasRouteGraph() const { return RouteNodes.Num() > 0; }
+	/** Nearest route-graph node to Query (the "snap waypoint to road" step). */
+	bool SnapToRouteGraph(const FVector2D& Query, FVector2D& OutPoint) const;
+	/** Routes from the player to Dest (snapped to the graph). False (and the
+	 *  old route is kept) if there's no graph/player or Dest is unreachable. */
+	bool SetRouteDestination(const FVector2D& Dest, const FString& Name);
+	void ClearRoute();
+	bool HasRoute() const { return RoutePts.Num() >= 2; }
+	const TArray<FVector2D>& GetRoutePoints() const { return RoutePts; }
+	const FString& GetRouteName() const { return RouteName; }
+	float GetRouteRemainingCm() const { return RouteRemainingCm; }
+	/** Next junction turn ahead: distance (cm) and signed angle (deg, + = right).
+	 *  False if the rest of the route is straight-through. */
+	bool GetNextTurn(float& OutDistCm, float& OutAngleDeg) const;
+	/** World time of the last arrival (route auto-clears on arrival), <0 = never. */
+	double GetArrivedTime() const { return ArrivedTime; }
+	const FString& GetArrivedName() const { return ArrivedName; }
+
 private:
 	void LoadCenterline();
 	void LoadMapCenterline();
 	void LoadPlaceLabels();
 	void BuildTownNodes();
 	void UpdateCurrentLabels(const FVector& PlayerLoc);
+	void LoadRouteGraph();
+	int32 NearestRouteNode(const FVector2D& Q) const;
+	bool FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes) const;
+	bool RecomputeRoute(const FVector2D& From);
+	void UpdateRouteProgress(const FVector2D& PlayerXY);
+
+	// CSR adjacency (both directions per undirected ODG1 edge)
+	TArray<FVector2D> RouteNodes;
+	TArray<int32> RouteAdjStart;   // RouteNodes.Num()+1
+	TArray<int32> RouteAdjNode;
+	TArray<float> RouteAdjLen;     // cm
+
+	TArray<FVector2D> RoutePts;
+	TArray<float> RouteCum;        // arc length (cm) from RoutePts[0]
+	struct FRouteTurn { float Cum; float AngleDeg; };
+	TArray<FRouteTurn> RouteTurns;
+	FVector2D RouteDest = FVector2D::ZeroVector;
+	FString RouteName;
+	int32 RouteSeg = 0;            // RoutePts segment the player is on
+	float RouteProgressCm = 0.0f;
+	float RouteRemainingCm = 0.0f;
+	double LastRerouteTime = -100.0;
+	double ArrivedTime = -1.0;
+	FString ArrivedName;
 
 	TArray<FTownNode> TownNodes;
 

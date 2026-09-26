@@ -619,6 +619,11 @@ private:
 		FVector2D WorldXY;   // cm
 		EODBiome Biome = EODBiome::DeciduousForest;
 		float ForestWeight = 0.0f;
+		// ODB2 (2026-09-25, next steps.md sec 7.35 V2/V5) - neutral defaults
+		// for ODB1 files (ElevM 0 = below every species band = base recipe).
+		float Northness = 0.0f;   // +1 steep north-facing .. -1 steep south-facing
+		float Moisture = 0.0f;    // 1 valley bottom .. 0 >=150 m above it
+		float ElevM = 0.0f;       // absolute sample elevation (m)
 	};
 	TArray<FBiomePoint> BiomePoints;
 	bool bUsePointBiomes = false;

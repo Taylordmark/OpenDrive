@@ -11,6 +11,7 @@
 #include "ODCreditsMenu.h"
 #include "ODInputConfig.h"
 #include "ODMainMenu.h"
+#include "ODRaceHUD.h"
 #include "ODRebindMenu.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
@@ -135,6 +136,15 @@ void AODPauseMenu::RefreshPauseKeyBinding()
 
 void AODPauseMenu::Toggle()
 {
+	// world map (SS7.37) is its own full-screen layer - Escape closes it first
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+	{
+		if (AODRaceHUD* Hud = Cast<AODRaceHUD>(PC->GetHUD()); Hud && Hud->IsWorldMapOpen())
+		{
+			Hud->CloseWorldMap();
+			return;
+		}
+	}
 	// Settings/Credits back out one level first (Escape), same as any other
 	// modal-inside-a-modal convention - see this class's header comment.
 	// Rebind (Arc 4.1, SS7.32) is a further level under Settings: Escape
@@ -275,7 +285,17 @@ void AODPauseMenu::Activate()
 	{
 		Toggle();
 	}
-	else if (Selected == 3)               // Garage (car/engine/drivetrain/tuning, in place)
+	else if (Selected == 1)               // World Map (SS7.37)
+	{
+		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+		{
+			if (AODRaceHUD* Hud = Cast<AODRaceHUD>(PC->GetHUD()))
+			{
+				Hud->OpenWorldMap();      // hides this overlay, stays paused
+			}
+		}
+	}
+	else if (Selected == 4)               // Garage (car/engine/drivetrain/tuning, in place)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
@@ -283,17 +303,17 @@ void AODPauseMenu::Activate()
 			Main->OpenGarage();           // keeps the game paused; "Drive"/esc resumes here
 		}
 	}
-	else if (Selected == 4)               // Settings
+	else if (Selected == 5)               // Settings
 	{
 		EnsureSettingsMenu();
 		bSettingsOpen = true;
 	}
-	else if (Selected == 5)               // Credits
+	else if (Selected == 6)               // Credits
 	{
 		EnsureCreditsMenu();
 		bCreditsOpen = true;
 	}
-	else if (Selected == 6)               // Main Menu (car/location front-end)
+	else if (Selected == 7)               // Main Menu (car/location front-end)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
@@ -301,7 +321,7 @@ void AODPauseMenu::Activate()
 			Main->OpenMenu();             // keeps the game paused
 		}
 	}
-	else if (Selected == 7)               // Quit Game
+	else if (Selected == 8)               // Quit Game
 	{
 		UKismetSystemLibrary::QuitGame(this,
 			UGameplayStatics::GetPlayerController(this, 0),
@@ -333,7 +353,7 @@ void AODPauseMenu::Adjust(int32 Dir)
 	}
 	switch (Selected)
 	{
-	case 1:  // traction: High -> Low -> Off
+	case 2:  // traction: High -> Low -> Off
 		if (UODVehicleMovement* D = FindMovement())
 		{
 			D->TractionMode = (EODTractionMode)(((int32)D->TractionMode + Dir + 3) % 3);
@@ -341,7 +361,7 @@ void AODPauseMenu::Adjust(int32 Dir)
 				UODVehicleMovement::TractionModeName(D->TractionMode));
 		}
 		break;
-	case 2:  // ABS on/off
+	case 3:  // ABS on/off
 		if (UODVehicleMovement* D = FindMovement())
 		{
 			D->bAbsEnabled = !D->bAbsEnabled;
@@ -383,6 +403,10 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	case 1:
+		OutLabel = TEXT("World Map");
+		OutValue.Empty();
+		break;
+	case 2:
 		OutLabel = TEXT("Traction");
 		OutValue = TEXT("?");
 		if (const UODVehicleMovement* D = FindMovement())
@@ -390,7 +414,7 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 			OutValue = UODVehicleMovement::TractionModeName(D->TractionMode);
 		}
 		break;
-	case 2:
+	case 3:
 		OutLabel = TEXT("ABS");
 		OutValue = TEXT("?");
 		if (const UODVehicleMovement* D = FindMovement())
@@ -398,23 +422,23 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 			OutValue = D->bAbsEnabled ? TEXT("On") : TEXT("Off");
 		}
 		break;
-	case 3:
+	case 4:
 		OutLabel = TEXT("Garage");
 		OutValue.Empty();
 		break;
-	case 4:
+	case 5:
 		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
-	case 5:
+	case 6:
 		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
-	case 6:
+	case 7:
 		OutLabel = TEXT("Main Menu");
 		OutValue.Empty();
 		break;
-	case 7:
+	case 8:
 		OutLabel = TEXT("Quit Game");
 		OutValue.Empty();
 		break;

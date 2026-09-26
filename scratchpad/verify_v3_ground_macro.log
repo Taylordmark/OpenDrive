@@ -1,0 +1,19 @@
+area=summit_county grid=(501, 621) 100 m, valid=125971, flat(flat_w>0.5)=116559, far(>3km)=115328
+texture linear means: grass=[0.059, 0.1073, 0.022], forest=[0.1652, 0.1082, 0.0261], dirt=[0.32, 0.2948, 0.1025], rock=[0.0811, 0.0755, 0.0633], scree=[0.2689, 0.2571, 0.2567]
+V3 constants: MACRO_NOISE_SCALE_CM=12000.0, MACRO_FINE_SCALE_CM=30000.0, MACRO_COARSE_SCALE_CM=120000.0, MACRO_COARSE_WEIGHT=0.6, MACRO_CONTRAST=2.2, MACRO_GREEN_MUL=(0.75, 1.1, 0.7), MACRO_DRY_MUL=(1.1, 1.0, 0.8), MACRO_DIRT_MUL=(0.75, 0.62, 0.5), FAR_START_CM=150000.0, FAR_END_CM=800000.0, FAR_DARKEN=0.25, FAR_SAT_BOOST=0.25
+[all flat, macro only, depth=0] before: hue_circ_std_deg=9.5483 sat_mean=0.3526 sat_std=0.0917 val_mean=0.3042 val_std=0.0448 min_lin=0.0075
+[all flat, macro only, depth=0] after : hue_circ_std_deg=11.1740 sat_mean=0.4048 sat_std=0.1153 val_mean=0.2965 val_std=0.0495 min_lin=0.0041
+[all flat] before: hue_circ_std_deg=9.5483 sat_mean=0.3526 sat_std=0.0917 val_mean=0.3042 val_std=0.0448 min_lin=0.0075
+[all flat] after : hue_circ_std_deg=10.5939 sat_mean=0.5229 sat_std=0.1933 val_mean=0.2717 val_std=0.0521 min_lin=0.0010
+[all flat] mean albedo sRGB8 before=[74.0, 78.0, 53.0] after=[67.0, 70.0, 40.0]
+[far flat >3km] before: hue_circ_std_deg=9.5661 sat_mean=0.3524 sat_std=0.0919 val_mean=0.3043 val_std=0.0449 min_lin=0.0075
+[far flat >3km] after : hue_circ_std_deg=10.6058 sat_mean=0.5237 sat_std=0.1938 val_mean=0.2716 val_std=0.0522 min_lin=0.0010
+[far flat >3km] mean albedo sRGB8 before=[74.0, 78.0, 53.0] after=[66.0, 70.0, 40.0]
+mean V (sRGB) vs depth, flat pts: before (depth-independent)=0.3042
+  d=  0.0 km  after V=0.2965 (-2.5%)  S=0.4048 (before 0.3526)
+  d=  2.5 km  after V=0.2928 (-3.7%)  S=0.4221 (before 0.3526)
+  d=  5.0 km  after V=0.2833 (-6.9%)  S=0.4674 (before 0.3526)
+  d=  7.5 km  after V=0.2730 (-10.2%)  S=0.5163 (before 0.3526)
+  d= 10.0 km  after V=0.2709 (-10.9%)  S=0.5268 (before 0.3526)
+  d= 12.5 km  after V=0.2709 (-10.9%)  S=0.5268 (before 0.3526)
+  d= 15.0 km  after V=0.2709 (-10.9%)  S=0.5268 (before 0.3526)

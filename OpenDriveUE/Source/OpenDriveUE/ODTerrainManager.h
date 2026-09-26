@@ -62,6 +62,11 @@ struct FBiomeSample
 {
 	float X = 0.0f, Y = 0.0f; // cm, UE world frame
 	uint8 Biome = 0;          // EODBiome ordinal (ODForestManager.h)
+	// ODB2 (2026-09-25, next steps.md sec 7.35 V2) - ODB1 files leave these
+	// at the neutral defaults. Northness: +1 steep north-facing, -1 steep
+	// south-facing; Moisture: 1 = valley bottom, 0 = >=150 m above it.
+	float Northness = 0.0f;
+	float Moisture = 0.0f;
 };
 
 /** Read-only spatial hash over every classified biome point

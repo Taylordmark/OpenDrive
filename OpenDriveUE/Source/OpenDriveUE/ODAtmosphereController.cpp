@@ -20,6 +20,15 @@ namespace
 // new content asset.
 const TCHAR* CloudMaterialPath =
 	TEXT("/Engine/EngineSky/VolumetricClouds/m_SimpleVolumetricCloud_Inst.m_SimpleVolumetricCloud_Inst");
+
+// V4 (2026-09-25, next steps.md §7.36) - THE knob for the Silverthorne
+// pale-hills veil (item 6: ShowFlag.Atmosphere 0 stripped (-20,-24,-36) off
+// distant hills). Scales view->surface distance for aerial perspective on
+// geometry only (not the sky dome), so haze on a hill at D km looks like it
+// did at D*scale km. Engine default 1.0; lower = clearer distant terrain,
+// too low flattens depth cueing. Tune in small steps (0.05-0.1) live -
+// the r.SkyAtmosphere.AerialPerspective.StartDepth cvar is a proven no-op.
+constexpr float AerialPerspectiveViewDistanceScale = 0.8f;
 }
 
 AODAtmosphereController::AODAtmosphereController()
@@ -84,6 +93,7 @@ void AODAtmosphereController::EnsureSkyAtmosphere()
 	Comp->SetMieAnisotropy(0.82f);              // close to 0.8 default, mild bump
 	Comp->SetAerialPerspectiveStartDepth(0.07f);   // vs 0.1 default - haze builds a bit sooner
 	Comp->SetHeightFogContribution(1.0f);
+	Comp->SetAerialPespectiveViewDistanceScale(AerialPerspectiveViewDistanceScale); // sic - engine's own spelling
 
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: tuned SkyAtmosphere for high-altitude haze"));
 }

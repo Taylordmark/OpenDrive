@@ -1,6 +1,7 @@
 #include "ODRoadManager.h"
 
 #include "ODBinSidecarUtil.h"
+#include "Algo/Reverse.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Containers/StringConv.h"
@@ -66,6 +67,7 @@ void AODRoadManager::BeginPlay()
 	RoadMatOneWay = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay"));
 	LoadCenterline();
+	LoadRouteGraph();
 	LoadMapCenterline();
 	LoadPlaceLabels();
 	BuildTownNodes();
@@ -122,6 +124,295 @@ void AODRoadManager::LoadCenterline()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODRoadManager: loaded %d centerline point(s) from %s (HUD route fallback)"),
 		N, *BinPath);
+}
+
+namespace
+{
+// SS7.37 navigation tuning - mirrored in scratchpad/nav/verify_route_graph.py
+constexpr float TurnLookCm = 2500.0f;    // heading sampled 25 m before/after a junction
+constexpr float TurnMinDeg = 35.0f;      // smaller bends at a junction = "continue"
+constexpr float TurnMergeCm = 3000.0f;   // junction nodes this close = one turn
+constexpr float OffRouteCm = 5000.0f;    // reroute past 50 m off the route line
+constexpr double RerouteCooldownS = 2.0;
+constexpr float ArriveCm = 3000.0f;
+}
+
+void AODRoadManager::LoadRouteGraph()
+{
+	if (!CenterlineFilePrefix.StartsWith(TEXT("centerline_")))
+	{
+		return;   // no open-world road data (e.g. Tail of the Dragon) - no nav
+	}
+	TArray<uint8> Bin;
+	const FString BinPath = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (CenterlineFilePrefix.Replace(TEXT("centerline_"), TEXT("routegraph_")) + TEXT(".bin"));
+	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'G' || Bin[3] != '1')
+	{
+		return;
+	}
+	const int64 N = ReadU32LE(Bin.GetData() + 4);
+	const int64 EOff = 8 + N * 8;
+	const int64 E = Bin.Num() >= EOff + 4 ? ReadU32LE(Bin.GetData() + EOff) : -1;
+	if (N <= 0 || E < 0 || Bin.Num() != EOff + 4 + E * 12)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODRoadManager: %s truncated/corrupt"), *BinPath);
+		return;
+	}
+	RouteNodes.SetNumUninitialized(N);
+	for (int64 i = 0; i < N; ++i)
+	{
+		const uint8* P = Bin.GetData() + 8 + i * 8;
+		RouteNodes[i] = FVector2D(ReadF32LE(P), ReadF32LE(P + 4));
+	}
+	// CSR build: count degrees, prefix-sum, fill (both directions)
+	RouteAdjStart.SetNumZeroed(N + 1);
+	const uint8* EP = Bin.GetData() + EOff + 4;
+	for (int64 e = 0; e < E; ++e)
+	{
+		const uint32 A = ReadU32LE(EP + e * 12), B = ReadU32LE(EP + e * 12 + 4);
+		if (A >= N || B >= N)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODRoadManager: %s bad edge index"), *BinPath);
+			RouteNodes.Reset();
+			RouteAdjStart.Reset();
+			return;
+		}
+		++RouteAdjStart[A + 1];
+		++RouteAdjStart[B + 1];
+	}
+	for (int64 i = 0; i < N; ++i)
+	{
+		RouteAdjStart[i + 1] += RouteAdjStart[i];
+	}
+	RouteAdjNode.SetNumUninitialized(E * 2);
+	RouteAdjLen.SetNumUninitialized(E * 2);
+	TArray<int32> Fill(RouteAdjStart.GetData(), N);
+	for (int64 e = 0; e < E; ++e)
+	{
+		const int32 A = ReadU32LE(EP + e * 12), B = ReadU32LE(EP + e * 12 + 4);
+		const float L = ReadF32LE(EP + e * 12 + 8);
+		RouteAdjNode[Fill[A]] = B; RouteAdjLen[Fill[A]++] = L;
+		RouteAdjNode[Fill[B]] = A; RouteAdjLen[Fill[B]++] = L;
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges from %s"),
+		N, E, *BinPath);
+}
+
+int32 AODRoadManager::NearestRouteNode(const FVector2D& Q) const
+{
+	// ponytail: brute-force O(N) (~73k nodes on summit_county) - only runs on
+	// a route pick or a >=2 s-throttled reroute; grid-bucket it if it shows up
+	int32 Best = INDEX_NONE;
+	double BestD2 = TNumericLimits<double>::Max();
+	for (int32 i = 0; i < RouteNodes.Num(); ++i)
+	{
+		const double D2 = FVector2D::DistSquared(RouteNodes[i], Q);
+		if (D2 < BestD2)
+		{
+			BestD2 = D2;
+			Best = i;
+		}
+	}
+	return Best;
+}
+
+bool AODRoadManager::SnapToRouteGraph(const FVector2D& Query, FVector2D& OutPoint) const
+{
+	const int32 N = NearestRouteNode(Query);
+	if (N == INDEX_NONE)
+	{
+		return false;
+	}
+	OutPoint = RouteNodes[N];
+	return true;
+}
+
+bool AODRoadManager::FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes) const
+{
+	// A*, Euclidean heuristic (admissible: along-road edges are arc length,
+	// link edges are straight-line). Lazy-deletion binary heap.
+	const int32 N = RouteNodes.Num();
+	TArray<double> G;
+	G.Init(TNumericLimits<double>::Max(), N);
+	TArray<int32> Prev;
+	Prev.Init(INDEX_NONE, N);
+	TBitArray<> Closed(false, N);
+	struct FOpen { double F; int32 Node; };
+	auto Less = [](const FOpen& A, const FOpen& B) { return A.F < B.F; };
+	TArray<FOpen> Heap;
+	const FVector2D Goal = RouteNodes[To];
+	G[From] = 0.0;
+	Heap.HeapPush({FVector2D::Distance(RouteNodes[From], Goal), From}, Less);
+	while (Heap.Num() > 0)
+	{
+		FOpen Top;
+		Heap.HeapPop(Top, Less, EAllowShrinking::No);
+		const int32 U = Top.Node;
+		if (U == To)
+		{
+			break;
+		}
+		if (Closed[U])
+		{
+			continue;
+		}
+		Closed[U] = true;
+		for (int32 k = RouteAdjStart[U]; k < RouteAdjStart[U + 1]; ++k)
+		{
+			const int32 V = RouteAdjNode[k];
+			const double NG = G[U] + RouteAdjLen[k];
+			if (NG < G[V])
+			{
+				G[V] = NG;
+				Prev[V] = U;
+				Heap.HeapPush({NG + FVector2D::Distance(RouteNodes[V], Goal), V}, Less);
+			}
+		}
+	}
+	if (Prev[To] == INDEX_NONE && From != To)
+	{
+		return false;
+	}
+	OutNodes.Reset();
+	for (int32 V = To; V != INDEX_NONE; V = Prev[V])
+	{
+		OutNodes.Add(V);
+	}
+	Algo::Reverse(OutNodes);
+	return true;
+}
+
+bool AODRoadManager::RecomputeRoute(const FVector2D& From)
+{
+	const int32 S = NearestRouteNode(From), T = NearestRouteNode(RouteDest);
+	TArray<int32> Path;
+	if (S == INDEX_NONE || T == INDEX_NONE || !FindRoutePath(S, T, Path) || Path.Num() < 2)
+	{
+		return false;
+	}
+	RoutePts.Reset(Path.Num());
+	RouteCum.Reset(Path.Num());
+	for (int32 i = 0; i < Path.Num(); ++i)
+	{
+		RoutePts.Add(RouteNodes[Path[i]]);
+		RouteCum.Add(i == 0 ? 0.0f : RouteCum[i - 1] + (float)FVector2D::Distance(RoutePts[i - 1], RoutePts[i]));
+	}
+	// turns = junction nodes (graph degree >= 3) where the heading 25 m
+	// before vs 25 m after bends past TurnMinDeg; near-duplicates merged.
+	// X=east, Y=south (screen-down), so cross > 0 = clockwise = RIGHT.
+	RouteTurns.Reset();
+	const int32 Num = RoutePts.Num();
+	for (int32 k = 1; k < Num - 1; ++k)
+	{
+		if (RouteAdjStart[Path[k] + 1] - RouteAdjStart[Path[k]] < 3)
+		{
+			continue;
+		}
+		int32 j = k - 1, m = k + 1;
+		while (j > 0 && RouteCum[k] - RouteCum[j] < TurnLookCm) { --j; }
+		while (m < Num - 1 && RouteCum[m] - RouteCum[k] < TurnLookCm) { ++m; }
+		const FVector2D In = (RoutePts[k] - RoutePts[j]).GetSafeNormal();
+		const FVector2D Out = (RoutePts[m] - RoutePts[k]).GetSafeNormal();
+		const float Ang = (float)FMath::RadiansToDegrees(FMath::Atan2(
+			FVector2D::CrossProduct(In, Out), FVector2D::DotProduct(In, Out)));
+		if (FMath::Abs(Ang) < TurnMinDeg)
+		{
+			continue;
+		}
+		if (RouteTurns.Num() > 0 && RouteCum[k] - RouteTurns.Last().Cum < TurnMergeCm)
+		{
+			if (FMath::Abs(Ang) > FMath::Abs(RouteTurns.Last().AngleDeg))
+			{
+				RouteTurns.Last() = {RouteCum[k], Ang};
+			}
+			continue;
+		}
+		RouteTurns.Add({RouteCum[k], Ang});
+	}
+	RouteSeg = 0;
+	RouteProgressCm = 0.0f;
+	RouteRemainingCm = RouteCum.Last();
+	return true;
+}
+
+bool AODRoadManager::SetRouteDestination(const FVector2D& Dest, const FString& Name)
+{
+	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!Player || !HasRouteGraph())
+	{
+		return false;
+	}
+	const FVector2D OldDest = RouteDest;
+	RouteDest = Dest;
+	if (!RecomputeRoute(FVector2D(Player->GetActorLocation())))
+	{
+		RouteDest = OldDest;
+		return false;
+	}
+	RouteName = Name;
+	LastRerouteTime = GetWorld()->GetTimeSeconds();
+	return true;
+}
+
+void AODRoadManager::ClearRoute()
+{
+	RoutePts.Reset();
+	RouteCum.Reset();
+	RouteTurns.Reset();
+	RouteName.Reset();
+	RouteRemainingCm = 0.0f;
+}
+
+bool AODRoadManager::GetNextTurn(float& OutDistCm, float& OutAngleDeg) const
+{
+	for (const FRouteTurn& T : RouteTurns)
+	{
+		if (T.Cum > RouteProgressCm)
+		{
+			OutDistCm = T.Cum - RouteProgressCm;
+			OutAngleDeg = T.AngleDeg;
+			return true;
+		}
+	}
+	return false;
+}
+
+void AODRoadManager::UpdateRouteProgress(const FVector2D& P)
+{
+	// windowed nearest-segment search around the last known segment (the
+	// player can't cover 60 x ~20 m nodes between frames); a teleport/fast
+	// travel just reads as "off route" and reroutes below
+	const int32 Lo = FMath::Max(0, RouteSeg - 3);
+	const int32 Hi = FMath::Min(RoutePts.Num() - 2, RouteSeg + 60);
+	double BestD2 = TNumericLimits<double>::Max();
+	for (int32 i = Lo; i <= Hi; ++i)
+	{
+		const FVector2D A = RoutePts[i], D = RoutePts[i + 1] - A;
+		const double DD = D.SizeSquared();
+		const double T = DD > 1.0 ? FMath::Clamp(FVector2D::DotProduct(P - A, D) / DD, 0.0, 1.0) : 0.0;
+		const double D2 = FVector2D::DistSquared(P, A + D * T);
+		if (D2 < BestD2)
+		{
+			BestD2 = D2;
+			RouteSeg = i;
+			RouteProgressCm = RouteCum[i] + (float)(T * FMath::Sqrt(DD));
+		}
+	}
+	RouteRemainingCm = FMath::Max(0.0f, RouteCum.Last() - RouteProgressCm);
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (RouteRemainingCm < ArriveCm && BestD2 < FMath::Square(OffRouteCm))
+	{
+		ArrivedTime = Now;
+		ArrivedName = RouteName;
+		ClearRoute();
+		return;
+	}
+	if (BestD2 > FMath::Square(OffRouteCm) && Now - LastRerouteTime > RerouteCooldownS)
+	{
+		LastRerouteTime = Now;
+		RecomputeRoute(P);   // failure (e.g. off on a disconnected piece) keeps the old line
+	}
 }
 
 void AODRoadManager::LoadMapCenterline()
@@ -1129,6 +1420,11 @@ void AODRoadManager::Tick(float DeltaSeconds)
 	{
 		LastLabelUpdateTime = Now;
 		UpdateCurrentLabels(Loc);
+	}
+
+	if (HasRoute())
+	{
+		UpdateRouteProgress(FVector2D(Loc));
 	}
 
 	// 2026-08-26 diagnostic: log the tracked junction-pad component's live

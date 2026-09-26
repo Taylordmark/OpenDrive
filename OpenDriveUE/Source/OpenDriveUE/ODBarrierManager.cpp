@@ -81,13 +81,15 @@ bool AODBarrierManager::LoadBiomePoints()
 	const FString BinPath = FPaths::ProjectContentDir()
 		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || Bin[3] != '1')
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
 		return false;
 	}
 	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
 		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
-	constexpr int32 RecordBytes = 4 + 4 + 1 + 1;
+	// ODB2 (2026-09-25) appends 4 bytes (Northness/Moisture/ElevM) this
+	// manager doesn't need - just a wider stride.
+	const int32 RecordBytes = Bin[3] == '2' ? 14 : 10;
 	if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
 	{
 		UE_LOG(LogTemp, Warning,

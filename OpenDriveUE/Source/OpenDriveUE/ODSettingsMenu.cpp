@@ -64,7 +64,7 @@ FIntPoint NativeResolution()
 }
 
 template <typename T>
-T* FindActor(UWorld* World)
+T* FindSettingsActor(UWorld* World)
 {
 	for (TActorIterator<T> It(World); It; ++It)
 	{
@@ -156,7 +156,7 @@ AODRebindMenu* AODSettingsMenu::EnsureRebindMenu()
 	{
 		return RebindMenu;
 	}
-	if (AODRebindMenu* Found = FindActor<AODRebindMenu>(GetWorld()))
+	if (AODRebindMenu* Found = FindSettingsActor<AODRebindMenu>(GetWorld()))
 	{
 		RebindMenu = Found;
 		return RebindMenu;
@@ -301,11 +301,11 @@ void AODSettingsMenu::ApplyAudioVolumes() const
 	// plain float multiply at the actor's one existing volume-application
 	// spot, not a per-frame cost added here: this only runs on load and on a
 	// slider nudge, not every tick.
-	if (AODVehicleAudio* Audio = FindActor<AODVehicleAudio>(GetWorld()))
+	if (AODVehicleAudio* Audio = FindSettingsActor<AODVehicleAudio>(GetWorld()))
 	{
 		Audio->SetVehicleVolumeScale(MasterVolume * VehicleVolume);
 	}
-	if (AODAmbientSoundManager* Ambient = FindActor<AODAmbientSoundManager>(GetWorld()))
+	if (AODAmbientSoundManager* Ambient = FindSettingsActor<AODAmbientSoundManager>(GetWorld()))
 	{
 		Ambient->SetVolumeScale(MasterVolume * AmbientVolume);
 	}

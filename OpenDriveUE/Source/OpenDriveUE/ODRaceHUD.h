@@ -55,7 +55,31 @@ public:
 	 *  AODRebindMenu after a rebind (Arc 4.1, SS7.32). */
 	void RefreshODManagedKeyBindings();
 
+	/** Full-screen world map + navigation (Arc 4.2 v3, next steps.md SS7.37).
+	 *  Open = game paused + cursor shown; Close unpauses. No-op on levels
+	 *  without an AODRoadManager route graph. */
+	bool IsWorldMapOpen() const { return bWorldMapOpen; }
+	void OpenWorldMap();
+	void CloseWorldMap();
+
 private:
+	void ToggleWorldMap() { if (bWorldMapOpen) { CloseWorldMap(); } else { OpenWorldMap(); } }
+	void ClearRouteKey();
+	AODRoadManager* FindNavRoadMgr() const;
+	void SetMapCursor(bool bVisible);
+	/** Polls its own input (pan/zoom/drag/pick) - see SS7.37 for controls. */
+	void DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* Centerline);
+	/** Top-center next-turn + remaining-distance panel while a route is set. */
+	void DrawNavPanel(const AODRoadManager* RoadMgr) const;
+
+	bool bWorldMapOpen = false;
+	FVector2D WorldMapCenter = FVector2D::ZeroVector;   // world XY, cm
+	float WorldMapRadiusM = 4000.0f;                     // half the shorter screen side
+	bool bWorldMapDragging = false;
+	FVector2D WorldMapLastMouse = FVector2D::ZeroVector;
+	float WorldMapDragPx = 0.0f;
+	uint64 WorldMapOpenFrame = 0;   // ignore the key press that opened it
+	double NoRouteMsgTime = -100.0;
 	void ToggleMiniMap() { bShowMiniMap = !bShowMiniMap; }
 	void ZoomIn() { MiniMapZoomM = FMath::Max(20.0f, MiniMapZoomM * 0.8f); }
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
@@ -83,7 +107,8 @@ private:
 	void DrawStageMap(const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, bool bRunning, int32 NextGate,
 		float PanelX, float PanelY, float PanelSize, float BgAlpha,
-		float ZoomRadiusM, bool bCircular, const AODRoadManager* RoadMgr) const;
+		float ZoomRadiusM, bool bCircular, const AODRoadManager* RoadMgr,
+		const FVector2D* CenterOverride = nullptr) const;   // zoomed view center (world map)
 
 	/** Front-end menu (AODMainMenu): the car-config panel, or the interactive
 	 *  town map. Takes over the whole screen when the menu is active - drawn

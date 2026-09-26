@@ -7,14 +7,19 @@ bbox instead of a Landscape stage square, and gated to a buffer around the
 road corridor (NOT the whole, much larger, terrain BBOX_SNWE) - same
 road-gating philosophy build_terrain_tiles.py already established for z15
 terrain: the player only experiences biome variety near the road, so only
-that imagery needs fetching/classifying.
+that imagery needs fetching/classifying. SUPERSEDED 2026-09-25 (V1, next
+steps.md sec 7.35): the background hills turned out to be what the player
+stares at most, so a coarse GRID_SPACING_M grid over the whole terrain bbox
+is now classified too (corridor samples unchanged), plus V2 per-sample
+aspect (northness) / valley-bottom moisture from a z12 DEM.
 
 Usage:  python classify_biomes.py     (needs road_stations.json first)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json
 Outputs data/road_tiles/<AREA_NAME>_test/road_biomes.json
         {"lon": [...], "lat": [...], "biome": [...EODBiome int...],
-         "forest_weight": [...0..1...]}
+         "forest_weight": [...0..1...], "northness": [...-1..1...],
+         "moisture": [...0..1...], "elev_m": [...], "n_corridor": N}
         one entry per SAMPLED station (every SAMPLE_STRIDE-th, not all -
         biome doesn't need road_stations' 5 m resolution, and this keeps
         the imagery fetch/classification cost down).
@@ -35,12 +40,29 @@ import numpy as np
 import requests
 from PIL import Image
 
-from test_areas import AREA_NAME
+from scipy import ndimage
+from scipy.spatial import cKDTree
+
+from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
+from test_areas import AREA_NAME, BACKGROUND_BBOX_SNWE, BBOX_SNWE, TERRAIN_TILE_SIZE_CM
 
 IMG_ZOOM = 13        # ~19 m/px at this latitude - regional biome character,
                       # not fine detail, so far coarser than terrain's z15
 MARGIN_M = 2000.0     # imagery fetch buffer beyond the road's own bbox
 SAMPLE_STRIDE = 10    # classify every 10th station (~50 m spacing)
+# V1 (2026-09-25, next steps.md sec 7.35): coarse full-terrain-bbox grid on
+# top of the corridor samples. The terrain mesh reaches BACKGROUND_BBOX_SNWE,
+# but corridor-only samples left every background-hill vertex with no biome
+# at all (ApplyBiomeTint's FarBiomeFallbackCm give-up). 300 m keeps every
+# point within ~212 m of a grid sample, i.e. always inside the runtime's
+# 300 m blend radius (ODTerrainManager/ODForestManager BiomeBlendRadiusCm).
+GRID_SPACING_M = 300.0
+# V2: aspect + valley-bottom moisture from a z12 (~30 m/px) Terrarium DEM.
+DEM_ZOOM = 12
+ASPECT_SMOOTH_M = 150.0    # hillside-scale aspect, not per-gully noise
+NORTHNESS_FULL_GRADE = 0.35  # dz/dnorth (m/m, ~19 deg) at which |northness| saturates
+VALLEY_RADIUS_M = 1000.0   # "local minimum within ~1 km" window
+VALLEY_DRY_RISE_M = 150.0  # rise above that minimum at which moisture hits 0
 TILE_URL = ("https://basemap.nationalmap.gov/arcgis/rest/services/"
             "USGSImageryOnly/MapServer/tile/{z}/{y}/{x}")
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
@@ -59,33 +81,87 @@ BIOME_NAMES = ["Deciduous", "Evergreen", "Chaparral", "Desert", "Plains",
                "Rainforest", "Coastal", "Canyon", "Foothill"]
 
 
-def fetch_imagery_mosaic(west, south, east, north):
-    tiles = list(mercantile.tiles(west, south, east, north, [IMG_ZOOM]))
+def _fetch_imagery_tile(session, z, x, y):
+    url = TILE_URL.format(z=z, y=y, x=x)
+    for attempt in range(4):
+        try:
+            r = session.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            break
+        except requests.RequestException:
+            if attempt == 3:
+                raise
+    return np.asarray(Image.open(BytesIO(r.content)).convert("RGB"))
+
+
+def _fetch_dem_tile(session, z, x, y):
+    return terrarium_to_elevation(fetch_terrarium_tile(z, x, y, session))
+
+
+def fetch_mosaic(west, south, east, north, zoom=IMG_ZOOM, fetch_tile=_fetch_imagery_tile):
+    """Slippy-tile mosaic over the bbox - imagery (uint8 RGB) by default,
+    or the Terrarium DEM (float32 m) via fetch_tile=_fetch_dem_tile."""
+    tiles = list(mercantile.tiles(west, south, east, north, [zoom]))
     xs, ys = [t.x for t in tiles], [t.y for t in tiles]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     cols, rows = x1 - x0 + 1, y1 - y0 + 1
-    print(f"fetching {cols * rows} imagery tile(s) at z{IMG_ZOOM} ({cols}x{rows}) ...")
-    mosaic = np.zeros((rows * 256, cols * 256, 3), dtype=np.uint8)
+    print(f"fetching {cols * rows} tile(s) at z{zoom} ({cols}x{rows}) ...")
+    mosaic = None
     session = requests.Session()
     for ty in range(y0, y1 + 1):
         for tx in range(x0, x1 + 1):
-            url = TILE_URL.format(z=IMG_ZOOM, y=ty, x=tx)
-            r = None
-            for attempt in range(4):
-                try:
-                    r = session.get(url, headers=HEADERS, timeout=30)
-                    r.raise_for_status()
-                    break
-                except requests.RequestException:
-                    if attempt == 3:
-                        raise
-            tile = np.asarray(Image.open(BytesIO(r.content)).convert("RGB"))
+            tile = fetch_tile(session, zoom, tx, ty)
+            if mosaic is None:
+                mosaic = np.zeros((rows * 256, cols * 256) + tile.shape[2:], dtype=tile.dtype)
             r0, c0 = (ty - y0) * 256, (tx - x0) * 256
             mosaic[r0:r0 + 256, c0:c0 + 256] = tile
         print(f"  row {ty - y0 + 1}/{rows}")
-    nw = mercantile.bounds(mercantile.Tile(x0, y0, IMG_ZOOM))
-    se = mercantile.bounds(mercantile.Tile(x1, y1, IMG_ZOOM))
+    nw = mercantile.bounds(mercantile.Tile(x0, y0, zoom))
+    se = mercantile.bounds(mercantile.Tile(x1, y1, zoom))
     return mosaic, (nw.west, se.south, se.east, nw.north)
+
+
+def dem_derivatives(dem, bounds):
+    """V2 per-pixel drivers from the DEM mosaic -> (grade, northness,
+    moisture). Pixel size treated as uniform (mean latitude), the same
+    linear-in-lat approximation sample_bilinear() already makes.
+
+    northness in [-1,1]: +1 = steep north-facing (ground falls away to the
+    north - shaded, snow-holding, denser/darker), -1 = steep south-facing
+    (sun-baked, drier/tan/sparser); scaled by steepness so flat ground ~0.
+    moisture in [0,1]: valley-bottom proxy, 1 at the lowest point within
+    VALLEY_RADIUS_M, 0 once VALLEY_DRY_RISE_M above it."""
+    w, s, e, n = bounds
+    h, wd = dem.shape
+    mid_lat = math.radians((s + n) / 2.0)
+    px_m = (e - w) * 111132.0 * math.cos(mid_lat) / wd
+    py_m = (n - s) * 111132.0 / h
+    gy, gx = np.gradient(dem, py_m, px_m)   # gy = d/d(row) = d/d(south)
+    grade = np.hypot(gx, gy)
+    smooth = ndimage.gaussian_filter(dem, ASPECT_SMOOTH_M / px_m)
+    sgy, _ = np.gradient(smooth, py_m, px_m)
+    # north-facing = elevation DROPS going north = rises going south = sgy > 0
+    northness = np.clip(sgy / NORTHNESS_FULL_GRADE, -1.0, 1.0)
+    win = int(round(2 * VALLEY_RADIUS_M / px_m)) | 1
+    rise = smooth - ndimage.minimum_filter(smooth, size=win)
+    moisture = np.clip(1.0 - rise / VALLEY_DRY_RISE_M, 0.0, 1.0)
+    return grade, northness, moisture
+
+
+def coarse_grid(lat0, lon0, bbox_snwe, corridor_east, corridor_north):
+    """V1: GRID_SPACING_M lattice (local east/north frame, same equirect
+    projection build_road_stations.py uses) over bbox_snwe, minus any point
+    within half a spacing of a corridor sample - near the road the dense
+    corridor samples stay authoritative, exactly as before."""
+    s, w, n, e = bbox_snwe
+    m_lon = 111132.0 * math.cos(math.radians(lat0))
+    east = np.arange((w - lon0) * m_lon, (e - lon0) * m_lon, GRID_SPACING_M)
+    north = np.arange((s - lat0) * 111132.0, (n - lat0) * 111132.0, GRID_SPACING_M)
+    ge, gn = (a.ravel() for a in np.meshgrid(east, north))
+    d, _ = cKDTree(np.column_stack([corridor_east, corridor_north])).query(np.column_stack([ge, gn]))
+    keep = d > GRID_SPACING_M / 2.0
+    ge, gn = ge[keep], gn[keep]
+    return ge, gn, lat0 + gn / 111132.0, lon0 + ge / m_lon
 
 
 def classify_rgb(mosaic):
@@ -126,6 +202,7 @@ def classify_rgb(mosaic):
 
 
 RUGGED_WINDOW = 21    # stations (5 m spacing) => ~100 m centered window
+WETLAND_GRADE_MAX = 0.10  # see pick_biome()'s Wetland branch
 CANYON_GRADE_MIN = 0.06   # 6% local grade floor - below this, "rock-colored"
                           # ground is flat bare soil/pavement, not badlands
 
@@ -157,7 +234,11 @@ def sample_bilinear(chan, bounds, lon, lat):
     w, s, e, n = bounds
     h, wd = chan.shape
     u = (lon - w) / (e - w) * wd
-    v = (n - lat) / (n - s) * h   # row 0 = north
+    # row 0 = north. Web-mercator rows, not linear-in-latitude (2026-09-25):
+    # the linear approximation was ~3-4 px (60-80 m at z13) off mid-mosaic
+    # and the error moves whenever the mosaic bbox does (V1 grew it).
+    merc = lambda phi: np.log(np.tan(np.pi / 4 + np.radians(phi) / 2))
+    v = (merc(n) - merc(lat)) / (merc(n) - merc(s)) * h
     x0 = np.clip(u.astype(int), 0, wd - 2)
     y0 = np.clip(v.astype(int), 0, h - 2)
     fx, fy = u - x0, v - y0
@@ -239,7 +320,11 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
         return BIOME_CANYON
     if elev_m < 5.0 and 0.1 < w_water <= 0.4:
         return BIOME_COASTAL
-    if w_water > 0.4:
+    # grade gate (2026-09-25, V1): the dark+blue-ish w_water signature also
+    # matches shadowed north-facing conifer slopes - the first full-bbox grid
+    # classified 21% of summit_county's grid as Wetland, mean northness +0.36
+    # (scratchpad/terrain_variety/diag_wetland.py). Water/marsh is flat.
+    if w_water > 0.4 and grade < WETLAND_GRADE_MAX:
         return BIOME_WETLAND
     if abs_lat > 60.0 and w_forest < 0.5:
         return BIOME_ARCTIC
@@ -327,11 +412,43 @@ def main():
 
     buf_lat = MARGIN_M / 111132.0
     buf_lon = MARGIN_M / (111132.0 * math.cos(math.radians(float(lat.mean()))))
-    west, east = float(lon.min() - buf_lon), float(lon.max() + buf_lon)
-    south, north = float(lat.min() - buf_lat), float(lat.max() + buf_lat)
+    # V1: grid covers the whole rendered terrain (background bbox when the
+    # area has one); the fetch covers corridor+margin AND that grid. Tiles
+    # are aligned to the global z13 lattice, so corridor pixels (and thus
+    # corridor classifications) are identical to a corridor-only fetch.
+    gs, gw, gn_, ge_ = BACKGROUND_BBOX_SNWE or BBOX_SNWE
+    # + one terrain tile of padding: tiles are grid-aligned, so the edge ring
+    # of baked terrain tiles overhangs the bbox by up to a tile (the first
+    # unpadded run left 24-100% of those edge tiles' verts untinted).
+    pad_lat = TERRAIN_TILE_SIZE_CM / 100.0 / 111132.0
+    pad_lon = pad_lat / math.cos(math.radians((gs + gn_) / 2.0))
+    gs, gw, gn_, ge_ = gs - pad_lat, gw - pad_lon, gn_ + pad_lat, ge_ + pad_lon
+    west = min(float(lon.min() - buf_lon), gw)
+    east = max(float(lon.max() + buf_lon), ge_)
+    south = min(float(lat.min() - buf_lat), gs)
+    north = max(float(lat.max() + buf_lat), gn_)
 
-    mosaic, bounds = fetch_imagery_mosaic(west, south, east, north)
+    lat0, lon0 = data["origin_latlon"]
+    g_east, g_north, g_lat, g_lon = coarse_grid(lat0, lon0, (gs, gw, gn_, ge_), east_m, north_m)
+    print(f"{len(g_lon)} coarse grid point(s) at {GRID_SPACING_M:.0f} m")
+
+    dem, dem_bounds = fetch_mosaic(west, south, east, north, DEM_ZOOM, _fetch_dem_tile)
+    d_grade, d_north, d_moist = dem_derivatives(dem, dem_bounds)
+    g_elev = sample_bilinear(dem, dem_bounds, g_lon, g_lat)
+    g_grade = sample_bilinear(d_grade, dem_bounds, g_lon, g_lat)
+
+    n_corr = len(lon)
+    lon, lat = np.concatenate([lon, g_lon]), np.concatenate([lat, g_lat])
+    elev, grade = np.concatenate([elev, g_elev]), np.concatenate([grade, g_grade])
+    x_cm = np.concatenate([x_cm, g_east * 100.0])
+    y_cm = np.concatenate([y_cm, -g_north * 100.0])
+    northness = sample_bilinear(d_north, dem_bounds, lon, lat)
+    moisture = sample_bilinear(d_moist, dem_bounds, lon, lat)
+    del dem, d_grade, d_north, d_moist
+
+    mosaic, bounds = fetch_mosaic(west, south, east, north)
     w_forest, w_grass, w_rock, w_water, w_bare = classify_rgb(mosaic)
+    del mosaic
 
     sf = sample_bilinear(w_forest, bounds, lon, lat)
     sg = sample_bilinear(w_grass, bounds, lon, lat)
@@ -349,14 +466,20 @@ def main():
         "lon": lon.tolist(), "lat": lat.tolist(),
         "x_cm": x_cm.tolist(), "y_cm": y_cm.tolist(),
         "biome": biomes, "forest_weight": forest_weight.tolist(),
+        # V2 (sec 7.35): aspect/moisture drivers + sample elevation (V5
+        # species banding); first n_corridor entries are the road samples.
+        "northness": np.round(northness, 3).tolist(),
+        "moisture": np.round(moisture, 3).tolist(),
+        "elev_m": np.round(elev, 1).tolist(),
+        "n_corridor": n_corr,
     }
     OUT_PATH.write_text(json.dumps(out))
-    counts = {}
-    for b in biomes:
-        counts[b] = counts.get(b, 0) + 1
-    print(f"wrote {OUT_PATH} ({len(lon)} points)")
-    print("biome counts: " + ", ".join(
-        f"{BIOME_NAMES[b]}={n}" for b, n in sorted(counts.items())))
+    print(f"wrote {OUT_PATH} ({len(lon)} points: {n_corr} corridor + {len(lon) - n_corr} grid)")
+    for label, sl in (("corridor", slice(0, n_corr)), ("grid", slice(n_corr, None)),
+                      ("all", slice(None))):
+        counts = np.bincount(np.asarray(biomes[sl]), minlength=len(BIOME_NAMES))
+        print(f"biome counts ({label}): " + ", ".join(
+            f"{BIOME_NAMES[b]}={n}" for b, n in enumerate(counts) if n))
 
 
 if __name__ == "__main__":

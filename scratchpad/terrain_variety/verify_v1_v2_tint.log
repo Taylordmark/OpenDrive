@@ -1,0 +1,20 @@
+before: biome_summit_county_test.bin magic=ODB1 N=27465
+after: biome_summit_county_test.bin magic=ODB2 N=80709
+
+== ALL: 1221 tiles ==
+  before: tiles distinctBiomes>0: 330/1221 (27.0%); distinct>=2: 248; mean distinct 0.67; verts default/no-data 30.3%, near-fallback 38.8%; mean in-tile luma std 0.0085
+  after : tiles distinctBiomes>0: 1221/1221 (100.0%); distinct>=2: 1033; mean distinct 2.38; verts default/no-data 0.0%, near-fallback 0.0%; mean in-tile luma std 0.0477
+  across-tile std of tile-mean luma: before 0.0123 -> after 0.0339
+
+== BACKGROUND (no road in query box): 898 tiles ==
+  before: tiles distinctBiomes>0: 7/898 (0.8%); distinct>=2: 1; mean distinct 0.01; verts default/no-data 99.8%, near-fallback 0.1%; mean in-tile luma std 0.0001
+  after : tiles distinctBiomes>0: 898/898 (100.0%); distinct>=2: 748; mean distinct 2.13; verts default/no-data 0.1%, near-fallback 0.2%; mean in-tile luma std 0.0511
+  across-tile std of tile-mean luma: before 0.0012 -> after 0.0358
+
+== CORRIDOR: 323 tiles ==
+  before: tiles distinctBiomes>0: 323/323 (100.0%); distinct>=2: 247; mean distinct 2.51; verts default/no-data 26.1%, near-fallback 41.1%; mean in-tile luma std 0.0318
+  after : tiles distinctBiomes>0: 323/323 (100.0%); distinct>=2: 285; mean distinct 3.07; verts default/no-data 0.0%, near-fallback 0.0%; mean in-tile luma std 0.0384
+  across-tile std of tile-mean luma: before 0.0237 -> after 0.0263
+
+northness corridor mean -0.016 std 0.295; grid mean +0.008 std 0.519; |n|>0.5: 27.3%
+moisture corridor mean 0.588; grid mean 0.160; >0.5: corridor 67.4% grid 15.5%

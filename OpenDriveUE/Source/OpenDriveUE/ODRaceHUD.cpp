@@ -8,6 +8,8 @@
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/App.h"
 #include "ODCreditsMenu.h"
 #include "ODGhost.h"
 #include "ODInputConfig.h"
@@ -54,21 +56,26 @@ void AODRaceHUD::RefreshODManagedKeyBindings()
 	{
 		EODInputAction Action;
 		void (AODRaceHUD::*Fn)();
+		bool bWhenPaused;   // world map is open while paused (SS7.37)
 	};
 	const FActionFn Binds[] = {
-		{EODInputAction::ToggleMap, &AODRaceHUD::ToggleMiniMap},
-		{EODInputAction::ZoomMapOut, &AODRaceHUD::ZoomOut},
-		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn},
+		{EODInputAction::ToggleMap, &AODRaceHUD::ToggleMiniMap, false},
+		{EODInputAction::ZoomMapOut, &AODRaceHUD::ZoomOut, false},
+		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn, false},
+		{EODInputAction::WorldMap, &AODRaceHUD::ToggleWorldMap, true},
+		{EODInputAction::ClearRoute, &AODRaceHUD::ClearRouteKey, true},
 	};
 	for (const FActionFn& B : Binds)
 	{
-		const FKey Key = FODInputConfig::GetKeyboardKey(B.Action);
-		if (!Key.IsValid())
+		for (const FKey& Key : {FODInputConfig::GetKeyboardKey(B.Action), FODInputConfig::GetGamepadKey(B.Action)})
 		{
-			continue;
+			if (!Key.IsValid())
+			{
+				continue;
+			}
+			InputComponent->BindKey(Key, IE_Pressed, this, B.Fn).bExecuteWhenPaused = B.bWhenPaused;
+			LastODManagedKeys.AddUnique(Key);
 		}
-		InputComponent->BindKey(Key, IE_Pressed, this, B.Fn);
-		LastODManagedKeys.AddUnique(Key);
 	}
 }
 
@@ -146,7 +153,8 @@ FMapFit ComputeFullMapFit(const TArray<FVector2D>& C,
 void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	const TArray<FTransform>* Gates, bool bRunning, int32 NextGate,
 	float PanelX, float PanelY, float PanelSize, float BgAlpha,
-	float ZoomRadiusM, bool bCircular, const AODRoadManager* RoadMgr) const
+	float ZoomRadiusM, bool bCircular, const AODRoadManager* RoadMgr,
+	const FVector2D* CenterOverride) const
 {
 	const bool bHaveGates = Gates && Gates->Num() >= 2;
 	const bool bHaveCenterline = Centerline && Centerline->Num() > 1;
@@ -161,9 +169,9 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	FVector2D Center;
 	float Scale;
 	const float Pad = 14.0f;
-	if (ZoomRadiusM > 0.0f && Pawn)
+	if (ZoomRadiusM > 0.0f && (Pawn || CenterOverride))
 	{
-		Center = FVector2D(Pawn->GetActorLocation());
+		Center = CenterOverride ? *CenterOverride : FVector2D(Pawn->GetActorLocation());
 		Scale = (PanelSize * 0.5f - Pad) / (ZoomRadiusM * 100.0f);
 	}
 	else
@@ -267,12 +275,20 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	{
 		if (bHaveMapTexture)
 		{
+			// draw only the view/texture overlap (SS7.37): WorldToUV clamps, so
+			// a view reaching past the texture edge used to stretch the edge
+			// texels across the rest of the panel instead of leaving it empty
 			const FVector2D HalfWorld = FVector2D(PanelSize * 0.5f, PanelSize * 0.5f) / Scale;
-			FCanvasTileItem Tex(FVector2D(PanelX, PanelY), MapTex->GetResource(),
-				FVector2D(PanelSize, PanelSize), WorldToUV(Center - HalfWorld),
-				WorldToUV(Center + HalfWorld), FLinearColor::White);
-			Tex.BlendMode = SE_BLEND_Translucent;
-			Canvas->DrawItem(Tex);
+			const FVector2D HalfTex(RoadMgr->MapTextureSpanCm * 0.5f, RoadMgr->MapTextureSpanCm * 0.5f);
+			const FVector2D Lo = FVector2D::Max(Center - HalfWorld, RoadMgr->MapTextureCenterCm - HalfTex);
+			const FVector2D Hi = FVector2D::Min(Center + HalfWorld, RoadMgr->MapTextureCenterCm + HalfTex);
+			if (Hi.X > Lo.X && Hi.Y > Lo.Y)
+			{
+				FCanvasTileItem Tex(ToMap(FVector(Lo, 0)), MapTex->GetResource(),
+					(Hi - Lo) * Scale, WorldToUV(Lo), WorldToUV(Hi), FLinearColor::White);
+				Tex.BlendMode = SE_BLEND_Translucent;
+				Canvas->DrawItem(Tex);
+			}
 		}
 		FCanvasTileItem Bg(FVector2D(PanelX, PanelY),
 			FVector2D(PanelSize, PanelSize),
@@ -280,6 +296,38 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		Bg.BlendMode = SE_BLEND_Translucent;
 		Canvas->DrawItem(Bg);
 	}
+
+	// clip a screen segment to the panel disc (circular) - the old both-
+	// endpoints-out skip let a segment with one endpoint inside draw at full
+	// length, streaking across the whole screen (live 2026-08-28). Square
+	// panels draw unclipped (whole-route fit, or the full-screen world map).
+	auto ClipToPanel = [&](FVector2D& A, FVector2D& B) -> bool
+	{
+		if (!bCircular)
+		{
+			return true;
+		}
+		const float R = PanelSize * 0.5f;
+		const FVector2D D = B - A;
+		const float DD = D.SizeSquared();
+		if (DD < KINDA_SMALL_NUMBER)
+		{
+			return InPanel(A);
+		}
+		// solve |A + t*D - PanelMid|^2 = R^2 for t, keep [t0,t1] within [0,1]
+		const FVector2D F = A - PanelMid;
+		const float Bq = 2.0f * FVector2D::DotProduct(F, D);
+		const float Cq = F.SizeSquared() - R * R;
+		const float Disc = Bq * Bq - 4.0f * DD * Cq;
+		if (Disc < 0.0f) { return false; }
+		const float SqrtDisc = FMath::Sqrt(Disc);
+		const float T0 = FMath::Max((-Bq - SqrtDisc) / (2.0f * DD), 0.0f);
+		const float T1 = FMath::Min((-Bq + SqrtDisc) / (2.0f * DD), 1.0f);
+		if (T1 <= T0) { return false; }
+		B = A + D * T1;
+		A = A + D * T0;
+		return true;
+	};
 
 	// real road centerline (pipeline/export_centerline_bin.py or
 	// export_road_centerline_bin.py, 5 m stations) when available - the
@@ -302,38 +350,39 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		}
 		FVector2D A = ToMap(FVector(Smooth[i - 1], 0));
 		FVector2D B = ToMap(FVector(Smooth[i], 0));
-		if (bCircular)
+		if (!ClipToPanel(A, B))
 		{
-			// clip the segment to the panel disc - the old both-endpoints-out
-			// skip let a segment with one endpoint inside draw at full length,
-			// streaking across the whole screen (live 2026-08-28)
-			const float R = PanelSize * 0.5f;
-			const FVector2D D = B - A;
-			const float DD = D.SizeSquared();
-			if (DD < KINDA_SMALL_NUMBER)
-			{
-				if (!InPanel(A)) { continue; }
-			}
-			else
-			{
-				// solve |A + t*D - PanelMid|^2 = R^2 for t, keep [t0,t1] within [0,1]
-				const FVector2D F = A - PanelMid;
-				const float Bq = 2.0f * FVector2D::DotProduct(F, D);
-				const float Cq = F.SizeSquared() - R * R;
-				const float Disc = Bq * Bq - 4.0f * DD * Cq;
-				if (Disc < 0.0f) { continue; }
-				const float SqrtDisc = FMath::Sqrt(Disc);
-				const float T0 = FMath::Max((-Bq - SqrtDisc) / (2.0f * DD), 0.0f);
-				const float T1 = FMath::Min((-Bq + SqrtDisc) / (2.0f * DD), 1.0f);
-				if (T1 <= T0) { continue; }
-				B = A + D * T1;
-				A = A + D * T0;
-			}
+			continue;
 		}
 		FCanvasLineItem Seg(A, B);
 		Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
 		Seg.LineThickness = 3.0f;
 		Canvas->DrawItem(Seg);
+	}
+
+	// navigation route (SS7.37) - on every map panel (mini, pause, world)
+	if (RoadMgr && RoadMgr->HasRoute())
+	{
+		const TArray<FVector2D>& R = RoadMgr->GetRoutePoints();
+		for (int32 i = 1; i < R.Num(); ++i)
+		{
+			FVector2D A = ToMap(FVector(R[i - 1], 0));
+			FVector2D B = ToMap(FVector(R[i], 0));
+			if (!ClipToPanel(A, B))
+			{
+				continue;
+			}
+			FCanvasLineItem Seg(A, B);
+			Seg.SetColor(FLinearColor(1.0f, 0.3f, 0.85f, 0.95f));
+			Seg.LineThickness = 5.0f;
+			Canvas->DrawItem(Seg);
+		}
+		const FVector2D DestM = ToMap(FVector(R.Last(), 0));
+		if (!bCircular || InPanel(DestM))
+		{
+			Dot(DestM, 6.0f, FLinearColor(1.0f, 0.3f, 0.85f));
+			Dot(DestM, 2.5f, FLinearColor::White);
+		}
 	}
 
 	// start/finish/next-gate markers and the PB ghost need actual checkpoint
@@ -759,6 +808,370 @@ void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const
 		FLinearColor(0.55f, 0.6f, 0.65f));
 }
 
+// ---- Arc 4.2 v3: world map + navigation (next steps.md SS7.37) ----
+
+namespace
+{
+// miles/feet, matching the mph speed readout
+FString FormatNavDist(float Cm)
+{
+	const float M = Cm / 100.0f;
+	if (M < 305.0f)   // under ~1000 ft
+	{
+		return FString::Printf(TEXT("%d ft"), FMath::Max(50, FMath::RoundToInt(M * 3.28084f / 50.0f) * 50));
+	}
+	return FString::Printf(TEXT("%.1f mi"), M / 1609.34f);
+}
+}
+
+AODRoadManager* AODRaceHUD::FindNavRoadMgr() const
+{
+	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+	{
+		if (It->HasRouteGraph())
+		{
+			return *It;
+		}
+	}
+	return nullptr;
+}
+
+void AODRaceHUD::SetMapCursor(bool bVisible)
+{
+	for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
+	{
+		It->SetCursorVisible(bVisible);   // same cursor/input-mode handling as the front-end map
+		return;
+	}
+	if (APlayerController* PC = GetOwningPlayerController())
+	{
+		PC->bShowMouseCursor = bVisible;
+	}
+}
+
+void AODRaceHUD::OpenWorldMap()
+{
+	if (bWorldMapOpen)
+	{
+		return;
+	}
+	for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
+	{
+		if (It->IsActive())
+		{
+			return;   // front-end / garage / loading screen owns the screen
+		}
+		break;
+	}
+	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+	{
+		if (It->IsSettingsOpen())
+		{
+			return;   // don't yank the screen out from under a rebind capture
+		}
+		It->HideForOverlay();
+		break;
+	}
+	const AODRoadManager* RoadMgr = FindNavRoadMgr();
+	if (!RoadMgr)
+	{
+		return;   // no route graph on this level (e.g. Tail of the Dragon)
+	}
+	const APawn* Pawn = GetOwningPawn();
+	WorldMapCenter = Pawn ? FVector2D(Pawn->GetActorLocation()) : RoadMgr->MapTextureCenterCm;
+	WorldMapRadiusM = 4000.0f;
+	bWorldMapDragging = false;
+	WorldMapOpenFrame = GFrameCounter;
+	bWorldMapOpen = true;
+	UGameplayStatics::SetGamePaused(this, true);
+	SetMapCursor(true);
+}
+
+void AODRaceHUD::CloseWorldMap()
+{
+	if (!bWorldMapOpen)
+	{
+		return;
+	}
+	bWorldMapOpen = false;
+	SetMapCursor(false);
+	UGameplayStatics::SetGamePaused(this, false);
+}
+
+void AODRaceHUD::ClearRouteKey()
+{
+	if (AODRoadManager* RoadMgr = FindNavRoadMgr())
+	{
+		RoadMgr->ClearRoute();
+	}
+}
+
+void AODRaceHUD::DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* Centerline)
+{
+	APlayerController* PC = GetOwningPlayerController();
+	if (!PC || !RoadMgr || !RoadMgr->HasRouteGraph())
+	{
+		CloseWorldMap();
+		return;
+	}
+	UFont* Font = GEngine->GetLargeFont();
+	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
+		T.Scale = FVector2D(Sc, Sc);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
+
+	// square panel covering the whole screen, centered - DrawStageMap's
+	// zoomed branch then gives Scale = (Side/2 - Pad) / radius
+	const float Side = FMath::Max(Canvas->SizeX, Canvas->SizeY);
+	const FVector2D Mid(Canvas->SizeX * 0.5f, Canvas->SizeY * 0.5f);
+	auto Scale = [&]() { return (Side * 0.5f - 14.0f) / (WorldMapRadiusM * 100.0f); };
+	auto ToScreen = [&](const FVector2D& W) { return Mid + (W - WorldMapCenter) * Scale(); };
+	auto ToWorld = [&](const FVector2D& S) { return WorldMapCenter + (S - Mid) / Scale(); };
+
+	float Mx = 0.0f, My = 0.0f;
+	const bool bMouse = PC->GetMousePosition(Mx, My);
+	const FVector2D Mouse(Mx, My);
+	const TArray<FTownNode>& Towns = RoadMgr->GetTownNodes();
+	auto TownNear = [&](const FVector2D& S, float MaxPx) -> int32
+	{
+		int32 Best = INDEX_NONE;
+		float BestD2 = MaxPx * MaxPx;
+		for (int32 i = 0; i < Towns.Num(); ++i)
+		{
+			const float D2 = FVector2D::DistSquared(ToScreen(Towns[i].Pos), S);
+			if (D2 < BestD2)
+			{
+				BestD2 = D2;
+				Best = i;
+			}
+		}
+		return Best;
+	};
+	// hovered town: under the mouse, else under the center crosshair (gamepad)
+	int32 Hover = bMouse ? TownNear(Mouse, 18.0f) : INDEX_NONE;
+	if (Hover == INDEX_NONE)
+	{
+		Hover = TownNear(Mid, 18.0f);
+	}
+	const double RealNow = GetWorld()->GetRealTimeSeconds();
+	auto Pick = [&](const FVector2D& S)
+	{
+		const int32 T = TownNear(S, 18.0f);
+		FVector2D Snap;
+		const bool bOk = T != INDEX_NONE
+			? RoadMgr->SetRouteDestination(Towns[T].Pos, Towns[T].Name)
+			: RoadMgr->SnapToRouteGraph(ToWorld(S), Snap)
+				&& RoadMgr->SetRouteDestination(Snap, TEXT("Waypoint"));
+		if (!bOk)
+		{
+			NoRouteMsgTime = RealNow;
+		}
+	};
+
+	// ---- input (polled; the game is paused, so only this map reads it).
+	// Skipped on the opening frame so the Enter/Tab that opened it doesn't
+	// also count as a pick here.
+	if (GFrameCounter > WorldMapOpenFrame + 1)
+	{
+		const float Dt = FMath::Min((float)FApp::GetDeltaTime(), 0.1f);
+		auto Down = [&](const FKey& K) { return PC->IsInputKeyDown(K); };
+		auto Pressed = [&](const FKey& K) { return PC->WasInputKeyJustPressed(K); };
+
+		// pan: arrows / WASD / d-pad / left stick, one view radius per second
+		FVector2D Pan(0, 0);
+		Pan.X += (Down(EKeys::Right) || Down(EKeys::D) || Down(EKeys::Gamepad_DPad_Right)) ? 1.0f : 0.0f;
+		Pan.X -= (Down(EKeys::Left) || Down(EKeys::A) || Down(EKeys::Gamepad_DPad_Left)) ? 1.0f : 0.0f;
+		Pan.Y += (Down(EKeys::Down) || Down(EKeys::S) || Down(EKeys::Gamepad_DPad_Down)) ? 1.0f : 0.0f;
+		Pan.Y -= (Down(EKeys::Up) || Down(EKeys::W) || Down(EKeys::Gamepad_DPad_Up)) ? 1.0f : 0.0f;
+		const FVector2D Stick(PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX),
+			-PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY));   // stick up = north = -Y
+		if (Stick.Size() > 0.2f)
+		{
+			Pan += Stick;
+		}
+		WorldMapCenter += Pan * WorldMapRadiusM * 100.0f * Dt;
+
+		// zoom: wheel (about the cursor), [ ] / shoulders (about the center)
+		float Zoom = 1.0f;
+		FVector2D Anchor = Mid;
+		if (Pressed(EKeys::MouseScrollUp)) { Zoom *= 0.8f; Anchor = bMouse ? Mouse : Mid; }
+		if (Pressed(EKeys::MouseScrollDown)) { Zoom /= 0.8f; Anchor = bMouse ? Mouse : Mid; }
+		if (Down(FODInputConfig::GetKeyboardKey(EODInputAction::ZoomMapIn)) || Down(EKeys::Gamepad_RightShoulder))
+		{
+			Zoom *= FMath::Pow(0.3f, Dt);
+		}
+		if (Down(FODInputConfig::GetKeyboardKey(EODInputAction::ZoomMapOut)) || Down(EKeys::Gamepad_LeftShoulder))
+		{
+			Zoom /= FMath::Pow(0.3f, Dt);
+		}
+		if (Zoom != 1.0f)
+		{
+			const FVector2D Before = ToWorld(Anchor);
+			WorldMapRadiusM = FMath::Clamp(WorldMapRadiusM * Zoom, 150.0f, 60000.0f);
+			WorldMapCenter = Before - (Anchor - Mid) / Scale();
+		}
+
+		// drag to pan; a click that barely moved = pick at the cursor
+		if (bMouse && Pressed(EKeys::LeftMouseButton))
+		{
+			bWorldMapDragging = true;
+			WorldMapDragPx = 0.0f;
+			WorldMapLastMouse = Mouse;
+		}
+		if (bWorldMapDragging && bMouse && Down(EKeys::LeftMouseButton))
+		{
+			const FVector2D D = Mouse - WorldMapLastMouse;
+			WorldMapDragPx += D.Size();
+			WorldMapCenter -= D / Scale();
+			WorldMapLastMouse = Mouse;
+		}
+		if (bWorldMapDragging && !Down(EKeys::LeftMouseButton))
+		{
+			bWorldMapDragging = false;
+			if (WorldMapDragPx < 6.0f)
+			{
+				Pick(WorldMapLastMouse);
+			}
+		}
+
+		if (Pressed(EKeys::Enter) || Pressed(EKeys::Gamepad_FaceButton_Bottom))
+		{
+			Pick(Mid);
+		}
+		if (Pressed(EKeys::RightMouseButton) || Pressed(EKeys::Gamepad_FaceButton_Left))
+		{
+			RoadMgr->ClearRoute();
+		}
+		if ((Pressed(EKeys::F) || Pressed(EKeys::Gamepad_FaceButton_Top)) && Hover != INDEX_NONE)
+		{
+			// fast travel: the front-end map's own teleport + loading path
+			for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
+			{
+				CloseWorldMap();
+				It->TravelToTown(Hover);
+				return;
+			}
+		}
+		if (Pressed(EKeys::Gamepad_FaceButton_Right))
+		{
+			CloseWorldMap();
+			return;
+		}
+	}
+
+	// ---- draw
+	FCanvasTileItem Backdrop(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
+		FLinearColor(0.04f, 0.05f, 0.07f, 1.0f));
+	Canvas->DrawItem(Backdrop);
+	DrawStageMap(Centerline, nullptr, false, INDEX_NONE, Mid.X - Side * 0.5f, Mid.Y - Side * 0.5f,
+		Side, 0.6f, WorldMapRadiusM, false, RoadMgr, &WorldMapCenter);
+
+	for (int32 i = 0; i < Towns.Num(); ++i)
+	{
+		const FVector2D S = ToScreen(Towns[i].Pos);
+		const bool bH = i == Hover;
+		const float R = bH ? 6.0f : 4.0f;
+		FCanvasTileItem Dot(S - FVector2D(R, R), FVector2D(2 * R, 2 * R),
+			bH ? FLinearColor(1.0f, 0.85f, 0.3f) : FLinearColor(0.95f, 0.95f, 0.9f));
+		Canvas->DrawItem(Dot);
+		Text(Towns[i].Name, S.X + 9.0f, S.Y - 9.0f, bH ? 1.25f : 1.0f,
+			bH ? FLinearColor(1.0f, 0.9f, 0.5f) : FLinearColor(0.92f, 0.92f, 0.88f));
+	}
+
+	// center crosshair (gamepad / Enter pick point)
+	for (const FVector2D& D : {FVector2D(1, 0), FVector2D(0, 1)})
+	{
+		FCanvasLineItem L(Mid - D * 10.0f, Mid + D * 10.0f);
+		L.SetColor(FLinearColor(1, 1, 1, 0.8f));
+		L.LineThickness = 2.0f;
+		Canvas->DrawItem(L);
+	}
+
+	FCanvasTileItem Bar(FVector2D(0, 0), FVector2D(Canvas->SizeX, 64.0f), FLinearColor(0.02f, 0.03f, 0.05f, 0.8f));
+	Bar.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Bar);
+	Text(TEXT("WORLD MAP"), 24.0f, 14.0f, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
+	const FString Status = RealNow - NoRouteMsgTime < 3.0
+		? FString(TEXT("no road route to there"))
+		: RoadMgr->HasRoute()
+			? FString::Printf(TEXT("route to %s  ·  %s"), *RoadMgr->GetRouteName(),
+				*FormatNavDist(RoadMgr->GetRouteRemainingCm()))
+			: FString(TEXT("no destination set"));
+	Text(Status, 260.0f, 22.0f, 1.2f, RealNow - NoRouteMsgTime < 3.0
+		? FLinearColor(1.0f, 0.45f, 0.35f) : FLinearColor(1.0f, 0.55f, 0.9f));
+	if (Hover != INDEX_NONE)
+	{
+		Text(FString::Printf(TEXT("%s  -  click/enter: route here    F / Y: fast travel"), *Towns[Hover].Name),
+			24.0f, Canvas->SizeY - 84.0f, 1.1f, FLinearColor(1.0f, 0.9f, 0.5f));
+	}
+	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: town or road waypoint    right-click / backspace: clear route    tab / esc: close"),
+		24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
+	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    B / back: close"),
+		24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
+}
+
+void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
+{
+	const double Now = GetWorld()->GetTimeSeconds();
+	const bool bArrived = RoadMgr->GetArrivedTime() >= 0.0 && Now - RoadMgr->GetArrivedTime() < 4.0;
+	if (!RoadMgr->HasRoute() && !bArrived)
+	{
+		return;
+	}
+	UFont* Font = GEngine->GetLargeFont();
+	const float W = 380.0f, H = 76.0f;
+	const float X = Canvas->SizeX * 0.5f - W * 0.5f, Y = 18.0f;
+	FCanvasTileItem Bg(FVector2D(X, Y), FVector2D(W, H), FLinearColor(0.02f, 0.03f, 0.05f, 0.72f));
+	Bg.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Bg);
+	auto Text = [&](const FString& S, float TX, float TY, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S), Font, C);
+		T.Scale = FVector2D(Sc, Sc);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
+	if (!RoadMgr->HasRoute())
+	{
+		Text(FString::Printf(TEXT("ARRIVED  ·  %s"), *RoadMgr->GetArrivedName()), X + 20.0f, Y + 22.0f, 1.5f,
+			FLinearColor(0.4f, 1.0f, 0.5f));
+		return;
+	}
+
+	// turn arrow: stem up from the bottom, then bent by the turn angle
+	// (+ = right = clockwise on screen); straight when no turn is coming
+	float TurnCm = 0.0f, TurnDeg = 0.0f;
+	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg);
+	const float A = FMath::DegreesToRadians(bTurn ? FMath::Clamp(TurnDeg, -135.0f, 135.0f) : 0.0f);
+	const FVector2D Knee(X + 38.0f, Y + 36.0f);
+	const FVector2D Dir(FMath::Sin(A), -FMath::Cos(A));
+	const FVector2D Tip = Knee + Dir * 20.0f;
+	const FVector2D Side(-Dir.Y, Dir.X);
+	const FLinearColor ArrowCol(1.0f, 0.55f, 0.9f);
+	const FVector2D Lines[4][2] = {
+		{Knee + FVector2D(0, 26.0f), Knee}, {Knee, Tip},
+		{Tip, Tip - Dir * 9.0f + Side * 7.0f}, {Tip, Tip - Dir * 9.0f - Side * 7.0f}};
+	for (const auto& L : Lines)
+	{
+		FCanvasLineItem Item(L[0], L[1]);
+		Item.SetColor(ArrowCol);
+		Item.LineThickness = 4.0f;
+		Canvas->DrawItem(Item);
+	}
+
+	const float Abs = FMath::Abs(TurnDeg);
+	const TCHAR* Side2 = TurnDeg > 0.0f ? TEXT("right") : TEXT("left");
+	const FString Line1 = !bTurn ? FString(TEXT("Continue"))
+		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
+			Side2, *FormatNavDist(TurnCm));
+	Text(Line1, X + 80.0f, Y + 10.0f, 1.5f, FLinearColor::White);
+	Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm())),
+		X + 80.0f, Y + 44.0f, 1.05f, FLinearColor(1.0f, 0.7f, 0.92f));
+}
+
 void AODRaceHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -829,6 +1242,13 @@ void AODRaceHUD::DrawHUD()
 			return;
 		}
 		break;
+	}
+
+	// ---- world map (SS7.37) - full screen, game paused; replaces the HUD
+	if (bWorldMapOpen)
+	{
+		DrawWorldMap(RoadMgr, MapCenterline);
+		return;
 	}
 
 	// road-name/city label (2026-07-23) - RoadMgr-only feature (see its own
@@ -970,6 +1390,12 @@ void AODRaceHUD::DrawHUD()
 			Race ? Race->NextGate : INDEX_NONE, 24.0f,
 			Canvas->SizeY - MiniMapSize - 24.0f, MiniMapSize, 0.55f,
 			MiniMapZoomM, true, RoadMgr);
+	}
+
+	// ---- navigation next-turn / distance panel (SS7.37)
+	if (RoadMgr && !bMenuOpen)
+	{
+		DrawNavPanel(RoadMgr);
 	}
 
 	// ---- pause menu (stopgap shell; ESC toggles, AODPauseMenu owns state) -

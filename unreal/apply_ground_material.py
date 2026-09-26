@@ -504,13 +504,60 @@ spring_green_amount = g.mul(spring_green_param, g.const(SPRING_GREEN_MAX_BLEND))
 # texture-variety only, not tied to any biome/road signal (the C++ tint's
 # own road-verge blend already handles the "near road" cue as a color shift;
 # this is purely "don't tile obviously" breakup).
-patch_noise = value_noise(g.mul(world_xy, g.const(1.0 / MACRO_NOISE_SCALE_CM)))
+# V3 (2026-09-25): now wrapped like the snow noise (see wrap_lattice_uv) -
+# the unwrapped form feeds the same large-magnitude sin() hash the snow
+# path's 2026-09-08 fix proved degenerate on GPU, i.e. likely one uniform
+# dirt amount everywhere instead of patches.
+patch_noise = value_noise(wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / MACRO_NOISE_SCALE_CM))))
 dirt_amount = g.mul(patch_noise, g.const(DIRT_PATCH_STRENGTH))
 veg_albedo = g.lerp(veg_albedo, dirt["albedo"], dirt_amount, b_out="RGB")
 veg_normal = g.lerp(veg_normal, dirt["normal"], dirt_amount, b_out="RGB")
 veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), dirt_amount)
 
 veg_albedo = g.lerp(veg_albedo, spring_green_color, spring_green_amount, b_out="")
+
+# ---- V3 (2026-09-25, next steps.md §7.36): flat-layer macro variation +
+# distant-flat darkening - the Vail pale-hills carrier (item 6: the flat
+# grass/dirt blend reads pale khaki at range; Ground037's own mean albedo is
+# the palest thing in this layer). Flat/vegetated layer ONLY - steep rock,
+# alpine scree and snow below are untouched.
+#  1. 2-octave world-space value_noise (~300 m + ~1200 m) picks one of three
+#     multiplier variants (green meadow / dry meadow / bare dirt) over the
+#     existing biome-tinted blend, so vertex-tint hue design still leads.
+#  2. toward PixelDepth, push saturation up (lerp past 1 away from grey) and
+#     value down, so far mips stop averaging to pale khaki.
+# All tunables are here; scratchpad/verify_v3_ground_macro.py mirrors this
+# math offline (it parses these constants straight out of this file).
+MACRO_FINE_SCALE_CM = 30000.0     # 300 m octave
+MACRO_COARSE_SCALE_CM = 120000.0  # 1200 m octave
+MACRO_COARSE_WEIGHT = 0.6         # octave mix (fine gets 1 - this)
+MACRO_CONTRAST = 2.2              # stretches the 2-octave sum (clusters near 0.5) back toward 0..1
+MACRO_GREEN_MUL = (0.75, 1.10, 0.70)   # green meadow - variant at macro=0
+MACRO_DRY_MUL = (1.10, 1.00, 0.80)     # dry meadow - variant at macro=0.5
+MACRO_DIRT_MUL = (0.75, 0.62, 0.50)    # bare dirt (darker brown, not khaki) - variant at macro=1
+FAR_START_CM = 150000.0           # 1.5 km - no distance shaping nearer than this
+FAR_END_CM = 800000.0             # 8 km - full distance shaping from here on
+FAR_DARKEN = 0.25                 # value multiplier at full distance = 1 - this
+FAR_SAT_BOOST = 0.25              # saturation extrapolation at full distance (1 + this)
+
+macro_fine = value_noise(
+    wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / MACRO_FINE_SCALE_CM))), seed_offset=(13.0, 57.0))
+macro_coarse = value_noise(
+    wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / MACRO_COARSE_SCALE_CM))), seed_offset=(71.0, 29.0))
+macro = g.lerp(macro_fine, macro_coarse, g.const(MACRO_COARSE_WEIGHT))
+macro = g.clamp01(g.add(g.mul(g.sub(macro, g.const(0.5)), g.const(MACRO_CONTRAST)), g.const(0.5)))
+macro_lo = g.clamp01(g.mul(macro, g.const(2.0)))                      # green -> dry over 0..0.5
+macro_hi = g.clamp01(g.sub(g.mul(macro, g.const(2.0)), one_c))        # dry -> dirt over 0.5..1
+variant_mul = g.lerp(g.lerp(g.const3(*MACRO_GREEN_MUL), g.const3(*MACRO_DRY_MUL), macro_lo),
+                     g.const3(*MACRO_DIRT_MUL), macro_hi)
+veg_albedo = g.mul(veg_albedo, variant_mul)
+
+far_t = g.clamp01(g.div(g.sub(g.node(unreal.MaterialExpressionPixelDepth), g.const(FAR_START_CM)),
+                        g.const(FAR_END_CM - FAR_START_CM)))
+veg_grey = g.node(unreal.MaterialExpressionDesaturation)
+g._req(MEL.connect_material_expressions(veg_albedo, "", veg_grey, ""), "Desaturation input (far sat)")
+veg_albedo = g.lerp(veg_grey, veg_albedo, g.add(one_c, g.mul(far_t, g.const(FAR_SAT_BOOST))))
+veg_albedo = g.mul(veg_albedo, g.sub(one_c, g.mul(far_t, g.const(FAR_DARKEN))))
 
 # ---- above treeline, blend the vegetated base toward scree even on FLAT
 # ground (real alpine tundra is patchy rock/gravel, not solid grass) - same
@@ -603,4 +650,6 @@ log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"treeline={TREELINE_LOW_M:.0f}-{TREELINE_HIGH_M:.0f}m ({TREELINE_LOW_CM:.0f}-{TREELINE_HIGH_CM:.0f}cm), "
     f"snowline={SNOW_START_M:.0f}-{SNOW_FULL_M:.0f}m ({SNOW_LOW_CM:.0f}-{SNOW_HIGH_CM:.0f}cm), "
     f"layers={list(LAYERS.keys())}, triplanar=rock, "
-    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen]")
+    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen], "
+    f"v3_macro={MACRO_FINE_SCALE_CM / 100:.0f}m/{MACRO_COARSE_SCALE_CM / 100:.0f}m, "
+    f"v3_far={FAR_START_CM / 100:.0f}-{FAR_END_CM / 100:.0f}m darken={FAR_DARKEN} sat+={FAR_SAT_BOOST}")

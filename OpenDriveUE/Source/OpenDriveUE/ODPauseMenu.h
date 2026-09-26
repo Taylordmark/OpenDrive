@@ -17,7 +17,8 @@ class AODCreditsMenu;
  * screen; the "Garage" row (2026-07-26) opens that screen in place
  * (AODMainMenu::OpenGarage()) instead of requiring a full trip through
  * "Main Menu" -> map-select just to change the car mid-drive. Rows are
- * Resume, Traction, ABS, Garage, Settings, Credits, Main Menu (back to the
+ * Resume, World Map (SS7.37 - hands the screen to AODRaceHUD's world map),
+ * Traction, ABS, Garage, Settings, Credits, Main Menu (back to the
  * front-end), Quit. Drawn on canvas by ODRaceHUD; arrows navigate/change,
  * Enter activates.
  *
@@ -41,13 +42,17 @@ public:
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
 	int32 GetSelected() const { return Selected; }
-	int32 NumRows() const { return 8; }
+	int32 NumRows() const { return 9; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
 	bool IsCreditsOpen() const { return bCreditsOpen; }
 	AODSettingsMenu* GetSettingsMenu() const { return SettingsMenu; }
 	AODCreditsMenu* GetCreditsMenu() const { return CreditsMenu; }
+
+	/** Drop the pause overlay WITHOUT unpausing - the world map (SS7.37)
+	 *  takes the screen over and owns the unpause when it closes. */
+	void HideForOverlay() { bOpen = false; bSettingsOpen = false; bCreditsOpen = false; }
 
 private:
 	void Toggle();
