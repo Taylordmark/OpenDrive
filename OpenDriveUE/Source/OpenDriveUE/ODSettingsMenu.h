@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODMenuTabs.h"
 #include "ODSettingsMenu.generated.h"
 
 class AODRebindMenu;
@@ -66,6 +67,10 @@ public:
 	 *  (see IsRebindOpen) - one level of the same "check the sub-screen flag
 	 *  first" idiom AODPauseMenu/AODMainMenu use for THIS menu. */
 	void MoveSelection(int32 Dir);
+	/** Display / Audio / Input tabs; Close is the always-visible footer. */
+	void SwitchTab(int32 Dir);
+	TArrayView<const FODMenuTab> GetTabs() const;
+	int32 GetTab() const { return TabIdx; }
 	/** Left/Right (Dir = -1/+1) on the selected row; Enter also calls this
 	 *  with Dir=+1 for a value row (same "Enter cycles" idiom as the other
 	 *  two menus), except the terminal "Close" row and the "Controls" row -
@@ -106,6 +111,7 @@ private:
 	AODRebindMenu* EnsureRebindMenu();
 
 	int32 Selected = 0;
+	int32 TabIdx = 0;
 
 	bool bRebindOpen = false;
 	UPROPERTY()

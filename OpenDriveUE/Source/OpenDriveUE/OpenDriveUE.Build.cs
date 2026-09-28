@@ -23,6 +23,10 @@ public class OpenDriveUE : ModuleRules
 			// FDisplayMetrics (Settings menu's "Native" resolution row, Arc 4.4) -
 			// lives in ApplicationCore, not Engine/Core.
 			"ApplicationCore",
+			// FSlateFontInfo / GWhiteTexture - menu panel text at real pixel
+			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
+			"SlateCore",
+			"RenderCore",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
 			"Json"
 		});

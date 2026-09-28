@@ -62,6 +62,9 @@ private:
 	void Right();
 	void Activate();
 	void Adjust(int32 Dir);
+	// Q/E (shoulders on pad) switch the Settings panel's tabs while it's open
+	void PrevTab();
+	void NextTab();
 
 public:
 	/** Re-derives the Pause key from FODInputConfig and rebuilds it - called

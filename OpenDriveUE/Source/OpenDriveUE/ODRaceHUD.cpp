@@ -7,6 +7,7 @@
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "GlobalRenderResources.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/App.h"
@@ -520,60 +521,18 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		return;
 	}
 
-	// ---- car config: keyboard rows on the left, the spinning car behind ----
-	// Palette restyled 2026-08 to match the new garage set (cool-white LED
-	// hex ceiling, black walls, glossy dark floor) - colors/decoration only,
-	// no row/logic/layout changes below. A dark translucent panel sits
-	// behind the text block so it reads as part of the room instead of
-	// floating text over whatever's rendering behind it; the selected-row
-	// highlight stays a warm accent (now a cooled amber rather than gold) so
-	// it still pops against the cool garage backdrop instead of blending in.
+	// ---- car config: tabbed panel on the left, the showroom car behind ----
 	if (Menu->GetStage() == EODMenuStage::CarConfig)
 	{
 		const bool bGarage = Menu->IsGarageMode();
-		const float Mx = 90.0f;
-		float My = Canvas->SizeY * 0.5f - 180.0f;
-
-		// panel background - dark blue-black, matching the garage's black
-		// walls, with a thin cool-cyan top/bottom rule for a hex-ceiling-ish
-		// accent line rather than a plain flat rectangle.
-		const float PanelW = 620.0f;
-		const float PanelTop = My - 30.0f;
-		const float PanelH = 44.0f * Menu->NumRows() + 150.0f;
-		FCanvasTileItem Panel(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, PanelH),
-			FLinearColor(0.02f, 0.03f, 0.05f, 0.78f));
-		Panel.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(Panel);
-		FCanvasTileItem RuleTop(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, 2.0f),
-			FLinearColor(0.55f, 0.85f, 1.0f, 0.55f));
-		RuleTop.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(RuleTop);
-		FCanvasTileItem RuleBottom(FVector2D(Mx - 30.0f, PanelTop + PanelH - 2.0f), FVector2D(PanelW, 2.0f),
-			FLinearColor(0.55f, 0.85f, 1.0f, 0.55f));
-		RuleBottom.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(RuleBottom);
-
-		Text(bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"), Mx, My, 2.2f,
-			FLinearColor(0.75f, 0.9f, 1.0f));
-		My += 80.0f;
-		for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
-		{
-			FString Label, Value;
-			Menu->GetRow(Row, Label, Value);
-			const bool bSel = Row == Menu->GetSelected();
-			const FLinearColor Col = bSel
-				? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
-			Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx, My, 1.5f, Col);
-			if (!Value.IsEmpty())
-			{
-				Text(FString::Printf(TEXT("< %s >"), *Value), Mx + 270.0f, My, 1.5f, Col);
-			}
-			My += 44.0f;
-		}
-		Text(bGarage
-				? TEXT("arrows change    enter select    esc/Resume Driving to continue")
-				: TEXT("arrows change    enter select    (Drive to pick a location)"),
-			Mx, My + 24.0f, 1.0f, FLinearColor(0.5f, 0.62f, 0.7f));
+		const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
+		const float H = TabbedPanelHeight(Tabs);
+		DrawTabbedPanel(70.0f, FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), 640.0f,
+			bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"),
+			Tabs, Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
+			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
+			bGarage ? TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  resume")
+				: TEXT("Q/E  tabs     ↑↓  select     ←→  change     Enter  confirm"));
 		return;
 	}
 
@@ -648,51 +607,18 @@ void AODRaceHUD::DrawSettingsMenu(AODSettingsMenu* Menu) const
 	{
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
-
 	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
 		FLinearColor(0, 0, 0, 0.7f));
 	Dim.BlendMode = SE_BLEND_Translucent;
 	Canvas->DrawItem(Dim);
 
-	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
-
-	const float Mx = Canvas->SizeX * 0.5f - 260.0f;
-	float My = Canvas->SizeY * 0.5f - 30.0f * Menu->NumRows() * 0.5f - 70.0f;
-
-	const float PanelW = 560.0f;
-	const float PanelTop = My - 30.0f;
-	const float PanelH = 42.0f * Menu->NumRows() + 130.0f;
-	FCanvasTileItem Panel(FVector2D(Mx - 30.0f, PanelTop), FVector2D(PanelW, PanelH),
-		FLinearColor(0.02f, 0.03f, 0.05f, 0.85f));
-	Panel.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Panel);
-
-	Text(TEXT("SETTINGS"), Mx, My, 2.0f, FLinearColor(0.75f, 0.9f, 1.0f));
-	My += 66.0f;
-
-	for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
-	{
-		FString Label, Value;
-		Menu->GetRow(Row, Label, Value);
-		const bool bSel = Row == Menu->GetSelected();
-		const FLinearColor Col = bSel
-			? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
-		Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx, My, 1.4f, Col);
-		if (!Value.IsEmpty())
-		{
-			Text(FString::Printf(TEXT("< %s >"), *Value), Mx + 260.0f, My, 1.4f, Col);
-		}
-		My += 42.0f;
-	}
-	Text(TEXT("arrows change    enter select    esc close"), Mx, My + 20.0f, 1.0f,
-		FLinearColor(0.55f, 0.6f, 0.65f));
+	const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
+	const float W = 680.0f;
+	const float H = TabbedPanelHeight(Tabs);
+	DrawTabbedPanel((Canvas->SizeX - W) * 0.5f, FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), W,
+		TEXT("SETTINGS"), Tabs, Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
+		[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
+		TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  close"));
 
 	if (Menu->IsRebindOpen())
 	{
@@ -807,6 +733,154 @@ void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const
 
 	Text(TEXT("up/down scroll    esc/enter close"), Mx + 24.0f, PanelTop + PanelH - 30.0f, 1.0f,
 		FLinearColor(0.55f, 0.6f, 0.65f));
+}
+
+// ---- tabbed menu panel (2026-09-28) ----
+
+namespace
+{
+constexpr float TabRowH = 50.0f;
+constexpr float TabHeaderH = 150.0f;   // title + tab bar
+constexpr float TabFooterH = 150.0f;   // gap + footer button + hint
+const FLinearColor PanelBg(0.015f, 0.02f, 0.035f, 0.88f);
+const FLinearColor Accent(1.0f, 0.68f, 0.25f);
+const FLinearColor Cyan(0.55f, 0.85f, 1.0f);
+const FLinearColor TextCol(0.86f, 0.9f, 0.94f);
+const FLinearColor DimCol(0.48f, 0.55f, 0.62f);
+
+// "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
+float ParsePercent(const FString& V)
+{
+	if (!V.EndsWith(TEXT("%")) || !V.LeftChop(1).IsNumeric())
+	{
+		return -1.0f;
+	}
+	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
+}
+}
+
+float AODRaceHUD::TabbedPanelHeight(TArrayView<const FODMenuTab> Tabs)
+{
+	int32 MaxRows = 0;
+	for (const FODMenuTab& T : Tabs)
+	{
+		MaxRows = FMath::Max(MaxRows, T.Count);
+	}
+	return TabHeaderH + MaxRows * TabRowH + TabFooterH;
+}
+
+void AODRaceHUD::DrawTabbedPanel(float X, float Y, float W, const TCHAR* Title,
+	TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, int32 Footer, int32 Selected,
+	TFunctionRef<void(int32, FString&, FString&)> GetRow, const TCHAR* Hint) const
+{
+	// Text at its real pixel size - the old Scale=1.5-2.2 stretched a small
+	// raster and read blurry. The engine font is a runtime Slate composite,
+	// so any size/typeface rasterizes crisp.
+	const UFont* Font = GEngine->GetLargeFont();
+	auto Text = [&](const FString& S, float TX, float TY, float Size, const FLinearColor& C,
+		bool bBold = false, bool bCenterX = false)
+	{
+		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S),
+			FSlateFontInfo(Font, Size, bBold ? FName("Bold") : FName("Regular")), C);
+		T.bCentreX = bCenterX;
+		T.bCentreY = true;
+		T.EnableShadow(FLinearColor(0, 0, 0, 0.6f), FVector2D(1, 1));
+		Canvas->DrawItem(T);
+	};
+	auto Rect = [&](float RX, float RY, float RW, float RH, const FLinearColor& C)
+	{
+		FCanvasTileItem T(FVector2D(RX, RY), FVector2D(RW, RH), C);
+		T.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(T);
+	};
+	auto Arrow = [&](float AX, float AY, float Dir, const FLinearColor& C)   // Dir -1 left, +1 right
+	{
+		FCanvasTriangleItem T(FVector2D(AX + 6.0f * Dir, AY), FVector2D(AX - 6.0f * Dir, AY - 8.0f),
+			FVector2D(AX - 6.0f * Dir, AY + 8.0f), GWhiteTexture);
+		T.SetColor(C);
+		T.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(T);
+	};
+
+	const float H = TabbedPanelHeight(Tabs);
+	const float Pad = 32.0f;
+	Rect(X, Y, W, H, PanelBg);
+	Rect(X, Y, W, 3.0f, Cyan * FLinearColor(1, 1, 1, 0.7f));
+
+	Text(Title, X + Pad, Y + 44.0f, 30.0f, FLinearColor(0.8f, 0.92f, 1.0f), true);
+
+	// tab bar: equal segments, Q/E cues at the ends, accent underline on the active tab
+	const float BarY = Y + 104.0f;
+	const float BarX0 = X + Pad + 28.0f, BarX1 = X + W - Pad - 28.0f;
+	const float SegW = (BarX1 - BarX0) / FMath::Max(1, Tabs.Num());
+	Text(TEXT("Q"), X + Pad + 4.0f, BarY, 15.0f, DimCol, true, true);
+	Text(TEXT("E"), X + W - Pad - 4.0f, BarY, 15.0f, DimCol, true, true);
+	Rect(BarX0, BarY + 20.0f, BarX1 - BarX0, 1.0f, FLinearColor(1, 1, 1, 0.12f));
+	for (int32 i = 0; i < Tabs.Num(); ++i)
+	{
+		const bool bActive = i == ActiveTab;
+		const float SX = BarX0 + SegW * i;
+		Text(Tabs[i].Name, SX + SegW * 0.5f, BarY, 17.0f, bActive ? FLinearColor::White : DimCol, true, true);
+		if (bActive)
+		{
+			Rect(SX + 10.0f, BarY + 18.0f, SegW - 20.0f, 3.0f, Accent);
+		}
+	}
+
+	// rows of the active tab
+	const float VX0 = X + W - Pad - 250.0f, VX1 = X + W - Pad - 10.0f;   // value column
+	float RowY = Y + TabHeaderH;
+	const FODMenuTab& Tab = Tabs[ActiveTab];
+	for (int32 Row = Tab.First; Row < Tab.First + Tab.Count; ++Row)
+	{
+		FString Label, Value;
+		GetRow(Row, Label, Value);
+		const bool bSel = Row == Selected;
+		const float CY = RowY + TabRowH * 0.5f;
+		if (bSel)
+		{
+			Rect(X + Pad - 12.0f, RowY + 3.0f, W - 2.0f * Pad + 24.0f, TabRowH - 6.0f,
+				FLinearColor(1.0f, 0.68f, 0.25f, 0.14f));
+			Rect(X + Pad - 12.0f, RowY + 3.0f, 4.0f, TabRowH - 6.0f, Accent);
+		}
+		Text(Label, X + Pad + 6.0f, CY, 20.0f, bSel ? FLinearColor::White : TextCol, bSel);
+
+		const FLinearColor ValCol = bSel ? Accent : TextCol;
+		if (Value.IsEmpty())
+		{
+			Arrow(VX1, CY, +1.0f, bSel ? Accent : DimCol);   // action row: opens a sub-screen
+		}
+		else if (const float Pct = ParsePercent(Value); Pct >= 0.0f)
+		{
+			const float TX0 = VX0 + 24.0f, TX1 = VX1 - 76.0f;
+			Rect(TX0, CY - 3.0f, TX1 - TX0, 6.0f, FLinearColor(1, 1, 1, 0.14f));
+			Rect(TX0, CY - 3.0f, (TX1 - TX0) * Pct, 6.0f, bSel ? Accent : Cyan * FLinearColor(1, 1, 1, 0.8f));
+			Rect(TX0 + (TX1 - TX0) * Pct - 2.0f, CY - 9.0f, 4.0f, 18.0f, bSel ? FLinearColor::White : TextCol);
+			Text(Value, VX1 - 32.0f, CY, 18.0f, ValCol, bSel, true);
+		}
+		else
+		{
+			Text(Value, (VX0 + VX1) * 0.5f, CY, 19.0f, ValCol, bSel, true);
+		}
+		if (bSel && !Value.IsEmpty())
+		{
+			Arrow(VX0, CY, -1.0f, Accent);
+			Arrow(VX1, CY, +1.0f, Accent);
+		}
+		RowY += TabRowH;
+	}
+
+	// footer button (Drive / Close) - always visible, pinned to the panel bottom
+	FString FootLabel, FootValue;
+	GetRow(Footer, FootLabel, FootValue);
+	const bool bFootSel = Selected == Footer;
+	const float FootY = Y + H - TabFooterH + 30.0f;
+	Rect(X + Pad - 12.0f, FootY, W - 2.0f * Pad + 24.0f, 54.0f,
+		bFootSel ? Accent : FLinearColor(1, 1, 1, 0.07f));
+	Text(FootLabel.ToUpper(), X + W * 0.5f, FootY + 27.0f, 21.0f,
+		bFootSel ? FLinearColor(0.05f, 0.04f, 0.02f) : TextCol, true, true);
+
+	Text(Hint, X + Pad, Y + H - 32.0f, 14.0f, DimCol);
 }
 
 // ---- Arc 4.2 v3: world map + navigation (next steps.md SS7.37) ----
@@ -1460,7 +1534,7 @@ void AODRaceHUD::DrawHUD()
 			if (!Value.IsEmpty())
 			{
 				FCanvasTextItem V(FVector2D(Mx + 220.0f, My),
-					FText::FromString(FString::Printf(TEXT("< %s >"), *Value)),
+					FText::FromString(Value),
 					Font, Color);
 				V.Scale = FVector2D(1.5f, 1.5f);
 				V.EnableShadow(FLinearColor::Black);

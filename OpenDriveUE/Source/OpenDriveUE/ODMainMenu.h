@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODMenuTabs.h"
 #include "ODMainMenu.generated.h"
 
 class AODVehiclePawn;
@@ -94,6 +95,9 @@ public:
 	// Arc 4.4, next steps.md SS4.4/SS7.31; Season SS7.38 - see Adjust()/GetRow() in the .cpp).
 	int32 NumRows() const { return 14; }
 	int32 GetSelected() const { return Selected; }
+	/** Car / Sound / Options tabs over the rows above; Drive is the footer. */
+	TArrayView<const FODMenuTab> GetTabs() const;
+	int32 GetTab() const { return TabIdx; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
@@ -142,6 +146,9 @@ private:
 	void Back();         // Escape
 	void OnClick();      // left mouse (map select)
 	void Adjust(int32 Dir);
+	void PrevTab() { SwitchTab(-1); }   // Q / left shoulder
+	void NextTab() { SwitchTab(+1); }   // E / right shoulder
+	void SwitchTab(int32 Dir);
 
 	// stage transitions
 	void EnterCarConfig();       // showroom + first live apply (once pawn ready)
@@ -190,6 +197,7 @@ private:
 	EODMenuStage Stage = EODMenuStage::CarConfig;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
+	int32 TabIdx = 0;
 	int32 EngineIdx = 0;     // index into the Engines[] table (ODMainMenu.cpp), 0 = Stock
 	int32 DriveIdx = 0;      // index into the Layouts[] table, 0 = Stock
 	int32 TuneIdx = 0;       // index into AODTuningManager::Presets

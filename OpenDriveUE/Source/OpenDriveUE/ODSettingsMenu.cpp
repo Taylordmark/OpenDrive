@@ -72,6 +72,12 @@ T* FindSettingsActor(UWorld* World)
 	}
 	return nullptr;
 }
+
+const FODMenuTab SettingsTabs[] = {
+	{TEXT("DISPLAY"), 0, 7},   // Resolution .. Asset Detail
+	{TEXT("AUDIO"), 7, 3},     // Master/Vehicle/Ambient volume
+	{TEXT("INPUT"), 10, 2},    // Input Device, Controls
+};
 }
 
 AODSettingsMenu::AODSettingsMenu()
@@ -102,7 +108,23 @@ void AODSettingsMenu::MoveSelection(int32 Dir)
 		}
 		return;
 	}
-	Selected = (Selected + Dir + NumRows()) % NumRows();
+	Selected = ODMenuTabs::Step(SettingsTabs[TabIdx], NumRows() - 1, Selected, Dir);
+}
+
+void AODSettingsMenu::SwitchTab(int32 Dir)
+{
+	if (bRebindOpen)
+	{
+		return;   // Q/E may be the key being captured
+	}
+	const int32 N = UE_ARRAY_COUNT(SettingsTabs);
+	TabIdx = (TabIdx + Dir + N) % N;
+	Selected = SettingsTabs[TabIdx].First;
+}
+
+TArrayView<const FODMenuTab> AODSettingsMenu::GetTabs() const
+{
+	return SettingsTabs;
 }
 
 void AODSettingsMenu::AdjustSelected(int32 Dir)
@@ -411,7 +433,7 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		OutValue = (UpscalerIdx == 1) ? TEXT("TSR") : TEXT("Off (TAA)");
 		break;
 	case 4:
-		OutLabel = TEXT("  Screen %");
+		OutLabel = TEXT("Screen %");
 		OutValue = FString::Printf(TEXT("%d%%"), ScreenPercent);
 		break;
 	case 5:

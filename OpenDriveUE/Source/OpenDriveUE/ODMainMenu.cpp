@@ -117,6 +117,12 @@ constexpr float ExhaustPopStep = 0.05f;
 const TCHAR* const SeasonNames[] = {TEXT("Auto"), TEXT("Summer"), TEXT("Fall"), TEXT("Winter"), TEXT("Spring")};
 const TCHAR* SeasonConfigSection = TEXT("OpenDrive.Season");
 
+const FODMenuTab MenuTabs[] = {
+	{TEXT("CAR"), 0, 4},       // Car, Engine, Drivetrain, Tuning
+	{TEXT("SOUND"), 4, 5},     // Exhaust preset + its 4 sliders
+	{TEXT("OPTIONS"), 9, 4},   // Input Device, Season, Settings, Credits
+};
+
 template <typename T>
 T* FindActor(UWorld* World)
 {
@@ -182,6 +188,10 @@ void AODMainMenu::BeginPlay()
 		Bind(EKeys::Enter, &AODMainMenu::Activate);
 		Bind(EKeys::Escape, &AODMainMenu::Back);
 		Bind(EKeys::LeftMouseButton, &AODMainMenu::OnClick);
+		Bind(EKeys::Q, &AODMainMenu::PrevTab);
+		Bind(EKeys::E, &AODMainMenu::NextTab);
+		Bind(EKeys::Gamepad_LeftShoulder, &AODMainMenu::PrevTab);
+		Bind(EKeys::Gamepad_RightShoulder, &AODMainMenu::NextTab);
 		// gamepad menu navigation (2026-08-27) - cheap to add alongside the
 		// keyboard binds above (same Bind() helper, same "must work while
 		// paused" flags), so a gamepad-only player isn't stuck needing a
@@ -270,6 +280,7 @@ void AODMainMenu::OpenMenu()
 	Stage = EODMenuStage::CarConfig;
 	bGarageMode = false;
 	Selected = 0;
+	TabIdx = 0;
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
 	// Deliberately NOT pausing here (2026-07-28, unlike OpenGarage() below) -
@@ -297,6 +308,7 @@ void AODMainMenu::OpenGarage()
 	Stage = EODMenuStage::CarConfig;
 	bGarageMode = true;
 	Selected = 0;
+	TabIdx = 0;
 	bEntered = false;   // re-sync the displayed engine/drivetrain with reality
 	UGameplayStatics::SetGamePaused(this, true);
 	// 2026-08-27 fix: this call was missing entirely, so the pause menu's
@@ -491,7 +503,7 @@ void AODMainMenu::Up()
 	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
-		Selected = (Selected + NumRows() - 1) % NumRows();
+		Selected = ODMenuTabs::Step(MenuTabs[TabIdx], NumRows() - 1, Selected, -1);
 	}
 }
 
@@ -509,8 +521,28 @@ void AODMainMenu::Down()
 	}
 	if (Stage == EODMenuStage::CarConfig)
 	{
-		Selected = (Selected + 1) % NumRows();
+		Selected = ODMenuTabs::Step(MenuTabs[TabIdx], NumRows() - 1, Selected, +1);
 	}
+}
+
+void AODMainMenu::SwitchTab(int32 Dir)
+{
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->SwitchTab(Dir); }
+		return;
+	}
+	if (Stage == EODMenuStage::CarConfig && !bCreditsOpen)
+	{
+		const int32 N = UE_ARRAY_COUNT(MenuTabs);
+		TabIdx = (TabIdx + Dir + N) % N;
+		Selected = MenuTabs[TabIdx].First;
+	}
+}
+
+TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
+{
+	return MenuTabs;
 }
 
 void AODMainMenu::Left()
@@ -1103,19 +1135,19 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue = ExhaustPresets[ExhaustPresetIdx].Name;
 		break;
 	case 5:
-		OutLabel = TEXT("  Loudness");
+		OutLabel = TEXT("Loudness");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustLoudness * 100.0f));
 		break;
 	case 6:
-		OutLabel = TEXT("  Rasp");
+		OutLabel = TEXT("Rasp");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustRasp * 100.0f));
 		break;
 	case 7:
-		OutLabel = TEXT("  Muffler");
+		OutLabel = TEXT("Muffler");
 		OutValue = FString::Printf(TEXT("%.0f Hz"), ExhaustMufflerCutoff);
 		break;
 	case 8:
-		OutLabel = TEXT("  Pop");
+		OutLabel = TEXT("Pop");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustPop * 100.0f));
 		break;
 	case 9:

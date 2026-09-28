@@ -81,6 +81,10 @@ void AODPauseMenu::BeginPlay()
 	Bind(EKeys::Left, &AODPauseMenu::Left, false);
 	Bind(EKeys::Right, &AODPauseMenu::Right, false);
 	Bind(EKeys::Enter, &AODPauseMenu::Activate, false);
+	Bind(EKeys::Q, &AODPauseMenu::PrevTab, false);
+	Bind(EKeys::E, &AODPauseMenu::NextTab, false);
+	Bind(EKeys::Gamepad_LeftShoulder, &AODPauseMenu::PrevTab, false);
+	Bind(EKeys::Gamepad_RightShoulder, &AODPauseMenu::NextTab, false);
 
 	// keep the current shift feel now that the gearbox row is gone
 	ApplyGearbox();
@@ -230,6 +234,22 @@ void AODPauseMenu::Down()
 	if (bOpen)
 	{
 		Selected = (Selected + 1) % NumRows();
+	}
+}
+
+void AODPauseMenu::PrevTab()
+{
+	if (bSettingsOpen && SettingsMenu)
+	{
+		SettingsMenu->SwitchTab(-1);
+	}
+}
+
+void AODPauseMenu::NextTab()
+{
+	if (bSettingsOpen && SettingsMenu)
+	{
+		SettingsMenu->SwitchTab(+1);
 	}
 }
 

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/HUD.h"
 #include "InputCoreTypes.h"
+#include "ODMenuTabs.h"
 #include "ODRaceHUD.generated.h"
 
 class AODRaceManager;
@@ -129,4 +130,13 @@ private:
 	 *  as DrawSettingsMenu/DrawCreditsMenu's "generic over whichever parent
 	 *  has it open" shape. */
 	void DrawRebindMenu(AODRebindMenu* Menu) const;
+
+	/** Shared car-config / settings panel (2026-09-28): title, Q/E tab bar,
+	 *  the active tab's rows (value between arrows, % values as a slider bar)
+	 *  and the footer button row. Sized to the tallest tab so switching tabs
+	 *  doesn't resize it. X,Y is the panel's top-left. */
+	void DrawTabbedPanel(float X, float Y, float W, const TCHAR* Title,
+		TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, int32 Footer, int32 Selected,
+		TFunctionRef<void(int32, FString&, FString&)> GetRow, const TCHAR* Hint) const;
+	static float TabbedPanelHeight(TArrayView<const FODMenuTab> Tabs);
 };
