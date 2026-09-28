@@ -116,6 +116,13 @@ STAGES = [
     ("build_road_stations.py", "build road_stations.json (single source of truth)"),
     ("classify_settlements.py", "classify settlement archetypes -> settlement_tiles.json"),
     ("build_retaining_walls.py", "build retaining_walls.json (must precede terrain carve)"),
+    # WATER (2026-09-01): must precede terrain - build_terrain_mesh_tiles
+    # reads the baked water_*.bin back as lake beds and depresses terrain to
+    # them (load_lake_beds). It used to sit after terrain ("needs terrain's
+    # sample_dem"), but it only imports that function, never reads terrain
+    # tiles - so terrain always baked against the PREVIOUS run's lakes
+    # (2026-09-25: 126 stations up to 10m off near Dillon after a rebake).
+    ("build_water_tiles.py", "bake lake/reservoir water tiles -> water_*.bin (terrain reads these as lake beds)"),
     ("build_terrain_mesh_tiles.py", "bake terrain tiles -> Content/OpenDrive/Masks/terrain_*.bin"),
     ("export_retaining_wall_bin.py", "export wall tiles -> Content/OpenDrive/Masks/walls_*.bin"),
     ("build_road_network.py", "build road_mesh.json + road_test_meta.json"),
@@ -158,13 +165,6 @@ STAGES = [
     ("export_biome_bin.py", "export biome_*.bin"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
-    # WATER (2026-09-01): added when summit_county became the active area -
-    # build_water_tiles.py postdates this driver (2026-08-27) and was never
-    # registered as a stage; Dillon Reservoir makes it load-bearing here.
-    # Needs road_stations.json (shared world-frame origin) + terrain tiles
-    # (sample_dem reuse), so it sits after both; fetches its own OSM water
-    # polygons like classify_biomes fetches its own imagery.
-    ("build_water_tiles.py", "bake lake/reservoir water tiles -> water_*.bin"),
     ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
     ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
 ]

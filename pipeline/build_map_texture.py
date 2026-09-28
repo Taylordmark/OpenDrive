@@ -28,7 +28,7 @@ import numpy as np
 from PIL import Image
 
 import test_areas
-from classify_biomes import classify_rgb, fetch_imagery_mosaic
+from classify_biomes import classify_rgb, fetch_mosaic
 from test_areas import AREA_NAME, BBOX_SNWE
 
 # Optional per-area wider bbox the map background should also cover, even
@@ -125,7 +125,7 @@ def main():
         pad_deg = (target_span_m - width_m) / 2.0 / m_per_deg_lon
         west, east = west - pad_deg, east + pad_deg
 
-    mosaic, bounds = fetch_imagery_mosaic(west, south, east, north)
+    mosaic, bounds = fetch_mosaic(west, south, east, north)
     # classify_rgb() now also returns w_bare (2026-08-27, classify_biomes.py
     # desert-detection fix) - unused here, this is a map-texture blend, not
     # a biome classification.
