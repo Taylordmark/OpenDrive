@@ -7204,10 +7204,11 @@ consumers. Nothing new is spawned by `AODGameMode`; everything hangs off
     everything else 0). It ramps like the other scalars.
     `AODAtmosphereController` multiplies the sky luminance and the fog's
     ambient inscatter by a green (0.62, 0.9, 0.55) at that weight.
-  - **Visibility:** the Tornado state's visibility went from 800 m to
-    6 km so the funnel can be seen from its spawn distance. The heavy loss
-    is local instead: visibility smoothsteps down to 40 m within 600 m of
-    the funnel.
+  - **Visibility:** the Tornado state stays at 800 m everywhere (Taylor,
+    2026-09-28, chose fog over a 6 km clear state). The funnel is hidden
+    at its 2-5 km spawn and looms out of the fog as it closes in; the HUD
+    warning's bearing is the early cue. Near the funnel, visibility still
+    smoothsteps down to 40 m within 600 m.
   - **Wind:** new `AODWeatherController::WindAtMs(pos)` returns the
     published wind plus a Rankine vortex: 60 m/s peak at the 50 m core,
     1/r outside it, faded to 0 between 150 and 300 m, cyclonic, plus a 0.5x

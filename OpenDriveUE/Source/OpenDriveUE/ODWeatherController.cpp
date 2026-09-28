@@ -67,8 +67,10 @@ namespace
 
 	// Per-state scalar targets (not mirrored - the sim only needs states):
 	// { PrecipIntensity, PrecipType, Wind m/s, Visibility m, CloudCover, Dust, StormTint }
-	// Tornado visibility is 6 km so the funnel reads from its 2-5 km spawn;
-	// the heavy loss is local, near the funnel (TickTornado).
+	// Tornado visibility is 800 m on purpose (Taylor, 2026-09-28): the funnel
+	// is hidden at its 2-5 km spawn and looms out of the fog as it closes in -
+	// the HUD warning's bearing is the only early cue. Near-funnel loss
+	// down to TORNADO_VIS_M is still applied locally (TickTornado).
 	constexpr float STATE_TARGETS[NumStates][7] = {
 		{ 0.0f,  0.0f,  3.0f, 20000.0f, 0.10f, 0.0f, 0.0f },   // Clear
 		{ 0.0f,  0.0f,  5.0f, 12000.0f, 0.85f, 0.0f, 0.0f },   // Overcast
@@ -80,7 +82,7 @@ namespace
 		{ 0.0f,  0.0f,  1.0f,   250.0f, 0.70f, 0.0f, 0.0f },   // Fog
 		{ 0.0f,  0.0f, 16.0f,   600.0f, 0.30f, 1.0f, 0.0f },   // DustStorm
 		{ 0.85f, 0.0f, 12.0f,  1500.0f, 1.00f, 0.0f, 0.0f },   // Thunderstorm
-		{ 0.7f,  0.0f, 25.0f,  6000.0f, 1.00f, 0.3f, 1.0f },   // Tornado
+		{ 0.7f,  0.0f, 25.0f,   800.0f, 1.00f, 0.3f, 1.0f },   // Tornado
 		{ 1.0f,  0.0f, 35.0f,   300.0f, 1.00f, 0.0f, 0.0f },   // Hurricane
 	};
 
