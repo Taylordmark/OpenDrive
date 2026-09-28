@@ -125,6 +125,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DragCoeff = 0.45f;
 
+	/** N per (m/s)^2. Tuning presets scale this by Preset->Downforce / 1.1. */
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DownforceCoeff = 1.1f;
 

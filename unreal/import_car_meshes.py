@@ -326,8 +326,11 @@ def make_def(name, props):
 # split (front_weight_frac), yaw_dynamic_index (Iz = DI*m*a*b), COM height,
 # drive layout, torque and brakes (total scaled with mass x wheel radius,
 # front share ~ split + 0.1; handbrake 2x rear). Validated in
-# scratchpad/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire,
-# suspension and aero still stay at UODVehicleDef's defaults.
+# scratchpad/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire and
+# suspension stay at UODVehicleDef's defaults; aero too except
+# downforce_coeff (N per (m/s)^2) on the aero cars, sized at 150 mph
+# (67.06 m/s, the usual real-world quote point): Concept = 1.0x its weight
+# (Taylor, 2026-09-28), LMP 1.5x, Super 0.5x - coeff = k*m*9.81/67.06^2.
 make_def("DA_Vehicle_Muscle", {
     "display_name": "Muscle",
     "chassis_mesh": meshes["SM_Car_Muscle"],
@@ -361,6 +364,7 @@ make_def("DA_Vehicle_Super", {
     "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 650.0,
     "front_brake_nm": 3950.0, "rear_brake_nm": 3650.0, "handbrake_nm": 7300.0,
+    "downforce_coeff": 1.56,
 })
 make_def("DA_Vehicle_Pickup", {
     "display_name": "Pickup",
@@ -396,6 +400,7 @@ make_def("DA_Vehicle_Concept", {
     "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 500.0,
     "front_brake_nm": 3100.0, "rear_brake_nm": 2850.0, "handbrake_nm": 5700.0,
+    "downforce_coeff": 2.51,
 })
 make_def("DA_Vehicle_LMP", {
     "display_name": "LMP",
@@ -407,6 +412,7 @@ make_def("DA_Vehicle_LMP", {
     "front_weight_frac": 0.45, "yaw_dynamic_index": 0.85, "com_local_z": 3.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 600.0,
     "front_brake_nm": 2850.0, "rear_brake_nm": 2300.0, "handbrake_nm": 4600.0,
+    "downforce_coeff": 3.37,
 })
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)

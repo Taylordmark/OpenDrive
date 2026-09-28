@@ -124,30 +124,38 @@ void AODVehiclePawn::LoadVehicleDefs()
 	IAssetRegistry& AR = ARM.Get();
 	// A -game launch can reach this BeginPlay before the async content scan has
 	// indexed the vehicle defs (seen live: "0 found" with the assets on disk),
-	// so force a synchronous scan of their folder(s) before querying.
+	// so force a synchronous scan of their folder before querying. Only
+	// /Game/OpenDrive/Cars (plural, import_car_meshes.py's current set) -
 	// /Game/OpenDrive/Car (singular) holds the original placeholder Coupe/GT
-	// defs; /Game/OpenDrive/Cars (plural) holds the 2026-08-27 procedural
-	// 4-car set, imported into a separate folder specifically so it couldn't
-	// collide with the originals - both need to be scanned or the plural
-	// folder's defs are invisible to the asset-registry query below (seen
-	// live: only 2 of 6 defs found before this fix).
-	AR.ScanPathsSynchronous(
-		{TEXT("/Game/OpenDrive/Car"), TEXT("/Game/OpenDrive/Cars")},
-		/*bForceRescan*/true);
+	// defs, dropped from the menu 2026-09-28 (its chassis/wheel meshes stay:
+	// EnsureMeshes' no-def fallback uses them).
+	AR.ScanPathsSynchronous({TEXT("/Game/OpenDrive/Cars")}, /*bForceRescan*/true);
+
+	// Superseded 2026-09-03 but still on disk (Content isn't in git, so they
+	// weren't deleted - see import_car_meshes.py's docstring).
+	static const FName StaleDefs[] = {
+		TEXT("DA_Vehicle_Sedan"), TEXT("DA_Vehicle_CoupeS"),
+		TEXT("DA_Vehicle_Sport"), TEXT("DA_Vehicle_Proto"),
+	};
 
 	FARFilter Filter;
 	Filter.ClassPaths.Add(UODVehicleDef::StaticClass()->GetClassPathName());
 	Filter.bRecursiveClasses = true;
+	Filter.PackagePaths.Add(TEXT("/Game/OpenDrive/Cars"));
 	TArray<FAssetData> Found;
 	AR.GetAssets(Filter, Found);
 	for (const FAssetData& A : Found)
 	{
+		if (MakeArrayView(StaleDefs).Contains(A.AssetName))
+		{
+			continue;
+		}
 		if (UODVehicleDef* Def = Cast<UODVehicleDef>(A.GetAsset()))
 		{
 			Vehicles.Add(Def);
 		}
 	}
-	// stable order, base "Coupe" used to sort to index 0 = the spawn car.
+	// stable alphabetical order; Muscle is bubbled to index 0 below.
 	// TObjectPtr Sort dereferences, so the predicate takes the element type
 	// by ref.
 	Vehicles.Sort([](const UODVehicleDef& A, const UODVehicleDef& B)
@@ -156,12 +164,10 @@ void AODVehiclePawn::LoadVehicleDefs()
 	});
 	// 2026-09-03 art-direction pass: the new replica-style 5-car set
 	// (import_car_meshes.py) should be the default spawn car, but plain
-	// alphabetical order puts the stale placeholder "Coupe" first. Rather
-	// than rely on naming to control spawn order, explicitly bubble
-	// "Muscle" (the new default) to index 0 if it's present; every other
-	// def (including the four other new cars, and the stale placeholders
-	// left behind for a later manual cleanup pass) keeps its alphabetical
-	// position and stays reachable via CycleVehicle().
+	// alphabetical order would put "Concept" first. Rather than rely on
+	// naming to control spawn order, explicitly bubble "Muscle" (the new
+	// default) to index 0 if it's present; every other def keeps its
+	// alphabetical position and stays reachable via CycleVehicle().
 	const int32 MuscleIdx = Vehicles.IndexOfByPredicate(
 		[](const UODVehicleDef* Def) { return Def && Def->DisplayName == TEXT("Muscle"); });
 	if (MuscleIdx > 0)

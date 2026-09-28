@@ -43,7 +43,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Power", meta = (ClampMin = 0.5, ClampMax = 2))
 	float TorqueScale = 1.0f;
 
-	/** Aero downforce coefficient (absolute; street = 1.1 from Arc 1.2). */
+	/** Aero downforce, street = 1.1 (Arc 1.2); scaled by the car's own
+	 *  UODVehicleDef::DownforceCoeff / 1.1 (see AODTuningManager::ApplyPreset). */
 	UPROPERTY(EditAnywhere, Category = "Aero", meta = (ClampMin = 0, ClampMax = 3))
 	float Downforce = 1.1f;
 

@@ -71,23 +71,20 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 	Move->FrontGripScale = Preset->FrontFrictionScale * GripBoost;
 	Move->RearGripScale = Preset->RearFrictionScale * GripBoost;
 
-	// x4 downforce, GT car only (2026-08-24, Taylor) - downforce is otherwise
-	// preset-owned (see comment below), with no per-car field of its own, so
-	// the boost is gated here on the pawn's currently-active UODVehicleDef
-	// rather than in ApplyVehicleDef/ODVehicleDef.h where it'd apply to every
-	// car and then get clobbered by the preset anyway.
-	float DownforceBoost = 1.0f;
+	// Preset downforce is relative to the street 1.1 baseline, scaled onto
+	// the active car's own UODVehicleDef::DownforceCoeff (2026-09-28: per-car
+	// aero - Concept/LMP/Super carry more; replaces the old GT-only x4 hack).
+	float CarDownforce = 1.1f;
 	if (const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Car))
 	{
 		const auto& Defs = VehiclePawn->GetVehicleDefs();
 		const int32 Idx = VehiclePawn->GetVehicleIndex();
-		if (Defs.IsValidIndex(Idx) && Defs[Idx] &&
-			Defs[Idx]->DisplayName.Contains(TEXT("GT")))
+		if (Defs.IsValidIndex(Idx) && Defs[Idx])
 		{
-			DownforceBoost = 4.0f;
+			CarDownforce = Defs[Idx]->DownforceCoeff;
 		}
 	}
-	Move->DownforceCoeff = Preset->Downforce * DownforceBoost;
+	Move->DownforceCoeff = CarDownforce * Preset->Downforce / 1.1f;
 	// preset COM heights were tuned around the template's 42 cm street value;
 	// map them as deltas onto the new body's 10 cm default (stage 3 retunes)
 	Move->ComLocalZ = 10.0f + (Preset->CenterOfMassZ - 42.0f);
