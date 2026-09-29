@@ -52,7 +52,7 @@ runtime by our own `AODTerrainManager` (no engine plugin, no network
 dependency), with a real OSM road network, procedural buildings, runtime
 forest, and a continuous collision barrier all machine-verified on a
 separate open-world test area (Oahu, HI as of 2026-07-27). See
-`next steps.md` § 7.0–7.10 for status.
+`status.md` § 7.0–7.10 for status.
 
 **Arc 7 scope, narrowed 2026-07-27:** the target is the **mountain areas** of
 North America — Cascades, Sierra Nevada, Rockies, Blue Ridge/Appalachians,
@@ -62,10 +62,10 @@ Midwest, Gulf and most of the desert Southwest are cut. See
 [`AUDIT.md`](AUDIT.md) for the implementation audit that drove this and the
 ranked work queue that came out of it — items 0–3 (barrier-seed
 determinism, adaptive martini terrain, retired-tile cleanup, bridge/tunnel
-elevation) are done as of 2026-07-28; `next steps.md` § 7.10 has the
+elevation) are done as of 2026-07-28; `status.md` § 7.10 has the
 maintained status, `AUDIT.md` itself is a dated snapshot.
 
-Full roadmap and per-arc status: [`next steps.md`](next%20steps.md).
+Current per-arc status: [`status.md`](status.md). Open work: [`next steps.md`](next%20steps.md).
 
 ## Repo layout
 
@@ -77,7 +77,8 @@ Full roadmap and per-arc status: [`next steps.md`](next%20steps.md).
 | `OpenDriveUE/Config/` | Project settings |
 | `data/stages/<stage>/` | Built stage artifacts (git-ignored; deterministic re-runs) |
 | `data/road_tiles/<area>_test/` | Open-world pipeline intermediates (road_stations.json, road_mesh.json, git-ignored) — baked terrain tiles themselves land directly in `OpenDriveUE/Content/OpenDrive/Masks/` |
-| `next steps.md` | Plan of record: 7 arcs, statuses, decisions, wishlist index |
+| `status.md` | What's built: per-arc status, standing decisions, process rules |
+| `next steps.md` | Open work only — remove items as they land in `status.md` |
 | `AUDIT.md` | Implementation audit (2026-07-27): how the world is built + delivered, measured limits, ranked work queue |
 
 `OpenDriveUE/Content/` is git-ignored by design: every imported asset is

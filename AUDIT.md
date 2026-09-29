@@ -13,7 +13,7 @@ number below is measured from files on disk or read out of the source.
 
 > **This is a dated snapshot, not a living document.** The decisions it
 > records are restated as plan-of-record in
-> [`next steps.md`](next%20steps.md) § 7.9 and the Arc 7 header — **those are
+> [`status.md`](status.md) § 7.9 and the Arc 7 header — **those are
 > authoritative and get maintained; this file does not.** What lives here is
 > the *analysis and measurement* behind them, which stays true for the state
 > of the repo on 2026-07-27 regardless of what changes afterwards.
@@ -22,12 +22,12 @@ number below is measured from files on disk or read out of the source.
 > barrier-seed determinism, adaptive martini terrain, retired-tile cleanup,
 > bridge/tunnel elevation. Several numbers in this snapshot are now stale as
 > a direct result (e.g. § 3.6's H-3 burial measurements, § 8's disk-usage
-> figures for the barrier). See `next steps.md` § 7.10 for the current
+> figures for the barrier). See `status.md` § 7.10 for the current
 > numbers and what changed; this file's own numbers are left as originally
 > measured, on purpose, as the historical record.
 >
 > **Status (2026-07-29):** the road's Z-axis algorithm itself was rewritten,
-> not just item 3's call-order bug — see `next steps.md` § 7.11. Two
+> not just item 3's call-order bug — see `status.md` § 7.11. Two
 > passages in this file now describe an algorithm that no longer exists:
 > § "Why the pipeline can't just use the road data as-is" point 2 ("Hence
 > median → Gaussian → grade clamp") and § 3.6 point 2 ("`grade_smooth_
@@ -829,9 +829,9 @@ resolution moves to the front by Taylor's call.*
 | # | Action | Effort | Payoff |
 |---|---|---|---|
 | 0 | ~~Fix `build_road_barrier.py:168`'s `hash()` seed~~ — **done**, was already fixed by the time this audit was written | minutes | Restores determinism |
-| 1 | ~~Adaptive martini terrain, base grid 257 (7.81 m)~~ — **done, 2026-07-28** — see `next steps.md` § 7.10 for the measured economics (worse than estimated below) and the seam fix this table didn't anticipate | days | ~25 m-grid storage for 8 m-grid mountains *(not what was measured — actual retention 22–44%, not 10–15%)* |
+| 1 | ~~Adaptive martini terrain, base grid 257 (7.81 m)~~ — **done, 2026-07-28** — see `status.md` § 7.10 for the measured economics (worse than estimated below) and the seam fix this table didn't anticipate | days | ~25 m-grid storage for 8 m-grid mountains *(not what was measured — actual retention 22–44%, not 10–15%)* |
 | 2 | ~~Delete retired-area tiles from `Content/OpenDrive/Masks`~~ — **moot**, no retired-area tiles existed to delete | minutes | −208 MB shipped |
-| 3 | ~~Bridge minimum-clearance pass; exempt structure spans from the one-way grade clamp; drop tunnel spans from the road mesh~~ — **done, 2026-07-28**, though the actual root cause was call-order (fill-before-smooth), not just the clamp — see `next steps.md` § 7.10 | hours | Viaducts sitting on the dirt, tunnels 430 m inside mountains (§ 3.6) — the representative case for mountain roads |
+| 3 | ~~Bridge minimum-clearance pass; exempt structure spans from the one-way grade clamp; drop tunnel spans from the road mesh~~ — **done, 2026-07-28**, though the actual root cause was call-order (fill-before-smooth), not just the clamp — see `status.md` § 7.10 | hours | Viaducts sitting on the dirt, tunnels 430 m inside mountains (§ 3.6) — the representative case for mountain roads |
 | 4 | Replace the barrier with an out-of-bounds reset + light visual boundary; delete ODW2 | hours | **−213 MB**, removes the invisible wall, and the player can finally see the edge (§ 5.4) |
 | 5 | Merge buildings per tile + corridor-gate their collision | hours | ~25,000 draw calls → ~25; drops most collision cooks entirely (§ 5.2, § 5.2b). Top *runtime* item — and **CPU-bound, so no GPU upgrade substitutes for it** (§ 1.4) |
 | 6 | Drive road width/lanes/surface/`layer` from OSM tags **already on disk** | hours | Largest available realism gain; makes a network look like a network. No re-fetch — 41% of ways already carry `lanes` |
@@ -852,7 +852,7 @@ resolution moves to the front by Taylor's call.*
 **Documentation drift**
 
 - `README.md` states the open-world test area is Oahu (correct —
-  `test_areas.py` has `AREA_NAME = "oahu"`), but `next steps.md` §§ 7.0–7.5 is
+  `test_areas.py` has `AREA_NAME = "oahu"`), but `status.md` §§ 7.0–7.5 is
   written entirely against Skagit/Cascades. The plan of record lags the code by
   one test area.
 - `verify_terrain_fit.py`'s docstring refers to `verify_road_fit.py` as an
