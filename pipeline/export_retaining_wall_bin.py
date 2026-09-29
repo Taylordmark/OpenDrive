@@ -10,7 +10,8 @@ Reads   data/road_tiles/<AREA_NAME>_test/retaining_walls.json
 Writes  OpenDriveUE/Content/OpenDrive/Masks/walls_<AREA_NAME>_test_tile_<tx>_<ty>.bin
         (one file per non-empty tile)
 
-ODS1 format (per file) - byte-identical structure to ODU1 (buildings):
+ODS1 format (per file) - byte-identical structure to the old ODU1 buildings
+format (ODU2 since added two per-building facade bytes):
     'O','D','S','1'                                   magic (4 bytes)
     16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
                2026-08-21 - see that module's docstring)

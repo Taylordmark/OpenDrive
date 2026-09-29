@@ -48,21 +48,21 @@ namespace
 	 *  the same "avoid per-building MIDs" convention AODTerrainManager's own
 	 *  vertex-color biome tint already established, just carrying different
 	 *  payload channels:
-	 *    R - wall material variant selector (M_BuildingFacade buckets this
-	 *        into N discrete wall texture sets - brick/siding/stucco/
-	 *        concrete - via floor(R*N), a HARD per-building pick, not a
+	 *    R - wall texture set, baked per building from OSM type + height
+	 *        (build_building_mesh.py pick_facade(), ODU2 WallSet byte),
+	 *        encoded as (WallSet + 0.5) / NumWallSets so M_BuildingFacade's
+	 *        floor(R*N) lands mid-bucket - a HARD per-building pick, not a
 	 *        blend, so one building always reads as one material)
 	 *    G - window-lit-fraction seed offset (decorrelates which windows
 	 *        read as lit between buildings that would otherwise share the
 	 *        same per-window hash pattern from a coincidentally similar
 	 *        facade UV phase)
-	 *    B - unused (reserved; kept at a stable hash rather than 0/1 so a
-	 *        future third channel doesn't have to re-derive the whole hash)
-	 *  Computed from the footprint's own baked centroid (deterministic,
-	 *  unique per building's location - no way-id plumbing needed through
-	 *  the ODU1 binary format) rather than any RNG, so re-finalizing the
-	 *  same building (e.g. after a pending-retry) always yields the exact
-	 *  same variant. */
+	 *    B - roof type: 1 = concrete flat roof, 0 = shingle (ODU2 FlatRoof
+	 *        byte; the material lerps its roof set on this)
+	 *  G is hashed from the footprint's own baked centroid (deterministic,
+	 *  unique per building's location) rather than any RNG, so
+	 *  re-finalizing the same building (e.g. after a pending-retry) always
+	 *  yields the exact same seed. */
 	FVector4f BuildingVertexColorForFacade(const FParsedBuilding& B)
 	{
 		const uint32 VCount = B.Verts.Num() / 3;
@@ -80,11 +80,12 @@ namespace
 
 		const uint32 Hx = FCrc::MemCrc32(&CentroidX, sizeof(CentroidX));
 		const uint32 Hy = FCrc::MemCrc32(&CentroidY, sizeof(CentroidY));
-		const uint32 H1 = HashCombine32(Hx, Hy);
 		const uint32 H2 = HashCombine32(Hy, HashCombine32(Hx, 0x2545F491u));
-		const uint32 H3 = HashCombine32(H1, 0xABCDEF01u);
 
-		return FVector4f(HashToUnitFloat(H1), HashToUnitFloat(H2), HashToUnitFloat(H3), 1.0f);
+		// MUST match len(WALL_LAYERS) in unreal/apply_building_material.py.
+		constexpr uint8 NumWallSets = 5;
+		const float R = (FMath::Min<uint8>(B.WallSet, NumWallSets - 1) + 0.5f) / NumWallSets;
+		return FVector4f(R, HashToUnitFloat(H2), B.FlatRoof ? 1.0f : 0.0f, 1.0f);
 	}
 }
 
@@ -154,7 +155,7 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 {
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || Bin[3] != '1')
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || Bin[3] != '2')
 	{
 		return false;
 	}
@@ -180,12 +181,14 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 	Out.Buildings.Reserve(BuildingCount);
 	for (uint32 b = 0; b < BuildingCount; ++b)
 	{
-		if (Remaining() < 8)
+		if (Remaining() < 10)
 		{
 			return false;
 		}
 		const uint32 VCount = ReadU32LE(Cur); Cur += 4;
 		const uint32 TCount = ReadU32LE(Cur); Cur += 4;
+		const uint8 WallSet = *Cur++;
+		const uint8 FlatRoof = *Cur++;
 		const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)TCount * 12;
 		if (Remaining() < NeedBytes)
 		{
@@ -198,6 +201,8 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 		Cur += NeedBytes;
 
 		FParsedBuilding& Building = Out.Buildings.AddDefaulted_GetRef();
+		Building.WallSet = WallSet;
+		Building.FlatRoof = FlatRoof;
 		Building.Verts.SetNumUninitialized(VCount * 3);
 		for (uint32 v = 0; v < VCount; ++v)
 		{

@@ -110,10 +110,10 @@ Usage:  python build_water_tiles.py   (needs road_stations.json first, for
 Writes  OpenDriveUE/Content/OpenDrive/Masks/water_<AREA_NAME>_test_tile_<tx>_<ty>.bin
 
 ODL1 format (per file) - deliberately the same per-feature vertex/uv/tri
-layout export_building_mesh_bin.py's ODU1 already uses (one already-
-established shape for "N flat-shaded features with a shared header/count"),
-just under a fresh magic since ODW2/ODW3/ODU1/ODB1/ODT1/ODS1 are all
-already spoken for by other sidecar families in this project:
+layout export_building_mesh_bin.py's ODU1 used (ODU2 since adds two
+per-building facade bytes) - one already-established shape for "N
+flat-shaded features with a shared header/count", just under a fresh
+magic since ODW2/ODW3/ODU2/ODB1/ODT1/ODS1 are all already spoken for by other sidecar families in this project:
     'O','D','L','1'                                   magic (4 bytes)
     16 bytes   generation id (ASCII hex, pipeline/generation_id.py)
     uint32 LE  lake_count

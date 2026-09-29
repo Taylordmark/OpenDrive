@@ -9,13 +9,15 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 /** One parsed building - plain data, safe to build off the game thread.
- *  Mirrors the ODU1 sidecar's per-building payload layout
+ *  Mirrors the ODU2 sidecar's per-building payload layout
  *  (pipeline/build_building_mesh.py / export_building_mesh_bin.py). */
 struct FParsedBuilding
 {
 	TArray<float> Verts;    // flat x,y,z (cm, UE world frame)
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
+	uint8 WallSet = 0;      // index into apply_building_material.py WALL_LAYERS
+	uint8 FlatRoof = 0;     // 1 = concrete flat roof, 0 = shingle
 };
 
 /** One parsed tile file's worth of buildings - the off-thread output of
@@ -25,7 +27,7 @@ struct FParsedBuildingTile
 {
 	TArray<FParsedBuilding> Buildings;
 
-	// pipeline/generation_id.py's per-run id, read from the ODU1 header
+	// pipeline/generation_id.py's per-run id, read from the ODU2 header
 	// (2026-08-21) - see AODBuildingManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;

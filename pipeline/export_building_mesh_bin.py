@@ -1,4 +1,4 @@
-"""Convert build_building_mesh.py's building_mesh.json into per-tile ODU1
+"""Convert build_building_mesh.py's building_mesh.json into per-tile ODU2
 binary sidecars AODBuildingManager streams at runtime (Arc 7.0 step 3) -
 same bucket-by-tile convention as export_road_mesh_bin.py, just bucketing
 already-tagged buildings (each already carries its own "tile" key from
@@ -10,14 +10,18 @@ Reads   data/road_tiles/<AREA_NAME>_test/building_mesh.json
 Writes  OpenDriveUE/Content/OpenDrive/Masks/buildings_<AREA_NAME>_test_tile_<tx>_<ty>.bin
         (one file per non-empty tile)
 
-ODU1 format (per file):
-    'O','D','U','1'                                   magic (4 bytes)
+ODU2 format (per file) - ODU1 plus the two per-building facade bytes
+(2026-09-29, wall texture + roof picked from type/height in
+build_building_mesh.py's pick_facade()):
+    'O','D','U','2'                                   magic (4 bytes)
     16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
                2026-08-21 - see that module's docstring)
     uint32 LE  building_count
     per building:
         uint32 LE  vertex_count
         uint32 LE  tri_count
+        uint8      wall_set    0..4, index into apply_building_material.py WALL_LAYERS
+        uint8      flat_roof   1 = concrete flat roof, 0 = shingle
         vertex_count * (float32 x, float32 y, float32 z)   cm, UE world frame
         vertex_count * (float32 u, float32 v)
         tri_count   * (uint32 i0, uint32 i1, uint32 i2)
@@ -38,14 +42,14 @@ OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 def write_tile(path, buildings, gen_id_bytes):
     with open(path, "wb") as f:
-        f.write(b"ODU1")
+        f.write(b"ODU2")
         f.write(gen_id_bytes)
         f.write(struct.pack("<I", len(buildings)))
         for b in buildings:
             verts, uvs, tris = b["vertices"], b["uvs"], b["triangles"]
             vcount, tcount = len(verts) // 3, len(tris) // 3
             assert len(uvs) // 2 == vcount, f"{b['name']}: uv/vertex count mismatch"
-            f.write(struct.pack("<II", vcount, tcount))
+            f.write(struct.pack("<IIBB", vcount, tcount, b["wall_set"], b["flat_roof"]))
             f.write(struct.pack(f"<{len(verts)}f", *verts))
             f.write(struct.pack(f"<{len(uvs)}f", *uvs))
             f.write(struct.pack(f"<{len(tris)}I", *tris))

@@ -20,6 +20,12 @@ material is ONE shared asset, and AODBuildingManager::CreateBuildingComponent
 instead - see BuildingVertexColorForFacade()'s comment there for the exact
 R/G/B payload this material reads back below.
 
+Vertex color channels: R = wall texture set, baked per building from OSM
+type + height (pipeline/build_building_mesh.py pick_facade(), carried in the
+ODU2 tile's WallSet byte, encoded mid-bucket as (idx+0.5)/5); G = lit-window
+seed hash; B = roof type (1 = flat roof using the Concrete034 wall set, 0 =
+shingle ROOF_LAYER).
+
 Wall-material variant pick is a HARD per-building selection (floor(R*N) via
 a chained MaterialExpressionIf, not a blend) - one building always reads as
 one material, matching the Crew-2-reference "each building is one facade
@@ -35,8 +41,9 @@ windows are warm-emissive (lit rooms), decorrelated per building via the G
 vertex-color channel so neighboring buildings don't share an identical lit
 pattern. Roof faces are picked out by vertex-normal Z (see
 AODBuildingManager::CreateBuildingComponent's per-vertex-normal comment for
-why the wall/roof edge stays crisp rather than smoothing) and get the single
-roof texture set, overriding the wall+window result entirely.
+why the wall/roof edge stays crisp rather than smoothing) and get the roof
+texture set (shingle, or concrete when B says flat roof), overriding the
+wall+window result entirely.
 
 Run unreal/import_building_textures.py FIRST (imports the PBR sets as
 Texture2D assets this script loads by path) - this script raises if any
@@ -293,6 +300,7 @@ v = g.mask(uv, gg=True)
 vtint = g.vertex_color()   # "" is the RGB output on this UE version
 variant_r = g.mask(vtint, r=True)
 seed_g = g.mask(vtint, gg=True)
+flat_roof_b = g.mask(vtint, b=True)   # 0 or 1 per building, see docstring
 
 normal_ws = g.world_normal()
 up = g.const3(0.0, 0.0, 1.0)
@@ -361,8 +369,14 @@ roof_albedo = g.sample(ROOF_TEXTURES["albedo"], uv)
 roof_normal = g.sample(ROOF_TEXTURES["normal"], uv, is_normal=True)
 roof_rough = g.rough_scalar(g.sample(ROOF_TEXTURES["rough"], uv))
 
-final_albedo = g.lerp(wall_or_window_albedo, roof_albedo, roof_mask, b_out="RGB")
-final_normal = g.lerp(wall_normal_node, roof_normal, roof_mask, a_out=wall_normal_out, b_out="RGB")
+# flat roofs reuse the already-sampled concrete wall set
+concrete = wall_samples[WALL_LAYERS.index("Concrete034")]
+roof_albedo = g.lerp(roof_albedo, concrete["albedo"], flat_roof_b, a_out="RGB", b_out="RGB")
+roof_normal = g.lerp(roof_normal, concrete["normal"], flat_roof_b, a_out="RGB", b_out="RGB")
+roof_rough = g.lerp(roof_rough, concrete["rough"], flat_roof_b)
+
+final_albedo = g.lerp(wall_or_window_albedo, roof_albedo, roof_mask)
+final_normal = g.lerp(wall_normal_node, roof_normal, roof_mask, a_out=wall_normal_out)
 final_rough = g.lerp(wall_or_window_rough, roof_rough, roof_mask)
 zero3 = g.const3(0.0, 0.0, 0.0)
 final_emissive = g.lerp(emissive, zero3, roof_mask)

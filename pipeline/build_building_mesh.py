@@ -29,7 +29,8 @@ Reads   data/raw/<AREA_NAME>_test/osm_buildings.json
         data/road_tiles/<AREA_NAME>_test/road_stations.json
         data/road_tiles/<AREA_NAME>_test/settlement_tiles.json
 Outputs data/road_tiles/<AREA_NAME>_test/building_mesh.json
-        {"buildings": [{"name","tile","vertices","uvs","triangles"}, ...]}
+        {"buildings": [{"name","tile","vertices","uvs","triangles",
+                        "wall_set","flat_roof"}, ...]}
         (same {"vertices","uvs","triangles"} chunk schema
         road_mesh_common.build_road_chunks already produces, so
         export_building_mesh_bin.py can bucket it the same way
@@ -120,6 +121,35 @@ def archetype_level_range(archetype, max_levels):
     if archetype == "City":
         return 1, max_levels
     return 1, min(3, max_levels)
+# Facade pick per building: (wall_set choices, flat_roof). wall_set indexes
+# WALL_LAYERS in unreal/apply_building_material.py (0 red brick, 1 tan
+# brick, 2 wood siding, 3 plaster, 4 concrete); flat_roof 1 = concrete flat
+# roof, 0 = shingle. Anything 8+ stories is always concrete + flat.
+_RESIDENTIAL_FACADE = ([2, 3, 0, 1], 0)
+_OUTBUILDING_FACADE = ([2, 4], 0)
+BUILDING_TYPE_FACADE = {
+    **{t: ([4, 3, 0, 1], 1) for t in ("office", "government", "public", "school")},
+    **{t: ([0, 1, 3, 4], 1) for t in ("apartments", "hotel", "dormitory")},
+    **{t: ([0, 1, 3], 1) for t in ("commercial", "retail", "shop")},
+    **{t: _RESIDENTIAL_FACADE for t in (
+        "house", "detached", "semidetached_house", "residential", "terrace",
+        "bungalow", "cabin", "farm", "static_caravan", "houseboat",
+        "construction")},
+    **{t: _OUTBUILDING_FACADE for t in ("garage", "shed", "carport", "greenhouse", "roof")},
+    "church": ([0, 1, 3], 0),
+}
+HIGH_RISE_LEVELS = 8
+
+
+def pick_facade(building_tag, levels, rng):
+    """(wall_set, flat_roof) for one building - see BUILDING_TYPE_FACADE."""
+    if levels >= HIGH_RISE_LEVELS:
+        return 4, 1
+    choices, flat = BUILDING_TYPE_FACADE.get(building_tag) or (
+        ([0, 3, 4], 1) if levels >= 4 else ([0, 1, 2, 3, 4], 0))
+    return rng.choice(choices), flat
+
+
 FACADE_TILE_M = 4.0   # UV repeat period on walls/roof, matches this
                        # project's DETAIL_TILE_CM-style tiling convention
 
@@ -227,6 +257,7 @@ def main():
 
     out = []
     n_excluded_road = n_not_populated = 0
+    facade_counts = defaultdict(int)
     for b in buildings_raw:
         ring_ll = b["nodes"]
         east_m = [(lon - lon0) * m_per_deg_lon for _, lon in ring_ll]
@@ -258,6 +289,10 @@ def main():
             n_excluded_road += 1
             continue
 
+        # Placeholder base Z only: AODBuildingManager::ComputeBuildingZOffset
+        # re-plants every building on traced terrain at runtime and uses this
+        # value just as the reference its offset is measured from. Sampling
+        # terrain here would change nothing in-game.
         nearest_i = cand[int(np.argmin(np.hypot(st_x_cm[cand] - cx_cm, st_y_cm[cand] - cy_cm)))]
         ground_z_cm = road_ue_z_m(float(st_elev[nearest_i]), 0.0, ORIGIN_HEIGHT_M) * 100.0
 
@@ -269,6 +304,9 @@ def main():
             levels = rng.randint(lo, hi)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
         height_cm = levels * LEVEL_HEIGHT_M * 100.0
+        # drawn AFTER the levels roll so existing heights don't shift
+        wall_set, flat_roof = pick_facade(b.get("building_tag"), levels, rng)
+        facade_counts[(wall_set, flat_roof)] += 1
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
         out.append({
@@ -277,12 +315,16 @@ def main():
             "vertices": [round(v, 1) for xyz in verts for v in xyz],
             "uvs": [round(v, 4) for uv in uvs for v in uv],
             "triangles": [i for t in tris for i in t],
+            "wall_set": wall_set,
+            "flat_roof": flat_roof,
         })
 
     OUT_PATH.write_text(json.dumps({"buildings": out}))
     print(f"{len(buildings_raw)} footprint(s) -> {len(out)} building(s) built "
           f"({n_not_populated} outside populated tiles, {n_excluded_road} "
           f"excluded - too close to the road) -> {OUT_PATH}")
+    print("facade (wall_set, flat_roof) counts: "
+          + ", ".join(f"{k}={facade_counts[k]}" for k in sorted(facade_counts)))
 
 
 if __name__ == "__main__":

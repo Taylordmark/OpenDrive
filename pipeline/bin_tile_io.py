@@ -32,7 +32,7 @@ MAGIC_BYTES = 4
 
 def read_generation_id_header(path: Path):
     """Reads just the magic + generation-id header of any sidecar tile file
-    (any of ODT1/ODR2/ODS1/ODW3/ODU1/...). Returns (magic_str, gen_id_str)
+    (any of ODT1/ODR2/ODS1/ODW3/ODU2/...). Returns (magic_str, gen_id_str)
     or None if the file is missing/too short/unreadable - callers treat that
     the same as "can't verify this tile", not a hard error, matching the
     runtime's own missing-file tolerance."""

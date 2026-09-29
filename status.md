@@ -202,10 +202,19 @@ were decoupled from it on 2026-07-20.
 - **Road + place labels** (2026-07-23): per-station `road_name`, ODL1 place
   labels, and a "road · city" HUD line.
 - **Buildings** (2026-07-24, then 09-03):
-  - OSM footprints produce the ODU1 mesh.
+  - OSM footprints produce the ODU2 mesh.
+  - Wall texture and flat/shingle roof are picked per building from type
+    and height (`pick_facade`, 2026-09-29); 8+ stories is concrete + flat.
   - Merged per tile via `AppendBuildingsToTileMesh`, with collision only
     near the road corridor (`IsNearRoadCorridor`).
   - Procedural facade windows, six CC0 sets, and heights from the level tag.
+  - Ground height is set at runtime, not in the bake:
+    `ComputeBuildingZOffset` traces every base corner and plants the lowest
+    hit minus 5 cm, retrying until collision streams in. The baked base Z
+    (nearest road station's elevation) is only the reference the offset is
+    measured from, so offline terrain sampling would change nothing in-game.
+    Traces more than 500 m from the player's Z are rejected as phantom
+    surfaces (`GroundSanityMaxDeltaCm`).
 - **Barrier → out-of-bounds reset:** the invisible ODW2 wall is retired.
   `AODVehiclePawn::TickOutOfBounds` resets with a HUD countdown.
 - **7.1 / 7.2 (historical):**
