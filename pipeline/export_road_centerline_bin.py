@@ -55,7 +55,7 @@ gated on elevation (and, for (b)-(d), neither being a bridge/tunnel/structure)
 so a grade-separated overpass never becomes a fake intersection. Oneway is
 ignored (known limitation - see SS7.37). AODRoadManager loads this at
 BeginPlay (path derived from CenterlineFilePrefix, centerline_ -> routegraph_)
-and runs A* on it; scratchpad/nav/verify_route_graph.py is the Python mirror.
+and runs A* on it; pipeline/checks/verify_route_graph.py is the Python mirror.
 """
 
 import json

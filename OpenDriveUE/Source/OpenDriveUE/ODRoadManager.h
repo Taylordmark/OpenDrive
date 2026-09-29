@@ -335,7 +335,7 @@ public:
 	// Road graph = routegraph_<area>_test.bin (ODG1, pipeline/
 	// export_road_centerline_bin.py's build_route_graph), path derived from
 	// CenterlineFilePrefix (centerline_ -> routegraph_). A* over it from the
-	// player's nearest graph node; scratchpad/nav/verify_route_graph.py is the
+	// player's nearest graph node; pipeline/checks/verify_route_graph.py is the
 	// Python mirror of FindRoutePath/BuildRouteTurns - keep in sync.
 
 	bool HasRouteGraph() const { return RouteNodes.Num() > 0; }

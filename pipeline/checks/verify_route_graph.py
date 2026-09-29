@@ -26,7 +26,8 @@ from scipy.sparse.csgraph import connected_components, dijkstra
 ROOT = Path(__file__).resolve().parents[2]
 MASKS = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 AREA = "summit_county"
-OUT = Path(__file__).resolve().parent
+OUT = ROOT / "scratchpad"
+OUT.mkdir(exist_ok=True)
 
 
 def load_graph(path):

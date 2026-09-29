@@ -1,8 +1,0 @@
-27465 sample point(s) (every 10th station)
-53244 coarse grid point(s) at 300 m
-fetching 120 tile(s) at z12 (12x10) ...
-fetching 418 tile(s) at z13 (22x19) ...
-wrote C:\Users\taylo\Coding\OpenDrive\data\road_tiles\summit_county_test\road_biomes.json (80709 points: 27465 corridor + 53244 grid)
-biome counts (corridor): Evergreen=23528, Plains=430, Wetland=196, Alpine=1223, Canyon=1206, Foothill=882
-biome counts (grid): Deciduous=3, Evergreen=45262, Chaparral=15, Desert=13, Plains=285, Wetland=643, Alpine=6247, Canyon=631, Foothill=145
-biome counts (all): Deciduous=3, Evergreen=68790, Chaparral=15, Desert=13, Plains=715, Wetland=839, Alpine=7470, Canyon=1837, Foothill=1027

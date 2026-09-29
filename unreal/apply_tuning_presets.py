@@ -15,7 +15,7 @@ def log(msg):
     unreal.log(f"TUNE {msg}")
 
 
-# Garage setups (2026-09-25). Values validated in scratchpad/esc_sim.py -
+# Garage setups (2026-09-25). Values validated in pipeline/checks/esc_sim.py -
 # change them there first. Unlisted fields keep the Street default (the
 # ODTuningPreset C++ defaults). COM: Rally/Offroad sit LOWER than the old
 # 48/50 because ride height + tire diameter already lift the body; the old

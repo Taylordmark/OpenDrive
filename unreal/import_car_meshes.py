@@ -326,7 +326,7 @@ def make_def(name, props):
 # split (front_weight_frac), yaw_dynamic_index (Iz = DI*m*a*b), COM height,
 # drive layout, torque and brakes (total scaled with mass x wheel radius,
 # front share ~ split + 0.1; handbrake 2x rear). Validated in
-# scratchpad/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire and
+# pipeline/checks/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire and
 # suspension stay at UODVehicleDef's defaults; aero too except
 # downforce_coeff (N per (m/s)^2) on the aero cars, sized at 150 mph
 # (67.06 m/s, the usual real-world quote point): Concept = 1.0x its weight

@@ -1,5 +1,0 @@
-corridor samples changed biome: 3874 / 27465
-corridor forest_weight mean abs diff 0.1652, frac changed>0.01: 0.808
-grid Wetland: n=643 northness mean +0.05 moist mean 0.48 elev p10/50/90 [2750. 3044. 3381.]
-grid Evergreen: n=45262 northness mean +0.06 moist mean 0.16 elev p10/50/90 [2827. 3236. 3618.]
-grid Alpine: n=6247 northness mean -0.29 moist mean 0.10 elev p10/50/90 [2925. 3649. 3895.]

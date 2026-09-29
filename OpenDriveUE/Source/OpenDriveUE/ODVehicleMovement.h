@@ -233,7 +233,7 @@ public:
 	 *  (the beta/beta-dot phase-plane idea production ESC uses). 0.2 not
 	 *  0.12 (2026-09-25): short-wheelbase cars (JDM/Rally/Coupe) on the lifted
 	 *  Offroad setup rotate faster than 0.12 s could see coming; 0.2 holds
-	 *  every car x setup in scratchpad/esc_sim.py with no clean-corner hits. */
+	 *  every car x setup in pipeline/checks/esc_sim.py with no clean-corner hits. */
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	float EscLookahead = 0.2f;
 

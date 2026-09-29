@@ -526,7 +526,7 @@ veg_albedo = g.lerp(veg_albedo, spring_green_color, spring_green_amount, b_out="
 #     existing biome-tinted blend, so vertex-tint hue design still leads.
 #  2. toward PixelDepth, push saturation up (lerp past 1 away from grey) and
 #     value down, so far mips stop averaging to pale khaki.
-# All tunables are here; scratchpad/verify_v3_ground_macro.py mirrors this
+# All tunables are here; pipeline/checks/verify_v3_ground_macro.py mirrors this
 # math offline (it parses these constants straight out of this file).
 MACRO_FINE_SCALE_CM = 30000.0     # 300 m octave
 MACRO_COARSE_SCALE_CM = 120000.0  # 1200 m octave

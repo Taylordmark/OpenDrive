@@ -1,4 +1,0 @@
-generation id: e26dcbfb2f64c684
-deleted 0 stale embankment tile(s) from a previous run
-1384 embankment run(s) (54138 stations) -> 195 tile(s) -> C:\Users\taylo\Coding\OpenDrive\OpenDriveUE\Content\OpenDrive\Masks
-  (23 genuine bridge run(s) in road_embankments.json left unpacked here - see build_road_bridges.py, their own consumer)

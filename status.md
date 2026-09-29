@@ -88,6 +88,14 @@ scale, built from open data, with a stylized "real places, storybook look".
     gates road-vs-terrain fit plus poke-through (§7.46).
   - `road_mesh_common.sample_mesh_height` was reconstructed. It is now pinned
     by `pipeline/tests/test_sample_mesh_height.py`.
+- **`scratchpad/` is git-ignored** (2026-09-29). It holds scratch output
+  only.
+  - The hand-run checks moved to `pipeline/checks/`: `esc_sim.py`,
+    `verify_route_graph.py`, `verify_v3_ground_macro.py` and
+    `capture_reconcile_pairs.py`.
+  - The other old scratchpad files are gone. Code comments that cite
+    `scratchpad/<file>` refer to them; recover one with
+    `git show 8a882be:scratchpad/<file>`.
 
 ---
 

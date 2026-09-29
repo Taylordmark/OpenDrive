@@ -140,7 +140,7 @@ void AODRoadManager::LoadCenterline()
 
 namespace
 {
-// SS7.37 navigation tuning - mirrored in scratchpad/nav/verify_route_graph.py
+// SS7.37 navigation tuning - mirrored in pipeline/checks/verify_route_graph.py
 constexpr float TurnLookCm = 2500.0f;    // heading sampled 25 m before/after a junction
 constexpr float TurnMinDeg = 35.0f;      // smaller bends at a junction = "continue"
 constexpr float TurnMergeCm = 3000.0f;   // junction nodes this close = one turn

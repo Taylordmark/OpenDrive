@@ -608,7 +608,8 @@ def grade_smooth_elevation(ground, spacing=STATION_SPACING, max_grade=MAX_GRADE,
 # I-70 seg001 15-45 m under it for km, Buffehr Creek 130 m - the terrain
 # carve then dug trenches to match, and bridge spans (exempt from the clamp,
 # floored at DEM+4 m) stood 14-31 m proud of the sunken approaches: the
-# dropoffs. Simulated over the whole network (scratchpad sim_grade3.py) this
+# dropoffs. Simulated over the whole network (one-off sim, see status.md
+# §7.47 for the shipped numbers) this
 # profile takes >5 m-below to 0.3%, steps >1.5 m from 170 to 6, and halves
 # the p99 grade-change (waviness).
 FOLLOW_GROUND_SIGMA_STATIONS = 4     # 20 m low-pass on the raw DEM profile
@@ -1057,8 +1058,8 @@ JUNCTION_RECONCILE_RADIUS_M = 20.0
 # max 9.6m (worst: Robbers Nest Drive seg347, two points of an ordinary
 # 12%-grade hairpin 19.8m apart in plan / ~80m along-road, falsely snapped
 # together). Re-derived against the same captured pre-reconciliation station
-# arrays the audit used (scratchpad/reconcile_pre_arrays.npz via capture_
-# reconcile_pairs.py, county-wide rebuild - 274,644 stations, reproduced the
+# arrays the audit used (scratchpad/reconcile_pre_arrays.npz via
+# pipeline/checks/capture_reconcile_pairs.py, county-wide rebuild - 274,644 stations, reproduced the
 # audit's 295/242/53 split exactly) and swept a same-segment-only distance
 # cap from 0.5m to 20m (scratchpad/sweep_same_seg_radius.py): ALL 242
 # same-segment pairs sit at 4.67m or farther apart in plan view - there is a

@@ -1,8 +1,10 @@
 """§7.34 verification: monkeypatch reconcile_junction_elevations() to capture
 the REAL pre-reconciliation station arrays build_road_stations.py passes it
-for the current ACTIVE_AREA (summit_county), then save them to a .npz so
-sweep_same_seg_radius.py can independently re-derive the same-segment pair
-distance distribution without re-running the (slow) full station-build.
+for the current ACTIVE_AREA (summit_county), then save them to
+scratchpad/reconcile_pre_arrays.npz so a radius sweep (the original is
+`git show 8a882be:scratchpad/sweep_same_seg_radius.py`) can independently
+re-derive the same-segment pair distance distribution without re-running
+the (slow) full station-build.
 
 Runs the real pipeline entry point (build_road_stations.main()) against the
 already-cached data/raw/summit_county_test/*.json - no network calls.
@@ -10,7 +12,7 @@ already-cached data/raw/summit_county_test/*.json - no network calls.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import road_mesh_common as rmc
@@ -44,7 +46,8 @@ brs.reconcile_junction_elevations = _capture_and_call
 
 brs.main()
 
-out_path = Path(__file__).resolve().parent / "reconcile_pre_arrays.npz"
+out_path = Path(__file__).resolve().parents[2] / "scratchpad" / "reconcile_pre_arrays.npz"
+out_path.parent.mkdir(exist_ok=True)
 np.savez(out_path,
          east_m=_captured["east_m"], north_m=_captured["north_m"],
          elev_m=_captured["elev_m"], seg_idx=_captured["seg_idx"],

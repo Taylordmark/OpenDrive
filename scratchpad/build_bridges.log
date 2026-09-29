@@ -1,2 +1,0 @@
-23 genuine bridge run(s) (378 station(s), 86 pier(s)) -> C:\Users\taylo\Coding\OpenDrive\data\road_tiles\summit_county_test\road_bridges.json
-  0 run(s) got zero piers (deck-only, e.g. a short span whose whole length stays under 1.0m clearance after the 1.25m deck depth - reads as abutment-to-abutment, no mid-span support)

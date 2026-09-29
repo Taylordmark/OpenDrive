@@ -10,7 +10,7 @@ background hills get no biome sample; road-verge term omitted). Snow is
 omitted (summer; item 6 proved it a no-op on the pale hills).
 Camera for the map/stats: area origin, 2 m above ground there.
 
-Run from repo root:  python scratchpad/verify_v3_ground_macro.py
+Run from repo root:  python pipeline/checks/verify_v3_ground_macro.py
 """
 import ast
 import glob
@@ -25,14 +25,15 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import rgb_to_hsv
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "pipeline"))
-sys.path.insert(0, str(ROOT / "scratchpad"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bin_tile_io import parse_terrain_tile_bin
 from shader_noise_common import value_noise as wrapped_value_noise
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M
 
 OUT = ROOT / "scratchpad"
+OUT.mkdir(exist_ok=True)
 
 # ---- constants from the material script itself
 src = (ROOT / "unreal/apply_ground_material.py").read_text()
