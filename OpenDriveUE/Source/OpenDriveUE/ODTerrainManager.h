@@ -304,6 +304,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Terrain")
 	float RoadCarveClampMarginCm = 40.0f;
 
+	/** Re-carve every loaded tile against the station sidecar
+	 *  (ApplyRoadCarve). Default OFF since 2026-09-28: the offline bake now
+	 *  carves every non-structure road on the fine grid before martini
+	 *  simplification, so a runtime re-carve only DISAGREED with it - it
+	 *  lifted river/lake beds the bake had depressed (up to 27 m), pulled
+	 *  terrain up toward bridge decks the bake skips, and could only move
+	 *  vertices of big simplified triangles (the "terrain shards in the
+	 *  road"). verify_road_fit.py now gates the bake itself at every
+	 *  non-structure station. Kept as a toggle for A/B comparison. */
+	UPROPERTY(EditAnywhere, Category = "Terrain")
+	bool bEnableRuntimeRoadCarve = false;
+
 	/** Temporary QA instrumentation (2026-08-26, carve-clamp guarantee fix):
 	 *  when on, every NEAR-fidelity tile that carves against at least one
 	 *  in-bounds road station gets a post-carve spot-check - see

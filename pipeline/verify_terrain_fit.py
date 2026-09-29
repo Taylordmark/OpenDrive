@@ -140,13 +140,79 @@ def _fit_station_data():
     return st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm
 
 
+# A station whose terrain sits more than TOL_M BELOW the road is fine when
+# road-owned geometry hides the drop (2026-09-28: the conflict carve lowers
+# the upper road's near edge on purpose - terrain may never be ABOVE the
+# road, but it may fall away under a wall). Covered = a retaining-wall
+# surface within this far of the station's pavement edge.
+WALL_COVER_REACH_M = 8.0
+
+
+def _judge_devs(label, rows):
+    """rows: [(station, dev_m)] where dev_m = terrain - (elev - CARVE_DROP_M).
+    Terrain ABOVE the road past TOL_M always fails. Terrain BELOW past TOL_M
+    fails only if no wall covers it; uncovered ones are reported by cause.
+    Returns ok."""
+    from scipy.spatial import cKDTree
+    import json
+    if not rows:
+        return True
+    st = np.array([r[0] for r in rows])
+    dev = np.array([r[1] for r in rows])
+    above = st[dev > TOL_M]
+    below = st[dev < -TOL_M]
+    print(f"[{label}] {len(above)} station(s) with terrain > {TOL_M}m ABOVE expected, "
+          f"{len(below)} with terrain > {TOL_M}m BELOW")
+    for i in above[np.argsort(-dev[dev > TOL_M])][:5]:
+        print(f"  ABOVE station {i}")
+    if len(below) == 0:
+        return len(above) == 0
+
+    east, north, elev, seg_idx, _si, _rn = brw.load_station_arrays()
+    hw = brw.load_station_half_widths()
+    walls = json.loads(brw.OUT_PATH.read_text())["walls"] if brw.OUT_PATH.exists() else []
+    wall_xy = [np.einsum("kj,tjc->tkc", brw._BARY,
+                         np.array(w["vertices"], float).reshape(-1, 3)[np.array(w["triangles"]).reshape(-1, 3)]
+                         ).reshape(-1, 3)[:, :2] / 100.0 for w in walls]
+    wall_xy = np.concatenate(wall_xy) * [1.0, -1.0] if wall_xy else np.zeros((0, 2))
+    wall_tree = cKDTree(wall_xy) if len(wall_xy) else None
+    st_tree = cKDTree(np.c_[east, north])
+    struct = btmt._get_struct_mask(len(east))
+    _ex, wall_pairs = classify_wall_stations(east, north, elev, seg_idx, _si, _rn, half_width_m=hw)
+    in_wall_pair = np.zeros(len(east), dtype=bool)
+    for a, b in wall_pairs:
+        in_wall_pair[a] = in_wall_pair[b] = True
+
+    causes = defaultdict(list)
+    for i in below:
+        if wall_tree is not None and wall_tree.query([east[i], north[i]])[0] <= hw[i] + WALL_COVER_REACH_M:
+            causes["covered by wall"].append(i)
+            continue
+        near = np.asarray(st_tree.query_ball_point([east[i], north[i]], hw[i] + 20.0), dtype=int)
+        near = near[(seg_idx[near] != seg_idx[i]) & ~struct[near] & (elev[near] < elev[i] - 2.0)]
+        d = np.hypot(east[near] - east[i], north[near] - north[i])
+        if np.any(d < hw[i] + hw[near] + 0.5):
+            causes["stacked crossing (needs bridge)"].append(i)
+        elif in_wall_pair[i]:
+            causes["wall-eligible, no wall built (skipped piece / lane gate)"].append(i)
+        else:
+            causes["not wall-eligible"].append(i)
+    for cause, ids in sorted(causes.items(), key=lambda kv: -len(kv[1])):
+        print(f"  {len(ids):5d}  {cause}")
+        if cause != "covered by wall":
+            for i in ids[:3]:
+                print(f"         e.g. station {i} at ({east[i]:.0f}, {north[i]:.0f}) m")
+    uncovered = len(below) - len(causes["covered by wall"])
+    return len(above) == 0 and uncovered == 0
+
+
 def check_shipped_terrain_fit():
     """SHIPPED ARTIFACT CHECK - reads the actual ODT1 .bin tiles in
     Content/OpenDrive/Masks/ and samples the real parsed mesh, per this
     module's docstring section 1."""
     st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data()
 
-    dzs = []
+    dzs, rows = [], []
     misses = 0
     missing_tiles = 0
     for (tx, ty), idxs in tiles.items():
@@ -177,6 +243,7 @@ def check_shipped_terrain_fit():
             # + ORIGIN_HEIGHT_M: undo the shift road_ue_z_m() baked into Z at
             # build time, so this is comparable to the station's raw elev_m
             dzs.append(h_cm / 100.0 + ORIGIN_HEIGHT_M - float(elev[i]))   # meters
+            rows.append((i, dzs[-1] + CARVE_DROP_M))
 
     dzs = np.array(dzs) if dzs else np.array([0.0])
     mean_abs = float(np.mean(np.abs(dzs + CARVE_DROP_M)))
@@ -186,10 +253,11 @@ def check_shipped_terrain_fit():
           f"-> mean dev from -{CARVE_DROP_M}m = {mean_abs:.2f}m, "
           f"max dev = {max_dev:.2f}m (tolerance {TOL_M}m)")
 
-    ok = (max_dev <= TOL_M) and (missing_tiles == 0)
+    ok = _judge_devs("SHIPPED", rows) and (missing_tiles == 0)
     if ok:
         print("PASS [SHIPPED ARTIFACT CHECK]: the terrain tiles actually on disk "
-              "sit at the expected carved offset below every road station.")
+              "sit at the expected carved offset below every road station, or "
+              "fall away under a retaining wall.")
     else:
         if missing_tiles:
             print(f"FAIL [SHIPPED ARTIFACT CHECK]: {missing_tiles} tile(s) that "
@@ -197,11 +265,10 @@ def check_shipped_terrain_fit():
                   f"from {MASKS_DIR} - rebuild terrain (build_terrain_mesh_tiles.py) "
                   f"or run pipeline/rebuild_area.py.")
         if max_dev > TOL_M:
-            print(f"FAIL [SHIPPED ARTIFACT CHECK]: the SHIPPED terrain deviates "
-                  f"from the expected carve offset by more than {TOL_M}m at at "
-                  f"least one station - the disk artifacts don't match the current "
-                  f"road_stations.json (stale bake, partial rebake, or a real carve "
-                  f"bug). Rebuild terrain tiles and re-run this script.")
+            print(f"FAIL [SHIPPED ARTIFACT CHECK]: the SHIPPED terrain sits more "
+                  f"than {TOL_M}m above the road, or more than {TOL_M}m below it "
+                  f"with no wall covering the drop, at the stations counted above "
+                  f"(stale bake, a real carve bug, or a gap needing a wall/bridge).")
     return ok
 
 
@@ -325,7 +392,7 @@ def check_prebake_consistency():
 
     session = requests.Session()
     caches = ({}, {})
-    dzs, misses = [], 0
+    dzs, rows, misses = [], [], 0
     for (tx, ty), idxs in tiles.items():
         d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
         is_near = d <= btmt.NEAR_MARGIN_M
@@ -340,6 +407,7 @@ def check_prebake_consistency():
                 misses += 1
                 continue
             dzs.append(h_cm / 100.0 + ORIGIN_HEIGHT_M - float(elev[i]))
+            rows.append((i, dzs[-1] + CARVE_DROP_M))
 
     dzs = np.array(dzs) if dzs else np.array([0.0])
     mean_abs = float(np.mean(np.abs(dzs + CARVE_DROP_M)))
@@ -349,7 +417,7 @@ def check_prebake_consistency():
           f"mean dev from -{CARVE_DROP_M}m = {mean_abs:.2f}m, "
           f"max dev = {max_dev:.2f}m (tolerance {TOL_M}m)")
 
-    ok = max_dev <= TOL_M
+    ok = _judge_devs("PRE-BAKE", rows)
     if ok:
         print("PASS [PRE-BAKE CONSISTENCY CHECK]: baking right now against the "
               "current road_stations.json would be internally consistent.")
@@ -376,15 +444,16 @@ def check_wall_coverage():
     the embed margin are themselves first-pass tunables, not exact
     specifications to hold a gate to)."""
     east, north, elev, seg_idx, station_idx, road_name = brw.load_station_arrays()
+    hw = brw.load_station_half_widths()
     _exclude, wall_pairs = classify_wall_stations(
-        east, north, elev, seg_idx, station_idx, road_name)
+        east, north, elev, seg_idx, station_idx, road_name, half_width_m=hw)
     runs = brw.cluster_runs(wall_pairs, len(east))
 
     tol_m = WALL_EMBED_MARGIN_M + 5.0
     n_checked = n_failed = 0
     for run_stations in runs:
         centroid_ref_cm = brw.own_chain_centroid_cm(run_stations, east, north, seg_idx)
-        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm)
+        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm)
         if mesh is None:
             continue
         verts, _uvs, _tris = mesh

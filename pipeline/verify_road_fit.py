@@ -38,6 +38,17 @@ Bridge/tunnel stations and auto-flagged elevation-conflict stations
 verify_terrain_fit.py - the terrain carve (and by extension this gate)
 deliberately skips them; retaining-wall-covered stations get their own
 check in verify_terrain_fit.py's check_wall_coverage(), not here.
+
+POKE-THROUGH CHECK (2026-09-28, the "terrain shards in the road" report):
+the gap check above skips every excluded station - but the exclusion mask
+covers ~half the network (build_road_stations dilates the bridge + conflict
+flags), and since the same date the offline carve DOES carve all of those
+except true bridges/tunnels (build_terrain_mesh_tiles._get_struct_mask).
+So separately, at EVERY non-bridge/tunnel station, the shipped terrain must
+not stand more than POKE_TOL_M above the road surface (station elev +
+ROAD_LIFT - the road mesh itself isn't sampled here because
+sample_mesh_height returns the TOPMOST surface, which at a crossing is the
+other road's deck and would hide a poke).
 """
 
 import sys
@@ -47,6 +58,7 @@ from pathlib import Path
 import numpy as np
 
 import build_terrain_mesh_tiles as btmt
+import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, sample_mesh_height
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
@@ -78,6 +90,12 @@ EXPECTED_GAP_M = ROAD_LIFT + CARVE_DROP_M
 # measured 5.38m max with a ~0.6m margin without being loose enough to
 # hide a real fit bug (see AUDIT-RELIABILITY.md SS4.2 diagnostic run).
 TOL_M = 6.0
+
+# Terrain above the road's centerline surface by more than this = visible
+# poke-through. Normal carve leaves it ROAD_LIFT + CARVE_DROP_M (0.25 m)
+# BELOW; see the post-rebake stats printed by check_poke_through().
+POKE_TOL_M = 0.3
+POKE_EDGE_INSET_M = 0.3   # edge probes sit this far inside the pavement edge
 
 _TERRAIN_CACHE = {}
 _ROAD_CACHE = {}
@@ -224,8 +242,63 @@ def check_road_vs_terrain_fit():
     return ok
 
 
+def _station_edge_points(east, north, seg_idx, hw):
+    """Left/right pavement-edge points (m), POKE_EDGE_INSET_M inside the
+    edge, from each station's own in-segment tangent."""
+    tx, ty = np.empty_like(east), np.empty_like(east)
+    for s in np.unique(seg_idx):
+        m = np.where(seg_idx == s)[0]
+        if len(m) < 2:
+            tx[m], ty[m] = 1.0, 0.0
+            continue
+        tx[m], ty[m] = np.gradient(east[m]), np.gradient(north[m])
+    tn = np.maximum(np.hypot(tx, ty), 1e-9)
+    off = np.maximum(hw - POKE_EDGE_INSET_M, 0.0)
+    nx, ny = -ty / tn * off, tx / tn * off
+    return (east + nx, north + ny), (east - nx, north - ny)
+
+
+def check_poke_through():
+    _lat0, _lon0, east, north, elev, _excl, _clamp_r, _walls = btmt.load_stations()
+    _e, _n, _z, seg_idx, _si, _rn = brw.load_station_arrays()
+    hw = brw.load_station_half_widths()
+    idx = np.where(~btmt._get_struct_mask(len(east)))[0]
+    tile_cm = btmt.TERRAIN_TILE_SIZE_CM
+    # centerline, then both pavement edges - a diagonal terrain triangle
+    # from a neighbouring road's carve can clip the edge while the
+    # centerline reads clean (2026-09-28 tightened conflict reach)
+    probes = [("center", east, north)] + list(zip(("left", "right"),
+                                                   *zip(*_station_edge_points(east, north, seg_idx, hw))))
+    ok = True
+    for label, pe, pn in probes:
+        poke = np.full(len(east), np.nan)
+        for i in idx:
+            x_cm, y_cm = float(pe[i]) * 100.0, -float(pn[i]) * 100.0
+            h, _ = _sample_with_neighbors(_load_terrain_tile, int(np.floor(x_cm / tile_cm)),
+                                          int(np.floor(y_cm / tile_cm)), x_cm, y_cm)
+            if h is not None:
+                # edge pavement is never below the centerline (banking only
+                # raises the outer edge), so elev + ROAD_LIFT is conservative
+                poke[i] = h / 100.0 + ORIGIN_HEIGHT_M - (elev[i] + ROAD_LIFT)
+        p = poke[idx]
+        misses = int(np.isnan(p).sum())
+        p = p[~np.isnan(p)]
+        bad = np.where(poke > POKE_TOL_M)[0]
+        print(f"poke-through [{label}]: {len(idx)} non-bridge/tunnel station(s), {misses} without terrain; "
+              f"terrain-minus-road median {np.median(p):+.2f}m, p99.9 {np.percentile(p, 99.9):+.2f}m, "
+              f"max {p.max():+.2f}m; {len(bad)} above {POKE_TOL_M}m")
+        for i in bad[np.argsort(-poke[bad])][:10]:
+            print(f"  station {i}: terrain {poke[i]:+.2f}m above road at "
+                  f"({pe[i]:.0f}, {pn[i]:.0f}) m")
+        ok = ok and len(bad) == 0 and misses == 0
+    print("PASS: no terrain pokes through any non-bridge road." if ok else
+          "FAIL: terrain pokes through the road surface (or is missing) - see stations above.")
+    return ok
+
+
 def main():
     ok = check_road_vs_terrain_fit()
+    ok = check_poke_through() and ok
     if not ok:
         sys.exit(1)
 

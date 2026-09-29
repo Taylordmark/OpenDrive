@@ -1235,6 +1235,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 	// the Near ring really is). Still opt-in via -odverifycarve, so this
 	// costs nothing by default.
 	const bool bVerifyCarve = bVerifyCarveGuarantee;
+	const bool bRuntimeCarve = bEnableRuntimeRoadCarve;
 
 	// Runtime ground tint (2026-08-26) - same snapshot-by-value reasoning as
 	// HashForCarve above (BiomeHash is thread-safe/read-only after BeginPlay).
@@ -1244,7 +1245,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath,
-		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve,
+		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve, bRuntimeCarve,
 		HashForTint, bTintEnabled, TintStrengthValue]()
 	{
 		FParsedTerrainTile Parsed;
@@ -1287,8 +1288,11 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 			float MaxDropCm = 0.0f;
 			float MaxLiftCm = 0.0f;
 			int32 HardClampedVerts = 0;
-			ApplyRoadCarve(Parsed, Key, CarveTileSizeCm, *HashForCarve, Fidelity,
-				bBuildRuntimeWalls, WallThresholdCm, ClampMarginCm, VertsTouched, MaxDropCm, MaxLiftCm, HardClampedVerts);
+			if (bRuntimeCarve)   // see bEnableRuntimeRoadCarve - off by default
+			{
+				ApplyRoadCarve(Parsed, Key, CarveTileSizeCm, *HashForCarve, Fidelity,
+					bBuildRuntimeWalls, WallThresholdCm, ClampMarginCm, VertsTouched, MaxDropCm, MaxLiftCm, HardClampedVerts);
+			}
 			if (VertsTouched > 0)
 			{
 				UE_LOG(LogTemp, Display,

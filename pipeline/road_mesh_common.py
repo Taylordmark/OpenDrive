@@ -21,8 +21,24 @@ from test_areas import ELEV_PLAUSIBLE_MAX_M, ELEV_PLAUSIBLE_MIN_M
 
 STATION_SPACING = 5.0        # m between road samples
 ROAD_HALF_WIDTH = 4.5        # m, asphalt edge
-SKIRT_EXTRA = 3.0            # m outward for embankment skirt
-SKIRT_DROP = 2.5             # m downward at skirt edge
+SKIRT_EXTRA = 3.0            # m beyond the pavement edge the terrain carve clamps
+                             # (the road mesh itself no longer reaches this far -
+                             # see WRAP_* below)
+SKIRT_DROP = 2.5             # m - no longer shapes the road mesh (the 2.5 m
+                             # curtain became the WRAP_* underside, 2026-09-28);
+                             # kept only because generation_id hashes it
+# Road cross-section wrap (2026-09-28, Taylor: the 3 m / 2.5 m skirt curtain
+# hung visibly under raised roads - wanted the road to "wrap around the
+# bottom in asphalt color" instead). Each station row is a closed loop:
+# underside-L, lip-L, pave-L, pave-R, lip-R, underside-R, underside-L again
+# (duplicate so the underside strip closes). At grade the lip dives under the
+# carved terrain (CARVE_DROP 0.15 m below) within ~0.15 m of the edge; on a
+# raised road it reads as a thick asphalt slab.
+WRAP_LIP_OUT_M = 0.5         # lip's lateral reach past the pavement edge
+WRAP_LIP_DROP_M = 0.6        # lip bottom below the pavement
+WRAP_DEPTH_M = 1.0           # slab underside below the pavement (bridge decks are 1.25)
+ROAD_PROFILE_COLS = 7        # verts per station row - consumers index by this
+ROAD_PAVE_COLS = (2, 3)      # pave-L / pave-R columns within a row
 ROAD_LIFT = 0.10             # m above smoothed ground (wishlist #11: keep the
                              # road close to terrain; build_terrain_tiles.py's
                              # CARVE_DROP_M carves the terrain further below)
@@ -581,6 +597,51 @@ def grade_smooth_elevation(ground, spacing=STATION_SPACING, max_grade=MAX_GRADE,
     return h
 
 
+# Ground-following profile (2026-09-28, Taylor in Summit County: "roads were
+# not continuous with random dropoffs and super wavy"). grade_smooth_
+# elevation()'s one-sided min-envelope assumes a real road never climbs
+# faster than its ROAD_CLASS_GRADE cap - true in Palmdale, false here: I-70
+# over Vail Pass climbs ~7% against a 6% motorway cap, steep residential
+# streets beat 12%, and the envelope falls a little further below the ground
+# every station of a sustained climb. Measured on the shipped
+# road_stations.json: 7.8% of non-structure stations >5 m below the DEM,
+# I-70 seg001 15-45 m under it for km, Buffehr Creek 130 m - the terrain
+# carve then dug trenches to match, and bridge spans (exempt from the clamp,
+# floored at DEM+4 m) stood 14-31 m proud of the sunken approaches: the
+# dropoffs. Simulated over the whole network (scratchpad sim_grade3.py) this
+# profile takes >5 m-below to 0.3%, steps >1.5 m from 170 to 6, and halves
+# the p99 grade-change (waviness).
+FOLLOW_GROUND_SIGMA_STATIONS = 4     # 20 m low-pass on the raw DEM profile
+FOLLOW_TREND_SIGMA_STATIONS = 12     # 60 m window for the "sustained slope"
+FOLLOW_TREND_SLACK = 1.15            # cap relaxes to 115% of the sustained slope
+FOLLOW_ABS_MAX_GRADE = 0.22          # never steeper than this (steepest real
+                                     # paved streets; beyond it the DEM is
+                                     # sampling a sidehill, not the road)
+FOLLOW_CURVE_SIGMA_STATIONS = 3      # 15 m vertical-curve ease on the result
+
+
+def follow_ground_profile(ground, max_grade, spacing=STATION_SPACING):
+    """Road elevation profile that TRACKS the ground rather than hanging
+    below it (see FOLLOW_* above). Returns (h, relaxed_max_grade): the
+    per-station cap is max(class cap, 1.15 x the ground's 60 m-window
+    slope), clipped to FOLLOW_ABS_MAX_GRADE, so the grade clamp only trims
+    short bumps, never a sustained climb. The clamp is two-sided (mean of
+    the cut envelope and the fill envelope) so trimmed bumps split the
+    difference instead of always cutting below. Callers re-running
+    grade_smooth_elevation() later (junction reconcile) should pass the
+    returned relaxed cap, or the one-sided clamp sinks the road again."""
+    ground = np.asarray(ground, dtype=float)
+    mg = np.broadcast_to(np.asarray(max_grade, dtype=float), ground.shape)
+    if len(ground) < 3:
+        return ground.copy(), np.array(mg, dtype=float)
+    trend = np.abs(np.gradient(gaussian1d(ground, FOLLOW_TREND_SIGMA_STATIONS))) / spacing
+    mg = np.minimum(np.maximum(mg, trend * FOLLOW_TREND_SLACK), FOLLOW_ABS_MAX_GRADE)
+    g = gaussian1d(ground, FOLLOW_GROUND_SIGMA_STATIONS)
+    cut = grade_smooth_elevation(g, spacing, mg)
+    fill = -grade_smooth_elevation(-g, spacing, mg)
+    return gaussian1d(0.5 * (cut + fill), FOLLOW_CURVE_SIGMA_STATIONS), mg
+
+
 def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        chunk_stations=CHUNK_STATIONS,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
@@ -605,11 +666,10 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     skirt+pavement profile, v=s/20 arbitrary-scaled station distance):
         u = lateral offset normalized so u=0 is the LEFT PAVEMENT edge and
             u=1 is the RIGHT PAVEMENT edge (off=+-road_half_width) - the
-            material can locate lane lines directly from u. Skirt vertices
-            are OUTSIDE the pavement, so their u falls outside [0,1]
-            (extrapolated linearly on the same scale, not clamped) - the
-            material can use u<0 or u>1 to blend to a shoulder/gravel look
-            past the paved edge.
+            material can locate lane lines directly from u. The wrap
+            (lip/underside) columns clamp u into [0,1] so they render as
+            plain asphalt (2026-09-28 - the old skirt columns extrapolated
+            outside [0,1] to pick up the material's gravel shoulder).
         v = station arc-length distance IN METERS, continuous along the
             centerline and NOT rescaled by road width - a chunk's `s` values
             already carry the segment's true along-road distance, so tiling
@@ -665,16 +725,22 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     bank_tan = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
     raise_side = -np.sign(gaussian1d(curv, BANK_SMOOTH_SIGMA_M))  # +1: raise right side
 
-    # cross-section: (lateral offset m, z offset m), left -> right - the
-    # pavement offset is per-station when half_width_s is given (variable
-    # width, 2026-09-06); the skirt is always skirt_extra beyond it.
+    # cross-section: (lateral offset m, z offset m) - a closed loop around
+    # the slab (see WRAP_* at the top of this module); the strip winding
+    # below makes every face point outward (pavement up, lips out, underside
+    # down). The pavement offset is per-station when half_width_s is given
+    # (variable width, 2026-09-06). skirt_extra/skirt_drop are unused now
+    # (kept in the signature for experimental_junction_pads.py's callers).
     def station_profile(i):
         hw = float(half_width_s[i]) if half_width_s is not None else road_half_width
-        return hw, [(-(hw + skirt_extra), -skirt_drop),
+        return hw, [(-hw, -WRAP_DEPTH_M),
+                    (-(hw + WRAP_LIP_OUT_M), -WRAP_LIP_DROP_M),
                     (-hw, 0.0),
                     (hw, 0.0),
-                    (hw + skirt_extra, -skirt_drop)]
-    n_prof = 4
+                    (hw + WRAP_LIP_OUT_M, -WRAP_LIP_DROP_M),
+                    (hw, -WRAP_DEPTH_M),
+                    (-hw, -WRAP_DEPTH_M)]
+    n_prof = ROAD_PROFILE_COLS
 
     # junction_suppress (Arc 7.17): 0..1 per station from build_road_
     # stations.py's junction-flatten pass (road_mesh_common.
@@ -716,11 +782,14 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             verts.extend(station_verts(i, profile))
             v = s[i]   # meters, continuous - see build_road_chunks docstring
             # u-coordinate per profile column, normalized to THIS station's
-            # PAVEMENT edges (columns 1/2 = pave-L/pave-R at off=+-hw ->
-            # u=0/1; columns 0/3 = skirt-L/skirt-R extrapolate outside
-            # [0,1] on the same scale).
-            uvs.extend([(off / (2.0 * hw) + 0.5, v) for off, _dz in profile])
-            uv1.extend([(hw, float(junction_suppress_arr[i])) for _ in range(n_prof)])
+            # PAVEMENT edges (pave-L/pave-R at off=+-hw -> u=0/1). The wrap
+            # columns clamp into [0,1] so the material draws plain asphalt
+            # there, not its u<0 / u>1 gravel shoulder; their uv1.y = 1
+            # (junction-suppress) keeps lane paint off the underside, whose
+            # u sweeps 1 -> 0 back across the slab.
+            uvs.extend([(min(1.0, max(0.0, off / (2.0 * hw) + 0.5)), v) for off, _dz in profile])
+            js = float(junction_suppress_arr[i])
+            uv1.extend([(hw, js if j in ROAD_PAVE_COLS else 1.0) for j in range(n_prof)])
         for irow in range(c1 - c0):
             b = irow * n_prof
             for j in range(n_prof - 1):
@@ -1140,7 +1209,8 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
                             min_gap_m=CONFLICT_MIN_GAP_M,
                             same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
                             wall_min_grade=WALL_MIN_GRADE,
-                            cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE):
+                            cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE,
+                            half_width_m=None):
     """Classifies every conflicting pair (detect_elevation_conflict_pairs)
     into one of three outcomes:
 
@@ -1175,7 +1245,16 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
     (i, j) index tuples needing generated wall geometry (deduplicated - a
     pair caught by both the main and cross-road passes below only appears
     once). A station's exclude flag is only ever set True, never reset back
-    to False by a later pair."""
+    to False by a later pair.
+
+    half_width_m (2026-09-28, I-70 station 44269): per-station pavement
+    half-width. When given, the in-scope wall grade is measured EDGE to edge
+    (centerline distance minus both half-widths, floored at 0.5 m) - two
+    carriageways 13.6 m apart centre-to-centre and 6 m apart vertically are
+    a 0.44 centerline grade (no wall) but a 6 m cliff over a 3.6 m gap, which
+    the 7.8 m terrain grid can't hold. The wall/terrain/verifier stages pass
+    it; build_road_stations.py deliberately doesn't (its conflict set shapes
+    road_stations.json itself, and changing that forces a full rebuild)."""
     n = len(east_m)
     east_m = np.asarray(east_m, dtype=np.float64)
     north_m = np.asarray(north_m, dtype=np.float64)
@@ -1203,6 +1282,8 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
             add_wall_pair(i, j)
             continue
         dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
+        if half_width_m is not None:
+            dist_m = max(dist_m - half_width_m[i] - half_width_m[j], 0.5)
         grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
         if grade >= wall_min_grade:
             add_wall_pair(i, j)
@@ -1596,22 +1677,30 @@ def junction_agreement_pass(east_m, north_m, elev_m, seg_idx,
     if not jpairs:
         return elev_m, touched
 
+    base_elev = elev_m.copy()
+
     def taper_walk(start, step, target):
         # Raise the profile along `start`'s own segment in direction
-        # `step`, following a JUNCTION_AGREE_TAPER_GRADE descent from
-        # `target`. Raise-only; stops at the segment boundary, at a skipped
+        # `step`, easing the crossing's RAISE back to zero at
+        # JUNCTION_AGREE_TAPER_GRADE on top of each station's pre-pass
+        # elevation. Raise-only; stops at the segment boundary, at a skipped
         # (bridge/tunnel/conflict) station, or once the taper dips below
-        # the road's own existing profile.
+        # the road's own existing profile. (2026-09-28: was an absolute
+        # `target - grade*dist` line, which never meets a road climbing
+        # faster than 3% toward the crossing - the raise GREW every station
+        # until a skip station cut it off: a 103 m cliff on Willow Creek
+        # seg013 once follow_ground_profile() kept its real ~10% grade.)
         raised = 0
         seg = seg_idx[start]
         k, prev = start + step, start
         dist = 0.0
+        raise0 = target - base_elev[start]
         while 0 <= k < n and seg_idx[k] == seg:
             if skip[k]:
                 break
             dist += math.hypot(east_m[k] - east_m[prev],
                                north_m[k] - north_m[prev])
-            want = target - JUNCTION_AGREE_TAPER_GRADE * dist
+            want = base_elev[k] + raise0 - JUNCTION_AGREE_TAPER_GRADE * dist
             if want <= elev_m[k]:
                 break
             elev_m[k] = want

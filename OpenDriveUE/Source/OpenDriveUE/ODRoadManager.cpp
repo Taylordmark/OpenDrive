@@ -1096,17 +1096,19 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			const float Z = Chunk.Verts[v * 3 + 2];
 			VertIds[v] = Mesh.AppendVertex(FVector3d(X, Y, Z));
 
-			// skirt-bottom sample for the -odseam terrain check: every
-			// 10th station's outer two verts (index 0/3 of the
-			// skirt-L,pave-L,pave-R,skirt-R layout build_road_chunks
-			// always emits, 4 verts per station) - same convention as
-			// slice 1, just filled in incrementally as tiles load now.
+			// lip-bottom sample for the -odseam terrain check: every
+			// 10th station's outer two verts (index 1/4 of the
+			// under-L,lip-L,pave-L,pave-R,lip-R,under-R,under-L layout
+			// build_road_chunks emits - road_mesh_common.ROAD_PROFILE_COLS
+			// = 7 verts per station) - same convention as slice 1, just
+			// filled in incrementally as tiles load now.
 			// Skipped on a physics-rebuild pass (bRecordSkirtSamples=false)
 			// since those points were already recorded on this chunk's
 			// original build - recording again would duplicate them.
-			const uint32 StationIdx = v / 4;
-			const uint32 InStation = v % 4;
-			if (bRecordSkirtSamples && (StationIdx % 10) == 0 && (InStation == 0 || InStation == 3))
+			constexpr uint32 ProfileCols = 7;
+			const uint32 StationIdx = v / ProfileCols;
+			const uint32 InStation = v % ProfileCols;
+			if (bRecordSkirtSamples && (StationIdx % 10) == 0 && (InStation == 1 || InStation == 4))
 			{
 				SkirtSamplePoints.Add(CompXf.TransformPosition(FVector(X, Y, Z)));
 			}

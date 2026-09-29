@@ -66,7 +66,8 @@ import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
                               half_width_for_stations, road_ue_z_m,
-                               classify_wall_stations)
+                               classify_wall_stations,
+                              CONFLICT_MAX_GRADE, CONFLICT_MIN_GAP_M)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -708,6 +709,23 @@ def _get_lake_beds():
     return _LAKE_BEDS_CACHE
 
 
+_STRUCT_MASK_CACHE = None
+
+
+def _get_struct_mask(n):
+    """Per-station is_struct (real bridge/tunnel span, no carve buffer, no
+    conflicts), in load_stations()' concatenation order - cached, so every
+    build_tile() caller gets it without changing station_data's shape."""
+    global _STRUCT_MASK_CACHE
+    if _STRUCT_MASK_CACHE is None:
+        segs = json.loads(STATIONS_PATH.read_text())["segments"]
+        _STRUCT_MASK_CACHE = np.concatenate([
+            np.array(s.get("is_struct", s.get("is_bridge", [False] * len(s["east_m"]))), dtype=bool)
+            for s in segs])
+    assert len(_STRUCT_MASK_CACHE) == n, (len(_STRUCT_MASK_CACHE), n)
+    return _STRUCT_MASK_CACHE
+
+
 def load_stations():
     """Returns (lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs).
     `exclude` is True for any station the terrain carve must skip (real
@@ -748,7 +766,8 @@ def load_stations():
     road_name = [name for seg in data["segments"] for name in seg["road_name"]]
 
     conflict, wall_pairs = classify_wall_stations(
-        east, north, elev, seg_ids, station_idx, road_name)
+        east, north, elev, seg_ids, station_idx, road_name,
+        half_width_m=clamp_r - SKIRT_EXTRA)
     n_new = int(np.sum(conflict & ~is_bridge))
     if n_new:
         print(f"classify_wall_stations: {n_new} station(s) auto-flagged "
@@ -879,6 +898,7 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     # 2026-09-06) - carried alongside best_elev from the same nearest
     # station; the old constant everywhere when the caller has no widths.
     best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
+    best_idx = np.zeros(P, dtype=np.int64)
     for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
         sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
         sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
@@ -889,6 +909,7 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
         better = nearest_d < best_d
         best_d = np.where(better, nearest_d, best_d)
         best_elev = np.where(better, se[nearest], best_elev)
+        best_idx = np.where(better, c0 + nearest, best_idx)
         if st_clamp_r is not None:
             sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
             best_clamp = np.where(better, sc[nearest], best_clamp)
@@ -904,6 +925,50 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     # second nearest-station search.
     under_road = best_d <= best_clamp
     out = np.where(under_road, np.minimum(out, best_elev - HARD_CLAMP_MARGIN_M), out)
+
+    # Conflict-aware min (2026-09-28, port of AODTerrainManager::
+    # ApplyRoadCarve's switchback clamp): a DIFFERENT, lower road pass whose
+    # own footprint also covers this pixel must win, or the pixel pokes up
+    # through it. "Different pass" = an elevation gap no continuous grade
+    # could make over the two stations' own separation (CONFLICT_MAX_GRADE/
+    # CONFLICT_MIN_GAP_M, same test classify_wall_stations uses). This is
+    # what lets conflict-flagged roads be carved offline at all - before
+    # they were skipped here and left to the runtime carve, which can only
+    # move vertices of the already-simplified mesh and so left 44-88 m
+    # martini triangles poking through the pavement.
+    # Reach is the lower road's PAVEMENT (clamp minus SKIRT_EXTRA) plus one
+    # grid cell: a pixel just outside the pavement still spans a triangle
+    # across it, so with I-70's split carriageways 8-18 m apart and 20-40 m
+    # apart vertically (7.8 m near grid) an un-lowered pixel one cell over
+    # left the terrain up to 7 m through the lower pavement (2026-09-28
+    # rebake, verify_road_fit's poke check). The price is the upper road's
+    # near edge losing its ground - a cliff there either way, which the
+    # retaining walls + road slab cover. Reaching from the full clamp
+    # (pavement + skirt) + cell instead dug out under the upper road's
+    # centerline too (I-70 station 44269 floated 6 m, visible from its far
+    # side; 259 verify_terrain_fit failures after the second rebake).
+    cell = float(max(np.hypot(east_grid[0, 1] - east_grid[0, 0], north_grid[0, 1] - north_grid[0, 0]),
+                     np.hypot(east_grid[1, 0] - east_grid[0, 0], north_grid[1, 0] - north_grid[0, 0])))
+    ur = np.where(best_d <= best_clamp + cell)[0]
+    if len(ur):
+        from scipy.spatial import cKDTree
+        st_xy = np.c_[st_east, st_north]
+        clamp = (st_clamp_r if st_clamp_r is not None
+                 else np.full(len(st_east), HARD_CLAMP_RADIUS_M))
+        rmax = float(max(best_clamp[ur].max(), clamp.max())) + cell
+        cands = cKDTree(st_xy).query_ball_point(np.c_[gx[ur], gy[ur]], rmax)
+        for p, cand in zip(ur, cands):
+            if len(cand) < 2:
+                continue
+            cand = np.asarray(cand)
+            d = np.hypot(st_xy[cand, 0] - gx[p], st_xy[cand, 1] - gy[p])
+            b = best_idx[p]
+            sep = np.hypot(*(st_xy[cand] - st_xy[b]).T)
+            ok = ((d <= clamp[cand] - SKIRT_EXTRA + cell)
+                  & (best_elev[p] - st_elev[cand]
+                     > CONFLICT_MAX_GRADE * sep + CONFLICT_MIN_GAP_M))
+            if ok.any():
+                out[p] = min(out[p], st_elev[cand[ok]].min() - HARD_CLAMP_MARGIN_M)
     return out.reshape(shape)
 
 
@@ -1084,12 +1149,13 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # is purely a speed optimization for far tiles with thousands of
     # stations elsewhere on the route)
     prefilter_m = TERRAIN_CARVE_OUTER_M + 500.0
-    # st_exclude = is_bridge OR an auto-detected elevation conflict (see
-    # road_mesh_common.classify_wall_stations) - both mean "don't carve
-    # toward this station, the ground here belongs to something else"
-    # (either a real structure, or - for wall-eligible conflicts - a
-    # generated retaining wall covers the gap instead)
-    keep = (~st_exclude) & (
+    # Only REAL structures (is_struct: tagged bridge/tunnel span) are skipped
+    # now. Elevation-conflict stations (st_exclude's other half, ~half the
+    # network) used to be skipped too, which left their terrain uncarved
+    # and martini-simplified into big triangles the runtime carve couldn't
+    # fix (2026-09-28 shard investigation) - carve_grid_m's conflict-aware
+    # min now handles the two-passes-at-different-heights case directly.
+    keep = (~_get_struct_mask(len(st_x_cm))) & (
         np.hypot(np.clip(st_x_cm, x0_cm, x1_cm) - st_x_cm,
                  np.clip(st_y_cm, y0_cm, y1_cm) - st_y_cm) / 100.0 <= prefilter_m)
     if keep.any():

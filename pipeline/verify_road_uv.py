@@ -11,10 +11,11 @@ UVs/metadata (2026-09-03). Reads a sample of tiles from BOTH:
 and checks, per sampled chunk:
   1. UVs are present and vertex-count-aligned.
   2. u0 spans the expected pavement-normalized range: >= 1.0 - eps and
-     <= 0.0 + eps somewhere (both pavement edges hit), and skirt columns
-     extrapolate outside [0, 1].
+     <= 0.0 + eps somewhere (both pavement edges hit), every row's pavement
+     columns sit at u=0/1, and the wrap (lip/underside) columns stay clamped
+     inside [0, 1] (plain asphalt, no gravel shoulder).
   3. v0 is monotonically non-decreasing along the centerline (station row
-     to station row - each row emits n_prof=4 verts at the same v, so this
+     to station row - each row emits ROAD_PROFILE_COLS verts at the same v, so this
      checks row-to-row, not vert-to-vert).
   4. (ODR3 only) uv1.x (road half-width, meters) is positive and sane
      (2..15 m), constant within a chunk.
@@ -31,6 +32,7 @@ import struct
 import sys
 from pathlib import Path
 
+from road_mesh_common import ROAD_PAVE_COLS, ROAD_PROFILE_COLS
 from test_areas import AREA_NAME
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +40,7 @@ MASKS = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 MASKS_V2 = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "MasksV2"
 
 GEN_ID_BYTES = 16
-N_PROF = 4   # skirt-L, pave-L, pave-R, skirt-R - road_mesh_common.py's fixed cross-section
+N_PROF = ROAD_PROFILE_COLS   # road_mesh_common.build_road_chunks' fixed cross-section
 U_EPS = 1e-3
 V_EPS = 1e-3   # meters - allow tiny float round-trip noise, not a real regression
 
@@ -132,23 +134,24 @@ def check_uv0(chunk, path, errors):
         errors.append(f"{path.name}: uv0 count {len(us)} != vcount {vcount}")
         return
     # pavement edges: at least one vertex within U_EPS of 0.0 and one within
-    # U_EPS of 1.0 (columns 1/2 of every station's 4-vert row).
+    # U_EPS of 1.0 (the ROAD_PAVE_COLS of every station row).
     if not (min(us) <= U_EPS):
         errors.append(f"{path.name}: u0 never reaches left pavement edge (min={min(us):.4f})")
     if not (max(us) >= 1.0 - U_EPS):
         errors.append(f"{path.name}: u0 never reaches right pavement edge (max={max(us):.4f})")
-    # skirt columns (0, 3 of every 4-vert row) must extrapolate OUTSIDE [0,1]
+    # pavement columns at u=0/1; wrap columns clamped inside [0,1]
     if vcount % N_PROF != 0:
         errors.append(f"{path.name}: vcount {vcount} not a multiple of N_PROF={N_PROF}")
     else:
         n_rows = vcount // N_PROF
         for row in range(n_rows):
             base = row * N_PROF
-            u_skirt_l, u_pave_l, u_pave_r, u_skirt_r = us[base:base + N_PROF]
-            if not (u_skirt_l < -U_EPS):
-                errors.append(f"{path.name} row {row}: left skirt u0={u_skirt_l:.4f} not < 0")
-            if not (u_skirt_r > 1.0 + U_EPS):
-                errors.append(f"{path.name} row {row}: right skirt u0={u_skirt_r:.4f} not > 1")
+            row_u = us[base:base + N_PROF]
+            pl, pr = (row_u[c] for c in ROAD_PAVE_COLS)
+            if abs(pl) > U_EPS or abs(pr - 1.0) > U_EPS:
+                errors.append(f"{path.name} row {row}: pavement u0=({pl:.4f},{pr:.4f}) not (0,1)")
+            if min(row_u) < -U_EPS or max(row_u) > 1.0 + U_EPS:
+                errors.append(f"{path.name} row {row}: wrap u0 outside [0,1] ({min(row_u):.4f}..{max(row_u):.4f})")
         # v0 (station distance, meters) monotonic non-decreasing row-to-row
         row_v = [vs[row * N_PROF] for row in range(n_rows)]
         for i in range(1, len(row_v)):
@@ -171,7 +174,7 @@ def check_uv1_and_meta(chunk, path, errors):
         errors.append(f"{path.name}: implausible road half-width in uv1.x: {bad:.3f} m")
     # Per-station width (2026-09-06, lanes= tags): uv1.x may now vary ALONG
     # a chunk, but only smoothly (WIDTH_SMOOTH_SIGMA_M gaussian over 5 m
-    # stations bounds any legal row-to-row step well under this), and the 4
+    # stations bounds any legal row-to-row step well under this), and the
     # verts of one station row must still share one half-width exactly.
     MAX_ROW_STEP_M = 2.0
     if vcount % N_PROF == 0:
@@ -252,7 +255,7 @@ def main():
             print(f"  ... and {len(errors) - 50} more")
         sys.exit(1)
 
-    print("PASS - uv0 pavement-edge/skirt-extrapolation/monotonic-v checks and "
+    print("PASS - uv0 pavement-edge/wrap-clamp/monotonic-v checks and "
           "(ODR3) uv1/road_class_id/lane_count sanity checks all passed.")
 
 

@@ -54,8 +54,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial import cKDTree
 
-from road_mesh_common import classify_wall_stations, road_ue_z_m, WALL_EMBED_MARGIN_M
+from road_mesh_common import (classify_wall_stations, road_ue_z_m, WALL_EMBED_MARGIN_M,
+                              half_width_for_stations, ROAD_HALF_WIDTH, WRAP_LIP_DROP_M, ROAD_LIFT)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -120,6 +122,16 @@ def load_station_arrays():
     station_idx = np.concatenate([np.arange(len(seg["east_m"])) for seg in segs])
     road_name = [name for seg in segs for name in seg["road_name"]]
     return east, north, elev, seg_idx, station_idx, road_name
+
+
+def load_station_half_widths():
+    """Per-station pavement half-width (m), same rule build_road_chunks and
+    the terrain carve use, in load_station_arrays' station order."""
+    segs = json.loads(STATIONS_PATH.read_text())["segments"]
+    return np.concatenate([
+        half_width_for_stations(seg["highway_class"], seg.get("oneway"), seg.get("lanes"))
+        if seg.get("highway_class") else np.full(len(seg["east_m"]), ROAD_HALF_WIDTH)
+        for seg in segs])
 
 
 # --------------------------------------------------------------- clustering
@@ -277,7 +289,7 @@ def own_chain_centroid_cm(run_stations, east, north, seg_idx):
     ])
 
 
-def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
+def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm):
     """Ruled-surface retaining-wall mesh (UE cm frame) between a run's
     upper and lower station sets. Returns (verts Nx3 float32 cm, uvs Nx2,
     tris Mx3 uint32) or None if the run is too degenerate to build (fewer
@@ -303,7 +315,7 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
         return None   # degenerate (all stations coincident) - shouldn't happen
 
     def side_arrays(idx_list):
-        arr = np.array([[east[s], north[s], elev[s]] for s in idx_list])
+        arr = np.array([[east[s], north[s], elev[s], hw[s]] for s in idx_list])
         proj = (arr[:, :2] - centroid) @ axis
         order = np.argsort(proj)
         return proj[order], arr[order]
@@ -343,13 +355,40 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
     hi_x = np.interp(fracs, hi_proj, hi_pts[:, 0])
     hi_y = np.interp(fracs, hi_proj, hi_pts[:, 1])
     hi_z = np.interp(fracs, hi_proj, hi_pts[:, 2])
+    lo_hw = np.interp(fracs, lo_proj, lo_pts[:, 3])
+    hi_hw = np.interp(fracs, hi_proj, hi_pts[:, 3])
 
-    # embed margin - bias bottom down, top up, so the wall visually embeds
-    # into terrain at both ends instead of leaving a hairline gap (the same
-    # "gap hidden under geometry" pattern the road skirt and
-    # build_terrain_mesh_tiles.build_seam_skirt already use)
+    # Edge anchors (2026-09-28, Taylor's "single plane shards in the road"):
+    # rows used to run centerline to centerline, so every wall stood across
+    # half of BOTH roads' lanes - a one-sided ground-material plane with
+    # BlockAll collision in the driving lane. Now the bottom sits on the
+    # lower road's edge facing the upper road, buried WALL_EMBED_MARGIN_M,
+    # and the top tucks inside the upper road's wrap slab (between its lip
+    # and underside), so no part of the face is above either pavement.
+    # Offsets run along each road's own lateral normal (toward the other
+    # road), not along the centerline-to-centerline line - two roads meeting
+    # at an angle would otherwise leave the anchor inside the pavement.
+    row_span = np.hypot(hi_x - lo_x, hi_y - lo_y)
+
+    def side_normal(x, y, ox, oy):
+        tx, ty = np.gradient(x), np.gradient(y)
+        tn = np.maximum(np.hypot(tx, ty), 1e-6)
+        nx, ny = -ty / tn, tx / tn
+        sgn = np.where(nx * (ox - x) + ny * (oy - y) >= 0.0, 1.0, -1.0)
+        return nx * sgn, ny * sgn
+
+    lnx, lny = side_normal(lo_x, lo_y, hi_x, hi_y)
+    hnx, hny = side_normal(hi_x, hi_y, lo_x, lo_y)
+    # lateral clearance of each road's centerline from the OTHER road's
+    # facing edge - under 0.5 m means the pavements overlap in plan (a
+    # stacked crossing: the upper road is effectively a bridge, and a wall
+    # there would stand in the lower road's lanes)
+    lo_clear = lnx * (hi_x - lo_x) + lny * (hi_y - lo_y) - hi_hw - lo_hw
+    hi_clear = hnx * (lo_x - hi_x) + hny * (lo_y - hi_y) - lo_hw - hi_hw
+    lo_x, lo_y = lo_x + lnx * lo_hw, lo_y + lny * lo_hw
+    hi_x, hi_y = hi_x + hnx * hi_hw, hi_y + hny * hi_hw
     lo_z = lo_z - WALL_EMBED_MARGIN_M
-    hi_z = hi_z + WALL_EMBED_MARGIN_M
+    hi_z = hi_z - 0.5 * WRAP_LIP_DROP_M
 
     lo_z_ue = road_ue_z_m(lo_z, 0.0, ORIGIN_HEIGHT_M)
     hi_z_ue = road_ue_z_m(hi_z, 0.0, ORIGIN_HEIGHT_M)
@@ -370,8 +409,7 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
     # surface bridging unrelated geometry, not a wall face - no quad is
     # emitted on either side of it, splitting the mesh there instead of
     # draping a shallow sheet over the hillside.
-    row_span = np.hypot(hi_x - lo_x, hi_y - lo_y)
-    row_ok = row_span <= WALL_MAX_ROW_SPAN_M
+    row_ok = (row_span <= WALL_MAX_ROW_SPAN_M) & (lo_clear >= 0.5) & (hi_clear >= 0.5)
 
     tris = []
     for k in range(n_samples - 1):
@@ -399,6 +437,53 @@ def build_wall_run_mesh(run_stations, east, north, elev, centroid_ref_cm):
         return None
     tris = face_outward_flip(tris, verts, centroid_ref_cm)
     return verts.astype(np.float32), np.array(uvs, dtype=np.float32), tris.astype(np.uint32)
+
+
+# Catch-all lane gate (2026-09-28): a wall triangle with any part standing
+# over a road's pavement, LANE_GATE_MIN..MAX_M above it, is dropped - a hole
+# in a wall beats a collidable plane in a driving lane. Covers junction
+# rows the per-row edge anchoring can't (a third road passing between the
+# wall's own two, or a curve the row interpolation cuts across).
+LANE_GATE_MIN_M = 0.2
+LANE_GATE_MAX_M = 5.0
+_BARY = np.array([(a, b, 1.0 - a - b) for a in np.linspace(0, 1, 7)
+                  for b in np.linspace(0, 1, 7) if a + b <= 1.0 + 1e-9])
+
+
+def build_lane_index(east, north, elev, hw):
+    """All road centerlines densified to ~1 m: (KD-tree over UE-cm XY,
+    half-width cm, pavement z UE cm). Station order = load_station_arrays."""
+    segs = json.loads(STATIONS_PATH.read_text())["segments"]
+    P, HW, Z = [], [], []
+    off = 0
+    for seg in segs:
+        n = len(seg["east_m"])
+        sl = slice(off, off + n)
+        off += n
+        t = np.linspace(0, n - 1, max(1, (n - 1) * 5 + 1))
+        i = np.arange(n)
+        P.append(np.c_[np.interp(t, i, east[sl]) * 100.0, -np.interp(t, i, north[sl]) * 100.0])
+        HW.append(np.interp(t, i, hw[sl]) * 100.0)
+        Z.append(road_ue_z_m(np.interp(t, i, elev[sl]), ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0)
+    P = np.concatenate(P)
+    return cKDTree(P), P, np.concatenate(HW), np.concatenate(Z)
+
+
+def drop_in_lane_tris(verts, tris, lane_index):
+    """tris minus any triangle with a sample point over a road's pavement
+    (lateral < half-width) and LANE_GATE_MIN..MAX_M above it."""
+    tree, P, HW, Z = lane_index
+    pts = np.einsum("kj,tjc->tkc", _BARY, verts[tris].astype(np.float64))
+    flat = pts.reshape(-1, 3)
+    bad = np.zeros(len(flat), dtype=bool)
+    for k, idxs in enumerate(tree.query_ball_point(flat[:, :2], 1500.0)):
+        if idxs:
+            idxs = np.asarray(idxs)
+            d = np.hypot(P[idxs, 0] - flat[k, 0], P[idxs, 1] - flat[k, 1])
+            h = flat[k, 2] - Z[idxs]
+            bad[k] = np.any((d < HW[idxs]) & (h > LANE_GATE_MIN_M * 100.0)
+                            & (h < LANE_GATE_MAX_M * 100.0))
+    return tris[~bad.reshape(len(tris), -1).any(axis=1)]
 
 
 def chunk_and_bucket(name_prefix, verts, uvs, tris, road_names):
@@ -441,8 +526,10 @@ def chunk_and_bucket(name_prefix, verts, uvs, tris, road_names):
 
 def main():
     east, north, elev, seg_idx, station_idx, road_name = load_station_arrays()
+    hw = load_station_half_widths()
+    lane_index = build_lane_index(east, north, elev, hw)
     _exclude, wall_pairs = classify_wall_stations(
-        east, north, elev, seg_idx, station_idx, road_name)
+        east, north, elev, seg_idx, station_idx, road_name, half_width_m=hw)
     print(f"{len(wall_pairs)} wall-eligible conflict pair(s) over {len(east)} station(s)")
 
     runs = cluster_runs(wall_pairs, len(east))
@@ -459,14 +546,21 @@ def main():
 
     walls = []
     n_skipped = 0
+    n_lane_dropped = 0
     max_edge_m = 0.0
     for piece_idx, piece_stations in enumerate(pieces):
         centroid_ref_cm = own_chain_centroid_cm(piece_stations, east, north, seg_idx)
-        mesh = build_wall_run_mesh(piece_stations, east, north, elev, centroid_ref_cm)
+        mesh = build_wall_run_mesh(piece_stations, east, north, elev, hw, centroid_ref_cm)
         if mesh is None:
             n_skipped += 1
             continue
         verts, uvs, tris = mesh
+        n_before = len(tris)
+        tris = drop_in_lane_tris(verts, tris, lane_index)
+        n_lane_dropped += n_before - len(tris)
+        if len(tris) == 0:
+            n_skipped += 1
+            continue
         va, vb, vc = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
         piece_max = max(np.linalg.norm(va - vb, axis=1).max(),
                         np.linalg.norm(vb - vc, axis=1).max(),
@@ -479,6 +573,8 @@ def main():
     if n_skipped:
         print(f"{n_skipped} piece(s) skipped (degenerate - fewer than 2 stations "
               f"on one side, or non-overlapping sides)")
+
+    print(f"{n_lane_dropped} wall triangle(s) dropped by the lane gate")
 
     OUT_PATH.write_text(json.dumps({"area": AREA_NAME, "walls": walls}))
     total_verts = sum(len(w["vertices"]) // 3 for w in walls)

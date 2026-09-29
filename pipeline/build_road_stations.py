@@ -133,6 +133,7 @@ from test_areas import AREA_NAME, BBOX_SNWE
 from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
 from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
+                               follow_ground_profile,
                                despike_ground, clamp_plausible_elevation,
                                despike_road_profile,
                                classify_wall_stations, junction_agreement_pass,
@@ -189,6 +190,11 @@ CONFLICT_EXCLUDE_STATIONS = 8      # dilate each flagged station's carve-exclusi
 # derived from any specific vertical-clearance code - just enough that a
 # bridge visibly clears the ground it crosses instead of grazing it.
 MIN_BRIDGE_CLEARANCE_M = 4.0
+# 2026-09-28: the clearance lift eases in from each abutment at no more than
+# this grade instead of stepping straight up at the first deck station - the
+# unramped floor was a 14-31 m cliff at every I-70 span whose DEM sampled
+# the canyon wall (see road_mesh_common.FOLLOW_* for the rest of that bug).
+BRIDGE_LIFT_RAMP_GRADE = 0.06
 # Generous vs MAX_GRADE (0.10) on purpose - same reasoning as
 # CONFLICT_MAX_GRADE below: only flag a structure span too steep for ANY
 # plausible real bridge/tunnel, not just an unusually steep one. This is a
@@ -722,7 +728,7 @@ def main():
         if os.environ.get("OD_RAW_ROAD_STATIONS") == "1":
             h = placeholder
         else:
-            h = grade_smooth_elevation(placeholder, STATION_SPACING, max_grade_s, max_grade_delta_s)
+            h, max_grade_s = follow_ground_profile(placeholder, max_grade_s)
         h = fill_structure_gaps(h, is_struct_s)
 
         # Minimum-clearance floor, bridges only - tunnels belong at/below
@@ -733,8 +739,13 @@ def main():
         # leave the deck closer to the ground than a real bridge would be.
         is_bridge_only_s = is_struct_s & ~is_tunnel_s
         if is_bridge_only_s.any():
-            clearance_floor = raw_ground + MIN_BRIDGE_CLEARANCE_M
-            h = np.where(is_bridge_only_s, np.maximum(h, clearance_floor), h)
+            lift = np.maximum(raw_ground + MIN_BRIDGE_CLEARANCE_M - h, 0.0)
+            ramp = np.full(len(h), np.inf)
+            for run_lo, run_hi in _contiguous_true_runs(is_bridge_only_s):
+                k = np.arange(run_lo, run_hi + 1)
+                ramp[k] = np.minimum(k - run_lo + 1, run_hi + 1 - k) * STATION_SPACING
+            lift = np.minimum(lift, np.minimum(MIN_BRIDGE_CLEARANCE_M, BRIDGE_LIFT_RAMP_GRADE * ramp))
+            h = np.where(is_bridge_only_s, h + lift, h)
 
         # Final despike pass (2026-08-27, Lake Hughes Road "vertical wall"
         # bug - see despike_road_profile()'s docstring in road_mesh_common.py

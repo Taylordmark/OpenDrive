@@ -37,8 +37,8 @@ re-deriving anything from OSM tags at runtime):
                    ROAD_CLASS_LANES_TWOWAY / road_class_and_lanes())
         vertex_count * (float32 x, float32 y, float32 z)   cm, UE world frame
         vertex_count * (float32 u0, float32 v0)   u0: 0=left pavement edge,
-                   1=right pavement edge (skirt vertices extrapolate outside
-                   [0,1]); v0: distance along centerline, METERS, continuous
+                   1=right pavement edge (lip/underside wrap vertices clamp
+                   into [0,1]); v0: distance along centerline, METERS, continuous
                    - see road_mesh_common.build_road_chunks()'s docstring
         vertex_count * (float32 u1, float32 v1)   u1: road HALF-width in
                    meters at this vertex (full pavement width = 2*u1; varies
