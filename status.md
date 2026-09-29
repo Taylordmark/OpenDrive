@@ -299,7 +299,7 @@ were decoupled from it on 2026-07-20.
   - Grip and wind (W3).
   - Tornado (800 m visibility) and hurricane (W4/W5).
 
-### 7.43 Terrain shards / offline carve fix (2026-09-28, uncommitted)
+### 7.43 Terrain shards / offline carve fix (2026-09-28, d9affa5)
 
 The drive-test showed rubber-banding and terrain shards poking through the
 road. The fix makes the offline terrain carve authoritative.
@@ -311,7 +311,7 @@ road. The fix makes the offline terrain carve authoritative.
   - `load_stations` passes `half_width_m` through.
 - `ODTerrainManager.h/.cpp`: new `bEnableRuntimeRoadCarve`, default `false`.
 
-### 7.44 Road wrap slab (2026-09-28, uncommitted)
+### 7.44 Road wrap slab (2026-09-28, d9affa5)
 
 The road cross-section is now a 7-column wrapped profile with an asphalt
 underside, replacing the skirt curtain, so it reads as a slab from below.
@@ -320,7 +320,7 @@ underside, replacing the skirt curtain, so it reads as a slab from below.
 - `verify_road_uv.py`: checks the 7-column profile and clamped u.
 - `ODRoadManager.cpp`: `ProfileCols = 7`. Seam samples use columns 1 and 4.
 
-### 7.45 Retaining walls: edge-to-edge grade, edge anchors, lane gate (2026-09-28, uncommitted)
+### 7.45 Retaining walls: edge-to-edge grade, edge anchors, lane gate (2026-09-28, d9affa5)
 
 - `classify_wall_stations(..., half_width_m=None)` measures the grade from
   pavement edge to pavement edge.
@@ -332,7 +332,7 @@ underside, replacing the skirt curtain, so it reads as a slab from below.
     that drops wall triangles inside a driving lane. The last bake dropped
     106 of them across 79 wall tiles.
 
-### 7.46 Verifier upgrades (2026-09-28, uncommitted)
+### 7.46 Verifier upgrades (2026-09-28, d9affa5)
 
 - `verify_road_fit.py`: `check_poke_through` probes the centre and both
   pavement edges. It uses `_station_edge_points`, with `POKE_TOL_M` 0.3 and
@@ -342,7 +342,7 @@ underside, replacing the skirt curtain, so it reads as a slab from below.
     `WALL_COVER_REACH_M` 8.0.
   - `_judge_devs` breaks down each failure by cause.
 
-### 7.47 Road elevation rewrite: follow the ground (2026-09-29, uncommitted)
+### 7.47 Road elevation rewrite: follow the ground (2026-09-29, d9affa5)
 
 The drive-test report: roads were "not continuous with random dropoffs and
 super wavy". The root cause was §7.11's one-sided min-envelope. It never lets

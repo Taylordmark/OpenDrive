@@ -13,13 +13,6 @@ When something here is finished, delete it from this file and add a line to
 
 ## 1. Now: road/terrain fit follow-ups (from §7.43–7.47)
 
-- **Commit the §7.43–7.47 work.** It is all uncommitted:
-  - `road_mesh_common.py`, `build_road_stations.py`,
-    `build_terrain_mesh_tiles.py`, `build_retaining_walls.py`,
-    `export_road_mesh_bin_v2.py`
-  - `verify_road_fit.py`, `verify_road_uv.py`, `verify_terrain_fit.py`
-  - `pipeline/tests/test_follow_ground_profile.py` (new)
-  - `ODRoadManager.cpp`, `ODTerrainManager.h/.cpp`
 - **Dennison Road float (2 stations).** seg273 k116/117 at (−10734, 1758) m:
   the road sits about 4 m above the terrain on a climb capped at 22%, and the
   nearest embankment is 10.5 m away. This is what fails `verify_terrain_fit`
