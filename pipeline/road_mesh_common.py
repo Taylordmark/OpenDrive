@@ -48,6 +48,44 @@ MAX_BANK_RAD = 0.14          # ~8.0 deg superelevation cap (was 0.09/~5.2 deg -
 BANK_GAIN = 9.55             # bank = min(cap, gain * |curvature 1/m|)
 CHUNK_STATIONS = 150         # stations per road mesh chunk (~750 m)
 
+# Dirt/gravel roads (2026-09-30): OSM surface= values that get the gravel
+# road material (M_Road_Gravel, PM_Dirt grip/audio) instead of asphalt.
+# Untagged ("") stays paved. Chunks split wherever this flips, so a surface
+# run shorter than MIN_SURFACE_RUN_STATIONS is absorbed into its neighbor
+# rather than spawning a sliver chunk for one oddly-tagged OSM way.
+UNPAVED_SURFACE_TAGS = {"dirt", "gravel", "unpaved", "ground", "compacted",
+                        "grass", "sand", "earth", "mud", "fine_gravel", "pebblestone"}
+MIN_SURFACE_RUN_STATIONS = 20   # 100 m at STATION_SPACING
+
+
+def unpaved_stations(surfaces, min_run=MIN_SURFACE_RUN_STATIONS):
+    """Per-station bool (surface= tag unpaved), short runs absorbed into the
+    preceding run (or the following one, for a short leading run)."""
+    flags = [s in UNPAVED_SURFACE_TAGS for s in surfaces]
+    out = list(flags)
+    n, i = len(flags), 0
+    while i < n:
+        j = i
+        while j < n and flags[j] == flags[i]:
+            j += 1
+        if j - i < min_run and (i > 0 or j < n):
+            fill = out[i - 1] if i > 0 else flags[j]
+            out[i:j] = [fill] * (j - i)
+        i = j
+    return out
+
+
+def chunk_spans(n_st, chunk_stations, is_unpaved=None):
+    """(c0, c1) station spans for build_road_chunks: every chunk_stations,
+    plus a cut wherever is_unpaved flips so each chunk has one surface.
+    Adjacent spans share their boundary station row, as before."""
+    cuts = [0]
+    if is_unpaved is not None:
+        cuts += [i for i in range(1, n_st - 1) if is_unpaved[i] != is_unpaved[i - 1]]
+    cuts.append(n_st - 1)
+    return [(c0, min(c0 + chunk_stations, b))
+            for a, b in zip(cuts, cuts[1:]) for c0 in range(a, b, chunk_stations)]
+
 # Per-highway-class vertical constraints (2026-07-28, Taylor: a road must
 # never smooth the TERRAIN - it rides the ground or it goes around it via
 # a cut/bridge/tunnel). Two separate limits per OSM highway= class:
@@ -648,7 +686,8 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
                        bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
-                       osm_lanes=None, half_width_s=None, junction_suppress=None):
+                       osm_lanes=None, half_width_s=None, junction_suppress=None,
+                       is_unpaved=None):
     """Build banked, skirted road mesh chunks from station arrays.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
@@ -700,8 +739,11 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     format change is needed. Skirt width (skirt_extra) stays constant
     beyond whichever pavement edge applies.
 
+    `is_unpaved` (optional per-station bool, see unpaved_stations()) cuts
+    chunks at every surface change and sets each chunk's "unpaved" flag.
+
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
-    {"name","vertices","uvs","uv1","triangles","oneway","road_class_id",
+    {"name","vertices","uvs","uv1","triangles","oneway","unpaved","road_class_id",
     "road_class","lane_count"} schema and cx/cy/cz are the UE-frame (cm)
     station centerline arrays for the caller's own use (yaw calc, player
     start, stats).
@@ -775,8 +817,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     # chunked mesh buffers; winding (A, A+right, A+forward) faces up in UE
     chunks = []
     n_st = len(s)
-    for c0 in range(0, n_st - 1, chunk_stations):
-        c1 = min(c0 + chunk_stations, n_st - 1)
+    for c0, c1 in chunk_spans(n_st, chunk_stations, is_unpaved):
         verts, tris, uvs, uv1 = [], [], [], []
         for i in range(c0, c1 + 1):
             hw, profile = station_profile(i)
@@ -810,6 +851,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             "uv1": [round(v, 4) for uv in uv1 for v in uv],
             "triangles": [i for t in tris for i in t],
             "oneway": oneway,
+            "unpaved": bool(is_unpaved[c0]) if is_unpaved is not None else False,
             "road_class_id": road_class_id,
             "road_class": road_class_name,
             "lane_count": lane_count,

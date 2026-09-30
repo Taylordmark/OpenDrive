@@ -37,7 +37,7 @@ from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
                               build_road_chunks, half_width_for_stations,
-                              road_ue_z_m)
+                              road_ue_z_m, unpaved_stations)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
@@ -144,6 +144,7 @@ def main():
         is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
         highway_full = seg.get("highway_class")   # absent in older files - defaults to unknown class
         lanes_full = seg.get("lanes")   # absent in older files - class-table fallback (2026-09-06)
+        surface_full = seg.get("surface")   # absent in older files - all paved (2026-09-30)
         # junction_suppress (2026-09-04, Arc 7.17): absent in older
         # road_stations.json -> zeros (no junction influence, same as the
         # pre-fix behavior). See build_road_stations.py's module docstring
@@ -165,6 +166,7 @@ def main():
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_classes = highway_full[lo:hi] if highway_full else None
             osm_lanes = lanes_full[lo:hi] if lanes_full else None
+            is_unpaved = unpaved_stations(surface_full[lo:hi]) if surface_full else None
             # Real per-road width from lanes= tags (class-table fallback for
             # untagged ways) - see road_mesh_common.half_width_for_stations().
             half_width_s = (half_width_for_stations(highway_classes, is_oneway, osm_lanes)
@@ -175,7 +177,8 @@ def main():
                                                    spacing=STATION_SPACING, is_oneway=is_oneway,
                                                    highway_classes=highway_classes,
                                                    osm_lanes=osm_lanes, half_width_s=half_width_s,
-                                                   junction_suppress=junction_suppress)
+                                                   junction_suppress=junction_suppress,
+                                                   is_unpaved=is_unpaved)
             segments.append({"name": name, "chunks": chunks})
             hw_m = (half_width_s if half_width_s is not None
                     else np.full(len(cx), ROAD_HALF_WIDTH))

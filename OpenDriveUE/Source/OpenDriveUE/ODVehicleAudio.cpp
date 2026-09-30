@@ -133,7 +133,7 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 		}
 		bGrounded = true;
 		const FString Name = Mat->GetName();
-		if (Name.Contains(TEXT("Dirt")))
+		if (Name.Contains(TEXT("Dirt")) || Name.Contains(TEXT("Gravel")))
 		{
 			Cutoff = 900.0f;                // gravel rumble
 		}

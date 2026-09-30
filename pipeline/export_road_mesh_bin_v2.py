@@ -28,7 +28,10 @@ re-deriving anything from OSM tags at runtime):
     per chunk:
         uint32 LE  vertex_count
         uint32 LE  tri_count
-        uint8      oneway (1 = one-way carriageway, no center yellow line)
+        uint8      flags: bit0 oneway (one-way carriageway, no center yellow
+                   line), bit1 unpaved (2026-09-30: M_Road_Gravel, see
+                   road_mesh_common.unpaved_stations()). Pre-flag files only
+                   ever wrote 0/1, so they still read correctly.
         uint8      road_class_id (0=motorway,1=trunk,2=primary,3=secondary,
                    4=tertiary/unclassified,5=residential/living_street,
                    6=service/track/unknown - see road_mesh_common.
@@ -84,7 +87,8 @@ def write_tile(path, chunks, gen_id_bytes):
             assert len(uvs) // 2 == vcount, f"{c['name']}: uv/vertex count mismatch"
             assert len(uv1) // 2 == vcount, f"{c['name']}: uv1/vertex count mismatch"
             f.write(struct.pack("<II", vcount, tcount))
-            f.write(struct.pack("<B", 1 if c.get("oneway") else 0))
+            f.write(struct.pack("<B", (1 if c.get("oneway") else 0)
+                                | (2 if c.get("unpaved") else 0)))
             f.write(struct.pack("<B", int(c["road_class_id"])))
             f.write(struct.pack("<B", int(c["lane_count"])))
             f.write(struct.pack(f"<{len(verts)}f", *verts))

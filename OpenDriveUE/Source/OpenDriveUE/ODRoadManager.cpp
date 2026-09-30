@@ -78,6 +78,8 @@ void AODRoadManager::BeginPlay()
 	}
 	RoadMatOneWay = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay"));
+	RoadMatGravel = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Gravel.M_Road_Gravel"));
 	LoadCenterline();
 	LoadRouteGraph();
 	LoadMapCenterline();
@@ -785,7 +787,7 @@ bool AODRoadManager::ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& O
 		}
 		const uint32 VCount = ReadU32LE(Cur); Cur += 4;
 		const uint32 TCount = ReadU32LE(Cur); Cur += 4;
-		const bool bOneway = *Cur != 0; Cur += 1;
+		const uint8 Flags = *Cur; Cur += 1;   // bit0 oneway, bit1 unpaved
 		const uint8 RoadClassId = *Cur; Cur += 1;
 		const uint8 LaneCount = *Cur; Cur += 1;
 		// xyz(12) + uv0(8) + uv1(8) per vertex, i0/i1/i2(12) per tri
@@ -802,7 +804,8 @@ bool AODRoadManager::ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& O
 		Cur += NeedBytes;
 
 		FParsedChunk& Chunk = Out.Chunks.AddDefaulted_GetRef();
-		Chunk.bOneway = bOneway;
+		Chunk.bOneway = (Flags & 1) != 0;
+		Chunk.bUnpaved = (Flags & 2) != 0;
 		Chunk.RoadClassId = RoadClassId;
 		Chunk.LaneCount = LaneCount;
 		Chunk.bHasV3Data = true;
@@ -1171,7 +1174,13 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	// (unreal/apply_road_physmat.py still assigns it a physical material) but
 	// is no longer selected here; falls back to RoadMatOneWay only if RoadMat
 	// itself failed to load, rather than rendering nothing.
+	// Dirt/gravel chunks (2026-09-30) get RoadMatGravel when it exists; a
+	// missing asset just falls back to asphalt.
 	UMaterialInterface* ChunkMat = RoadMat ? RoadMat : RoadMatOneWay;
+	if (Chunk.bUnpaved && RoadMatGravel)
+	{
+		ChunkMat = RoadMatGravel;
+	}
 	if (ChunkMat)
 	{
 		Comp->SetMaterial(0, ChunkMat);

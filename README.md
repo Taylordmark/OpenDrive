@@ -119,6 +119,8 @@ target) → `apply_forest_manager.py` → `strip_ground_bushes.py` →
 `pipeline/make_car_mesh.py` + `apply_vehicle_pawn.py` (placeholder car +
 ODGameMode) → `apply_road_physmat.py` (asphalt physmat on M_Road — the
 suspension raycasts read the *render* material's physmat) →
+`apply_gravel_road_material.py` (M_Road_Gravel + PM_Gravel for dirt/gravel
+road chunks) →
 `pipeline/export_centerline_bin.py` (real road centerline for the mini-map,
 reads the already-built `road_mesh.json` — no network calls).
 Verify with `diag_arc23.py`. Landscape transform drifted? `fix_landscape_headless.py`.

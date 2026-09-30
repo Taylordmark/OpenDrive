@@ -539,8 +539,10 @@ void AODVehiclePawn::TrySnapToGround()
 	// placing its pavement once that (separately gated, tile-by-tile)
 	// process finishes - snapping onto whatever's hit first left the car
 	// buried once the road caught up and built on top of/around it.
+	// PM_Gravel = dirt/gravel road chunks (2026-09-30), still the road
 	const bool bOnRoad = bHit && Hit.PhysMaterial.IsValid()
-		&& Hit.PhysMaterial->GetName().Contains(TEXT("Asphalt"));
+		&& (Hit.PhysMaterial->GetName().Contains(TEXT("Asphalt"))
+			|| Hit.PhysMaterial->GetName().Contains(TEXT("Gravel")));
 
 	const double Now = GetWorld()->GetTimeSeconds();
 	const bool bTimedOut = (Now - SpawnTime) > GroundSnapTimeoutSec;
@@ -582,7 +584,8 @@ void AODVehiclePawn::TrySnapToGround()
 				if (GetWorld()->LineTraceSingleByChannel(ProbeHit, ProbeStart, ProbeEnd,
 						ECC_Visibility, Params)
 					&& ProbeHit.PhysMaterial.IsValid()
-					&& ProbeHit.PhysMaterial->GetName().Contains(TEXT("Asphalt")))
+					&& (ProbeHit.PhysMaterial->GetName().Contains(TEXT("Asphalt"))
+						|| ProbeHit.PhysMaterial->GetName().Contains(TEXT("Gravel"))))
 				{
 					BestXY = FVector2D(Loc.X + Offset.X, Loc.Y + Offset.Y);
 					bFoundNearbyRoad = true;

@@ -26,6 +26,10 @@ struct FParsedChunk
 	// pipeline/build_road_stations.py's is_oneway_way()).
 	bool bOneway = false;
 
+	// ODR3 flags bit1 (2026-09-30): OSM surface= dirt/gravel/etc. -
+	// CreateChunkMeshComponent uses RoadMatGravel (PM_Dirt grip/audio).
+	bool bUnpaved = false;
+
 	// ODR3 (2026-09-03, Phase 2a road-visual overhaul - see
 	// pipeline/export_road_mesh_bin_v2.py's docstring for the wire format).
 	// Empty/default when this chunk came from an ODR2 fallback file (no
@@ -482,6 +486,10 @@ private:
 	// FParsedChunk::bOneway.
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatOneWay;
+
+	// dirt/gravel road (FParsedChunk::bUnpaved) - unreal/apply_gravel_road_material.py
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RoadMatGravel;
 
 	// skirt-bottom world positions sampled every 10th station as tiles
 	// load, for -odseam
