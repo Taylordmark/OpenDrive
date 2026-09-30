@@ -71,7 +71,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import requests
 
 import build_terrain_mesh_tiles as btmt
 import build_retaining_walls as brw
@@ -390,20 +389,13 @@ def check_prebake_consistency():
     for i in fit_idx:
         tiles[(int(tx_all[i]), int(ty_all[i]))].append(i)
 
-    session = requests.Session()
-    caches = ({}, {})
+    near = [(k, np.array(idxs)) for k, idxs in tiles.items()
+            if btmt.tile_min_dist_m(st_x_cm, st_y_cm, k[0], k[1], tile_cm) <= btmt.NEAR_MARGIN_M]
+    jobs = [(k, True, st_x_cm[idxs], st_y_cm[idxs]) for k, idxs in near]
     dzs, rows, misses = [], [], 0
-    for (tx, ty), idxs in tiles.items():
-        d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
-        is_near = d <= btmt.NEAR_MARGIN_M
-        if not is_near:
-            continue
-        tile = btmt.build_tile(tx, ty, True, station_data, session, caches)
-        positions = tile["verts"][:, [0, 1, 2]]
-        triangles = tile["tris"]
-        for i in idxs:
-            h_cm = sample_mesh_height(positions, triangles, float(st_x_cm[i]), float(st_y_cm[i]))
-            if h_cm is None:
+    for (_k, idxs), hs in zip(near, btmt.sample_built_tiles(jobs, station_data)):
+        for i, h_cm in zip(idxs, hs):
+            if np.isnan(h_cm):
                 misses += 1
                 continue
             dzs.append(h_cm / 100.0 + ORIGIN_HEIGHT_M - float(elev[i]))

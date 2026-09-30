@@ -42,10 +42,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import requests
 
 import build_terrain_mesh_tiles as btmt
-from road_mesh_common import sample_mesh_height
 from test_areas import AREA_NAME
 
 STATION_STRIDE = 6        # every 6th 5 m station = 30 m along-route spacing
@@ -115,12 +113,9 @@ def main():
         tiles[(int(tx_all[i]), int(ty_all[i]))].append(i)
     print(f"{len(tiles)} distinct terrain tile(s) touched by the fan")
 
-    session = requests.Session()
-    caches = ({}, {})   # (near_cache, far_cache), keyed (zoom, tx, ty) - see
-                         # build_terrain_mesh_tiles.py's build_tile()
     elev_cm = np.full(len(x_cm), np.nan, dtype=np.float64)
     n_miss = 0
-    n_built = 0
+    jobs, job_idxs = [], []
     for (tx, ty), idxs in tiles.items():
         d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
         if d > btmt.RENDER_DISTANCE_M:
@@ -128,17 +123,12 @@ def main():
             # candidate this far from the route has no built tile to sample
             n_miss += len(idxs)
             continue
-        is_near = d <= btmt.NEAR_MARGIN_M
-        tile = btmt.build_tile(tx, ty, is_near, station_data, session, caches)
-        n_built += 1
-        positions = tile["verts"][:, [0, 1, 2]]   # x_cm, y_cm, z_cm
-        triangles = tile["tris"]
-        for i in idxs:
-            h_cm = sample_mesh_height(positions, triangles, float(x_cm[i]), float(y_cm[i]))
-            if h_cm is None:
-                n_miss += 1
-                continue
-            elev_cm[i] = h_cm
+        idxs = np.array(idxs)
+        jobs.append(((tx, ty), d <= btmt.NEAR_MARGIN_M, x_cm[idxs], y_cm[idxs]))
+        job_idxs.append(idxs)
+    for n_built, (idxs, hs) in enumerate(zip(job_idxs, btmt.sample_built_tiles(jobs, station_data)), 1):
+        n_miss += int(np.isnan(hs).sum())
+        elev_cm[idxs] = hs
         if n_built % 20 == 0:
             print(f"  {n_built}/{len(tiles)} tile(s) sampled")
 

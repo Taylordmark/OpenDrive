@@ -67,7 +67,7 @@ import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
                               half_width_for_stations, road_ue_z_m,
-                               classify_wall_stations)
+                               classify_wall_stations, sample_mesh_height)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -1444,6 +1444,25 @@ def _bake_one_tile(item):
         write_tile_bin(coarse_path, build_tile(tx, ty, False, station_data, session, caches),
                        gen_id_bytes)
     return out_path, coarse_path, len(tile["verts"]), len(tile["tris"])
+
+
+def _sample_one_tile(job):
+    (tx, ty), is_near, xs_cm, ys_cm = job
+    station_data, _gen, session, caches = _BAKE_WORKER
+    tile = build_tile(tx, ty, is_near, station_data, session, caches)
+    pos, tri = tile["verts"][:, [0, 1, 2]], tile["tris"]
+    hs = [sample_mesh_height(pos, tri, float(x), float(y)) for x, y in zip(xs_cm, ys_cm)]
+    return np.array([np.nan if h is None else h for h in hs])
+
+
+def sample_built_tiles(jobs, station_data):
+    """For consumers that build tiles in memory (verify_terrain_fit's
+    pre-bake check, build_forest_elevation): jobs are ((tx, ty), is_near,
+    x cm array, y cm array). Builds each tile in the BAKE_WORKERS pool and
+    yields, in job order, its mesh height (cm, NaN = off-mesh) at each point."""
+    with ProcessPoolExecutor(BAKE_WORKERS, initializer=_init_bake_worker,
+                             initargs=(station_data, None)) as pool:
+        yield from pool.map(_sample_one_tile, jobs, chunksize=4)
 
 
 def main():
