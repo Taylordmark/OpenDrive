@@ -56,6 +56,7 @@ import re
 import struct
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -66,8 +67,7 @@ import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
                               half_width_for_stations, road_ue_z_m,
-                               classify_wall_stations,
-                              CONFLICT_MAX_GRADE, CONFLICT_MIN_GAP_M)
+                               classify_wall_stations)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -198,6 +198,33 @@ TERRAIN_CARVE_DROP_M = 0.15   # bias the carved surface just below the road so
 HARD_CLAMP_RADIUS_M = ROAD_HALF_WIDTH + SKIRT_EXTRA   # 7.5 m - the literal
                                                        # paved+skirt width
 HARD_CLAMP_MARGIN_M = 0.15    # matches TERRAIN_CARVE_DROP_M's own small gap
+
+# Pavement ceiling (2026-09-30, "road below the terrain" drive report).
+# carve_grid_m stamps each grid point with its NEAREST station's height, so
+# where two roads run close at different heights (divided carriageways,
+# frontage roads, I-70's split levels) the points between them took the
+# higher road's height and the triangle over the lower road's edge rose
+# through it: 93% of 2,133 buried stations, up to 2.2 m (near) / 12.7 m
+# (coarse). The old conflict-aware min only fired past a CONFLICT_MAX_GRADE
+# gap and a radial pavement+cell reach, so ~2 m gaps 10 m apart slipped
+# under it. Instead: every grid cell any pavement probe point falls in gets
+# all four corners capped at that road's own grade line (the probe's height,
+# extended along the road's tangent at its local grade, flat across it)
+# minus a margin. A triangle interpolates linearly, so it reproduces that
+# line exactly at the probe - no pavement point can be buried, whichever
+# road is nearest, and a climb doesn't sink the cap to the cell's lowest
+# road height (a plain per-cell min floated roads ~1 m on grades). Where two
+# pavements share a cell the upper road loses its ground there instead (I-70's
+# split levels float up to ~9 m over the gap - a cliff either way, which the
+# retaining walls + road slab cover).
+PAVEMENT_SAMPLE_M = 2.0       # probe spacing across and along the pavement (near cell 7.8 m)
+# near tiles are martini-simplified after this, which can lift the surface
+# above the capped grid. The full MAX_ERROR_NEAR_M allowance (0.45 total)
+# floated the road a median 0.55 m, past the wrap lip's ~0.6 m on 7% of it;
+# a 2026-09-30 in-memory trial over 13 I-70 near tiles buried nothing at
+# 0.15/0.25/0.35/0.45 (clearance left 0.00/0.06/0.14/0.22 m) - martini only
+# ate ~0.25-0.37 m of it. Far tiles are a uniform grid.
+PAVEMENT_CEIL_MARGIN_NEAR_M = HARD_CLAMP_MARGIN_M + 0.10
 
 # Cut/fill asymmetry (2026-08-24, Taylor: switchback screenshots showing the
 # road buried under terrain that should have been cut away for it). The
@@ -726,6 +753,98 @@ def _get_struct_mask(n):
     return _STRUCT_MASK_CACHE
 
 
+_PAVEMENT_CACHE = None
+
+
+def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r):
+    """Probe points covering every non-structure road's pavement, bucketed
+    by terrain tile - see PAVEMENT_SAMPLE_M. Each is (x cm, y cm, elevation
+    m, tangent x/y, grade m per cm along it): stations plus midpoints, each
+    fanned across the full pavement width on its own normal. Banking only
+    raises the outer edge, so the centerline height is the conservative cap."""
+    global _PAVEMENT_CACHE
+    if _PAVEMENT_CACHE is not None:
+        return _PAVEMENT_CACHE
+    lens = [len(s["east_m"]) for s in json.loads(STATIONS_PATH.read_text())["segments"]]
+    struct = _get_struct_mask(len(st_x_cm))
+    hw_cm = (st_clamp_r - SKIRT_EXTRA) * 100.0
+    cols = [[] for _ in range(6)]
+    k = int(np.ceil(2.0 * hw_cm.max() / 100.0 / PAVEMENT_SAMPLE_M)) + 1
+    fan = np.linspace(-1.0, 1.0, k)
+    off = 0
+    for n_st in lens:
+        sl = slice(off, off + n_st)
+        off += n_st
+        x, y, z, h, s = st_x_cm[sl], st_y_cm[sl], st_elev[sl], hw_cm[sl], struct[sl]
+        if n_st >= 2:   # interleave midpoints: 2.5 m along at 5 m station spacing
+            ok = ~(s[:-1] | s[1:])
+            x = np.concatenate([x[~s], ((x[:-1] + x[1:]) / 2)[ok]])
+            y = np.concatenate([y[~s], ((y[:-1] + y[1:]) / 2)[ok]])
+            z = np.concatenate([z[~s], ((z[:-1] + z[1:]) / 2)[ok]])
+            h = np.concatenate([h[~s], np.maximum(h[:-1], h[1:])[ok]])
+            t = np.concatenate([np.arange(n_st)[~s], (np.arange(n_st - 1) + 0.5)[ok]])
+            order = np.argsort(t)
+            x, y, z, h = x[order], y[order], z[order], h[order]
+        else:
+            x, y, z, h = x[~s], y[~s], z[~s], h[~s]
+        if len(x) == 0:
+            continue
+        if len(x) >= 2:
+            tx, ty = np.gradient(x), np.gradient(y)
+        else:
+            tx, ty = np.ones(1), np.zeros(1)
+        tn = np.maximum(np.hypot(tx, ty), 1e-9)
+        tx, ty = tx / tn, ty / tn
+        grade = np.gradient(z) / tn if len(x) >= 2 else np.zeros(1)   # m per cm
+        rep = lambda a: np.repeat(a, k)
+        for c, a in zip(cols, ((x[:, None] - ty[:, None] * h[:, None] * fan).ravel(),
+                               (y[:, None] + tx[:, None] * h[:, None] * fan).ravel(),
+                               rep(z), rep(tx), rep(ty), rep(grade))):
+            c.append(a)
+    px, py, pz, ptx, pty, pg = (np.concatenate(c) for c in cols)
+    tile = TERRAIN_TILE_SIZE_CM
+    key = np.floor(px / tile).astype(np.int64) * 1_000_003 + np.floor(py / tile).astype(np.int64)
+    order = np.argsort(key, kind="stable")
+    key = key[order]
+    arrs = [a[order] for a in (px, py, pz, ptx, pty, pg)]
+    uniq, first = np.unique(key, return_index=True)
+    bounds = np.append(first, len(key))
+    _PAVEMENT_CACHE = {int(u): tuple(a[lo:hi] for a in arrs)
+                       for u, lo, hi in zip(uniq, bounds[:-1], bounds[1:])}
+    return _PAVEMENT_CACHE
+
+
+def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
+    """(n x n) cap grid (m, inf where no road): the four corners of every
+    cell a pavement probe falls in get that road's grade line - margin_m. Probes
+    up to one cell outside the tile still cap this tile's shared edge
+    corners, identically to the neighbor that owns the cell."""
+    cap = np.full(n * n, np.inf)
+    cell = (x1_cm - x0_cm) / (n - 1)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            b = buckets.get((tx + dx) * 1_000_003 + (ty + dy))
+            if b is None:
+                continue
+            px, py, pz, ptx, pty, pg = b
+            m = ((px >= x0_cm - cell) & (px <= x1_cm + cell)
+                 & (py >= y0_cm - cell) & (py <= y1_cm + cell))
+            if not m.any():
+                continue
+            fi = (px[m] - x0_cm) / cell
+            fj = (py[m] - y0_cm) / cell
+            i0, j0 = np.floor(fi).astype(np.int64), np.floor(fj).astype(np.int64)
+            for di in (0, 1):
+                for dj in (0, 1):
+                    i, j = i0 + di, j0 + dj
+                    ok = (i >= 0) & (i < n) & (j >= 0) & (j < n)
+                    q = np.where(m)[0][ok]
+                    along = ((x0_cm + i[ok] * cell - px[q]) * ptx[q]
+                             + (y0_cm + j[ok] * cell - py[q]) * pty[q])
+                    np.minimum.at(cap, j[ok] * n + i[ok], pz[q] + pg[q] * along - margin_m)
+    return cap.reshape(n, n)
+
+
 def load_stations():
     """Returns (lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs).
     `exclude` is True for any station the terrain carve must skip (real
@@ -849,8 +968,9 @@ def tile_min_dist_m(station_x_cm, station_y_cm, tx, ty, tile_cm):
     return float(d_cm.min()) / 100.0
 
 
-CARVE_STATION_CHUNK = 2000   # see carve_grid_m's docstring - bounds the
-                             # (grid_points x stations) distance matrix
+CARVE_STATION_CHUNK = 1000   # see carve_grid_m's docstring - bounds the
+                             # (grid_points x stations) distance matrix; ~1.5 GB
+                             # peak per BAKE_WORKERS process on a near tile
 
 def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
@@ -898,7 +1018,6 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     # 2026-09-06) - carried alongside best_elev from the same nearest
     # station; the old constant everywhere when the caller has no widths.
     best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
-    best_idx = np.zeros(P, dtype=np.int64)
     for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
         sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
         sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
@@ -909,7 +1028,6 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
         better = nearest_d < best_d
         best_d = np.where(better, nearest_d, best_d)
         best_elev = np.where(better, se[nearest], best_elev)
-        best_idx = np.where(better, c0 + nearest, best_idx)
         if st_clamp_r is not None:
             sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
             best_clamp = np.where(better, sc[nearest], best_clamp)
@@ -926,49 +1044,6 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     under_road = best_d <= best_clamp
     out = np.where(under_road, np.minimum(out, best_elev - HARD_CLAMP_MARGIN_M), out)
 
-    # Conflict-aware min (2026-09-28, port of AODTerrainManager::
-    # ApplyRoadCarve's switchback clamp): a DIFFERENT, lower road pass whose
-    # own footprint also covers this pixel must win, or the pixel pokes up
-    # through it. "Different pass" = an elevation gap no continuous grade
-    # could make over the two stations' own separation (CONFLICT_MAX_GRADE/
-    # CONFLICT_MIN_GAP_M, same test classify_wall_stations uses). This is
-    # what lets conflict-flagged roads be carved offline at all - before
-    # they were skipped here and left to the runtime carve, which can only
-    # move vertices of the already-simplified mesh and so left 44-88 m
-    # martini triangles poking through the pavement.
-    # Reach is the lower road's PAVEMENT (clamp minus SKIRT_EXTRA) plus one
-    # grid cell: a pixel just outside the pavement still spans a triangle
-    # across it, so with I-70's split carriageways 8-18 m apart and 20-40 m
-    # apart vertically (7.8 m near grid) an un-lowered pixel one cell over
-    # left the terrain up to 7 m through the lower pavement (2026-09-28
-    # rebake, verify_road_fit's poke check). The price is the upper road's
-    # near edge losing its ground - a cliff there either way, which the
-    # retaining walls + road slab cover. Reaching from the full clamp
-    # (pavement + skirt) + cell instead dug out under the upper road's
-    # centerline too (I-70 station 44269 floated 6 m, visible from its far
-    # side; 259 verify_terrain_fit failures after the second rebake).
-    cell = float(max(np.hypot(east_grid[0, 1] - east_grid[0, 0], north_grid[0, 1] - north_grid[0, 0]),
-                     np.hypot(east_grid[1, 0] - east_grid[0, 0], north_grid[1, 0] - north_grid[0, 0])))
-    ur = np.where(best_d <= best_clamp + cell)[0]
-    if len(ur):
-        from scipy.spatial import cKDTree
-        st_xy = np.c_[st_east, st_north]
-        clamp = (st_clamp_r if st_clamp_r is not None
-                 else np.full(len(st_east), HARD_CLAMP_RADIUS_M))
-        rmax = float(max(best_clamp[ur].max(), clamp.max())) + cell
-        cands = cKDTree(st_xy).query_ball_point(np.c_[gx[ur], gy[ur]], rmax)
-        for p, cand in zip(ur, cands):
-            if len(cand) < 2:
-                continue
-            cand = np.asarray(cand)
-            d = np.hypot(st_xy[cand, 0] - gx[p], st_xy[cand, 1] - gy[p])
-            b = best_idx[p]
-            sep = np.hypot(*(st_xy[cand] - st_xy[b]).T)
-            ok = ((d <= clamp[cand] - SKIRT_EXTRA + cell)
-                  & (best_elev[p] - st_elev[cand]
-                     > CONFLICT_MAX_GRADE * sep + CONFLICT_MIN_GAP_M))
-            if ok.any():
-                out[p] = min(out[p], st_elev[cand[ok]].min() - HARD_CLAMP_MARGIN_M)
     return out.reshape(shape)
 
 
@@ -1187,6 +1262,20 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
         else:
             elev = downsample_mean_grid(elev, n, FAR_SUPERSAMPLE)
 
+    # See PAVEMENT_SAMPLE_M's comment - on the FINAL grid, so it holds for
+    # far/coarse tiles' 100 m cells too, not just the fine carve grid. A
+    # road-free far tile (only far terrain_ tiles; classify_tiles keeps every
+    # road >NEAR_MARGIN_M away) skips it: its triangles cover no pavement,
+    # and a neighbor's road 100 m in would drag its corners down to road
+    # height (up to 49 m seams against the near tile that owns the road).
+    buckets = _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r)
+    if is_near or (tx * 1_000_003 + ty) in buckets:
+        cap = pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty,
+                               PAVEMENT_CEIL_MARGIN_NEAR_M if is_near else HARD_CLAMP_MARGIN_M)
+    else:
+        cap = np.full((n, n), np.inf)
+    elev = np.minimum(elev, cap)
+
     z_cm = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) * 100.0
 
     # Lake-bed depression - see this module's top-of-file comment next to
@@ -1197,6 +1286,8 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
         gx_cm, gy_cm, z_cm, _get_lake_beds(),
         st_east_m=st_x_cm[keep] / 100.0 if keep.any() else None,
         st_north_m=-st_y_cm[keep] / 100.0 if keep.any() else None)
+    # the lake rim blend can pull toward a shore above a lakeside road
+    z_cm = np.minimum(z_cm, road_ue_z_m(cap, 0.0, ORIGIN_HEIGHT_M) * 100.0)
 
     if is_near:
         # AUDIT.md item 1: adaptive martini triangulation instead of a
@@ -1319,6 +1410,42 @@ def classify_tiles(station_data):
     return tiles
 
 
+# Tiles are independent, so main() bakes them in parallel. Each worker peaks
+# around 1.5 GB in carve_grid_m (see CARVE_STATION_CHUNK), so 8 workers on a
+# 16-core / 32 GB box, not one per core.
+BAKE_WORKERS = 8
+_BAKE_WORKER = None
+
+
+def _init_bake_worker(station_data, gen_id_bytes):
+    global _BAKE_WORKER
+    # (station_data, gen id, session, (near_cache, far_cache) keyed (zoom, tx, ty))
+    _BAKE_WORKER = (station_data, gen_id_bytes, requests.Session(), ({}, {}))
+
+
+def _bake_one_tile(item):
+    """Builds + writes one tile (and a near tile's coarse fallback) in a pool
+    worker. Returns (path, coarse path or None, verts, tris)."""
+    (tx, ty), is_near = item
+    station_data, gen_id_bytes, session, caches = _BAKE_WORKER
+    tile = build_tile(tx, ty, is_near, station_data, session, caches)
+    out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+    write_tile_bin(out_path, tile, gen_id_bytes)
+    # Runtime dynamic-LOD streaming (2026-08-25, Arc 7 rescope): near
+    # tiles are the only ones with full-res+collision geometry, but
+    # AODTerrainManager needs something cheap to show *before* the
+    # player is actually close enough to warrant that cost. Bake the
+    # same coarse/no-collision variant a plain far tile would get,
+    # under a distinct prefix so both can live on disk at once - see
+    # AODTerrainManager::RequestTileLoad.
+    coarse_path = None
+    if is_near:
+        coarse_path = OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        write_tile_bin(coarse_path, build_tile(tx, ty, False, station_data, session, caches),
+                       gen_id_bytes)
+    return out_path, coarse_path, len(tile["verts"]), len(tile["tris"])
+
+
 def main():
     # 2026-09-03: --lakes-only restricts the rebake to tiles that actually
     # touch a baked lake bbox (padded by the water-depression falloff/blend
@@ -1382,36 +1509,23 @@ def main():
     gen_id_bytes = pack_generation_id(gen_id)
     print(f"generation id: {gen_id}")
 
-    session = requests.Session()
-    caches = ({}, {})   # (near_cache, far_cache), keyed (zoom, tx, ty)
     total_verts = total_tris = 0
     written_paths = []
     written_coarse_paths = []
-    n_coarse_fallback = 0
-    for i, ((tx, ty), is_near) in enumerate(tiles.items()):
-        tile = build_tile(tx, ty, is_near, station_data, session, caches)
-        out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile_bin(out_path, tile, gen_id_bytes)
-        written_paths.append(out_path)
-        total_verts += len(tile["verts"])
-        total_tris += len(tile["tris"])
-
-        # Runtime dynamic-LOD streaming (2026-08-25, Arc 7 rescope): near
-        # tiles are the only ones with full-res+collision geometry, but
-        # AODTerrainManager needs something cheap to show *before* the
-        # player is actually close enough to warrant that cost. Bake the
-        # same coarse/no-collision variant a plain far tile would get,
-        # under a distinct prefix so both can live on disk at once - see
-        # AODTerrainManager::RequestTileLoad.
-        if is_near:
-            coarse_tile = build_tile(tx, ty, False, station_data, session, caches)
-            coarse_path = OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-            write_tile_bin(coarse_path, coarse_tile, gen_id_bytes)
-            written_coarse_paths.append(coarse_path)
-            n_coarse_fallback += 1
-
-        if (i + 1) % 10 == 0 or i + 1 == len(tiles):
-            print(f"  {i + 1}/{len(tiles)} tile(s) built")
+    with ProcessPoolExecutor(BAKE_WORKERS, initializer=_init_bake_worker,
+                             initargs=(station_data, gen_id_bytes)) as pool:
+        # chunks of row-adjacent tiles, so a worker reuses the DEM tiles it
+        # already fetched for the previous one
+        for i, (out_path, coarse_path, nv, nt) in enumerate(
+                pool.map(_bake_one_tile, tiles.items(), chunksize=4)):
+            written_paths.append(out_path)
+            if coarse_path is not None:
+                written_coarse_paths.append(coarse_path)
+            total_verts += nv
+            total_tris += nt
+            if (i + 1) % 10 == 0 or i + 1 == len(tiles):
+                print(f"  {i + 1}/{len(tiles)} tile(s) built")
+    n_coarse_fallback = len(written_coarse_paths)
 
     if lakes_only or bbox_cm is not None:
         print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "

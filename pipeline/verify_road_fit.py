@@ -101,10 +101,10 @@ _TERRAIN_CACHE = {}
 _ROAD_CACHE = {}
 
 
-def _load_terrain_tile(tx, ty):
-    key = (tx, ty)
+def _load_terrain_tile(tx, ty, prefix="terrain_"):
+    key = (prefix, tx, ty)
     if key not in _TERRAIN_CACHE:
-        path = MASKS_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        path = MASKS_DIR / f"{prefix}{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         parsed = parse_terrain_tile_bin(path)
         if parsed is not None:
             parsed["positions"] = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
@@ -269,12 +269,19 @@ def check_poke_through():
     # centerline reads clean (2026-09-28 tightened conflict reach)
     probes = [("center", east, north)] + list(zip(("left", "right"),
                                                    *zip(*_station_edge_points(east, north, seg_idx, hw))))
+    # coarse tiles too (2026-09-30): they render past CollisionRadius (2 km)
+    # and, with the runtime carve off, buried roads up to 12.7 m out there
+    # that this check never saw
+    probes = [(f"{tag} {label}", prefix, pe, pn)
+              for tag, prefix in (("near", "terrain_"), ("coarse", "terrain_coarse_"))
+              for label, pe, pn in probes]
     ok = True
-    for label, pe, pn in probes:
+    for label, prefix, pe, pn in probes:
+        loader = lambda tx, ty: _load_terrain_tile(tx, ty, prefix)
         poke = np.full(len(east), np.nan)
         for i in idx:
             x_cm, y_cm = float(pe[i]) * 100.0, -float(pn[i]) * 100.0
-            h, _ = _sample_with_neighbors(_load_terrain_tile, int(np.floor(x_cm / tile_cm)),
+            h, _ = _sample_with_neighbors(loader, int(np.floor(x_cm / tile_cm)),
                                           int(np.floor(y_cm / tile_cm)), x_cm, y_cm)
             if h is not None:
                 # edge pavement is never below the centerline (banking only
