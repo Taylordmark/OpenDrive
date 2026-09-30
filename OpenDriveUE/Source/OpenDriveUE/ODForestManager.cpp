@@ -897,6 +897,7 @@ bool AODForestManager::LoadWaterLakes()
 			*WaterTilePrefix, TileFileCount);
 		return false;
 	}
+	BuildLakeIndex();
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d lake boundary ring(s) from %d water tile file(s) "
 		     "(WaterTilePrefix='%s') - trees/bushes/rocks/scrub excluded from open water"),
@@ -927,7 +928,110 @@ static double DistPointToSegment2D(double Px, double Py, double Ax, double Ay, d
 	return FMath::Sqrt((Px - CX) * (Px - CX) + (Py - CY) * (Py - CY));
 }
 
+void AODForestManager::BuildLakeIndex()
+{
+	LakeSegCells.Reset();
+	LakeSegRows.Reset();
+	const double M = LakeShoreExclusionMarginCm;
+	for (int32 r = 0; r < LakeRings.Num(); ++r)   // ring order keeps each row's segments grouped by ring
+	{
+		const TArray<FVector2D>& Ring = LakeRings[r].Ring;
+		for (int32 i = 0, j = Ring.Num() - 1; i < Ring.Num(); j = i++)
+		{
+			const FLakeSeg Seg{r, i};
+			const double X0 = FMath::Min(Ring[i].X, Ring[j].X), X1 = FMath::Max(Ring[i].X, Ring[j].X);
+			const double Y0 = FMath::Min(Ring[i].Y, Ring[j].Y), Y1 = FMath::Max(Ring[i].Y, Ring[j].Y);
+			for (int32 cy = FMath::FloorToInt32((Y0 - M) / LakeGridCellCm); cy <= FMath::FloorToInt32((Y1 + M) / LakeGridCellCm); ++cy)
+			{
+				for (int32 cx = FMath::FloorToInt32((X0 - M) / LakeGridCellCm); cx <= FMath::FloorToInt32((X1 + M) / LakeGridCellCm); ++cx)
+				{
+					LakeSegCells.FindOrAdd(FIntPoint(cx, cy)).Add(Seg);
+				}
+			}
+			for (int32 row = FMath::FloorToInt32(Y0 / LakeGridCellCm); row <= FMath::FloorToInt32(Y1 / LakeGridCellCm); ++row)
+			{
+				LakeSegRows.FindOrAdd(row).Add(Seg);
+			}
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	// Self-check: indexed IsInsideLake() must agree with the brute-force scan
+	// it replaced, on points in and around random rings' shore margins.
+	FRandomStream Rng(1234);
+	int32 Mismatches = 0, Inside = 0;
+	constexpr int32 NumChecks = 500;
+	for (int32 k = 0; k < NumChecks; ++k)
+	{
+		const FLakeRing& LR = LakeRings[Rng.RandRange(0, LakeRings.Num() - 1)];
+		const double X = Rng.FRandRange(LR.MinX - 2.0 * M, LR.MaxX + 2.0 * M);
+		const double Y = Rng.FRandRange(LR.MinY - 2.0 * M, LR.MaxY + 2.0 * M);
+		const bool bBrute = IsInsideLakeBruteForce(X, Y);
+		Inside += bBrute;
+		Mismatches += (bBrute != IsInsideLake(X, Y));
+	}
+	UE_LOG(LogTemp, Display,
+		TEXT("ODForestManager: lake index %d cell(s), %d row(s); self-check %d/%d mismatch(es) vs brute force (%d inside)"),
+		LakeSegCells.Num(), LakeSegRows.Num(), Mismatches, NumChecks, Inside);
+#endif
+}
+
 bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
+{
+	auto SegEnds = [this](const FLakeSeg& S, const FVector2D*& Pi, const FVector2D*& Pj)
+	{
+		const TArray<FVector2D>& Ring = LakeRings[S.Ring].Ring;
+		Pi = &Ring[S.I];
+		Pj = &Ring[S.I == 0 ? Ring.Num() - 1 : S.I - 1];
+	};
+	const FVector2D* Pi;
+	const FVector2D* Pj;
+
+	// Shore band: any segment within the margin of this point is in this cell.
+	if (const TArray<FLakeSeg>* Near = LakeSegCells.Find(FIntPoint(
+			FMath::FloorToInt32(WorldX / LakeGridCellCm), FMath::FloorToInt32(WorldY / LakeGridCellCm))))
+	{
+		for (const FLakeSeg& S : *Near)
+		{
+			SegEnds(S, Pi, Pj);
+			if (DistPointToSegment2D(WorldX, WorldY, Pi->X, Pi->Y, Pj->X, Pj->Y) <= LakeShoreExclusionMarginCm)
+			{
+				return true;
+			}
+		}
+	}
+
+	// Interior: even-odd ray cast to +X per ring, using only segments whose
+	// Y-span covers this row (a crossing segment must). Row lists are grouped
+	// by ring, so parity resets whenever the ring id changes.
+	const TArray<FLakeSeg>* Row = LakeSegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
+	if (!Row)
+	{
+		return false;
+	}
+	int32 CurRing = INDEX_NONE;
+	bool bInside = false;
+	for (const FLakeSeg& S : *Row)
+	{
+		if (S.Ring != CurRing)
+		{
+			if (bInside)
+			{
+				return true;
+			}
+			CurRing = S.Ring;
+		}
+		SegEnds(S, Pi, Pj);
+		if (((Pi->Y > WorldY) != (Pj->Y > WorldY)) &&
+			(WorldX < (Pj->X - Pi->X) * (WorldY - Pi->Y) / (Pj->Y - Pi->Y) + Pi->X))
+		{
+			bInside = !bInside;
+		}
+	}
+	return bInside;
+}
+
+bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) const
 {
 	for (const FLakeRing& LR : LakeRings)
 	{

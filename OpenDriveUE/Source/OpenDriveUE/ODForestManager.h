@@ -668,16 +668,24 @@ private:
 	// _extract_boundary_rings() does (any edge shared by exactly one
 	// triangle is a boundary edge, chained into a closed ring) - works
 	// regardless of ear-clip/fan-fallback triangulation and naturally
-	// ignores interior island vertices. Small array (a handful of lakes per
-	// map), checked with a cheap bbox test before the exact point-in-polygon
-	// ray-cast, so no spatial hash needed unlike the point-cloud sidecars
-	// above.
+	// ignores interior island vertices.
 	struct FLakeRing
 	{
 		TArray<FVector2D> Ring;   // world cm, closed (last point != first, IsInsideLake wraps)
 		double MinX = 0.0, MaxX = 0.0, MinY = 0.0, MaxY = 0.0;
 	};
 	TArray<FLakeRing> LakeRings;
+
+	// Segment index over LakeRings (2026-09-29): not "a handful of lakes" -
+	// summit_county loads 45k rings (mostly river ribbons), and the old
+	// per-candidate scan over all of them was 20-57 ms forest ticks
+	// (Insights trace, forest.utrace). Segment I runs Ring[I] -> Ring[I-1].
+	struct FLakeSeg { int32 Ring; int32 I; };
+	static constexpr double LakeGridCellCm = 5000.0;
+	TMap<FIntPoint, TArray<FLakeSeg>> LakeSegCells;   // segments within shore margin of each cell
+	TMap<int32, TArray<FLakeSeg>> LakeSegRows;         // segments whose Y-span overlaps each row, grouped by ring
+	void BuildLakeIndex();
+	bool IsInsideLakeBruteForce(double WorldX, double WorldY) const;
 	bool bUseWaterExclusion = false;
 
 	// Road-station exclusion (2026-08-26) - see RoadStationFilePrefix's
