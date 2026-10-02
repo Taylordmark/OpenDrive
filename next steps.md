@@ -13,14 +13,15 @@ When something here is finished, delete it from this file and add a line to
 
 ## 1. Now: road/terrain fit follow-ups (from §7.43–7.47)
 
-- **Dennison Road float (1 station since §7.48).** Station 184480 at
-  (−10734, 1756) m: the road sits about 4 m above the terrain on a climb
-  capped at 22%, and the nearest embankment is 10.5 m away. This is what fails
-  `verify_terrain_fit` (3.95 m against a 2.8 m tolerance), and that stops
-  `rebuild_area.py` before its last stage, `verify_road_fit`, so run that by
-  hand. Two options:
-  - extend the embankment runs to cover it;
-  - have the verifier count embankment coverage the same way it counts walls.
+- **Dennison Road hairpin (Taylor to judge in a drive).** Station 184480 at
+  (−10734, 1756) m is not a float. The hairpin is about 6 m in radius at 22%,
+  so its two pavements sit 8 m apart and 4 m apart vertically, inside one
+  7.8 m terrain cell. The terrain under the upper pavement drops 4–6 m.
+  - `verify_terrain_fit` accepts it (`HAIRPIN_*`, 2026-10-01). Only 7
+    tight-turn stations map-wide are over 2.8 m.
+  - If it shows in the drive, the fix is to flatten the grade through tight
+    hairpins. That changes every switchback's feel and needs a full rebuild.
+    Walls were rejected: they have BlockAll collision next to the lane.
 - **Road float after the §7.48 ceiling.** 11,699 near-tile stations float
   more than 0.7 m (3,291 over 2 m). This is the price of 0 buried stations.
   If it shows in drive-tests, the next step is the 513 near grid (3.9 m cells).
