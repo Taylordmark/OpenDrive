@@ -123,7 +123,7 @@ import json
 import math
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -604,6 +604,22 @@ def merge_way_chains(ways):
     return chains, degree
 
 
+def junction_node_degree(ways):
+    """node id -> road arms meeting there: 1 per way END, 2 per way passing
+    THROUGH. merge_way_chains()' own degree counts way ends only, which scores
+    a side street T-ing into a through way's interior node as 1."""
+    deg = Counter()
+    for w in ways:
+        nds = w.get("nodes", [])
+        if len(nds) < 2:
+            continue
+        deg[nds[0]] += 1   # a closed loop's shared end node -> 2 arms
+        deg[nds[-1]] += 1
+        for nid in nds[1:-1]:
+            deg[nid] += 2
+    return deg
+
+
 # ---------------------------------------------------------------- main build
 def main():
     data = json.loads((RAW / "osm.json").read_text())
@@ -611,8 +627,9 @@ def main():
     ways = [e for e in data["elements"] if e["type"] == "way"]
     print(f"Loaded {len(ways)} ways, {len(nodes)} nodes")
 
-    chains, node_degree = merge_way_chains(ways)
+    chains, _ = merge_way_chains(ways)
     print(f"Merged into {len(chains)} chains (real junctions/dead-ends)")
+    junction_degree = junction_node_degree(ways)
 
     # local frame anchored at the test-area bbox center - the SAME origin
     # the old georeference actor used (test_areas.BBOX_SNWE via
@@ -629,13 +646,12 @@ def main():
         is_tunnel = np.array(tunnel, dtype=bool)
         length = float(np.sum(np.hypot(np.diff(latlon[:, 0]) * M_PER_DEG_LAT,
                                         np.diff(latlon[:, 1]) * m_per_deg_lon)))
-        # chain[0]/chain[-1] (2026-09-04, Arc 7.17): the OSM node ids this
-        # chain starts/ends at - kept through scored/kept below so main()'s
-        # junction pass can tell exactly which real junction node (if any,
-        # via node_degree) each KEPT segment's own two ends touch, with no
-        # geometric guessing (see merge_way_chains()'s docstring).
+        # chain (2026-09-04, Arc 7.17; whole chain since 2026-10-01): the OSM
+        # node ids this chain runs through - kept through scored/kept below so
+        # main()'s junction pass knows exactly which real junction nodes (via
+        # junction_degree) each KEPT segment touches, with no geometric guessing.
         scored.append((length, latlon, is_struct, is_tunnel, names, oneway, highway, meta,
-                        chain[0], chain[-1]))
+                        chain))
     scored.sort(key=lambda t: -t[0])
 
     # only fetch DEM tiles for chains that will actually become segments
@@ -656,7 +672,7 @@ def main():
     n_grade_warnings = 0
     n_spike_repairs = 0
     for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway, meta,
-              node_start, node_end) in enumerate(kept):
+              chain_nodes) in enumerate(kept):
         east = (latlon[:, 1] - lon0) * m_per_deg_lon
         north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
         s, e, n = resample_stations(east, north, STATION_SPACING)
@@ -672,6 +688,8 @@ def main():
         d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(east), np.diff(north)))])
         is_struct_s = np.interp(s, d, is_struct.astype(float)) > 0.5
         is_tunnel_s = np.interp(s, d, is_tunnel.astype(float)) > 0.5
+        node_s = [(nid, float(d[k])) for k, nid in enumerate(chain_nodes)
+                  if junction_degree[nid] >= 3]
         # road_name is categorical (not a 0..1 signal like is_struct), so
         # nearest-original-station lookup, not interpolation - a road label
         # doesn't need sub-station precision at a name-change boundary the
@@ -793,7 +811,7 @@ def main():
             "lanes_s": lanes_s, "surface_s": surface_s, "layer_s": layer_s,
             "e": e, "n": n, "s": s, "h": h,
             "max_grade_s": max_grade_s, "max_grade_delta_s": max_grade_delta_s,
-            "node_start": node_start, "node_end": node_end,
+            "node_start": chain_nodes[0], "node_end": chain_nodes[-1], "node_s": node_s,
         })
         total_km += length / 1000.0
 
@@ -890,15 +908,14 @@ def main():
     # or same road_name) - a real intersection of two DIFFERENTLY NAMED roads
     # never enters it at all, which is exactly the reported bug (crossing
     # roads baked as independently-stacked ribbons, lane markings running
-    # straight through). Junction NODES come straight from merge_way_chains()'s
-    # own OSM graph degree (node_degree, returned above) - a node with 3+
-    # incident ways is a real junction by the exact same rule that function
-    # already uses to break a chain there; a degree-2 node is always a same-
-    # road continuation and is never flagged. Each KEPT segment's chain-start/
-    # chain-end node id (node_start/node_end, carried through since the
-    # `scored`/`kept` loop above) is exactly the node its chain broke at, so
-    # matching those against node_degree finds every real junction a baked
-    # segment actually touches with no geometric/proximity guessing.
+    # straight through). Junction NODES are OSM nodes with 3+ road arms
+    # (junction_node_degree) anywhere along a kept segment - its ends or a
+    # node it passes THROUGH (seg["node_s"]: node id + arc-length along the
+    # segment). Ends-only (merge_way_chains' own degree, until 2026-10-01)
+    # missed 1,664 of ~2,200 junctions: OSM joins a side street to a through
+    # way at one of its interior nodes, which scored 1, so the side street
+    # just stopped on top of the through road. A through road takes part
+    # once and blends on both sides of the node.
     current_elev = np.concatenate([seg["h"] for seg in segments])
     # Bridge/tunnel endpoints are excluded from junction participation
     # entirely (2026-09-04) - caught via a 51-jump, all-bridge-adjacent
@@ -910,15 +927,13 @@ def main():
     # 34 m over 20 m of arc-length at seg208, an overpass). A bridge ramp
     # meeting a graph node of degree>=3 is not the flush-pavement,
     # shared-grade intersection this pass is meant to flatten.
-    junction_incident = defaultdict(list)   # node_id -> [(seg_idx, 'start'|'end')]
+    junction_incident = defaultdict(list)   # node_id -> [(seg_idx, arc-length s of the node)]
     for seg_i, seg in enumerate(segments):
-        is_struct_s = seg["is_struct_s"]
-        start_ok = not (len(is_struct_s) and is_struct_s[0])
-        end_ok = not (len(is_struct_s) and is_struct_s[-1])
-        if start_ok and node_degree.get(seg["node_start"], 0) >= 3:
-            junction_incident[seg["node_start"]].append((seg_i, "start"))
-        if end_ok and node_degree.get(seg["node_end"], 0) >= 3:
-            junction_incident[seg["node_end"]].append((seg_i, "end"))
+        s_seg = np.asarray(seg["s"], dtype=np.float64)
+        for node_id, s_node in seg["node_s"]:
+            if seg["is_struct_s"][int(np.argmin(np.abs(s_seg - s_node)))]:
+                continue
+            junction_incident[node_id].append((seg_i, s_node))
 
     junctions = []
     junction_target_elev = {}   # node_id -> target elevation, for the flatten pass below
@@ -932,9 +947,9 @@ def main():
         ej = (lon_n - lon0) * m_per_deg_lon
         nj = (lat_n - lat0) * M_PER_DEG_LAT
         elevs = []
-        for seg_i, end in incident:
+        for seg_i, s_node in incident:
             lo, hi = offsets[seg_i], offsets[seg_i + 1]
-            elevs.append(current_elev[lo if end == "start" else hi - 1])
+            elevs.append(float(np.interp(s_node, segments[seg_i]["s"], current_elev[lo:hi])))
         # Outlier exclusion (2026-09-04, bug #3 - see JUNCTION_MAX_
         # DISAGREEMENT_M's docstring): a participant stranded more than that
         # far from the REST of this node's incident elevations (median,
@@ -943,16 +958,16 @@ def main():
         # entirely rather than let it drag the others toward it (or get
         # dragged toward them into a fake vertical transition itself).
         median_elev = float(np.median(elevs))
-        ok = [(seg_i, end, z) for (seg_i, end), z in zip(incident, elevs)
+        ok = [(seg_i, s_node, z) for (seg_i, s_node), z in zip(incident, elevs)
               if abs(z - median_elev) <= JUNCTION_MAX_DISAGREEMENT_M]
-        incident_ok = [(seg_i, end) for seg_i, end, z in ok]
+        incident_ok = [(seg_i, s_node) for seg_i, s_node, z in ok]
         junction_incident[node_id] = incident_ok
         if len(incident_ok) < 2:
             # every other participant got excluded (or there was only ever
             # one plausible one) - nothing left to unify, same as a node
             # with <2 incident segments to begin with.
             continue
-        elevs_ok = [z for seg_i, end, z in ok]
+        elevs_ok = [z for _, _, z in ok]
         # highest incident approach wins (same "never lower a station, only
         # raise" doctrine reconcile_junction_elevations() above already
         # uses) - every other road meeting here blends UP to it, never down.
@@ -990,10 +1005,10 @@ def main():
             if len(incident) < 2:
                 continue
             target = junction_target_elev[node_id]
-            for seg_i, end in incident:
+            for seg_i, s_node in incident:
                 lo, hi = offsets[seg_i], offsets[seg_i + 1]
                 s_seg = np.asarray(segments[seg_i]["s"], dtype=np.float64)
-                d = (s_seg - s_seg[0]) if end == "start" else (s_seg[-1] - s_seg)
+                d = np.abs(s_seg - s_node)
                 w = np.ones_like(d)
                 w[d <= box_r] = 0.0
                 ease = (d > box_r) & (d <= box_r + JUNCTION_APPROACH_M)
