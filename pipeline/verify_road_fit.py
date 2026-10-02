@@ -60,7 +60,7 @@ import numpy as np
 import build_terrain_mesh_tiles as btmt
 import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
-from road_mesh_common import ROAD_LIFT, sample_mesh_height
+from road_mesh_common import ROAD_LIFT, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
@@ -143,30 +143,55 @@ def _load_road_tile(tx, ty):
 
 
 def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1):
-    """Tries (tx0,ty0) first, then its neighbors out to `ring` tiles,
-    returning the first non-None sample - see this module's docstring for why
-    a station's own tile isn't guaranteed to hold the chunk/triangle covering
-    it. `ring` defaults to 1 (8 neighbors); road lookups pass 2 (2026-08-25)
-    since ROAD_TILE_SIZE_CM (500 m) is now smaller than a chunk's own span
-    (750 m, CHUNK_STATIONS * station spacing), so a chunk centroid up to
-    ~375 m from a covered station can land more than one 500 m tile away."""
-    order = [(tx0, ty0)] + [
-        (tx0 + dx, ty0 + dy)
-        for dy in range(-ring, ring + 1) for dx in range(-ring, ring + 1)
-        if not (dx == 0 and dy == 0)
-    ]
-    tiles_tried = 0
-    for (tx, ty) in order:
-        parsed = loader(tx, ty)
-        if parsed is None:
-            continue
-        tiles_tried += 1
-        if len(parsed["triangles"]) == 0:
-            continue
-        h = sample_mesh_height(parsed["positions"], parsed["triangles"], x_cm, y_cm)
-        if h is not None:
-            return h, tiles_tried
-    return None, tiles_tried
+    """Per point: tries its own tile (tx0,ty0) first, then its neighbors out
+    to `ring` tiles, keeping the first hit (NaN = none) - see this module's
+    docstring for why a station's own tile isn't guaranteed to hold the
+    chunk/triangle covering it. `ring` defaults to 1 (8 neighbors); road
+    lookups pass 2 (2026-08-25) since ROAD_TILE_SIZE_CM (500 m) is now
+    smaller than a chunk's own span (750 m, CHUNK_STATIONS * station
+    spacing), so a chunk centroid up to ~375 m from a covered station can
+    land more than one 500 m tile away. Arrays in, batched per tile
+    (2026-10-01: was one scalar sample per point, ~56 min a run)."""
+    order = [(0, 0)] + [(dx, dy) for dy in range(-ring, ring + 1)
+                        for dx in range(-ring, ring + 1) if not (dx == 0 and dy == 0)]
+    out = np.full(len(x_cm), np.nan)
+    pending = np.arange(len(x_cm))
+    for dx, dy in order:
+        if not len(pending):
+            break
+        keys = np.c_[tx0[pending] + dx, ty0[pending] + dy]
+        uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+        for k, (tx, ty) in enumerate(uniq):
+            parsed = loader(int(tx), int(ty))
+            if parsed is None or len(parsed["triangles"]) == 0:
+                continue
+            sel = pending[inv.ravel() == k]
+            out[sel] = sample_mesh_heights(parsed["positions"], parsed["triangles"],
+                                           x_cm[sel], y_cm[sel])
+        pending = pending[np.isnan(out[pending])]
+    return out
+
+
+def _shipped_stations(east, north, elev):
+    """(east, north, road z) each station actually ships at. Normally
+    road_stations.json's position at elev + ROAD_LIFT, but
+    experimental_junction_pads regrades AND XY-snaps junction approaches
+    (up to ~25 m) and patches the roadstations sidecar in place over a
+    backup of the original - so a backup entry matching the original x/y
+    has, at the same index in the live sidecar, the shipped position."""
+    from scipy.spatial import cKDTree
+    from experimental_junction_pads import read_station_sidecar, SIDECAR_BACKUP_DIR, SIDECAR_PATH
+    z = elev + ROAD_LIFT
+    backup = SIDECAR_BACKUP_DIR / SIDECAR_PATH.name
+    if not backup.exists():
+        return east, north, z
+    _g, ox, oy, _oz, _h = read_station_sidecar(backup)
+    _g, sx, sy, sz, _h = read_station_sidecar(SIDECAR_PATH)
+    d, j = cKDTree(np.c_[ox, oy]).query(np.c_[east * 100.0, -north * 100.0])
+    m = d < 5.0
+    east, north = east.copy(), north.copy()
+    east[m], north[m], z[m] = sx[j[m]] / 100.0, -sy[j[m]] / 100.0, sz[j[m]] / 100.0 + ORIGIN_HEIGHT_M
+    return east, north, z
 
 
 def check_road_vs_terrain_fit():
@@ -189,28 +214,15 @@ def check_road_vs_terrain_fit():
     rtx_all = np.floor(st_x_cm / ROAD_TILE_SIZE_CM).astype(int)
     rty_all = np.floor(st_y_cm / ROAD_TILE_SIZE_CM).astype(int)
 
-    gaps = []
-    road_misses = terrain_misses = 0
-    for i in fit_idx:
-        tx, ty = int(tx_all[i]), int(ty_all[i])
-        rtx, rty = int(rtx_all[i]), int(rty_all[i])
-        x_cm, y_cm = float(st_x_cm[i]), float(st_y_cm[i])
-
-        road_h, _rt = _sample_with_neighbors(_load_road_tile, rtx, rty, x_cm, y_cm, ring=2)
-        terrain_h, _tt = _sample_with_neighbors(_load_terrain_tile, tx, ty, x_cm, y_cm)
-
-        if road_h is None:
-            road_misses += 1
-            continue
-        if terrain_h is None:
-            terrain_misses += 1
-            continue
-
-        road_m = road_h / 100.0 + ORIGIN_HEIGHT_M
-        terrain_m = terrain_h / 100.0 + ORIGIN_HEIGHT_M
-        gaps.append(road_m - terrain_m)
-
-    gaps = np.array(gaps) if gaps else np.array([EXPECTED_GAP_M])
+    road_h = _sample_with_neighbors(_load_road_tile, rtx_all[fit_idx], rty_all[fit_idx],
+                                    st_x_cm[fit_idx], st_y_cm[fit_idx], ring=2)
+    terrain_h = _sample_with_neighbors(_load_terrain_tile, tx_all[fit_idx], ty_all[fit_idx],
+                                       st_x_cm[fit_idx], st_y_cm[fit_idx])
+    road_misses = int(np.isnan(road_h).sum())
+    terrain_misses = int((~np.isnan(road_h) & np.isnan(terrain_h)).sum())
+    ok_pts = ~np.isnan(road_h) & ~np.isnan(terrain_h)
+    gaps = ((road_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M) - (terrain_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M))
+    gaps = gaps if len(gaps) else np.array([EXPECTED_GAP_M])
     dev = gaps - EXPECTED_GAP_M
     mean_abs = float(np.mean(np.abs(dev)))
     max_dev = float(np.max(np.abs(dev))) if len(dev) else 0.0
@@ -264,6 +276,10 @@ def check_poke_through():
     hw = brw.load_station_half_widths()
     idx = np.where(~btmt._get_struct_mask(len(east)))[0]
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
+    e0, n0 = east, north
+    east, north, road_z = _shipped_stations(east, north, elev)
+    print(f"junction-pad patch: {int(np.sum((east != e0) | (north != n0) | (np.abs(road_z - elev - ROAD_LIFT) > 0.01)))} "
+          f"station(s) probed at their regraded/snapped shipped position")
     # centerline, then both pavement edges - a diagonal terrain triangle
     # from a neighbouring road's carve can clip the edge while the
     # centerline reads clean (2026-09-28 tightened conflict reach)
@@ -279,14 +295,12 @@ def check_poke_through():
     for label, prefix, pe, pn in probes:
         loader = lambda tx, ty: _load_terrain_tile(tx, ty, prefix)
         poke = np.full(len(east), np.nan)
-        for i in idx:
-            x_cm, y_cm = float(pe[i]) * 100.0, -float(pn[i]) * 100.0
-            h, _ = _sample_with_neighbors(loader, int(np.floor(x_cm / tile_cm)),
-                                          int(np.floor(y_cm / tile_cm)), x_cm, y_cm)
-            if h is not None:
-                # edge pavement is never below the centerline (banking only
-                # raises the outer edge), so elev + ROAD_LIFT is conservative
-                poke[i] = h / 100.0 + ORIGIN_HEIGHT_M - (elev[i] + ROAD_LIFT)
+        x_cm, y_cm = pe[idx] * 100.0, -pn[idx] * 100.0
+        h = _sample_with_neighbors(loader, np.floor(x_cm / tile_cm).astype(int),
+                                   np.floor(y_cm / tile_cm).astype(int), x_cm, y_cm)
+        # edge pavement is never below the centerline (banking only raises
+        # the outer edge), so the centerline height is conservative
+        poke[idx] = h / 100.0 + ORIGIN_HEIGHT_M - road_z[idx]
         p = poke[idx]
         misses = int(np.isnan(p).sum())
         p = p[~np.isnan(p)]

@@ -18,6 +18,7 @@ To add an area:
      1300 m ceiling would have silently clipped any real mountain).
   3. Add the entry, flip ACTIVE_AREA, bake via rebuild_area.py.
 """
+import os
 
 AREAS = {
     # Skagit Valley / North Cascades foothills, WA (2026-07-20 - 2026-07-26)
@@ -103,10 +104,26 @@ AREAS = {
         # "City" archetype call comes out to for a given tile.
         max_building_levels=6,
     ),
+
+    # Russian Hill, San Francisco (2026-10-02) - Taylor's junction-pad test:
+    # steep parallel streets that flatten at the cross streets. 2x2 blocks
+    # (Union/Filbert/Greenwich x Hyde/Leavenworth/Jones) plus ~50 m of
+    # approach; Filbert drops ~16% over the Hyde->Leavenworth block. Origin
+    # 70.4 m (z12 at bbox center); z15 12x12 grid read 22..98 m, padded.
+    # Bake with OD_AREA=sf_russian_hill.
+    "sf_russian_hill": dict(
+        bbox_snwe=(37.7988, -122.4202, 37.8019, -122.4154),
+        background_bbox_snwe=None,
+        origin_height_m=70.4,
+        elev_plausible_m=(-20.0, 250.0),
+        max_building_levels=12,
+    ),
 }
 
 # The one switch. Everything below derives from this entry.
-ACTIVE_AREA = "summit_county"
+# OD_AREA env var overrides it for a one-off bake of another area without
+# editing this file (2026-10-02: SF pad test next to summit_county).
+ACTIVE_AREA = os.environ.get("OD_AREA", "summit_county")
 
 # ---------------------------------------------------------------------------
 # Flat exports - the stable interface every pipeline/unreal stage imports.

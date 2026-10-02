@@ -497,11 +497,13 @@ def _load_ribbon_flags():
     below treats a missing/short entry as "not a ribbon" (real-lake
     behavior), the same as before this flag existed, so this is a strictly
     additive, backward-compatible read."""
-    matches = sorted(OUT_DIR.glob(f"water_*_ribbon_flags.json"))
-    if not matches:
+    # this area's own sidecar - a water_*_ glob picked whichever area sorted
+    # first once a second area was baked (2026-10-02)
+    path = OUT_DIR / f"water_{AREA_NAME}_test_ribbon_flags.json"
+    if not path.exists():
         return {}
     try:
-        return json.loads(matches[0].read_text())
+        return json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
 

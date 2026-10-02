@@ -1072,6 +1072,162 @@ OVERLAP_MERGE_MAX_ELEV_SPREAD_M = 1.2   # merge_drawn_overlaps: max sloped-
                                          # for a visible step at the pad edge.
 
 
+PAD_TILT_FIT_MARGIN_M = 10.0   # fit_pad_tilts: approach stations this far past
+                               # the rim join the fit - a longer baseline, and
+                               # the plane meets the roads where they leave
+PAD_TILT_RIDGE_M2 = 4.0        # just enough to zero the cross-slope of a
+                               # single straight road (no lateral spread)
+PAD_TILT_MAX_GRADE = 0.12      # steepest a junction pad may tilt
+PAD_MOLD_RINGS = 4             # concentric vertex rings a molded pad is drawn
+                               # with (1 = the old hub+rim fan, planar only)
+PAD_MOLD_MAX_CENTER_MISS_M = 0.5   # no mold if a road misses the plane by more
+                               # than this where it passes the centre: the roads
+                               # don't meet there (summit pad 6, two parallel
+                               # roads 3 m apart: kinks 69 -> 227 molded)
+
+
+def fit_pad_tilts(junctions, east, north, elev, structural):
+    """Tilt every non-fused pad onto the plane through its roads' ORIGINAL
+    grade (2026-10-02, Taylor: "the junction pads all appear to be flat. they
+    need to angle ... to align with the connecting roads"). Two straight
+    graded roads crossing at a point span a plane exactly, so a crossing on a
+    hill keeps both grades instead of a flat shelf. Fit over the original
+    (pre-snap) station positions and json elevations - the real road surface.
+    Fused (merged2) pads keep the plane merge_drawn_overlaps gave them (its
+    tighter gate tells a level stack from a hill). Returns pads tilted."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.c_[east, north])
+    n = 0
+    for j in junctions:
+        if j.get("merged2"):
+            continue
+        r = max([j["radius_m"], *(j["ellipse"][2:4] if "ellipse" in j else [])])
+        idx = [i for i in tree.query_ball_point(j["xy"], r + PAD_TILT_FIT_MARGIN_M)
+               if not structural[i]
+               and point_in_pad(east[i], north[i], j, margin=PAD_TILT_FIT_MARGIN_M)]
+        if len(idx) < 3:
+            continue
+        px, py, pz, gx, gy, g, _res = _fit_pad_plane(
+            list(zip(east[idx], north[idx], elev[idx])),
+            ridge_m2=PAD_TILT_RIDGE_M2, max_grade=PAD_TILT_MAX_GRADE)
+        cx, cy = j["xy"]
+        j["elev"] = float(pz + gx * (cx - px) + gy * (cy - py))
+        j["plane"] = (float(gx), float(gy))
+        # mold (2026-10-02, Taylor: "can we force pads to conform to road
+        # grade ... mold them to fit?"): each fit station's miss from the
+        # plane, which pad_plane_z eases back in toward the rim. Only where
+        # the tilt hit its cap: an uncapped plane is already the best fit and
+        # its misses are DEM noise or two roads disagreeing, which the mold
+        # drew as bumps (summit kinks 9,350 -> 9,928, steps 5,772 -> 12,253)
+        n += 1
+        if g <= PAD_TILT_MAX_GRADE:
+            continue
+        # one polyline per road run (consecutive station indices, <= 15 m apart)
+        idx = np.sort(idx)
+        miss = elev[idx] - (j["elev"] + gx * (east[idx] - cx) + gy * (north[idx] - cy))
+        cut = np.flatnonzero((np.diff(idx) != 1)
+                             | (np.hypot(np.diff(east[idx]), np.diff(north[idx])) > 15.0)) + 1
+        mold = [(east[r], north[r], miss[q])
+                for r, q in zip(np.split(idx, cut), np.split(np.arange(len(idx)), cut))]
+        if max(abs(_mold_miss([r], cx, cy)) for r in mold) <= PAD_MOLD_MAX_CENTER_MISS_M:
+            j["mold"] = mold
+    return n
+
+
+def surface_at_snapped(bounds, east, north, elev, qe, qn):
+    """Original road surface height at each station's snapped (qe, qn): the
+    station projected onto its own segment's ORIGINAL polyline, elev linear
+    along it. Unmoved stations keep their own elev."""
+    out = elev.astype(np.float64).copy()
+    for lo, hi in bounds.values():
+        sl = slice(lo, hi + 1)
+        moved = np.flatnonzero(np.hypot(qe[sl] - east[sl], qn[sl] - north[sl]) > 0.01) + lo
+        if hi <= lo or not len(moved):
+            continue
+        ax, ay, az = east[lo:hi], north[lo:hi], elev[lo:hi]
+        bx, by, bz = east[lo + 1:hi + 1] - ax, north[lo + 1:hi + 1] - ay, elev[lo + 1:hi + 1] - az
+        L2 = np.maximum(bx * bx + by * by, 1e-9)
+        for i in moved:
+            u = np.clip(((qe[i] - ax) * bx + (qn[i] - ay) * by) / L2, 0.0, 1.0)
+            q = int(((ax + u * bx - qe[i]) ** 2 + (ay + u * by - qn[i]) ** 2).argmin())
+            out[i] = az[q] + u[q] * bz[q]
+    return out
+
+
+def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north, regraded,
+                        base=None):
+    """Final grade pass over the FINAL pad shapes (2026-10-01). Pads are
+    drawn flat (or on their plane) out to the drawn rim, but the approach
+    blends are smoothsteps out of the junction point computed before
+    merge/fuse/swallow grew the pads - a 21 m grown pad still had ~40% of an
+    approach's climb left at its rim, so the ribbon resumed up to ~3 m above
+    the pad edge. Every non-structural station inside a pad (the ones whose
+    ribbon is omitted there) is set to the pad surface; stations within
+    TRANSITION_LEN_M of a rim blend from the pad's plane back to their own
+    grade. Where two pads' approaches overlap (SF blocks are ~70 m between
+    pads, under 2x TRANSITION_LEN_M) the pull is the strongest one but the
+    target is the pulls' weighted mean (weights w/(1-w), so each pad still
+    owns its own rim) - "strongest wins" swapped
+    planes between adjacent stations, a 3.4 m step on Hyde St (2026-10-02).
+    `base` (default
+    `regraded`) is the grade an approach blends back to near the rim - the
+    original elevations, so a tilted pad meets the real road rather than the
+    flat plateau earlier junction blends left; it hands back to `regraded`
+    as the pull fades, so the walk's far end stays continuous. Mutates
+    `regraded`; returns (n_inside, n_blended, w) - w is each station's pull,
+    1 inside a pad fading to 0 at TRANSITION_LEN_M past the rim."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.c_[east, north])
+    w_best = np.zeros(len(regraded))
+    z_best = np.zeros(len(regraded))
+    sw = np.zeros(len(regraded))     # approach pulls' sum / weighted plane-z sum
+    swz = np.zeros(len(regraded))
+    inside = np.zeros(len(regraded), dtype=bool)
+    base = regraded if base is None else base
+    for j in junctions:
+        r = max([j["radius_m"], *(j["ellipse"][2:4] if "ellipse" in j else [])])
+        cand = np.array(sorted(i for i in tree.query_ball_point(j["xy"], r) if not structural[i]
+                               and point_in_pad(east[i], north[i], j, margin=0.0)), dtype=int)
+        if not len(cand):
+            continue
+        zc = np.array([pad_plane_z(j, east[i], north[i]) for i in cand])
+        inside[cand] = True
+        w_best[cand], z_best[cand] = 1.0, zc
+        # each contiguous inside run, walked outward both ways along its road
+        brk = np.flatnonzero((np.diff(cand) != 1) | (seg_ids[cand[1:]] != seg_ids[cand[:-1]]))
+        for a, b in zip(np.r_[0, brk + 1], np.r_[brk, len(cand) - 1]):
+            lo, hi = bounds[seg_ids[cand[a]]]
+            for edge, step in ((cand[a], -1), (cand[b], 1)):
+                # past the rim: the road's own grade, shifted by its miss at the
+                # rim (2026-10-02, SF) - the capped plane carried 50 m out made
+                # the catch-up ~1.5x the miss steeper than a 25% block already is
+                # ...measured at the first station OUT of the pad, where a
+                # molded pad has finished easing back onto the road (at the
+                # last one in, ~20% of the plane's miss was still in it)
+                k = edge + step
+                o = k if lo <= k <= hi and not structural[k] else edge
+                off = pad_plane_z(j, east[o], north[o]) - base[o]
+                while lo <= k <= hi and not structural[k]:
+                    d = abs(s_m[k] - s_m[edge])
+                    if d > TRANSITION_LEN_M:
+                        break
+                    tt = d / TRANSITION_LEN_M
+                    w = 1.0 - (3.0 * tt * tt - 2.0 * tt * tt * tt)
+                    if not inside[k]:   # past the rim
+                        w_best[k] = max(w_best[k], w)
+                        # rim-dominant: a pad's own rim (w -> 1) is never
+                        # outvoted by a far pad's tail (a 0.9 m fill disc
+                        # on SF pad 3); equal pulls still average
+                        wt = w / (1.0 - w + 0.01)
+                        sw[k] += wt
+                        swz[k] += wt * (base[k] + off)
+                    k += step
+    out = ~inside & (sw > 0)
+    z_best[out] = swz[out] / sw[out]
+    regraded[:] = w_best * z_best + (1.0 - w_best) * (w_best * base + (1.0 - w_best) * regraded)
+    return int(inside.sum()), int(((w_best > 0) & ~inside).sum()), w_best
+
+
 def _segments_intersect(p1, p2, p3, p4):
     """True when segment p1-p2 properly intersects segment p3-p4."""
     def cross(o, a, b):
@@ -1176,7 +1332,7 @@ PAD_PLANE_RIDGE_M2 = 100.0              # _fit_pad_plane ridge weight per
                                          # judge it honestly).
 
 
-def _fit_pad_plane(pts):
+def _fit_pad_plane(pts, ridge_m2=None, max_grade=None):
     """Ridge-regularized least-squares plane z = z0 + gx*(x-x0) + gy*(y-y0)
     through the member points, about their centroid (z0 unpenalized -
     centering decouples it, so z0 = mean(z) exactly). Returns (x0, y0, z0,
@@ -1191,7 +1347,9 @@ def _fit_pad_plane(pts):
     x0, y0 = float(xs.mean()), float(ys.mean())
     dx, dy = xs - x0, ys - y0
     zc = zs - zs.mean()
-    lam = len(pts) * PAD_PLANE_RIDGE_M2
+    ridge_m2 = PAD_PLANE_RIDGE_M2 if ridge_m2 is None else ridge_m2
+    max_grade = PAD_PLANE_MAX_GRADE if max_grade is None else max_grade
+    lam = len(pts) * ridge_m2
     sxx = float(np.dot(dx, dx)) + lam
     syy = float(np.dot(dy, dy)) + lam
     sxy = float(np.dot(dx, dy))
@@ -1202,8 +1360,8 @@ def _fit_pad_plane(pts):
     gy = (sxx * syz - sxy * sxz) / det
     z0 = float(zs.mean())
     grade = math.hypot(gx, gy)
-    if grade > PAD_PLANE_MAX_GRADE:
-        s = PAD_PLANE_MAX_GRADE / grade
+    if grade > max_grade:
+        s = max_grade / grade
         gx, gy = gx * s, gy * s
     residual = float(np.max(np.abs(zs - (z0 + gx * dx + gy * dy))))
     return x0, y0, z0, gx, gy, grade, residual
@@ -1215,10 +1373,49 @@ def pad_plane_z(j, x, y):
     pads, connector welds, merge_same_intersection pads, fill discs) is flat
     at j["elev"], exactly as before sloped pads existed."""
     gx, gy = j.get("plane", (0.0, 0.0))
-    if gx == 0.0 and gy == 0.0:
-        return float(j["elev"])
     cx, cy = j["xy"]
-    return float(j["elev"]) + gx * (x - cx) + gy * (y - cy)
+    z = float(j["elev"]) + gx * (x - cx) + gy * (y - cy)
+    if "mold" not in j:
+        return z
+    # molded pad (fit_pad_tilts): every road meets at j["elev"] in the
+    # middle and is back on its own grade at the rim (the roads' plane
+    # misses, _mold_miss), eased in by a smoothstep of the normalised radius
+    t = min(_pad_rho(j, x, y), 1.0)
+    return z + (3.0 * t * t - 2.0 * t * t * t) * _mold_miss(j["mold"], x, y)
+
+
+def _mold_miss(mold, x, y):
+    """Plane miss at (x, y): each road's miss profile, linear along the road
+    between its stations, at (x, y)'s projection onto that road - blended
+    across roads by distance to each road (not to each station: that
+    stair-stepped ~1 m between stations on a 30% SF block, 2026-10-02)."""
+    num = den = 0.0
+    for px, py, pr in mold:
+        if len(px) == 1:
+            d2, r = (px[0] - x) ** 2 + (py[0] - y) ** 2, pr[0]
+        else:
+            ax, ay = px[:-1], py[:-1]
+            bx, by = px[1:] - ax, py[1:] - ay
+            u = np.clip(((x - ax) * bx + (y - ay) * by) / np.maximum(bx * bx + by * by, 1e-9), 0.0, 1.0)
+            dd = (ax + u * bx - x) ** 2 + (ay + u * by - y) ** 2
+            q = int(dd.argmin())
+            d2, r = dd[q], pr[q] + u[q] * (pr[q + 1] - pr[q])
+        w = 1.0 / (d2 + 1.0)
+        num += w * r
+        den += w
+    return float(num / den)
+
+
+def _pad_rho(j, x, y):
+    """Normalised radius of (x, y) in pad j: 0 at the center, 1 on the
+    bare (margin-free) rim."""
+    if j.get("shape") == "ellipse":
+        cx, cy, a, b, th = j["ellipse"]
+        dx, dy = x - cx, y - cy
+        du = dx * math.cos(th) + dy * math.sin(th)
+        dv = -dx * math.sin(th) + dy * math.cos(th)
+        return math.sqrt((du / max(a, 1e-6)) ** 2 + (dv / max(b, 1e-6)) ** 2)
+    return math.hypot(x - j["xy"][0], y - j["xy"][1]) / max(j["radius_m"], 1e-6)
 
 
 def merge_drawn_overlaps(junctions, east, north, elev, seg_ids, structural):
@@ -1637,7 +1834,7 @@ def build_pad_chunk_hull(name, hull_members, elev_m, margin, sides=PAD_SIDES):
 
 
 def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
-                             plane=(0.0, 0.0)):
+                             plane=(0.0, 0.0), z_fn=None):
     """Like build_pad_chunk, but the ring is the fitted-ellipse boundary
     _ellipse_polygon() computes for a merged pad (see
     _fit_ellipse_to_circles/merge_overlapping_pads) instead of a plain
@@ -1648,9 +1845,18 @@ def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
     `plane` = (gx, gy), the pad's tilt about its center (sloped pads,
     2026-09-05): elev_m is the surface elevation AT the center, each ring
     vertex gets elev_m + gx*dx + gy*dy - a fan over a plane is still exactly
-    planar, so nothing else about the topology/UV/winding changes."""
+    planar, so nothing else about the topology/UV/winding changes.
+
+    `z_fn(x, y)` (molded pads, 2026-10-02) is the pad surface elevation at
+    any point; the pad is then drawn as PAD_MOLD_RINGS concentric rings so
+    it can curve."""
     cx, cy, _a0, _b0, _theta = ellipse
     ring = _ellipse_polygon(ellipse, margin, sides)
+    if z_fn is not None:
+        return _build_pad_fan(name, (cx, cy), road_ue_z_m(z_fn(cx, cy), ROAD_LIFT, ORIGIN_HEIGHT_M),
+                              ring, z_fn=lambda x, y: road_ue_z_m(z_fn(x, y), ROAD_LIFT,
+                                                                  ORIGIN_HEIGHT_M),
+                              rings=PAD_MOLD_RINGS)
     z_m = road_ue_z_m(elev_m, ROAD_LIFT, ORIGIN_HEIGHT_M)
     gx, gy = plane
     ring_z_m = None
@@ -1660,14 +1866,34 @@ def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
     return _build_pad_fan(name, (cx, cy), z_m, ring, ring_z_m=ring_z_m)
 
 
-def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
+def build_fill_disc(name, xy, elev_m, radius_m, gi, seg_ids, east, north, z):
+    """A fill/gate-cover disc tilted onto its road's local grade (station gi's
+    neighbours on its own segment). A flat disc on a 30% SF block stood
+    ~0.3 m/m proud of the road downhill - a kink ring round every one
+    (2026-10-02)."""
+    a = gi - 1 if gi > 0 and seg_ids[gi - 1] == seg_ids[gi] else gi
+    b = gi + 1 if gi + 1 < len(z) and seg_ids[gi + 1] == seg_ids[gi] else gi
+    dx, dy = east[b] - east[a], north[b] - north[a]
+    d2 = dx * dx + dy * dy
+    dz = (z[b] - z[a]) / d2 if d2 > 0.01 else 0.0
+    return build_pad_chunk_ellipse(name, (*xy, radius_m, radius_m, 0.0), elev_m, 0.0,
+                                   sides=PAD_SIDES, plane=(dz * dx, dz * dy))
+
+
+def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
     """Shared fan-mesh builder for build_pad_chunk/build_pad_chunk_hull:
     hub vertex 0 at hub_xy (UE-frame elevation z_m) plus a ring of (x, y)
     points (pipeline-frame meters), triangulated as a fan. `ring_z_m`
     (sloped pads) gives each ring vertex its own UE-frame elevation instead
-    of the hub's flat z_m."""
+    of the hub's flat z_m. `rings` > 1 adds inner rings at even fractions
+    of the way out to `ring`, each vertex at `z_fn(x, y)` (UE-frame m) -
+    a molded pad, which curves."""
     cx, cy = hub_xy
     sides = len(ring)
+    ring = [(cx + (vx - cx) * (q + 1) / rings, cy + (vy - cy) * (q + 1) / rings)
+            for q in range(rings) for vx, vy in ring]
+    if z_fn is not None:
+        ring_z_m = [z_fn(vx, vy) for vx, vy in ring]
     verts = [cx * 100.0, -cy * 100.0, z_m * 100.0]
 
     # UV0 (2026-09-07, Taylor: "junctions definitely still do not look
@@ -1731,6 +1957,11 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None):
     for k in range(sides):
         a, b = 1 + k, 1 + (k + 1) % sides
         tris.extend([0, a, b])
+    for q in range(rings - 1):   # quad strips between rings, same winding sense
+        i0, o0 = 1 + q * sides, 1 + (q + 1) * sides
+        for k in range(sides):
+            k1 = (k + 1) % sides
+            tris.extend([i0 + k, o0 + k, o0 + k1, i0 + k, o0 + k1, i0 + k1])
     # uv1/road_class_id/lane_count: the ODR3 mirror (write_tile_v3) needs
     # every chunk to carry the extended-format fields. A pad disc has no
     # single meaningful road width/class, so it gets the classic half-width
@@ -2207,7 +2438,7 @@ def _polygon_area(pts):
 GATE_COVER_SEARCH_M = 120.0
 
 
-def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_exclude):
+def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_exclude, seg_ids):
     """verify_road_fit.py checks that every non-excluded ORIGINAL station
     coordinate (road_stations.json, which this script never edits) still has
     road surface directly above it. The XY snap + inside-pad ribbon omission
@@ -2273,8 +2504,9 @@ def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_e
 
     for k, i in enumerate(misses):
         xy = (float(east[i]), float(north[i]))
-        pad = build_pad_chunk(f"gatecover_{k:04d}", xy, float(regraded[i]),
-                              ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M)
+        pad = build_fill_disc(f"gatecover_{k:04d}", xy, float(regraded[i]),
+                              ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M,
+                              i, seg_ids, east, north, regraded)
         host = nearest_chunk(all_chunks, xy)
         if host is not None:
             merge_chunk_into(host, pad)
@@ -2499,7 +2731,23 @@ def _pad_rim_points(j, spacing_m=PAD_RIM_SPACING_M):
     return pts
 
 
-def _augment_station_data_with_pad_rims(station_data, junctions):
+PAD_INTERIOR_SPACING_M = 3.0   # grid of interior anchors over each pad (2026-10-01):
+                               # rim anchors + crossing stations left the lobes of
+                               # wide/elliptical pads outside every clamp radius, so
+                               # the narrow cut taper let hillside terrain stand up to
+                               # 4.4 m proud of the pad surface (298 pads > 0.3 m)
+
+
+def _pad_interior_points(j, spacing_m=PAD_INTERIOR_SPACING_M):
+    """Grid points (pipeline-frame m) inside junction j's drawn pad."""
+    r = max([j["radius_m"], *(j["ellipse"][2:4] if "ellipse" in j else [])])
+    cx, cy = j["xy"]
+    return [(x, y) for x in np.arange(cx - r, cx + r + spacing_m, spacing_m)
+            for y in np.arange(cy - r, cy + r + spacing_m, spacing_m)
+            if point_in_pad(x, y, j, margin=0.0)]
+
+
+def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()):
     """Appends one synthetic, never-excluded "station" per rim point (see
     _pad_rim_points) to the (lat0, lon0, st_x_cm, st_y_cm, st_elev,
     st_exclude) tuple build_tile()/carve_grid_m() consume, each carrying its
@@ -2518,6 +2766,17 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
             # the terrain carve follows the tilt instead of trenching a flat
             # shelf across a climb.
             rim_elev.append(pad_plane_z(j, px, py))
+    n_rim = len(rim_x)
+    for j in junctions:
+        for (px, py) in _pad_interior_points(j):
+            rim_x.append(px)
+            rim_y.append(py)
+            rim_elev.append(pad_plane_z(j, px, py))
+    n_in = len(rim_x)
+    for px, py, pz in spur_anchors:
+        rim_x.append(px)
+        rim_y.append(py)
+        rim_elev.append(pz)
     rim_x_cm = np.asarray(rim_x, dtype=np.float64) * 100.0
     rim_y_cm = -np.asarray(rim_y, dtype=np.float64) * 100.0
     rim_elev = np.asarray(rim_elev, dtype=np.float64)
@@ -2525,6 +2784,11 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
     # rim anchors keep the classic constant footprint radius - they mark the
     # pad's blend boundary, not a lane-tagged road surface
     rim_clamp = np.full(len(rim_x), btmt.HARD_CLAMP_RADIUS_M, dtype=np.float64)
+    # spur anchors are real pavement: same clamp a road station of that width gets
+    # interior anchors: every pixel inside the pad lies within spacing/sqrt(2)
+    # of one, so the hard clamp covers the whole pad
+    rim_clamp[n_rim:n_in] = PAD_INTERIOR_SPACING_M
+    rim_clamp[n_in:] = ROAD_HALF_WIDTH + SKIRT_EXTRA
     return (lat0, lon0,
             np.concatenate([st_x_cm, rim_x_cm]),
             np.concatenate([st_y_cm, rim_y_cm]),
@@ -2534,7 +2798,7 @@ def _augment_station_data_with_pad_rims(station_data, junctions):
 
 
 def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded_elev,
-                                  terrain_exclude, st_clamp_r):
+                                  terrain_exclude, st_clamp_r, spur_anchors=()):
     """Re-carve the (small) set of terrain tiles a snapped junction actually
     touches, from the SAME regraded station arrays the road pads/ribbons
     above were just built from - reuses build_terrain_mesh_tiles.build_tile()
@@ -2564,7 +2828,8 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     # relying on it staying small by coincidence.
     for j in junctions:
         cx_cm, cy_cm = j["xy"][0] * 100.0, -j["xy"][1] * 100.0
-        r_cm = (j["radius_m"] + btmt.TERRAIN_CARVE_OUTER_M) * 100.0
+        r_cm = (max([j["radius_m"], *(j["ellipse"][2:4] if "ellipse" in j else [])])
+                + btmt.TERRAIN_CARVE_OUTER_M) * 100.0
         tx0, tx1 = int((cx_cm - r_cm) // tile_cm), int((cx_cm + r_cm) // tile_cm)
         ty0, ty1 = int((cy_cm - r_cm) // tile_cm), int((cy_cm + r_cm) // tile_cm)
         j["_terrain_tiles"] = {(tx, ty) for tx in range(tx0, tx1 + 1) for ty in range(ty0, ty1 + 1)}
@@ -2578,7 +2843,7 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     st_y_cm = -regraded_north * 100.0
     station_data = _augment_station_data_with_pad_rims(
         (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r),
-        junctions)
+        junctions, spur_anchors)
 
     gen_id_bytes = pack_generation_id(compute_generation_id())
 
@@ -2628,7 +2893,7 @@ def read_station_sidecar(path):
             flat[2::stride].copy(), hw)
 
 
-def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
+def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_east, new_north):
     """Mirrors this script's road-tile patching (write_tile() over the
     backed-up originals) for the OTHER on-disk artifact the runtime terrain
     carve reads: roadstations_{AREA_NAME}.bin. Without this, the sidecar
@@ -2641,8 +2906,10 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
     sidecar entries to the regraded station set by ORIGINAL x/y (the
     sidecar was built from unregraded road_stations.json, so its x/y is
     exactly the pre-patch east/north this script also started from) and
-    overwrites only their z - x/y are left untouched, same as the road-tile
-    patch never moves a station whose ribbon isn't rebuilt for it.
+    overwrites their z AND x/y - the junction XY snap moves approach
+    stations up to ~25 m, and the ribbons/terrain are rebuilt at the
+    snapped position (2026-10-01: z-only patching paired regraded heights
+    with the OLD corridor, 1-6 m off the shipped road there).
 
     `regraded_mask` selects which of the flat (all-segments-concatenated)
     station arrays actually changed elevation; `orig_east`/`orig_north` are
@@ -2664,11 +2931,14 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
         print(f"reusing existing sidecar backup baseline at {backup_path}")
 
     gen_id, sc_x, sc_y, sc_z, sc_hw = read_station_sidecar(backup_path)
+    key_x, key_y = sc_x.copy(), sc_y.copy()   # match on the ORIGINAL x/y; sc_x/sc_y get moved below
 
     idxs = np.nonzero(regraded_mask)[0]
     px_cm = orig_east[idxs] * 100.0
     py_cm = -orig_north[idxs] * 100.0
     pz_cm = road_ue_z_m(new_elev[idxs], ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
+    nx_cm = new_east[idxs] * 100.0
+    ny_cm = -new_north[idxs] * 100.0
 
     # Same bucket-by-cell pattern used everywhere else in this file (e.g.
     # find_crossings/find_dangling_endpoints) - N=~29k sidecar stations is
@@ -2678,7 +2948,7 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
     cell = max(SIDECAR_MATCH_EPS_CM * 4.0, STATION_SPACING * 100.0)
     buckets = defaultdict(list)
     for si in range(len(sc_x)):
-        buckets[(int(sc_x[si] // cell), int(sc_y[si] // cell))].append(si)
+        buckets[(int(key_x[si] // cell), int(key_y[si] // cell))].append(si)
 
     eps2 = SIDECAR_MATCH_EPS_CM ** 2
     matched = 0
@@ -2690,7 +2960,7 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for si in buckets.get((bx + dx, by + dy), ()):
-                    d2 = (sc_x[si] - px_cm[k]) ** 2 + (sc_y[si] - py_cm[k]) ** 2
+                    d2 = (key_x[si] - px_cm[k]) ** 2 + (key_y[si] - py_cm[k]) ** 2
                     if d2 <= eps2:
                         hits += 1
                         if d2 < best_d2:
@@ -2702,6 +2972,7 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev):
         if hits > 1:
             ambiguous += 1   # still patches the single closest match below
         sc_z[best_si] = pz_cm[k]
+        sc_x[best_si], sc_y[best_si] = nx_cm[k], ny_cm[k]
         matched += 1
 
     unmatched = len(idxs) - matched
@@ -2895,12 +3166,22 @@ def main():
     print(f"found {len(snaps)} dangling endpoint(s) within {ENDPOINT_SNAP_MAX_M:.0f}m "
           f"of another road - welding with a connector spur")
     connector_chunks = []
+    # (east, north, road elev m) along each spur, for the terrain re-carve -
+    # a spur is a 2-station ribbon no real station sits under, so without
+    # these the hillside it crosses stays uncarved and buries it (2026-10-01:
+    # up to 4.4 m at (-27544,11341))
+    spur_anchors = []
     half_t = int(round(TRANSITION_LEN_M / STATION_SPACING)) + 1
     for k, sp in enumerate(snaps):
         gi, seg, tgi, tseg = sp["gi"], sp["seg"], sp["target_gi"], sp["target_seg"]
         grade_a = local_grade(elev, *bounds[seg], gi)
         grade_b = local_grade(elev, *bounds[tseg], tgi)
-        pin_elev = elev[tgi] if grade_b <= grade_a else elev[gi]
+        # the weld pad sits ON the target road, so it takes the target's
+        # (already crossing-regraded) height and only the spur blends - pinning
+        # to the spur's end when it was flatter (pre-2026-10-01) sank/raised
+        # the pad up to JUNCTION_MAX_ELEV_DIFF_M inside an unregraded through
+        # road (2.3 m pothole at (10428,-5352))
+        pin_elev = float(regraded[tgi])
 
         lo, hi = bounds[seg]
         k0, k1 = max(lo, gi - half_t), min(hi, gi + half_t)
@@ -2921,6 +3202,10 @@ def main():
             name_prefix=f"connector_{k:04d}", spacing=STATION_SPACING,
             skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP)
         connector_chunks.extend(chunks)
+        for t_ in np.linspace(0.0, 1.0, max(int(sp["dist"] / (STATION_SPACING / 2)), 1) + 1):
+            spur_anchors.append((east[gi] + t_ * (east[tgi] - east[gi]),
+                                 north[gi] + t_ * (north[tgi] - north[gi]),
+                                 regraded[gi] + t_ * (pin_elev - regraded[gi])))
         conn_r = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
         junctions.append({"xy": (east[tgi], north[tgi]), "elev": pin_elev,
                            "radius_m": conn_r,
@@ -3071,20 +3356,22 @@ def main():
         seg["north_m"] = regraded_north[off:off + cnt].tolist()
         off += cnt
 
-    regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
-                                  terrain_exclude, clamp_r)
+    def carve_and_patch():
+        regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
+                                      terrain_exclude, clamp_r, spur_anchors)
 
-    # The runtime terrain carve (AODTerrainManager) doesn't only read the
-    # road-mesh tiles patched above - it reads roadstations_{AREA_NAME}.bin,
-    # a separate sidecar build_road_network.py writes straight from
-    # UNREGRADED road_stations.json, long before this script's pad/regrade
-    # pass ever runs. Left unpatched, that sidecar keeps shipping pre-pad
-    # elevations forever, so the carve digs to the wrong height near every
-    # junction. `regraded`/`elev` are still the SAME flat, all-segments
-    # arrays used throughout this function (both cluster regrades and the
-    # dangling-endpoint connector welds write into `regraded`), so the mask
-    # below covers both.
-    patch_station_sidecar(regraded != elev, east, north, regraded)
+        # The runtime terrain carve (AODTerrainManager) doesn't only read the
+        # road-mesh tiles patched above - it reads roadstations_{AREA_NAME}.bin,
+        # a separate sidecar build_road_network.py writes straight from
+        # UNREGRADED road_stations.json, long before this script's pad/regrade
+        # pass ever runs. Left unpatched, that sidecar keeps shipping pre-pad
+        # elevations forever, so the carve digs to the wrong height near every
+        # junction. `regraded`/`elev` are still the SAME flat, all-segments
+        # arrays used throughout this function (both cluster regrades and the
+        # dangling-endpoint connector welds write into `regraded`), so the mask
+        # below covers both.
+        patch_station_sidecar((regraded != elev) | (regraded_east != east) | (regraded_north != north),
+                              east, north, regraded, regraded_east, regraded_north)
 
     if "--solo" in sys.argv:
         solo_xy = None
@@ -3103,6 +3390,7 @@ def main():
             kwargs["target_xy"] = solo_xy
         if solo_stub_len:
             kwargs["stub_len_m"] = solo_stub_len
+        carve_and_patch()
         build_solo_junction(junctions, raw, **kwargs)
         return
 
@@ -3245,6 +3533,23 @@ def main():
                 n_swallowed += 1
     print(f"pad-swallow: {n_grown} junction pad(s) grown to absorb "
           f"{n_swallowed} adjacent fill disc(s)")
+    n_tilt = fit_pad_tilts(junctions, east, north, elev, structural)
+    print(f"pad-tilt: {n_tilt} pad(s) tilted onto their roads' grade")
+    # the rim blend's base is the ORIGINAL road surface where each station
+    # now sits (2026-10-02): the weld snap slides stations up to ~11 m along
+    # their road, and their own original elev there met the molded pad
+    # (built on the original surface) 0.5 m off at the rim
+    base_here = surface_at_snapped(bounds, east, north, elev, regraded_east, regraded_north)
+    n_in, n_blend, pad_w = flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural,
+                                               regraded_east, regraded_north, regraded,
+                                               base=base_here)
+    print(f"rim-flatten: {n_in} station(s) inside a pad set to its surface, "
+          f"{n_blend} approach station(s) re-blended from the rim")
+    off = 0
+    for seg in raw["segments"]:
+        cnt = len(seg["east_m"])
+        seg["elev_m"] = regraded[off:off + cnt].tolist()
+        off += cnt
     # final (post-growth) footprints, for offline top-down verification
     # renders - same schema as --dump-pads
     (btmt.STATIONS_PATH.parent / "junction_pads_final.json").write_text(json.dumps([{
@@ -3256,6 +3561,10 @@ def main():
         "merged2": bool(j.get("merged2")),
         "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
     } for j in junctions], indent=1))
+
+    # after pad-swallow (2026-10-01): carving before it left every grown
+    # pad's new lobes without rim anchors - terrain up to 4.4 m proud
+    carve_and_patch()
 
     all_chunks = list(connector_chunks)
     total_km = 0.0
@@ -3280,6 +3589,10 @@ def main():
         # gravel surfaces and the junction marking-suppression ramps)
         surface_full = seg.get("surface")
         jsup_full = np.array(seg.get("junction_suppress", [0.0] * len(s_full)), dtype=np.float64)
+        # superelevation fades out over the same ramp the grade blends onto
+        # the pad (2026-10-02): a full 8 deg bank met a pad's plane with a
+        # ~1.3 m outer-edge lip; real roads drop the bank into an intersection
+        bank_full = 1.0 - pad_w[goff:goff + len(s_full)]
         runs = list(split_excluding_tunnels(is_tunnel))
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
@@ -3291,6 +3604,7 @@ def main():
             lanes_run = lanes_full[lo:hi] if lanes_full else None
             unpaved_run = unpaved_stations(surface_full[lo:hi]) if surface_full else None
             jsup_run = jsup_full[lo:hi]
+            bank_run = bank_full[lo:hi]
             # Same per-station width build_road_network.py bakes into
             # road_mesh.json (2026-09-06 lanes=-tag width work) - computed
             # over the whole run, like build_road_network does, so the
@@ -3326,7 +3640,8 @@ def main():
             inside = inside_circle | inside_prox
             for i in range(len(e)):
                 if inside_prox[i] and not inside_circle[i]:
-                    fill_pads.append((f"{name}_fill{i:04d}", (e[i], nn[i]), regraded[goff + lo + i]))
+                    fill_pads.append((f"{name}_fill{i:04d}", (e[i], nn[i]), regraded[goff + lo + i],
+                                      goff + lo + i))
             # Ribbon cuts land ON the pad rim, not at whole stations
             # (2026-09-07, Taylor: "all junctions look broken" - top-down
             # tile renders showed 1-5m of bare ground at nearly every
@@ -3396,6 +3711,7 @@ def main():
                         ln_r = list(lanes_run[p0:p1]) if lanes_run else None
                         up_r = list(unpaved_run[p0:p1]) if unpaved_run is not None else None
                         js_r = jsup_run[p0:p1]
+                        bk_r = bank_run[p0:p1]
                         # categorical per-station tags at an interpolated rim
                         # station copy the adjacent real station's values
                         head = tail = None
@@ -3421,6 +3737,7 @@ def main():
                             if up_r is not None:
                                 up_r = [up_r[0]] + up_r
                             js_r = np.concatenate([[js_r[0]], js_r])
+                            bk_r = np.concatenate([[bk_r[0]], bk_r])
                         if tail is not None:
                             s_r = np.concatenate([s_r, [tail[0]]])
                             e_r = np.concatenate([e_r, [tail[1]]])
@@ -3437,6 +3754,7 @@ def main():
                             if up_r is not None:
                                 up_r = up_r + [up_r[-1]]
                             js_r = np.concatenate([js_r, [js_r[-1]]])
+                            bk_r = np.concatenate([bk_r, [bk_r[-1]]])
                         chunks, cx, cy, cz = build_road_chunks(
                             s_r, e_r, n_r, z_r, name_prefix=sub_name,
                             spacing=STATION_SPACING, is_oneway=ow_r,
@@ -3445,7 +3763,7 @@ def main():
                             osm_lanes=ln_r,
                             half_width_s=hw_r,
                             junction_suppress=js_r,
-                            is_unpaved=up_r)
+                            is_unpaved=up_r, bank_scale=bk_r)
                         all_chunks.extend(chunks)
                         total_km += float(s_r[-1] - s_r[0]) / 1000.0
                         sub_idx += 1
@@ -3463,8 +3781,9 @@ def main():
     # (merge_chunk_into) instead of appending it as its own standalone chunk -
     # see that function's docstring. Was: all_chunks.append(build_pad_chunk(...)).
     n_merged, n_standalone = 0, 0
-    for name, xy, elev_m in fill_pads:
-        pad = build_pad_chunk(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M)
+    for name, xy, elev_m, gi in fill_pads:
+        pad = build_fill_disc(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M, gi, seg_ids,
+                              regraded_east, regraded_north, regraded)
         host = nearest_chunk(all_chunks, xy)
         if host is not None:
             merge_chunk_into(host, pad)
@@ -3474,13 +3793,16 @@ def main():
             n_standalone += 1
 
     for k, j in enumerate(junctions):
+        z_fn = (lambda x, y, j=j: pad_plane_z(j, x, y)) if "mold" in j else None
         if j.get("shape") == "ellipse":
             pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}", j["ellipse"],
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
-                                           plane=j.get("plane", (0.0, 0.0)))
-        else:
-            pad = build_pad_chunk(f"junctionpad_{k:04d}", j["xy"],
-                                   j["elev"], j["radius_m"] + PAD_OVERLAP_MARGIN_M)
+                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn)
+        else:   # a circle is an ellipse with equal axes - and can tilt too
+            pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}",
+                                           (*j["xy"], j["radius_m"], j["radius_m"], 0.0),
+                                           j["elev"], PAD_OVERLAP_MARGIN_M,
+                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn)
         host = nearest_chunk(all_chunks, j["xy"])
         if host is not None:
             merge_chunk_into(host, pad)
@@ -3490,7 +3812,7 @@ def main():
             n_standalone += 1
 
     n_gate_fills = add_gate_coverage_fills(all_chunks, junctions, east, north,
-                                            regraded, terrain_exclude)
+                                            regraded, terrain_exclude, seg_ids)
 
     buckets = defaultdict(list)
     for chunk in all_chunks:
@@ -3498,8 +3820,10 @@ def main():
         tx, ty = int(cx // ROAD_TILE_SIZE_CM), int(cy // ROAD_TILE_SIZE_CM)
         buckets[(tx, ty)].append(chunk)
 
-    if not BACKUP_DIR.exists():
-        BACKUP_DIR.mkdir(parents=True)
+    # keyed on this area's files, not the dir: the dir is shared by every area
+    # (2026-10-02, sf_russian_hill found summit's backups and skipped its own)
+    if not any(BACKUP_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin")):
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         for p in OUT_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin"):
             (BACKUP_DIR / p.name).write_bytes(p.read_bytes())
         print(f"backed up original (unpatched) road tiles -> {BACKUP_DIR}")
@@ -3524,8 +3848,8 @@ def main():
     # carry the identical patched geometry or every regrade above is
     # silently overridden wherever a v3 tile exists).
     OUT_DIR_V2.mkdir(parents=True, exist_ok=True)
-    if not V3_BACKUP_DIR.exists():
-        V3_BACKUP_DIR.mkdir(parents=True)
+    if not any(V3_BACKUP_DIR.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin")):
+        V3_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
             (V3_BACKUP_DIR / p.name).write_bytes(p.read_bytes())
         print(f"backed up original (unpatched) ODR3 road tiles -> {V3_BACKUP_DIR}")

@@ -79,6 +79,7 @@ from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M
+from road_mesh_common import ROAD_LIFT
 from road_mesh_common import (CONFLICT_SAME_CHAIN_GAP_STATIONS, STATION_SPACING,
                               WALL_EMBED_MARGIN_M, classify_wall_stations, sample_mesh_heights)
 
@@ -116,11 +117,17 @@ ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 
-def _fit_station_data():
+def _fit_station_data(shipped=False):
     """Shared station loading + tile bucketing for both the shipped-artifact
     and pre-bake checks below - same station set, same exclusions, so the
-    two checks are directly comparable."""
+    two checks are directly comparable. `shipped`: junction-pad regraded/
+    XY-snapped stations at their shipped position and height (2026-10-01 -
+    the pre-snap corridor can sit 15+ m from the road, beside a pad)."""
     lat0, lon0, east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
+    if shipped:
+        from verify_road_fit import _shipped_stations
+        east, north, z = _shipped_stations(east, north, elev)
+        elev = z - ROAD_LIFT
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
     fit_idx = np.where(~exclude)[0]
@@ -233,7 +240,7 @@ def check_shipped_terrain_fit():
     """SHIPPED ARTIFACT CHECK - reads the actual ODT1 .bin tiles in
     Content/OpenDrive/Masks/ and samples the real parsed mesh, per this
     module's docstring section 1."""
-    st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data()
+    st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data(shipped=True)
 
     dzs, rows = [], []
     misses = 0

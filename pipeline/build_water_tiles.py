@@ -1067,7 +1067,10 @@ def main():
 
     polygons = fetch_water_polygons()
     if not polygons:
-        raise SystemExit(f"No water polygons matched in the {AREA_NAME} bbox.")
+        # a dry area is valid (2026-10-02, sf_russian_hill) - terrain treats
+        # missing water tiles as "no lake beds"
+        print(f"No water polygons matched in the {AREA_NAME} bbox - no water tiles.")
+        return
 
     session = requests.Session()
     dem_cache = {}

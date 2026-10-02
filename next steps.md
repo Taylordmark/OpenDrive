@@ -28,9 +28,17 @@ When something here is finished, delete it from this file and add a line to
 - **Junction-flatten steps.** About 45 steps of 2–3 m sit near segment ends.
   They predate §7.47. Re-measure them after §7.49, which added 1,276
   junctions.
-- **Junction pads are stale.** `experimental_junction_pads.py` is not in
-  `rebuild_area.py` STAGES and hasn't run since before §7.49, so the new
-  junctions have no pads.
+- **Junction pads are a manual step** (§7.51). `experimental_junction_pads.py`
+  is not in `rebuild_area.py` STAGES, so any rebuild wipes the pads until it
+  is rerun (about 15 min).
+- **Junction pad leftovers** (§7.51):
+  - 108 pads still sit more than 1 m off their road's grade (worst 4.3 m at
+    (24639, 17570)).
+  - About 10% of pads are pinned at the 12% tilt cap
+    (`PAD_TILT_MAX_GRADE`).
+  - 9 road ends are less paved than before the pads, e.g. (-27544, 11341).
+  - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
+    the ribbon leaves the molded rim up to 0.68 m high on steep downhill arms.
 - **Re-check the downstream systems against the new elevations:**
   - `WALL_MIN_GRADE` and the conflict detection (§7.12);
   - the Frisco North 6th Ave dead-end float, 1–2 m (§7.14);

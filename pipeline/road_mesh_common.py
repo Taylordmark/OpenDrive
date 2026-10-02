@@ -687,7 +687,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
                        bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
                        osm_lanes=None, half_width_s=None, junction_suppress=None,
-                       is_unpaved=None):
+                       is_unpaved=None, bank_scale=None):
     """Build banked, skirted road mesh chunks from station arrays.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
@@ -742,6 +742,9 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     `is_unpaved` (optional per-station bool, see unpaved_stations()) cuts
     chunks at every surface change and sets each chunk's "unpaved" flag.
 
+    `bank_scale` (optional per-station 0..1) multiplies the superelevation -
+    experimental_junction_pads fades it to 0 into each junction pad.
+
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
     {"name","vertices","uvs","uv1","triangles","oneway","unpaved","road_class_id",
     "road_class","lane_count"} schema and cx/cy/cz are the UE-frame (cm)
@@ -766,6 +769,8 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     bank = np.minimum(max_bank_rad,
                        bank_gain * np.abs(gaussian1d(curv, BANK_SMOOTH_SIGMA_M)))
     bank_tan = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
+    if bank_scale is not None:
+        bank_tan = bank_tan * np.asarray(bank_scale, dtype=np.float64)
     raise_side = -np.sign(gaussian1d(curv, BANK_SMOOTH_SIGMA_M))  # +1: raise right side
 
     # cross-section: (lateral offset m, z offset m) - a closed loop around

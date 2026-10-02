@@ -94,8 +94,6 @@ def parse_odr3_tile(path):
     return chunks
 
 
-PAD_U = 0.58   # experimental_junction_pads._build_pad_fan's constant PAD_UV
-PAD_UV_EPS = 1e-6
 
 
 def strip_pad_verts(chunk):
@@ -103,14 +101,15 @@ def strip_pad_verts(chunk):
     export: pad discs are standalone fan chunks OR get their verts APPENDED
     to an existing ribbon chunk (merge_chunk_into's bridge-triangle merge),
     so a patched chunk's vcount/%4 alignment and per-row column layout no
-    longer describe the whole vertex array. Pad verts carry the exact
-    constant PAD_UV (0.58, 0.0) (single flat asphalt texel - see
-    _build_pad_fan); strip them and check only the surviving ribbon part.
+    longer describe the whole vertex array. Ribbon verts always sit at
+    u0 = 0 or 1 (every profile offset is >= the half-width, clamped), pad
+    verts strictly inside (_pad_uv's marking-free band; it replaced the old
+    constant PAD_UV 2026-09-07); strip those and check only the ribbon part.
     Returns a filtered chunk, or None if nothing but pad verts remain."""
     us = chunk["uvs"][0::2]
     vs = chunk["uvs"][1::2]
     keep = [i for i in range(len(us))
-            if not (abs(us[i] - PAD_U) < PAD_UV_EPS and vs[i] == 0.0)]
+            if not (U_EPS < us[i] < 1.0 - U_EPS)]
     if not keep:
         return None
     if len(keep) == len(us):

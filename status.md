@@ -496,6 +496,121 @@ each terrain worker.
   terrain tiles are byte-identical to the shipped ones. Test:
   `test_sample_dem.py`.
 
+### 7.51 Junction pads rerun for the §7.49 junctions (2026-10-01)
+
+The drive-test report: a lot of roads don't truly connect. The pads hadn't
+run since before §7.49, so 1,276 junctions had no pad.
+- **Carve after pad-swallow.** The terrain regrade ran before the swallow grew
+  the pads, so grown pads had raw terrain under them. It now runs after, and
+  every pad also gets interior carve anchors on a 3 m grid at its plane
+  height (`_pad_interior_points`).
+- **Rim-flatten** (`flatten_to_pad_rims`) is a final grade pass over the
+  FINAL pad shapes. Stations inside a pad sit on its surface, and approaches
+  blend back from the rim over `TRANSITION_LEN_M`. Grown pads used to leave
+  up to 3 m steps at the rim. Test: `pipeline/tests/test_flatten_to_pad_rims.py`.
+- **Connector welds** take the target road's regraded height, which removes
+  the weld potholes.
+- **The station sidecar** is now patched with the snapped x/y as well as z.
+  `verify_road_fit` and `verify_terrain_fit`'s shipped check probe those
+  shipped positions (`_shipped_stations`). `verify_road_uv` tells pad
+  vertices apart by u0 strictly inside (0, 1).
+- **Tilted pads** (`fit_pad_tilts`, 2026-10-02). Every non-fused pad now
+  sits on the plane through its roads' original grade (stations inside the
+  pad plus 10 m past the rim, capped at 12%), not flat at the junction
+  height. The rim blend carries that plane past the rim back to the original
+  grade, and circle pads are built tilted too. 1,858 of 1,868 pads now tilt;
+  pads more than 1 m off their road's grade went from 241 to 108.
+- **Bank fade.** Superelevation fades to 0 over the same ramp into each
+  pad (`build_road_chunks(bank_scale=)`). Before, a full 8° bank met the
+  pad with up to a 1.3 m outer-edge lip.
+- **Result:**
+
+  | Check | Before | After |
+  |---|---|---|
+  | Pad-footprint holes | 36.7% | 0 |
+  | Steps over 0.25 m | 72,217 | 6,278 |
+  | Road ends fully paved | 47.6% | 97.9% |
+  | Pads with terrain over 0.3 m above the road | 298 (max 4.43 m) | 6 (max 0.65 m) |
+
+  - `verify_road_fit`: PASS, with 0 pokes.
+  - `verify_road_uv`: PASS.
+  - `verify_terrain_fit` SHIPPED: PASS. The flat-pad Gore Creek loop
+    exception is gone too.
+- **Test:** `pipeline/tests/test_flatten_to_pad_rims.py`.
+- **SF test area and the rim-blend rework** (2026-10-02). New area
+  `sf_russian_hill` (`test_areas.py`): Union/Filbert/Greenwich ×
+  Hyde/Leavenworth/Jones, which have 25-30% blocks. `OD_AREA=<name>`
+  overrides `ACTIVE_AREA` for one-off bakes. SF exposed two flaws in the
+  approach blend in `flatten_to_pad_rims`:
+  - **Steps where approaches overlap.** "Strongest pull wins" swapped from
+    one pad's plane to the next between adjacent stations wherever two
+    approaches overlapped (blocks under 2 × `TRANSITION_LEN_M`): a 3.4 m step
+    on Hyde, and a 124% spike on Jones. The target is now the pulls'
+    weighted mean.
+  - **Catch-up steeper than the street.** The capped (12%) pad plane carried
+    50 m out made a 25% block's catch-up about 1.5 × the miss steeper. Past
+    the rim, the road now follows its own original grade shifted by its miss
+    at the rim, fading out. SF ships flat shelves at the crossings, and no
+    street is steeper than its original grade. The tilt cap barely matters
+    there: 5% and 12% bake within centimetres, because the DEM already has
+    the shelves.
+  - **Summit after both changes (run 11):**
+    - All verifiers PASS.
+    - Pokes 6 (max 0.65 m), holes 0, 97.9% of ends paved - unchanged.
+    - Pad steps 6,278 → 7,599. This is likely the rim crest/sag where a road
+      is steeper than its capped pad (not yet localised).
+  - **Cross-area fixes found on the way:**
+    - The road/ODR3 backups in the pads script keyed on the shared folder
+      existing, so a second area never backed up its originals.
+    - `_load_ribbon_flags` globbed another area's water flags.
+    - A dry area aborted `build_water_tiles`.
+  - **Not covered:** `diagnose_junctions` classes all 11 SF crossings as
+    grade-separated, so it doesn't rank them.
+- **Molded pads** (2026-10-02). A capped tilt plane can't follow a 25%
+  street, so the rim crested/sagged where the road met it. `fit_pad_tilts`
+  now also stores each road's miss from the plane (`j["mold"]`, one polyline
+  per road). `pad_plane_z` adds that miss back with a smoothstep in the
+  normalised radius: the plane at the centre, the road itself at the rim.
+  - **Which pads.** Only pads whose tilt hit `PAD_TILT_MAX_GRADE`, and only
+    when every road passes within `PAD_MOLD_MAX_CENTER_MISS_M` (0.5 m) of the
+    plane at the centre.
+    - Molding every pad traced DEM noise into bumps. Summit kinks went
+      9,350 → 9,928 and steps 5,772 → 12,253.
+    - Without the centre gate, two parallel roads 3 m apart through one pad
+      (summit pad 6) had their cross-slope drawn in: kinks 69 → 227.
+    - The gate leaves 2 SF pads and about 60 summit pads molded.
+  - **Mesh.** `_build_pad_fan` draws `PAD_MOLD_RINGS` (4) concentric rings
+    through `z_fn`. 8 rings measured no better.
+  - **Interpolation.** The miss is linear along each road (like the ribbon)
+    and blended across roads by 1/(d²+1). IDW and LinearND both
+    stair-stepped.
+  - **Approach-blend fixes from the same work.** These are most of SF's
+    gain:
+    - The base is `surface_at_snapped`: the original road surface where the
+      weld snap moved a station (up to ~11 m on SF), not the station's old
+      `elev`.
+    - The rim offset is measured at the first station outside the rim.
+    - Competing approaches weight w/(1−w), so the pad whose rim is right
+      there dominates.
+    - Fill and gate-cover discs tilt onto the local road grade
+      (`build_fill_disc`).
+  - **Metric.** `connect_check` "steps" (a first difference over 0.25 m per
+    1 m cell) counts grade on 25-30% streets. "Kinks" (3-cell second
+    difference over 0.25 m) is the discontinuity measure.
+  - **Results:**
+
+    | Area | Kinks | Steps | Holes | Verifiers |
+    |---|---|---|---|---|
+    | SF | 109 → 70 | 115 | 0 | all PASS |
+    | Summit (run 16) | 9,350 → 9,303 | 5,772 → 6,082 | 0 | all PASS |
+
+    - SF: no segment's shipped max grade exceeds its original.
+    - SF pads 0 and 5 keep about 20 kinks each, where steep downhill arms
+      leave the rim (top up to 0.68 m above the pad).
+    - Summit: pokes 5 pads over 0.3 m (max 0.68 m), 97.9% of ends paved.
+    - `pad_tilt_audit` reads `junction_pads_final.json`, which has no mold,
+      so its "108 pads > 1 m" measures the bare plane.
+
 ### Release engineering
 
 - Scripted `BuildCookRun` works for Development and Shipping (0 errors,
