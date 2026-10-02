@@ -79,7 +79,7 @@ from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M
-from road_mesh_common import sample_mesh_height, classify_wall_stations, WALL_EMBED_MARGIN_M
+from road_mesh_common import sample_mesh_heights, classify_wall_stations, WALL_EMBED_MARGIN_M
 
 # 1.0 m was the original first-pass tolerance, sized for the old uniform-41
 # grid (~50 m spacing), where the carve stamped elevation almost exactly at
@@ -234,9 +234,9 @@ def check_shipped_terrain_fit():
 
         positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
         triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
-        for i in idxs:
-            h_cm = sample_mesh_height(positions, triangles, float(st_x_cm[i]), float(st_y_cm[i]))
-            if h_cm is None:
+        hs = sample_mesh_heights(positions, triangles, st_x_cm[idxs], st_y_cm[idxs])
+        for i, h_cm in zip(idxs, hs):
+            if np.isnan(h_cm):
                 misses += 1
                 continue
             # + ORIGIN_HEIGHT_M: undo the shift road_ue_z_m() baked into Z at

@@ -14,7 +14,7 @@ Outputs to  data/raw/<AREA_NAME>_test/ :
 import json
 from pathlib import Path
 
-import requests
+from fetch_cache import overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
 
@@ -32,10 +32,6 @@ HIGHWAY_CLASS_REGEX = (
     "|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"
 )
 
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / f"{AREA_NAME}_test"
@@ -61,17 +57,7 @@ def fetch_osm_network():
     """
     print(f"Querying Overpass for drivable roads in {AREA_NAME} bbox "
           f"{'(ref-filtered: ' + ROAD_REF_REGEX + ')' if ROAD_REF_REGEX else ''} ...")
-    data = None
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
-            r.raise_for_status()
-            data = r.json()
-            break
-        except requests.RequestException as exc:
-            print(f"  {url} failed ({exc}), trying next mirror")
-    if data is None:
-        raise SystemExit("All Overpass mirrors failed.")
+    data = overpass_json(query, HEADERS)
     ways = [e for e in data["elements"] if e["type"] == "way"]
     nodes = [e for e in data["elements"] if e["type"] == "node"]
     if not ways:

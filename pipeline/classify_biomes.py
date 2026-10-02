@@ -43,6 +43,7 @@ from PIL import Image
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
+from fetch_cache import cached_bytes
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, BACKGROUND_BBOX_SNWE, BBOX_SNWE, TERRAIN_TILE_SIZE_CM
 
@@ -83,15 +84,19 @@ BIOME_NAMES = ["Deciduous", "Evergreen", "Chaparral", "Desert", "Plains",
 
 def _fetch_imagery_tile(session, z, x, y):
     url = TILE_URL.format(z=z, y=y, x=x)
-    for attempt in range(4):
-        try:
-            r = session.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            break
-        except requests.RequestException:
-            if attempt == 3:
-                raise
-    return np.asarray(Image.open(BytesIO(r.content)).convert("RGB"))
+
+    def fetch():
+        for attempt in range(4):
+            try:
+                r = session.get(url, headers=HEADERS, timeout=30)
+                r.raise_for_status()
+                return r.content
+            except requests.RequestException:
+                if attempt == 3:
+                    raise
+
+    img = cached_bytes("usgs_imagery", f"{z}/{x}/{y}", fetch)
+    return np.asarray(Image.open(BytesIO(img)).convert("RGB"))
 
 
 def _fetch_dem_tile(session, z, x, y):

@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from road_mesh_common import sample_mesh_height
+from road_mesh_common import sample_mesh_height, sample_mesh_heights
 
 
 def test_flat_patch():
@@ -195,6 +195,21 @@ def test_degenerate_triangle_ignored():
     assert h is None, h
 
 
+def test_batch_matches_scalar():
+    # sample_mesh_heights (2026-10-01) must agree exactly with the per-point
+    # call, including the topmost rule, edges and misses (NaN).
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(0, 1000, (60, 2))
+    positions = np.c_[pts, rng.uniform(0, 500, 60)]
+    triangles = rng.integers(0, 60, (200, 3))   # overlapping + degenerate mix
+    xs = np.r_[rng.uniform(-100, 1100, 3000), positions[:, 0]]
+    ys = np.r_[rng.uniform(-100, 1100, 3000), positions[:, 1]]
+    got = sample_mesh_heights(positions, triangles, xs, ys)
+    for x, y, g in zip(xs, ys, got):
+        h = sample_mesh_height(positions, triangles, float(x), float(y))
+        assert (h is None and np.isnan(g)) or h == g, (x, y, h, g)
+
+
 if __name__ == "__main__":
     test_flat_patch()
     test_sloped_ramp()
@@ -202,4 +217,5 @@ if __name__ == "__main__":
     test_outside_every_triangle_returns_none()
     test_shared_edge_seam()
     test_degenerate_triangle_ignored()
+    test_batch_matches_scalar()
     print("all sample_mesh_height fixture tests passed")

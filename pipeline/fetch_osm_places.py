@@ -12,7 +12,7 @@ Outputs to  data/raw/<AREA_NAME>_test/ :
 import json
 from pathlib import Path
 
-import requests
+from fetch_cache import overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
 
@@ -27,10 +27,6 @@ PLACE_CLASS_REGEX = "^(city|town|village|hamlet)$"
 # border-area station picking a farther-away in-bbox town by default
 MARGIN_DEG = 0.15
 
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / f"{AREA_NAME}_test"
@@ -46,17 +42,7 @@ def fetch_osm_places():
     out body;
     """
     print(f"Querying Overpass for named places in {AREA_NAME} bbox (+{MARGIN_DEG} deg margin) ...")
-    data = None
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
-            r.raise_for_status()
-            data = r.json()
-            break
-        except requests.RequestException as exc:
-            print(f"  {url} failed ({exc}), trying next mirror")
-    if data is None:
-        raise SystemExit("All Overpass mirrors failed.")
+    data = overpass_json(query, HEADERS)
 
     places = [{"name": el["tags"]["name"], "lat": el["lat"], "lon": el["lon"]}
               for el in data["elements"] if el["type"] == "node"]

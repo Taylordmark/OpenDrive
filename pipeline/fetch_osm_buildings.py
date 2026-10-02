@@ -33,14 +33,10 @@ apartments/etc. instead of assuming density implies height.
 import json
 from pathlib import Path
 
-import requests
+from fetch_cache import overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
 
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / f"{AREA_NAME}_test"
@@ -57,17 +53,7 @@ def fetch_osm_buildings():
     """
     print(f"Querying Overpass for building footprints in the {AREA_NAME} bbox "
           f"({s:.3f},{w:.3f},{n_:.3f},{e:.3f}) ...")
-    data = None
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
-            r.raise_for_status()
-            data = r.json()
-            break
-        except requests.RequestException as exc:
-            print(f"  {url} failed ({exc}), trying next mirror")
-    if data is None:
-        raise SystemExit("All Overpass mirrors failed.")
+    data = overpass_json(query, HEADERS)
 
     nodes = {el["id"]: (el["lat"], el["lon"])
              for el in data["elements"] if el["type"] == "node"}

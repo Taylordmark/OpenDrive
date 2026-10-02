@@ -13,23 +13,23 @@ When something here is finished, delete it from this file and add a line to
 
 ## 1. Now: road/terrain fit follow-ups (from §7.43–7.47)
 
-- **Dennison Road float (2 stations).** seg273 k116/117 at (−10734, 1758) m:
-  the road sits about 4 m above the terrain on a climb capped at 22%, and the
-  nearest embankment is 10.5 m away. This is what fails `verify_terrain_fit`
-  PRE-BAKE (4.54 m against a 2.8 m tolerance) and stopped `rebuild_area.py`
-  before stage 28. Two options:
+- **Dennison Road float (1 station since §7.48).** Station 184480 at
+  (−10734, 1756) m: the road sits about 4 m above the terrain on a climb
+  capped at 22%, and the nearest embankment is 10.5 m away. This is what fails
+  `verify_terrain_fit` (3.95 m against a 2.8 m tolerance), and that stops
+  `rebuild_area.py` before its last stage, `verify_road_fit`, so run that by
+  hand. Two options:
   - extend the embankment runs to cover it;
   - have the verifier count embankment coverage the same way it counts walls.
-- **Edge poke-through.** Terrain sits more than 0.3 m above the pavement edge
-  at 980 left-edge stations (max 1.87 m) and 1,210 right-edge stations
-  (max 2.17 m). The centre probe has 190, max 1.09 m.
-  - Worst spots: stations 121231 (−21914, 10585), 40818 (17084, 15978) and
-    113329 (12074, 11046).
-  - Likely sidehill cuts that the 7.8 m near grid can't carve sharply enough.
-    Fix the carve's cross-slope reach or add a finer edge sample.
-  - Needs a terrain rebake, so ask first.
+- **Road float after the §7.48 ceiling.** 11,699 near-tile stations float
+  more than 0.7 m (3,291 over 2 m). This is the price of 0 buried stations.
+  If it shows in drive-tests, the next step is the 513 near grid (3.9 m cells).
 - **Junction-flatten steps.** About 45 steps of 2–3 m sit near segment ends.
-  They predate §7.47.
+  They predate §7.47. Re-measure them after §7.49, which added 1,276
+  junctions.
+- **Junction pads are stale.** `experimental_junction_pads.py` is not in
+  `rebuild_area.py` STAGES and hasn't run since before §7.49, so the new
+  junctions have no pads.
 - **Re-check the downstream systems against the new elevations:**
   - `WALL_MIN_GRADE` and the conflict detection (§7.12);
   - the Frisco North 6th Ave dead-end float, 1–2 m (§7.14);

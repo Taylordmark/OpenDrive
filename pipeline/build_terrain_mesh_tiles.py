@@ -67,7 +67,7 @@ import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
                               half_width_for_stations, road_ue_z_m,
-                               classify_wall_stations, sample_mesh_height)
+                               classify_wall_stations, sample_mesh_heights)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
@@ -1451,8 +1451,7 @@ def _sample_one_tile(job):
     station_data, _gen, session, caches = _BAKE_WORKER
     tile = build_tile(tx, ty, is_near, station_data, session, caches)
     pos, tri = tile["verts"][:, [0, 1, 2]], tile["tris"]
-    hs = [sample_mesh_height(pos, tri, float(x), float(y)) for x, y in zip(xs_cm, ys_cm)]
-    return np.array([np.nan if h is None else h for h in hs])
+    return sample_mesh_heights(pos, tri, xs_cm, ys_cm)
 
 
 def sample_built_tiles(jobs, station_data):

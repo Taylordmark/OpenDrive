@@ -14,6 +14,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+from fetch_cache import cached_bytes
+
 TERRAIN_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 
 
@@ -28,18 +30,24 @@ def lonlat_to_tilepx(lon, lat, z):
 
 
 def fetch_terrarium_tile(z, x, y, session=None, retries=3):
-    """Fetch one Terrarium PNG tile (slippy/XYZ numbering). Returns a PIL Image."""
+    """Fetch one Terrarium PNG tile (slippy/XYZ numbering). Returns a PIL Image.
+    Kept on disk after the first download (fetch_cache)."""
     session = session or requests
     url = TERRAIN_URL.format(z=z, x=x, y=y)
-    for attempt in range(retries):
-        try:
-            resp = session.get(url, timeout=30)
-            resp.raise_for_status()
-            return Image.open(BytesIO(resp.content)).convert("RGB")
-        except requests.RequestException:
-            if attempt == retries - 1:
-                raise
-            time.sleep(1.5 * (attempt + 1))
+
+    def fetch():
+        for attempt in range(retries):
+            try:
+                resp = session.get(url, timeout=30)
+                resp.raise_for_status()
+                return resp.content
+            except requests.RequestException:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(1.5 * (attempt + 1))
+
+    png = cached_bytes("terrarium", f"{z}/{x}/{y}.png", fetch)
+    return Image.open(BytesIO(png)).convert("RGB")
 
 
 def terrarium_to_elevation(img):

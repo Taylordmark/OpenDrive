@@ -66,6 +66,8 @@ scale, built from open data, with a stylized "real places, storybook look".
   - in `Masks/`: `_road_backup_junction_pads`, `_terrain_backup_junction_pads`
     and `_sidecar_backup_junction_pads`;
   - in `MasksV2/`: `_roadv3_backup_junction_pads`.
+- **Downloads are cached in `data/cache/`** (§7.50). Delete a kind's dir to
+  pull fresh data from the source.
 - **Commit early**, even to a scratch branch. Three pipeline scripts were
   lost uncommitted in July.
 - **Crash handling:** triage new UE crashes from `Saved/Crashes` before
@@ -424,6 +426,68 @@ Two checks still fail:
   2 Dennison Road stations.
 
 Both are in `next steps.md`.
+
+### 7.48 Terrain pavement ceiling + 8-way parallel bake (2026-09-30, c5bc094/62d543c)
+
+The drive-test report: the road sat below the terrain in many places.
+- **`pavement_ceiling`** (`build_terrain_mesh_tiles.py`) caps the 4 corners
+  of every cell a pavement probe lands in at the road's grade line minus a
+  margin, and probes one cell into neighbouring tiles.
+- **Near-tile margin is `HARD_CLAMP_MARGIN_M + 0.10`** (0.25 m). Martini
+  simplification lifts the surface after the cap. An in-memory trial over 13
+  I-70 tiles buried nothing at 0.15–0.45. The full 0.45 m floated the road a
+  median 0.55 m, past the wrap lip on 7% of it.
+- **Road-free far tiles skip the ceiling.** Otherwise the neighbour probes
+  dragged their corners down and opened near/far seams of up to 49 m.
+- **Bake runs 8 worker processes** (`BAKE_WORKERS`). Full terrain went from
+  47 to 10.6 min. `verify_terrain_fit`'s pre-bake check and
+  `build_forest_elevation` sample through the same pool.
+- **Test:** `pipeline/tests/test_pavement_ceiling.py`.
+- **Result:** 0 buried stations on near and coarse tiles. Near-tile float has
+  a median of 0.36 m, with 11,699 stations over 0.7 m (3,521 before). Seams
+  are unchanged: 378 edges over tolerance, all from the existing near/far
+  skirts.
+
+### 7.49 Junctions at interior nodes (2026-10-01)
+
+The drive-test report: roads ended directly on top of other roads with no
+junction.
+- **Cause:** junction detection used `merge_way_chains`' degree, which counts
+  only way ENDS. OSM joins a side street to a through way at one of the
+  through way's interior nodes, which scored 1. That missed 1,664 T-junctions
+  and 101 crossings.
+- **Fix:** `junction_node_degree` counts 1 per way end and 2 per way passing
+  through. Each segment carries `node_s`: every junction node along it and its
+  arc length. The flatten blends at that arc length, on both sides for a
+  through road.
+- **Roads are not split at junctions.** Splitting would have dropped 1,119
+  junction-to-junction pieces (53.5 km) under `MIN_SEGMENT_STATIONS`.
+- **Test:** `pipeline/tests/test_junction_node_degree.py`.
+- **Result:** junctions went from 495 to 1,771. Road ends on another road's
+  pavement with no junction box went from 946 (286 over 1 m of height
+  difference, worst +11 m at High Road / US 24) to 1 (0.13 m).
+- **Full rebuild:** `verify_road_fit` PASSES (mean dev 0.18 m, max 4.24 m),
+  with 0 poke-through. `verify_terrain_fit` fails only on Dennison Road
+  station 184480 (3.95 m against 2.8 m).
+
+### 7.50 Download cache (2026-10-01)
+
+Every rebake re-downloaded the same data. Terrarium DEM tiles took about
+1 s each and were fetched again by each stage that samples heights and by
+each terrain worker.
+- **`fetch_cache.py`** keeps every download under `data/cache/<kind>/`:
+  `terrarium/` (via `terrain_common.fetch_terrarium_tile`), `usgs_imagery/`
+  (`classify_biomes`), and `overpass/`. Overpass responses are keyed by query
+  text, so the OSM fetch stages, water and parking all reuse them.
+- **To refresh from the source,** delete that kind's dir, e.g.
+  `data/cache/overpass/` to pick up OSM edits.
+- **Test:** `pipeline/tests/test_fetch_cache.py`.
+- **`sample_mesh_heights`** (`road_mesh_common.py`) is a batch version of
+  `sample_mesh_height`. It bins triangles into a grid, gives bit-identical
+  results, and is about 300× faster on a 75k-triangle near tile.
+  `verify_forest_elevation_fit` went from over an hour to 10 s. The terrain
+  pool's sampler and `verify_terrain_fit`'s shipped check use it too. Pinned
+  by `test_batch_matches_scalar`.
 
 ### Release engineering
 

@@ -34,7 +34,7 @@ import numpy as np
 from bin_tile_io import parse_terrain_tile_bin
 from build_terrain_mesh_tiles import TERRAIN_TILE_SIZE_CM as TILE_CM
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
-from road_mesh_common import sample_mesh_height
+from road_mesh_common import sample_mesh_heights
 from test_areas import AREA_NAME
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,14 +98,13 @@ def main():
             misses += len(idxs)
             continue
         positions, triangles = mesh
-        for i in idxs:
-            h_cm = sample_mesh_height(positions, triangles, float(x_cm[i]), float(y_cm[i]))
-            if h_cm is None:
-                misses += 1
-                continue
-            devs.append(abs(h_cm - float(z_cm[i])) / 100.0)  # cm -> m
+        idxs = np.array(idxs)
+        h_cm = sample_mesh_heights(positions, triangles, x_cm[idxs], y_cm[idxs])
+        hit = ~np.isnan(h_cm)
+        misses += int((~hit).sum())
+        devs.extend(np.abs(h_cm[hit] - z_cm[idxs][hit]) / 100.0)  # cm -> m
 
-    devs = np.array(devs) if devs else np.array([0.0])
+    devs = np.array(devs) if len(devs) else np.array([0.0])
     mean_dev = float(np.mean(devs))
     max_dev = float(np.max(devs)) if len(devs) else 0.0
     print(f"{len(tiles)} distinct terrain tile(s) referenced ({missing_tiles} missing/unreadable)")

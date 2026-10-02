@@ -133,6 +133,8 @@ from pathlib import Path
 
 import numpy as np
 import requests
+
+from fetch_cache import overpass_json
 from scipy.spatial import cKDTree
 
 from build_terrain_mesh_tiles import NEAR_DEM_ZOOM, sample_dem
@@ -140,10 +142,6 @@ from generation_id import compute_generation_id, delete_stale_tiles, pack_genera
 from road_mesh_common import ROAD_HALF_WIDTH, road_ue_z_m
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
 
 M_PER_DEG_LAT = 111132.0
@@ -245,17 +243,7 @@ def fetch_water_polygons():
     # their nodes unfetched. See module docstring (MULTIPOLYGON RELATIONS).
     print(f"Querying Overpass for water polygons/relations in the {AREA_NAME} bbox "
           f"({s:.3f},{w:.3f},{n_:.3f},{e:.3f}) ...")
-    data = None
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
-            r.raise_for_status()
-            data = r.json()
-            break
-        except requests.RequestException as exc:
-            print(f"  {url} failed ({exc}), trying next mirror")
-    if data is None:
-        raise SystemExit("All Overpass mirrors failed.")
+    data = overpass_json(query, HEADERS)
 
     nodes = {el["id"]: (el["lat"], el["lon"])
              for el in data["elements"] if el["type"] == "node"}
@@ -410,17 +398,7 @@ def fetch_waterways():
     """
     print(f"Querying Overpass for waterways in the {AREA_NAME} bbox "
           f"({s:.3f},{w:.3f},{n_:.3f},{e:.3f}) ...")
-    data = None
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=HEADERS, timeout=200)
-            r.raise_for_status()
-            data = r.json()
-            break
-        except requests.RequestException as exc:
-            print(f"  {url} failed ({exc}), trying next mirror")
-    if data is None:
-        raise SystemExit("All Overpass mirrors failed.")
+    data = overpass_json(query, HEADERS)
 
     nodes = {el["id"]: (el["lat"], el["lon"])
              for el in data["elements"] if el["type"] == "node"}

@@ -1911,3 +1911,67 @@ def sample_mesh_height(positions, triangles, x_cm, y_cm, eps=1e-4):
     zc_all = tri_pts[idxs, 2, 2]
     z_all = w_a[idxs] * za_all + w_b[idxs] * zb_all + w_c[idxs] * zc_all
     return float(np.max(z_all))
+
+
+def sample_mesh_heights(positions, triangles, xs_cm, ys_cm, eps=1e-4, chunk=50_000):
+    """Batch sample_mesh_height (2026-10-01): the same barycentric test and
+    topmost rule at many points, NaN where a point is off-mesh. Triangles are
+    binned by XY bounding box into a grid, so each point only tests the few
+    triangles in its cell instead of all of them - per-point calls over a
+    whole tile took the forest verifier over an hour."""
+    xs = np.asarray(xs_cm, dtype=np.float64)
+    ys = np.asarray(ys_cm, dtype=np.float64)
+    out = np.full(len(xs), -np.inf)
+    if len(xs) == 0 or len(triangles) == 0:
+        return np.full(len(xs), np.nan)
+    tri_pts = positions[triangles]   # (M, 3, 3)
+    tx, ty = tri_pts[:, :, 0], tri_pts[:, :, 1]
+    # pad each bbox: eps lets a point sit a hair outside its triangle
+    pad = 1.0 + 1e-3 * np.maximum(tx.max(1) - tx.min(1), ty.max(1) - ty.min(1))
+    bx0, bx1 = tx.min(1) - pad, tx.max(1) + pad
+    by0, by1 = ty.min(1) - pad, ty.max(1) + pad
+    g = int(np.clip(np.sqrt(len(triangles)) / 2, 1, 256))
+    gx0, gy0 = bx0.min(), by0.min()
+    cell = max(bx1.max() - gx0, by1.max() - gy0) / g
+
+    def to_cell(v, v0):
+        return np.clip(((v - v0) / cell).astype(np.int64), 0, g - 1)
+
+    ci0, ci1, cj0, cj1 = to_cell(bx0, gx0), to_cell(bx1, gx0), to_cell(by0, gy0), to_cell(by1, gy0)
+    nx = ci1 - ci0 + 1
+    cnt = nx * (cj1 - cj0 + 1)
+    k = np.arange(cnt.sum()) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    nx_r = np.repeat(nx, cnt)
+    cells = (np.repeat(cj0, cnt) + k // nx_r) * g + np.repeat(ci0, cnt) + k % nx_r
+    order = np.argsort(cells, kind="stable")
+    tri_of = np.repeat(np.arange(len(triangles)), cnt)[order]
+    starts = np.searchsorted(cells[order], np.arange(g * g))
+    ends = np.searchsorted(cells[order], np.arange(g * g), side="right")
+
+    ax, ay, az = tri_pts[:, 0, 0], tri_pts[:, 0, 1], tri_pts[:, 0, 2]
+    bx, by, bz = tri_pts[:, 1, 0], tri_pts[:, 1, 1], tri_pts[:, 1, 2]
+    cx, cy, cz = tri_pts[:, 2, 0], tri_pts[:, 2, 1], tri_pts[:, 2, 2]
+    denom = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+
+    for lo in range(0, len(xs), chunk):
+        px, py = xs[lo:lo + chunk], ys[lo:lo + chunk]
+        inside_grid = ((px >= gx0) & (px <= gx0 + g * cell)
+                       & (py >= gy0) & (py <= gy0 + g * cell))
+        pc = to_cell(py, gy0) * g + to_cell(px, gx0)
+        c = np.where(inside_grid, ends[pc] - starts[pc], 0)
+        pt = np.repeat(np.arange(len(px)), c)
+        kk = np.arange(c.sum()) - np.repeat(np.cumsum(c) - c, c)
+        tri = tri_of[np.repeat(starts[pc], c) + kk]
+        x, y = px[pt], py[pt]
+        d = denom[tri]
+        nonzero = d != 0
+        d = np.where(nonzero, d, 1.0)
+        w_a = ((by[tri] - cy[tri]) * (x - cx[tri]) + (cx[tri] - bx[tri]) * (y - cy[tri])) / d
+        w_b = ((cy[tri] - ay[tri]) * (x - cx[tri]) + (ax[tri] - cx[tri]) * (y - cy[tri])) / d
+        w_c = 1.0 - w_a - w_b
+        ok = nonzero & (w_a >= -eps) & (w_b >= -eps) & (w_c >= -eps)
+        tri, pt = tri[ok], pt[ok]
+        z = w_a[ok] * az[tri] + w_b[ok] * bz[tri] + w_c[ok] * cz[tri]
+        np.maximum.at(out, lo + pt, z)
+    out[np.isinf(out)] = np.nan
+    return out
