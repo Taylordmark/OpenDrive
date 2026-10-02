@@ -488,6 +488,13 @@ each terrain worker.
   `verify_forest_elevation_fit` went from over an hour to 10 s. The terrain
   pool's sampler and `verify_terrain_fit`'s shipped check use it too. Pinned
   by `test_batch_matches_scalar`.
+- **`lakes_near`** (`build_terrain_mesh_tiles.py`) prefilters the 45k lake
+  rings by bbox before barrier/guardrails/embankments' per-lake loops (about
+  144M `bb.any()` calls each). Those stages went from 1000-1090 s to
+  17-28 s, with byte-identical JSON. Test: `test_lakes_near.py`.
+- **`sample_dem`** is vectorized (it was a per-point Python loop). Rebuilt
+  terrain tiles are byte-identical to the shipped ones. Test:
+  `test_sample_dem.py`.
 
 ### Release engineering
 

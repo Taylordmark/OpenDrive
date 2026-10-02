@@ -76,18 +76,20 @@ import math
 import struct
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
-import requests
 
 import build_terrain_mesh_tiles as btmt
+from export_road_mesh_bin import write_tile
+from export_road_mesh_bin_v2 import write_tile as write_tile_v3
 from build_road_network import split_excluding_tunnels, write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks,
                                half_width_for_stations, road_ue_z_m,
-                               sample_mesh_height)
+                               sample_mesh_height, unpaved_stations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -170,43 +172,9 @@ ENDPOINT_SNAP_MAX_M = 35.0
 
 
 # ------------------------------------------------------------------ ODR2 I/O
-def write_tile(path, chunks, gen_id_bytes):
-    with open(path, "wb") as f:
-        f.write(b"ODR2")
-        f.write(gen_id_bytes)
-        f.write(struct.pack("<I", len(chunks)))
-        for c in chunks:
-            verts, uvs, tris = c["vertices"], c["uvs"], c["triangles"]
-            vcount, tcount = len(verts) // 3, len(tris) // 3
-            f.write(struct.pack("<II", vcount, tcount))
-            f.write(struct.pack("<B", 1 if c.get("oneway") else 0))
-            f.write(struct.pack(f"<{len(verts)}f", *verts))
-            f.write(struct.pack(f"<{len(uvs)}f", *uvs))
-            f.write(struct.pack(f"<{len(tris)}I", *tris))
-
-
-def write_tile_v3(path, chunks, gen_id_bytes):
-    """ODR3 layout - must stay byte-identical to export_road_mesh_bin_v2.
-    write_tile() (which is what ODRoadManager::ParseRoadTileFileV3 parses):
-    ODR2's header/verts/uv0/tris plus a second per-vertex UV channel (uv1.x =
-    half-width m) and two per-chunk metadata bytes (road_class_id,
-    lane_count)."""
-    with open(path, "wb") as f:
-        f.write(b"ODR3")
-        f.write(gen_id_bytes)
-        f.write(struct.pack("<I", len(chunks)))
-        for c in chunks:
-            verts, uvs, uv1, tris = c["vertices"], c["uvs"], c["uv1"], c["triangles"]
-            vcount, tcount = len(verts) // 3, len(tris) // 3
-            assert len(uv1) // 2 == vcount, f"{c['name']}: uv1/vertex count mismatch"
-            f.write(struct.pack("<II", vcount, tcount))
-            f.write(struct.pack("<B", 1 if c.get("oneway") else 0))
-            f.write(struct.pack("<B", int(c.get("road_class_id", 6))))
-            f.write(struct.pack("<B", int(c.get("lane_count", 2))))
-            f.write(struct.pack(f"<{len(verts)}f", *verts))
-            f.write(struct.pack(f"<{len(uvs)}f", *uvs))
-            f.write(struct.pack(f"<{len(uv1)}f", *uv1))
-            f.write(struct.pack(f"<{len(tris)}I", *tris))
+# The exporters' own writers (2026-10-01): the copies that used to live here
+# drifted - the ODR3 one never learned the unpaved flag bit (d8bf4ed), so
+# every patched tile turned gravel roads back into asphalt.
 
 
 def chunk_centroid(chunk):
@@ -2355,7 +2323,7 @@ def restore():
         print("no terrain backup found - nothing to restore there")
     else:
         n = 0
-        for p in TERRAIN_BACKUP_DIR.glob(f"terrain_{AREA_NAME}_test_tile_*.bin"):
+        for p in TERRAIN_BACKUP_DIR.glob(f"terrain*_{AREA_NAME}_test_tile_*.bin"):
             (OUT_DIR / p.name).write_bytes(p.read_bytes())
             n += 1
         print(f"restored {n} terrain tile(s) from {TERRAIN_BACKUP_DIR}")
@@ -2612,29 +2580,25 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
         (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r),
         junctions)
 
-    session = requests.Session()
-    caches = ({}, {})
     gen_id_bytes = pack_generation_id(compute_generation_id())
 
     if not TERRAIN_BACKUP_DIR.exists():
         TERRAIN_BACKUP_DIR.mkdir(parents=True)
     backed_up = 0
-    paths = {}
-    built = {}
     for (tx, ty) in sorted(tiles_needed):
-        path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        backup_path = TERRAIN_BACKUP_DIR / path.name
-        if path.exists() and not backup_path.exists():
-            backup_path.write_bytes(path.read_bytes())
-            backed_up += 1
-        # every junction-adjacent tile is, by construction, within the road
-        # corridor - always a NEAR tile (full-res grid + collision), never
-        # the coarse background/far LOD.
-        built[(tx, ty)] = btmt.build_tile(tx, ty, True, station_data, session, caches)
-        paths[(tx, ty)] = path
-
-    for key, tile in built.items():
-        btmt.write_tile_bin(paths[key], tile, gen_id_bytes)
+        for prefix in ("terrain", "terrain_coarse"):
+            path = OUT_DIR / f"{prefix}_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+            backup_path = TERRAIN_BACKUP_DIR / path.name
+            if path.exists() and not backup_path.exists():
+                backup_path.write_bytes(path.read_bytes())
+                backed_up += 1
+    # every junction-adjacent tile is, by construction, within the road
+    # corridor - always a NEAR tile (full-res grid + collision). Built in
+    # btmt's own bake pool (2026-10-01: was serial, ~30 min for 155 tiles),
+    # which also rewrites the tile's coarse LOD (was left stale).
+    with ProcessPoolExecutor(btmt.BAKE_WORKERS, initializer=btmt._init_bake_worker,
+                             initargs=(station_data, gen_id_bytes)) as pool:
+        list(pool.map(btmt._bake_one_tile, [(k, True) for k in sorted(tiles_needed)], chunksize=4))
     print(f"regrade_terrain: re-carved {len(tiles_needed)} terrain tile(s) "
           f"around {len(junctions)} junction(s) using pad-rim anchors"
           + (f", backed up {backed_up} original(s) -> {TERRAIN_BACKUP_DIR}" if backed_up else ""))
@@ -3296,6 +3260,12 @@ def main():
     all_chunks = list(connector_chunks)
     total_km = 0.0
     goff = 0
+    # bounding circle per pad (margin 0) - prefilters the per-station
+    # point_in_pad scans below to the pads near each run (2026-10-01: was
+    # every station x every pad, ~500M calls with 1870 pads)
+    pad_bound = np.array([(j["ellipse"][0], j["ellipse"][1], max(j["ellipse"][2], j["ellipse"][3]))
+                          if j.get("shape") == "ellipse" else (j["xy"][0], j["xy"][1], j["radius_m"])
+                          for j in junctions]).reshape(-1, 3)
     for si, seg in enumerate(raw["segments"]):
         s_full = np.array(seg["s_m"])
         e_full = np.array(seg["east_m"])
@@ -3305,6 +3275,11 @@ def main():
         is_oneway_full = seg.get("oneway")
         highway_full = seg.get("highway_class")   # absent in older files
         lanes_full = seg.get("lanes")
+        # same two per-station channels build_road_network.py feeds
+        # build_road_chunks (2026-10-01: missing here, so a patched bake lost
+        # gravel surfaces and the junction marking-suppression ramps)
+        surface_full = seg.get("surface")
+        jsup_full = np.array(seg.get("junction_suppress", [0.0] * len(s_full)), dtype=np.float64)
         runs = list(split_excluding_tunnels(is_tunnel))
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
@@ -3314,6 +3289,8 @@ def main():
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_run = highway_full[lo:hi] if highway_full else None
             lanes_run = lanes_full[lo:hi] if lanes_full else None
+            unpaved_run = unpaved_stations(surface_full[lo:hi]) if surface_full else None
+            jsup_run = jsup_full[lo:hi]
             # Same per-station width build_road_network.py bakes into
             # road_mesh.json (2026-09-06 lanes=-tag width work) - computed
             # over the whole run, like build_road_network does, so the
@@ -3339,9 +3316,12 @@ def main():
             # PAD_OVERLAP_MARGIN_M) disc to cover that whole footprint avoids
             # ribbon-vs-ribbon overlap entirely instead of trying to paper
             # over it.
+            near_pads = [junctions[k] for k in np.flatnonzero(
+                (pad_bound[:, 0] + pad_bound[:, 2] >= e.min()) & (pad_bound[:, 0] - pad_bound[:, 2] <= e.max()) &
+                (pad_bound[:, 1] + pad_bound[:, 2] >= nn.min()) & (pad_bound[:, 1] - pad_bound[:, 2] <= nn.max()))]
             inside_circle = np.array([
-                any(point_in_pad(e[i], nn[i], j, margin=0.0) for j in junctions)
-                for i in range(len(e))])
+                any(point_in_pad(e[i], nn[i], j, margin=0.0) for j in near_pads)
+                for i in range(len(e))], dtype=bool)
             inside_prox = prox_mask[goff + lo:goff + lo + len(e)]
             inside = inside_circle | inside_prox
             for i in range(len(e)):
@@ -3375,7 +3355,7 @@ def main():
                     px = e[oi] + t * (e[ii] - e[oi])
                     py = nn[oi] + t * (nn[ii] - nn[oi])
                     if any(point_in_pad(px, py, j, margin=-PAD_RIM_TUCK_M)
-                           for j in junctions):
+                           for j in near_pads):
                         t_hi = t
                     else:
                         t_lo = t
@@ -3414,6 +3394,8 @@ def main():
                         ow_r = list(is_oneway[p0:p1]) if is_oneway is not None else None
                         hc_r = list(highway_run[p0:p1]) if highway_run else None
                         ln_r = list(lanes_run[p0:p1]) if lanes_run else None
+                        up_r = list(unpaved_run[p0:p1]) if unpaved_run is not None else None
+                        js_r = jsup_run[p0:p1]
                         # categorical per-station tags at an interpolated rim
                         # station copy the adjacent real station's values
                         head = tail = None
@@ -3436,6 +3418,9 @@ def main():
                                 hc_r = [hc_r[0]] + hc_r
                             if ln_r is not None:
                                 ln_r = [ln_r[0]] + ln_r
+                            if up_r is not None:
+                                up_r = [up_r[0]] + up_r
+                            js_r = np.concatenate([[js_r[0]], js_r])
                         if tail is not None:
                             s_r = np.concatenate([s_r, [tail[0]]])
                             e_r = np.concatenate([e_r, [tail[1]]])
@@ -3449,13 +3434,18 @@ def main():
                                 hc_r = hc_r + [hc_r[-1]]
                             if ln_r is not None:
                                 ln_r = ln_r + [ln_r[-1]]
+                            if up_r is not None:
+                                up_r = up_r + [up_r[-1]]
+                            js_r = np.concatenate([js_r, [js_r[-1]]])
                         chunks, cx, cy, cz = build_road_chunks(
                             s_r, e_r, n_r, z_r, name_prefix=sub_name,
                             spacing=STATION_SPACING, is_oneway=ow_r,
                             skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP,
                             highway_classes=hc_r,
                             osm_lanes=ln_r,
-                            half_width_s=hw_r)
+                            half_width_s=hw_r,
+                            junction_suppress=js_r,
+                            is_unpaved=up_r)
                         all_chunks.extend(chunks)
                         total_km += float(s_r[-1] - s_r[0]) / 1000.0
                         sub_idx += 1

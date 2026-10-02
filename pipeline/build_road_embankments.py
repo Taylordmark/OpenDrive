@@ -346,7 +346,7 @@ import requests
 from road_mesh_common import ROAD_HALF_WIDTH, road_ue_z_m, reconcile_junction_elevations
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
-                                       load_lake_beds, _point_in_polygon,
+                                       lakes_near, load_lake_beds, _point_in_polygon,
                                        WATER_SHORE_BLEND_M)
 
 LAKE_SHORE_EXCLUSION_MARGIN_M = WATER_SHORE_BLEND_M + 3.0   # bbox pre-filter only, see docstring
@@ -741,7 +741,7 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
                                        # clearance guard and the pier/deck water-surface
                                        # termination (see module docstring)
     bbox_margin_cm = LAKE_SHORE_EXCLUSION_MARGIN_M * 100.0
-    for lake in lakes:
+    for lake in lakes_near(lakes, edge_cx, edge_cy, bbox_margin_cm):
         bx0, bx1, by0, by1 = lake["bbox"]
         bb = ((edge_cx >= bx0 - bbox_margin_cm) & (edge_cx <= bx1 + bbox_margin_cm) &
               (edge_cy >= by0 - bbox_margin_cm) & (edge_cy <= by1 + bbox_margin_cm))

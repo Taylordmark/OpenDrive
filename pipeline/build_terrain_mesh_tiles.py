@@ -578,6 +578,28 @@ def load_lake_beds():
     return lakes
 
 
+_LAKE_BBOXES = {}
+
+
+def lakes_near(lakes, x, y, margin_cm):
+    """The lakes (in order) whose bbox, grown by margin_cm, overlaps the
+    bbox of points x/y - a vectorized prefilter for the per-lake
+    `bb = (x >= bx0 - margin) & ...; if not bb.any(): continue` loops in
+    barrier/guardrails/embankments, which ran ~144M times per stage
+    (2026-10-01). Any lake it drops would have failed bb.any() anyway."""
+    hit = _LAKE_BBOXES.get(id(lakes))
+    if hit is None or hit[0] is not lakes:
+        hit = _LAKE_BBOXES[id(lakes)] = (lakes, np.array([l["bbox"] for l in lakes],
+                                                         dtype=np.float64).reshape(-1, 4))
+    b = hit[1]
+    if len(x) == 0 or not np.isfinite(x).any():
+        return []
+    x0, x1, y0, y1 = np.nanmin(x), np.nanmax(x), np.nanmin(y), np.nanmax(y)
+    keep = ((b[:, 0] - margin_cm <= x1) & (b[:, 1] + margin_cm >= x0) &
+            (b[:, 2] - margin_cm <= y1) & (b[:, 3] + margin_cm >= y0))
+    return [lakes[i] for i in np.flatnonzero(keep)]
+
+
 def _point_in_polygon(px, py, ring_x, ring_y):
     """Vectorized even-odd ray-casting point-in-polygon test, same algorithm
     as build_water_tiles.point_in_polygon (independent copy - see this
@@ -749,8 +771,11 @@ def _get_struct_mask(n):
         _STRUCT_MASK_CACHE = np.concatenate([
             np.array(s.get("is_struct", s.get("is_bridge", [False] * len(s["east_m"]))), dtype=bool)
             for s in segs])
-    assert len(_STRUCT_MASK_CACHE) == n, (len(_STRUCT_MASK_CACHE), n)
-    return _STRUCT_MASK_CACHE
+    m = len(_STRUCT_MASK_CACHE)
+    assert n >= m, (m, n)
+    # extra trailing entries: experimental_junction_pads' pad-rim anchors,
+    # appended after every real station - never a structure
+    return _STRUCT_MASK_CACHE if n == m else np.concatenate([_STRUCT_MASK_CACHE, np.zeros(n - m, bool)])
 
 
 _PAVEMENT_CACHE = None
@@ -937,22 +962,25 @@ def sample_dem(lat_arr, lon_arr, zoom, session, cache):
             ) from exc
         cache[key] = terrarium_to_elevation(img)
 
-    def px(tx, ty, x, y):
-        return float(cache[(zoom, tx, ty)][y, x])
+    # vectorized (2026-10-01; was a per-point Python loop) - same float64
+    # expression in the same order, so bit-identical to the old loop
+    keys = sorted(needed)
+    stack = np.stack([np.asarray(cache[(zoom, tx, ty)]) for tx, ty in keys])
+    key_ids = np.array([tx * (n // 256 + 2) + ty for tx, ty in keys], dtype=np.int64)
 
-    out = np.empty(len(lat_arr), dtype=np.float32)
-    for i in range(len(lat_arr)):
-        tx, ty = int(tx_arr[i]), int(ty_arr[i])
-        lx, ly = px_glob[i] - tx * 256, py_glob[i] - ty * 256
-        x0, y0 = min(int(lx), 255), min(int(ly), 255)
-        fx, fy = lx - x0, ly - y0
-        tx1, x1 = (tx + 1, 0) if x0 == 255 else (tx, x0 + 1)
-        ty1, y1 = (ty + 1, 0) if y0 == 255 else (ty, y0 + 1)
-        v00, v01 = px(tx, ty, x0, y0), px(tx1, ty, x1, y0)
-        v10, v11 = px(tx, ty1, x0, y1), px(tx1, ty1, x1, y1)
-        out[i] = (v00 * (1 - fx) * (1 - fy) + v01 * fx * (1 - fy)
-                  + v10 * (1 - fx) * fy + v11 * fx * fy)
-    return out
+    def px(tx, ty, x, y):
+        k = np.searchsorted(key_ids, tx.astype(np.int64) * (n // 256 + 2) + ty)
+        return stack[k, y, x].astype(np.float64)
+
+    lx, ly = px_glob - tx_arr * 256, py_glob - ty_arr * 256
+    x0, y0 = np.minimum(lx.astype(int), 255), np.minimum(ly.astype(int), 255)
+    fx, fy = lx - x0, ly - y0
+    tx1, x1 = np.where(x0 == 255, tx_arr + 1, tx_arr), np.where(x0 == 255, 0, x0 + 1)
+    ty1, y1 = np.where(y0 == 255, ty_arr + 1, ty_arr), np.where(y0 == 255, 0, y0 + 1)
+    v00, v01 = px(tx_arr, ty_arr, x0, y0), px(tx1, ty_arr, x1, y0)
+    v10, v11 = px(tx_arr, ty1, x0, y1), px(tx1, ty1, x1, y1)
+    return (v00 * (1 - fx) * (1 - fy) + v01 * fx * (1 - fy)
+            + v10 * (1 - fx) * fy + v11 * fx * fy).astype(np.float32)
 
 
 def tile_min_dist_m(station_x_cm, station_y_cm, tx, ty, tile_cm):

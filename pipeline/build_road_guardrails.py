@@ -107,7 +107,7 @@ from road_mesh_common import (ROAD_HALF_WIDTH, half_width_for_stations,
                                road_ue_z_m, reconcile_junction_elevations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
-                                       load_lake_beds, _point_in_polygon,
+                                       lakes_near, load_lake_beds, _point_in_polygon,
                                        WATER_SHORE_BLEND_M)
 
 # Only used as a bbox pre-filter margin now (see the "open water" exclusion
@@ -307,7 +307,7 @@ def main():
             # part of the actual inclusion test.
             in_lake = np.zeros(n, dtype=bool)
             bbox_margin_cm = LAKE_SHORE_EXCLUSION_MARGIN_M * 100.0
-            for lake in lakes:
+            for lake in lakes_near(lakes, rail_cx, rail_cy, bbox_margin_cm):
                 bx0, bx1, by0, by1 = lake["bbox"]
                 bb = ((rail_cx >= bx0 - bbox_margin_cm) & (rail_cx <= bx1 + bbox_margin_cm) &
                       (rail_cy >= by0 - bbox_margin_cm) & (rail_cy <= by1 + bbox_margin_cm))

@@ -62,7 +62,7 @@ from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 # re-fetching OSM/DEM here - build_water_tiles.py must have already run for
 # this to have any effect; load_lake_beds() returns [] (no exclusion, same as
 # today) if it hasn't.
-from build_terrain_mesh_tiles import load_lake_beds, _point_in_polygon, _dist_to_ring, WATER_SHORE_BLEND_M
+from build_terrain_mesh_tiles import lakes_near, load_lake_beds, _point_in_polygon, _dist_to_ring, WATER_SHORE_BLEND_M
 
 # Lake shore-blend margin (2026-09-03, second pass, same reviewer defect):
 # matches AODForestManager::LakeShoreExclusionMarginCm and the reasoning in
@@ -180,7 +180,7 @@ def main():
             # paying for the exact ray-cast polygon test.
             in_lake = np.zeros(n, dtype=bool)
             margin_cm = LAKE_SHORE_EXCLUSION_MARGIN_M * 100.0
-            for lake in lakes:
+            for lake in lakes_near(lakes, ox, oy, margin_cm):
                 bx0, bx1, by0, by1 = lake["bbox"]
                 bb = ((ox >= bx0 - margin_cm) & (ox <= bx1 + margin_cm) &
                       (oy >= by0 - margin_cm) & (oy <= by1 + margin_cm))
