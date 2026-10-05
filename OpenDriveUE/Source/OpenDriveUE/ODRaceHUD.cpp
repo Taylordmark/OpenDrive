@@ -23,6 +23,14 @@
 #include "ODSettingsMenu.h"
 #include "ODWeatherController.h"
 
+// Canvas text at Scale > 1 stretches a glyph bitmap rasterized at the font's
+// base size - blocky/blurry. Asking for the scaled point size instead makes
+// the runtime font cache rasterize glyphs at that size, so text stays crisp.
+static FSlateFontInfo CrispFont(const UFont* Font, float Scale)
+{
+	return FSlateFontInfo(Font, Font->LegacyFontSize * Scale);
+}
+
 static FString FormatTime(float T)
 {
 	const int32 Mins = FMath::FloorToInt(T / 60.0f);
@@ -477,8 +485,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
 		T.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(T);
 	};
@@ -642,8 +649,7 @@ void AODRaceHUD::DrawRebindMenu(AODRebindMenu* Menu) const
 
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
 		T.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(T);
 	};
@@ -702,8 +708,7 @@ void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const
 
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
 		T.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(T);
 	};
@@ -992,8 +997,7 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* 
 	UFont* Font = GEngine->GetLargeFont();
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
 		T.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(T);
 	};
@@ -1204,8 +1208,7 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	Canvas->DrawItem(Bg);
 	auto Text = [&](const FString& S, float TX, float TY, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S), Font, C);
-		T.Scale = FVector2D(Sc, Sc);
+		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S), CrispFont(Font, Sc), C);
 		T.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(T);
 	};
@@ -1372,8 +1375,7 @@ void AODRaceHUD::DrawHUD()
 
 		auto Line = [&](const FString& Text, const FLinearColor& Color, float Scale)
 		{
-			FCanvasTextItem Item(FVector2D(X, Y), FText::FromString(Text), Font, Color);
-			Item.Scale = FVector2D(Scale, Scale);
+			FCanvasTextItem Item(FVector2D(X, Y), FText::FromString(Text), CrispFont(Font, Scale), Color);
 			Item.EnableShadow(FLinearColor::Black);
 			Canvas->DrawItem(Item);
 			Y += 26.0f * Scale;
@@ -1427,8 +1429,7 @@ void AODRaceHUD::DrawHUD()
 					TEXT("%s - RETURNING IN %.0f"),
 					Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
 					FMath::CeilToFloat(Cd))),
-				Font, FLinearColor(1.0f, 0.35f, 0.2f));
-			Warn.Scale = FVector2D(2.2f, 2.2f);
+				CrispFont(Font, 2.2f), FLinearColor(1.0f, 0.35f, 0.2f));
 			Warn.EnableShadow(FLinearColor::Black);
 			Canvas->DrawItem(Warn);
 		}
@@ -1442,8 +1443,7 @@ void AODRaceHUD::DrawHUD()
 		if (Now - It->WarningShownAt < 6.0f)
 		{
 			FCanvasTextItem Warn(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
-				FText::FromString(It->WarningText), Font, FLinearColor(1.0f, 0.8f, 0.2f));
-			Warn.Scale = FVector2D(2.0f, 2.0f);
+				FText::FromString(It->WarningText), CrispFont(Font, 2.0f), FLinearColor(1.0f, 0.8f, 0.2f));
 			Warn.EnableShadow(FLinearColor::Black);
 			Canvas->DrawItem(Warn);
 		}
@@ -1456,8 +1456,7 @@ void AODRaceHUD::DrawHUD()
 		const float Mph = Pawn->GetVelocity().Size() * 0.02237f;
 		FCanvasTextItem Speed(FVector2D(Canvas->SizeX - 200.0f, Canvas->SizeY - 80.0f),
 			FText::FromString(FString::Printf(TEXT("%.0f mph"), Mph)),
-			Font, FLinearColor::White);
-		Speed.Scale = FVector2D(1.8f, 1.8f);
+			CrispFont(Font, 1.8f), FLinearColor::White);
 		Speed.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(Speed);
 	}
@@ -1510,8 +1509,7 @@ void AODRaceHUD::DrawHUD()
 		float My = Canvas->SizeY * 0.5f - 150.0f;
 
 		FCanvasTextItem Title(FVector2D(Mx, My), FText::FromString(TEXT("PAUSED")),
-			Font, FLinearColor::White);
-		Title.Scale = FVector2D(2.2f, 2.2f);
+			CrispFont(Font, 2.2f), FLinearColor::White);
 		Title.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(Title);
 		My += 70.0f;
@@ -1526,8 +1524,7 @@ void AODRaceHUD::DrawHUD()
 
 			FCanvasTextItem L(FVector2D(Mx, My),
 				FText::FromString((bSel ? TEXT("> ") : TEXT("  ")) + Label),
-				Font, Color);
-			L.Scale = FVector2D(1.5f, 1.5f);
+				CrispFont(Font, 1.5f), Color);
 			L.EnableShadow(FLinearColor::Black);
 			Canvas->DrawItem(L);
 
@@ -1535,8 +1532,7 @@ void AODRaceHUD::DrawHUD()
 			{
 				FCanvasTextItem V(FVector2D(Mx + 220.0f, My),
 					FText::FromString(Value),
-					Font, Color);
-				V.Scale = FVector2D(1.5f, 1.5f);
+					CrispFont(Font, 1.5f), Color);
 				V.EnableShadow(FLinearColor::Black);
 				Canvas->DrawItem(V);
 			}
