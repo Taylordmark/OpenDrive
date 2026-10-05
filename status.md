@@ -611,6 +611,27 @@ run since before §7.49, so 1,276 junctions had no pad.
     - `pad_tilt_audit` reads `junction_pads_final.json`, which has no mold,
       so its "108 pads > 1 m" measures the bare plane.
 
+- **Planar bank** (2026-10-02). The bank now tilts the whole pavement about
+  the centerline (`bank_slopes`, smoothed signed so S-bends pass through
+  flat), and the terrain carve, hard clamp and pavement ceiling follow the
+  same tilt. Before, only the outer half was raised over flat terrain, and
+  46% of raised edges floated up to ~1 m on far_gasquet. Guardrails and
+  embankments seat on the banked edge; junction pads fade it and save the
+  fade for `verify_road_fit`, which checks each edge against its planned
+  banked height.
+  - Lip gaps over 0.3 m (far_gasquet): 8.0% → 2.5%.
+  - All gates PASS on far_gasquet, near_gasquet and Summit.
+  - Tests: `test_bank_slopes.py`, `test_pavement_ceiling.py` (banked case).
+
+### Large world
+
+- **Far-corner test** (2026-10-02). `test_areas` takes `origin_latlon`
+  (same latitude only). `far_gasquet` sits ~646 km from the world origin,
+  `near_gasquet` is its centred control. Every runtime mesh manager builds
+  around a local component origin, and the sky atmosphere's planet top
+  follows the camera (1 km snap). Taylor's drive: handling and collision
+  good; the sky wasn't checked.
+
 ### Release engineering
 
 - Scripted `BuildCookRun` works for Development and Shipping (0 errors,

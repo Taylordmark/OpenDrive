@@ -140,6 +140,15 @@ Group these into a few drive sessions. Each line says what to judge.
 
 ## 4. World pipeline
 
+- **California-scale world (agreed order, 2026-10-02):**
+  1. World grid: an LCC projection replacing the equirectangular frame,
+     cut into 64 km chunks, each with its own local origin.
+  2. Runtime chunk streaming (load/unload chunks around the car).
+  3. Two-pass chunked bake, so a chunk's edges match its neighbours'.
+  4. Horizon culling of distant tiles.
+  - Also: coarse terrain tiles sit ~9 m below roads in the corridor
+    (`verify_road_fit` coarse poke median −5.9 m on Summit).
+  - Far-corner sky still to check in a drive.
 - **Multi-zone `test_areas.py` refactor (overdue).** Turn the module
   constants (`AREA_NAME`, `BBOX_SNWE`, `ORIGIN_HEIGHT_M`) into a table keyed
   by zone, and make every script take the zone as an argument. Required
