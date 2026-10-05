@@ -188,6 +188,8 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& L
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
+	const FVector3d Origin = VCount ? FVector3d(Lk.Verts[0], Lk.Verts[1], 0.0) : FVector3d::ZeroVector;
+	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 	Comp->RegisterComponent();
 	// No relative offset needed - unlike AODBuildingManager, FParsedLake's
 	// verts already carry their final baked world Z (pipeline-time DEM
@@ -205,7 +207,7 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& L
 		for (uint32 v = 0; v < VCount; ++v)
 		{
 			VertIds[v] = Mesh.AppendVertex(FVector3d(
-				Lk.Verts[v * 3 + 0], Lk.Verts[v * 3 + 1], Lk.Verts[v * 3 + 2]));
+				Lk.Verts[v * 3 + 0] - Origin.X, Lk.Verts[v * 3 + 1] - Origin.Y, Lk.Verts[v * 3 + 2]));
 		}
 		for (uint32 v = 0; v < VCount; ++v)
 		{

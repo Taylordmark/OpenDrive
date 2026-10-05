@@ -195,6 +195,7 @@ void AODGuardrailManager::BuildRailMesh(UDynamicMeshComponent* Comp, const FPars
 
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
 	{
+		const FVector3d O = Comp->GetRelativeLocation();
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 
@@ -210,7 +211,7 @@ void AODGuardrailManager::BuildRailMesh(UDynamicMeshComponent* Comp, const FPars
 				const FVector P = Run.Stations[s]
 					+ Outward[s] * Profile[k].X
 					+ FVector(0, 0, Profile[k].Y);
-				const int32 Vid = Mesh.AppendVertex(FVector3d(P.X, P.Y, P.Z));
+				const int32 Vid = Mesh.AppendVertex(FVector3d(P.X - O.X, P.Y - O.Y, P.Z));
 				VertIds[s * M + k] = Vid;
 				UvIds[s * M + k] = UV->AppendElement(FVector2f(U, (float)k / (M - 1)));
 			}
@@ -259,6 +260,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
 		Comp->SetupAttachment(RootComponent);
+		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();
 		BuildRailMesh(Comp, Run, Profile);
 

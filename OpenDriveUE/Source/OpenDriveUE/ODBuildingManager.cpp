@@ -446,6 +446,11 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 	{
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
 		Comp->SetupAttachment(RootComponent);
+		const TArray<float>& V0 = Batch[0].Key->Verts;
+		if (V0.Num() >= 3)
+		{
+			Comp->SetRelativeLocation(FVector(V0[0], V0[1], 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
+		}
 		Comp->RegisterComponent();
 		if (bNear)
 		{
@@ -471,6 +476,7 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 		CompSlot = Comp;
 	}
 
+	const FVector3d O = CompSlot->GetRelativeLocation();
 	CompSlot->EditMesh([&](FDynamicMesh3& Mesh)
 	{
 		Mesh.EnableAttributes();
@@ -504,7 +510,7 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 			for (uint32 v = 0; v < VCount; ++v)
 			{
 				VertIds[v] = Mesh.AppendVertex(FVector3d(
-					B.Verts[v * 3 + 0], B.Verts[v * 3 + 1],
+					B.Verts[v * 3 + 0] - O.X, B.Verts[v * 3 + 1] - O.Y,
 					B.Verts[v * 3 + 2] + ZOffsetCm));
 			}
 			for (uint32 v = 0; v < VCount; ++v)

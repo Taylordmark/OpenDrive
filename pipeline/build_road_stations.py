@@ -129,7 +129,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from test_areas import AREA_NAME, BBOX_SNWE
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_LATLON
 from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
 from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
@@ -635,8 +635,7 @@ def main():
     # the old georeference actor used (test_areas.BBOX_SNWE via
     # build_terrain_tiles.py's origin_latlon), so every consumer's local
     # east/north math stays consistent with everyone else's.
-    lat0 = (BBOX_SNWE[0] + BBOX_SNWE[2]) / 2
-    lon0 = (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2
+    lat0, lon0 = ORIGIN_LATLON   # the bbox centre unless the area sets one
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     scored = []

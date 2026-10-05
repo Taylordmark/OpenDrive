@@ -1,5 +1,6 @@
 #include "ODAtmosphereController.h"
 
+#include "Camera/PlayerCameraManager.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
@@ -10,6 +11,7 @@
 #include "Engine/PostProcessVolume.h"
 #include "Engine/SkyLight.h"
 #include "EngineUtils.h"
+#include "GameFramework/PlayerController.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
@@ -110,6 +112,14 @@ void AODAtmosphereController::EnsureSkyAtmosphere()
 	Comp->SetAerialPerspectiveStartDepth(0.07f);   // vs 0.1 default - haze builds a bit sooner
 	Comp->SetHeightFogContribution(1.0f);
 	Comp->SetAerialPespectiveViewDistanceScale(AerialPerspectiveViewDistanceScale); // sic - engine's own spelling
+	// Large-world (2026-10-02): the default PlanetTopAtAbsoluteWorldOrigin puts
+	// the planet top at (0,0,0), so an area ~650 km from the origin sat ~33 km
+	// up the curve. Anchor the planet top to the component instead; Tick keeps
+	// it under the camera.
+	Comp->SetMobility(EComponentMobility::Movable);
+	Comp->TransformMode = ESkyAtmosphereTransformMode::PlanetTopAtComponentTransform;
+	Comp->SetWorldLocation(FVector::ZeroVector);
+	Comp->MarkRenderStateDirty();
 	AtmoComp = Comp;
 	BaseSkyLuminance = Comp->SkyLuminanceFactor;
 
@@ -329,6 +339,22 @@ void AODAtmosphereController::SpawnGradeVolume()
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// Keep the planet top under the camera, snapped to 1 km so the render
+	// state isn't dirtied every frame (curvature at 1 km is 8 cm).
+	if (USkyAtmosphereComponent* Atmo = AtmoComp.Get())
+	{
+		const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+		if (PC && PC->PlayerCameraManager)
+		{
+			const FVector Cam = PC->PlayerCameraManager->GetCameraLocation();
+			const FVector Snap(FMath::RoundToDouble(Cam.X / 1e5) * 1e5, FMath::RoundToDouble(Cam.Y / 1e5) * 1e5, 0.0);
+			if (!Atmo->GetComponentLocation().Equals(Snap, 1.0))
+			{
+				Atmo->SetWorldLocation(Snap);
+			}
+		}
+	}
 
 	if (!WeatherCtl.IsValid())
 	{

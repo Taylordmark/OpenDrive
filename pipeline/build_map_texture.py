@@ -29,7 +29,7 @@ from PIL import Image
 
 import test_areas
 from classify_biomes import classify_rgb, fetch_mosaic
-from test_areas import AREA_NAME, BBOX_SNWE
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_LATLON
 
 # Optional per-area wider bbox the map background should also cover, even
 # though the OSM road network (and this script's own default road-station
@@ -166,9 +166,8 @@ def main():
     img.save(OUT_PNG)
 
     # center of that square crop, in the same local frame build_road_stations.py
-    # anchors everything to (bbox center of test_areas.BBOX_SNWE)
-    lat0_area = (BBOX_SNWE[0] + BBOX_SNWE[2]) / 2
-    lon0_area = (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2
+    # anchors everything to (test_areas.ORIGIN_LATLON)
+    lat0_area, lon0_area = ORIGIN_LATLON
     center_lon = (w + e) / 2
     center_lat = (s + n) / 2
     center_east_m = (center_lon - lon0_area) * m_per_deg_lon

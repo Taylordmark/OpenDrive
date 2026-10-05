@@ -1013,6 +1013,13 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
+	// Large-world precision (2026-10-02): vertices are stored relative to the
+	// chunk's first vertex so a chunk hundreds of km from the world origin
+	// doesn't render/collide with float-ulp (4 cm at 650 km) error. Z stays
+	// absolute. ponytail: the .bin verts are still float, so far-out chunks keep
+	// a static +-2 cm quantization; store per-chunk origins in the format if it shows.
+	const FVector3d Origin = VCount ? FVector3d(Chunk.Verts[0], Chunk.Verts[1], 0.0) : FVector3d::ZeroVector;
+	Comp->SetRelativeLocation(Origin);
 	// Async collision cook (2026-08-27, fast-drive hitch fix): set BEFORE
 	// EnableComplexAsSimpleCollision below so whichever call actually
 	// triggers RebuildPhysicsData (immediately here, or later when
@@ -1097,7 +1104,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			const float X = Chunk.Verts[v * 3 + 0];
 			const float Y = Chunk.Verts[v * 3 + 1];
 			const float Z = Chunk.Verts[v * 3 + 2];
-			VertIds[v] = Mesh.AppendVertex(FVector3d(X, Y, Z));
+			VertIds[v] = Mesh.AppendVertex(FVector3d(X - Origin.X, Y - Origin.Y, Z));
 
 			// lip-bottom sample for the -odseam terrain check: every
 			// 10th station's outer two verts (index 1/4 of the

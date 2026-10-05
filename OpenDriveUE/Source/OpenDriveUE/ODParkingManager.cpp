@@ -176,6 +176,8 @@ void AODParkingManager::CreateLotComponent(FParkingTile& Tile, const FParsedPark
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
+	const FVector3d Origin = VCount ? FVector3d(Lot.Verts[0], Lot.Verts[1], 0.0) : FVector3d::ZeroVector;
+	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 	Comp->RegisterComponent();
 
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
@@ -189,7 +191,7 @@ void AODParkingManager::CreateLotComponent(FParkingTile& Tile, const FParsedPark
 		for (uint32 v = 0; v < VCount; ++v)
 		{
 			VertIds[v] = Mesh.AppendVertex(FVector3d(
-				Lot.Verts[v * 3 + 0], Lot.Verts[v * 3 + 1], Lot.Verts[v * 3 + 2]));
+				Lot.Verts[v * 3 + 0] - Origin.X, Lot.Verts[v * 3 + 1] - Origin.Y, Lot.Verts[v * 3 + 2]));
 		}
 		for (uint32 v = 0; v < VCount; ++v)
 		{

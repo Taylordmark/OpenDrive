@@ -1471,6 +1471,8 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
+	const FVector3d Origin = VCount ? FVector3d(Parsed.Verts[0], Parsed.Verts[1], 0.0) : FVector3d::ZeroVector;
+	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 	// Async collision cook (2026-08-27, fast-drive hitch fix): the physics
 	// mesh cook triggered by EnableComplexAsSimpleCollision/RegisterComponent
 	// below is exactly the "collision cook" stage TCollision times - moving
@@ -1517,7 +1519,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 			const float X = Parsed.Verts[v * 3 + 0];
 			const float Y = Parsed.Verts[v * 3 + 1];
 			const float Z = Parsed.Verts[v * 3 + 2];
-			VertIds[v] = Mesh.AppendVertex(FVector3d(X, Y, Z));
+			VertIds[v] = Mesh.AppendVertex(FVector3d(X - Origin.X, Y - Origin.Y, Z));
 		}
 		for (uint32 v = 0; v < VCount; ++v)
 		{
@@ -1614,6 +1616,8 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 
 		auto* WallComp = NewObject<UDynamicMeshComponent>(this);
 		WallComp->SetupAttachment(RootComponent);
+		const FVector3d WallOrigin(Parsed.WallVerts[0], Parsed.WallVerts[1], 0.0);
+		WallComp->SetRelativeLocation(WallOrigin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		WallComp->bUseAsyncCooking = true; // see Comp's own bUseAsyncCooking comment above
 		WallComp->RegisterComponent();
 
@@ -1624,7 +1628,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 			for (uint32 v = 0; v < WVCount; ++v)
 			{
 				WallVertIds[v] = Mesh.AppendVertex(FVector3d(
-					Parsed.WallVerts[v * 3 + 0], Parsed.WallVerts[v * 3 + 1], Parsed.WallVerts[v * 3 + 2]));
+					Parsed.WallVerts[v * 3 + 0] - WallOrigin.X, Parsed.WallVerts[v * 3 + 1] - WallOrigin.Y, Parsed.WallVerts[v * 3 + 2]));
 			}
 			for (uint32 t = 0; t < WTCount; ++t)
 			{

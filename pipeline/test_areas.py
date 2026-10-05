@@ -118,6 +118,31 @@ AREAS = {
         elev_plausible_m=(-20.0, 250.0),
         max_building_levels=12,
     ),
+
+    # Gasquet, US 199 along the Smith River (2026-10-02) - the far-corner
+    # physics test for a California-wide world: the origin sits 7.8 deg
+    # east at the same latitude, so the whole area is ~646 km from the world
+    # origin (UE X ~ -6.46e7 cm), about where Crescent City would land from
+    # the state's centre. Drive it and compare handling with summit_county.
+    # Origin 116.5 m (z12 at bbox centre); z15 12x12 grid read 94..583 m,
+    # padded. Bake with OD_AREA=far_gasquet.
+    "far_gasquet": dict(
+        bbox_snwe=(41.835, -123.985, 41.860, -123.945),
+        background_bbox_snwe=None,
+        origin_latlon=(41.8475, -123.965 + 7.8),
+        origin_height_m=116.5,
+        elev_plausible_m=(0.0, 900.0),
+        max_building_levels=4,
+    ),
+    # far_gasquet's control: same bbox at the usual centred origin, so its
+    # tiles diff against far_gasquet's to isolate large-coordinate effects.
+    "near_gasquet": dict(
+        bbox_snwe=(41.835, -123.985, 41.860, -123.945),
+        background_bbox_snwe=None,
+        origin_height_m=116.5,
+        elev_plausible_m=(0.0, 900.0),
+        max_building_levels=4,
+    ),
 }
 
 # The one switch. Everything below derives from this entry.
@@ -135,6 +160,19 @@ AREA_NAME = ACTIVE_AREA
 
 # (south, west, north, east)
 BBOX_SNWE = _ACTIVE["bbox_snwe"]
+
+# Local-frame origin (lat, lon): every east/north metre in the pipeline and
+# every UE cm is measured from here. Defaults to the bbox centre. An area may
+# set "origin_latlon" to sit far from the world origin (2026-10-02: the
+# California-scale physics test). Same latitude only: the frame is still
+# equirectangular at cos(origin lat), and several stages scale by their own
+# local latitude, so a latitude shift would stretch them against each other
+# until a state-wide projection replaces it.
+ORIGIN_LATLON = tuple(_ACTIVE.get("origin_latlon")
+                      or ((BBOX_SNWE[0] + BBOX_SNWE[2]) / 2, (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2))
+if abs(ORIGIN_LATLON[0] - (BBOX_SNWE[0] + BBOX_SNWE[2]) / 2) > 1e-9:
+    raise ValueError(f"{ACTIVE_AREA}: origin_latlon must keep the bbox centre latitude "
+                     f"{(BBOX_SNWE[0] + BBOX_SNWE[2]) / 2} (got {ORIGIN_LATLON[0]})")
 
 # Background-visuals bbox: wider than BBOX_SNWE, used ONLY by
 # build_terrain_mesh_tiles.py (raw-DEM far tiles, no road carving, no

@@ -182,6 +182,7 @@ void AODEmbankmentManager::BuildSkirtMesh(UDynamicMeshComponent* Comp, const FPa
 
 	Comp->EditMesh([&](FDynamicMesh3& Mesh)
 	{
+		const FVector3d O = Comp->GetRelativeLocation();
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 
@@ -210,7 +211,7 @@ void AODEmbankmentManager::BuildSkirtMesh(UDynamicMeshComponent* Comp, const FPa
 
 			for (int32 k = 0; k < M; ++k)
 			{
-				const int32 Vid = Mesh.AppendVertex(FVector3d(Layers[k].X, Layers[k].Y, Layers[k].Z));
+				const int32 Vid = Mesh.AppendVertex(FVector3d(Layers[k].X - O.X, Layers[k].Y - O.Y, Layers[k].Z));
 				VertIds[s * M + k] = Vid;
 				UvIds[s * M + k] = UV->AppendElement(FVector2f(U, VCoord[k]));
 			}
@@ -253,6 +254,7 @@ void AODEmbankmentManager::FinalizeTile(const FIntPoint& Key, FParsedEmbankmentT
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
 		Comp->SetupAttachment(RootComponent);
+		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();
 		BuildSkirtMesh(Comp, Run);
 

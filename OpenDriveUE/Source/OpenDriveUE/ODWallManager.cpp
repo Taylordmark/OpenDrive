@@ -184,6 +184,8 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
 		Comp->SetupAttachment(RootComponent);
+		const FVector3d Origin = VCount ? FVector3d(W.Verts[0], W.Verts[1], 0.0) : FVector3d::ZeroVector;
+		Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();
 
 		Comp->EditMesh([&](FDynamicMesh3& Mesh)
@@ -197,7 +199,7 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 			for (uint32 v = 0; v < VCount; ++v)
 			{
 				VertIds[v] = Mesh.AppendVertex(FVector3d(
-					W.Verts[v * 3 + 0], W.Verts[v * 3 + 1], W.Verts[v * 3 + 2]));
+					W.Verts[v * 3 + 0] - Origin.X, W.Verts[v * 3 + 1] - Origin.Y, W.Verts[v * 3 + 2]));
 			}
 			for (uint32 v = 0; v < VCount; ++v)
 			{
