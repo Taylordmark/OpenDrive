@@ -343,7 +343,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from road_mesh_common import ROAD_HALF_WIDTH, road_ue_z_m, reconcile_junction_elevations
+from road_mesh_common import ROAD_HALF_WIDTH, bank_slopes, road_ue_z_m, reconcile_junction_elevations
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
                                        lakes_near, load_lake_beds, _point_in_polygon,
@@ -712,6 +712,9 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
     rx, ry = -ty, tx
 
     road_z_ue_m = road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M)
+    # the banked pavement edge on this side (rx, ry is LEFT of travel, the
+    # bank slope is per metre to the right) - see road_mesh_common.bank_slopes
+    road_z_ue_m = road_z_ue_m - bank_slopes(east, north)[0] * side * EMBANK_EDGE_OFFSET_M
     z_cm_all = road_z_ue_m * 100.0
 
     probe_e = east + rx * EMBANK_PROBE_OFFSET_M * side

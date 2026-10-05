@@ -132,6 +132,7 @@ def compute_generation_id() -> str:
         ROAD_LIFT,
         MAX_BANK_RAD,
         BANK_GAIN,
+        "bank-plane",   # 2026-10-02: bank tilts about the centerline, terrain follows it
         ELEV_PLAUSIBLE_MIN_M,
         ELEV_PLAUSIBLE_MAX_M,
         DEM_SPIKE_THRESHOLD_M,

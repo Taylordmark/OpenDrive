@@ -185,8 +185,10 @@ def _shipped_stations(east, north, elev):
     backup = SIDECAR_BACKUP_DIR / SIDECAR_PATH.name
     if not backup.exists():
         return east, north, z
-    _g, ox, oy, _oz, _h = read_station_sidecar(backup)
-    _g, sx, sy, sz, _h = read_station_sidecar(SIDECAR_PATH)
+    bg, ox, oy, _oz, _h = read_station_sidecar(backup)
+    g, sx, sy, sz, _h = read_station_sidecar(SIDECAR_PATH)
+    if bg != g:                          # previous bake's backup, sidecar unpatched
+        return east, north, z
     d, j = cKDTree(np.c_[ox, oy]).query(np.c_[east * 100.0, -north * 100.0])
     m = d < 5.0
     east, north = east.copy(), north.copy()
@@ -218,6 +220,19 @@ def check_road_vs_terrain_fit():
                                     st_x_cm[fit_idx], st_y_cm[fit_idx], ring=2)
     terrain_h = _sample_with_neighbors(_load_terrain_tile, tx_all[fit_idx], ty_all[fit_idx],
                                        st_x_cm[fit_idx], st_y_cm[fit_idx])
+    # A way-end station sits exactly on its ribbon's end edge, and float32 .bin
+    # verts far from the origin (4 cm ulp at 650 km) can leave it a hair
+    # outside - retry those within the format's own precision (far_gasquet: 4
+    # misses, all < 1 cm off the surface).
+    miss = np.where(np.isnan(road_h))[0]
+    for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False):
+        if not len(miss):
+            break
+        sel = fit_idx[miss]
+        road_h[miss] = _sample_with_neighbors(
+            _load_road_tile, rtx_all[sel], rty_all[sel],
+            st_x_cm[sel] + 5.0 * np.cos(ang), st_y_cm[sel] + 5.0 * np.sin(ang), ring=2)
+        miss = miss[np.isnan(road_h[miss])]
     road_misses = int(np.isnan(road_h).sum())
     terrain_misses = int((~np.isnan(road_h) & np.isnan(terrain_h)).sum())
     ok_pts = ~np.isnan(road_h) & ~np.isnan(terrain_h)
@@ -277,7 +292,14 @@ def check_poke_through():
     idx = np.where(~btmt._get_struct_mask(len(east)))[0]
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
     e0, n0 = east, north
+    from experimental_junction_pads import BANK_SCALE_PATH, SIDECAR_PATH, read_station_sidecar
+    scale = None      # junction pads fade the bank to 0 into each pad
+    if BANK_SCALE_PATH.exists() and SIDECAR_PATH.exists():
+        f = np.load(BANK_SCALE_PATH)
+        if str(f["gen"]) == read_station_sidecar(SIDECAR_PATH)[0] and len(f["scale"]) == len(east):
+            scale = f["scale"]
     east, north, road_z = _shipped_stations(east, north, elev)
+    bank = btmt.station_bank(east, north, scale)[:, 0]   # as pads built it, snapped positions
     print(f"junction-pad patch: {int(np.sum((east != e0) | (north != n0) | (np.abs(road_z - elev - ROAD_LIFT) > 0.01)))} "
           f"station(s) probed at their regraded/snapped shipped position")
     # centerline, then both pavement edges - a diagonal terrain triangle
@@ -298,9 +320,15 @@ def check_poke_through():
         x_cm, y_cm = pe[idx] * 100.0, -pn[idx] * 100.0
         h = _sample_with_neighbors(loader, np.floor(x_cm / tile_cm).astype(int),
                                    np.floor(y_cm / tile_cm).astype(int), x_cm, y_cm)
-        # edge pavement is never below the centerline (banking only raises
-        # the outer edge), so the centerline height is conservative
-        poke[idx] = h / 100.0 + ORIGIN_HEIGHT_M - road_z[idx]
+        # edges sit on the bank plane, up to ~0.6 m off the centerline either
+        # way, and the carve follows it - so each edge compares against its
+        # planned banked height. Not the road mesh: chunk seams (float32,
+        # ~2 mm), pad rims and way ends read its lip/underside instead.
+        rz = road_z[idx]
+        if not label.endswith("center"):
+            side = -1.0 if label.endswith("left") else 1.0
+            rz = rz + side * bank[idx] * hw[idx]
+        poke[idx] = h / 100.0 + ORIGIN_HEIGHT_M - rz
         p = poke[idx]
         misses = int(np.isnan(p).sum())
         p = p[~np.isnan(p)]

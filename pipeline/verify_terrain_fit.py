@@ -163,7 +163,10 @@ WALL_COVER_REACH_M = 8.0
 # a drive (next steps.md: flatten the apex grade instead).
 HAIRPIN_GAP_STATIONS = (3, CONFLICT_SAME_CHAIN_GAP_STATIONS)
 HAIRPIN_FOLD_RATIO = 0.5    # plan distance < this x arc distance = folds back
-HAIRPIN_MIN_DROP_M = 2.0
+# 2026-10-02: 1.5, was 2.0 - the bank plane sinks the apex's inside edge by
+# up to tan(MAX_BANK_RAD)*hw ~ 0.6 m more (Summit station 88645: 1.87 m drop
+# to the other leg 10 m away, terrain 4.4 m under the upper pavement)
+HAIRPIN_MIN_DROP_M = 1.5
 
 
 HAIRPIN_CAUSE = "tight hairpin apex (accepted, see HAIRPIN_GAP_STATIONS)"
@@ -408,7 +411,7 @@ def check_prebake_consistency():
     partial/stale state Content/OpenDrive/Masks/ happens to be in."""
     lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r)
+    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r, btmt.station_bank(east, north))
 
     fit_idx = np.where(~exclude)[0]
 

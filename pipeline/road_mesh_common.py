@@ -681,6 +681,47 @@ def follow_ground_profile(ground, max_grade, spacing=STATION_SPACING):
     return gaussian1d(0.5 * (cut + fill), FOLLOW_CURVE_SIGMA_STATIONS), mg
 
 
+BANK_SMOOTH_SIGMA_M = 5.0
+# smoothing sigma widened 3.0 -> 5.0 m (2026-08-23, Taylor: wanted a smoother
+# road feel) - a wider window damps station-to-station curvature noise into a
+# gentler bank ramp in/out of curves instead of tracking every small wiggle.
+
+
+def bank_slopes(e, n, spacing=STATION_SPACING, max_bank_rad=MAX_BANK_RAD,
+                bank_gain=BANK_GAIN, bank_scale=None):
+    """Per-station superelevation of one ribbon run: pavement height at
+    lateral offset `off` m (positive = right of travel) is centerline +
+    slope * off - a plane tilted about the centerline, rising on the curve's
+    outside. Returns (slope, rx, ry), (rx, ry) the horizontal right-of-travel
+    unit normal in the UE frame (X=east, Y=south). build_road_chunks builds
+    the ribbon from it and build_terrain_mesh_tiles carves the terrain to the
+    same cross-section, so both must see the same run arrays.
+
+    2026-10-02: was an outer-edge-only raise (inner half flat), whose kink the
+    flat-at-centerline terrain carve couldn't follow - raised outer edges
+    floated up to ~1 m over the shoulder (46% of them, far_gasquet drive)."""
+    tx = np.gradient(e); ty = np.gradient(-n)
+    tl = np.hypot(tx, ty)
+    ok = tl > 1e-6
+    if not ok.any():
+        z = np.zeros(len(e)); return z, z, z
+    # junction-pad snapping can stack stations, so a zero central difference
+    # takes its neighbours' direction (was NaN -> NaN carve -> terrain holes)
+    k = np.arange(len(e))
+    tx, ty = np.interp(k, k[ok], tx[ok] / tl[ok]), np.interp(k, k[ok], ty[ok] / tl[ok])
+    tl = np.hypot(tx, ty); tx /= tl; ty /= tl
+    theta = np.unwrap(np.arctan2(ty, tx))
+    curv = gaussian1d(np.gradient(theta) / spacing, BANK_SMOOTH_SIGMA_M)   # 1/m, signed
+    # smoothed SIGNED, so an S-bend's bank runs through flat - smoothing the
+    # magnitude and re-applying sign(curv) flipped the whole plane in one
+    # station (each edge jumped ~0.5 m at every inflection)
+    bank = np.clip(-bank_gain * curv, -max_bank_rad, max_bank_rad)
+    slope = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
+    if bank_scale is not None:
+        slope = slope * np.asarray(bank_scale, dtype=np.float64)
+    return slope, -ty, tx
+
+
 def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        chunk_stations=CHUNK_STATIONS,
                        road_half_width=ROAD_HALF_WIDTH, skirt_extra=SKIRT_EXTRA,
@@ -753,25 +794,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     """
     # UE frame: X=east, Y=south(-north), Z=up, cm
     cx, cy, cz = e * 100.0, -n * 100.0, z * 100.0
-    tx = np.gradient(cx); ty = np.gradient(cy)
-    tl = np.hypot(tx, ty); tx /= tl; ty /= tl
-    rx, ry = -ty, tx          # right of travel, horizontal
-
-    # superelevation: raise the OUTER edge through curves (inner edge stays at
-    # road height, so the carved terrain can never poke through the low side)
-    theta = np.unwrap(np.arctan2(ty, tx))
-    curv = np.gradient(theta) / spacing          # 1/m, signed
-    # smoothing sigma widened 3.0 -> 5.0 m (2026-08-23, Taylor: wanted a
-    # smoother road feel) - a wider window damps station-to-station
-    # curvature noise into a gentler bank ramp in/out of curves instead of
-    # tracking every small wiggle.
-    BANK_SMOOTH_SIGMA_M = 5.0
-    bank = np.minimum(max_bank_rad,
-                       bank_gain * np.abs(gaussian1d(curv, BANK_SMOOTH_SIGMA_M)))
-    bank_tan = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
-    if bank_scale is not None:
-        bank_tan = bank_tan * np.asarray(bank_scale, dtype=np.float64)
-    raise_side = -np.sign(gaussian1d(curv, BANK_SMOOTH_SIGMA_M))  # +1: raise right side
+    bank, rx, ry = bank_slopes(e, n, spacing, max_bank_rad, bank_gain, bank_scale)
 
     # cross-section: (lateral offset m, z offset m) - a closed loop around
     # the slab (see WRAP_* at the top of this module); the strip winding
@@ -813,7 +836,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
         out = []
         zb_cm = zbias_m[i] * 100.0
         for off, dz in profile:
-            lift = bank_tan[i] * max(0.0, off * raise_side[i])  # outer-edge raise
+            lift = bank[i] * off   # superelevation plane, see bank_slopes
             out.append((cx[i] + rx[i] * off * 100.0,
                         cy[i] + ry[i] * off * 100.0,
                         cz[i] + (dz + lift) * 100.0 - zb_cm))

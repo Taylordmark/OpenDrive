@@ -89,7 +89,8 @@ def main():
     # own unpacking; this file used to skip that conversion, which was the
     # actual bug behind this rewrite's near-total sample-miss rate).
     st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r)
+    station_data = (lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r,
+                    btmt.station_bank(st_east, st_north))
 
     data = json.loads(STATIONS_PATH.read_text())
     all_e, all_n = [], []

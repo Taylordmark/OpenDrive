@@ -65,7 +65,8 @@ from pymartini import Martini
 
 import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
-from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA,
+from build_road_network import split_excluding_tunnels
+from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
                               half_width_for_stations, road_ue_z_m,
                                classify_wall_stations, sample_mesh_heights)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
@@ -164,9 +165,8 @@ TERRAIN_CARVE_DROP_M = 0.15   # bias the carved surface just below the road so
                               # (Was 1.5 - an unjustified inflation that left the
                               # road+trees floating ~1.35 m above the visible
                               # terrain, fixed 2026-07-24. No larger margin is
-                              # needed for banking: road_mesh_common raises only
-                              # the OUTER edge through curves, never dropping any
-                              # edge below the centerline the carve references.)
+                              # needed for banking: the carve follows the same
+                              # banked cross-section - see station_bank().)
                               #
                               # Briefly raised 0.15 -> 0.5 (2026-08-23) to paper
                               # over martini's simplification error (up to
@@ -225,6 +225,13 @@ PAVEMENT_SAMPLE_M = 2.0       # probe spacing across and along the pavement (nea
 # 0.15/0.25/0.35/0.45 (clearance left 0.00/0.06/0.14/0.22 m) - martini only
 # ate ~0.25-0.37 m of it. Far tiles are a uniform grid.
 PAVEMENT_CEIL_MARGIN_NEAR_M = HARD_CLAMP_MARGIN_M + 0.10
+# how far past a banked road's LOW edge the cap keeps falling on the bank
+# plane before holding flat (see pavement_ceiling). Unbounded, corners a cell
+# out sank ~1 m and left air under 7.6% of low-edge lips; flat at the edge, a
+# triangle spanning the road could rise ~0.39 m over it at max bank; 2.5 m
+# holds the worst chord over a 7.8 m cell to ~0.23 m, inside the 0.25 m
+# margin (2.0 m measured 1 cm over it, tests/test_pavement_ceiling.py).
+PAVEMENT_CEIL_LOW_EXT_M = 2.5
 
 # Cut/fill asymmetry (2026-08-24, Taylor: switchback screenshots showing the
 # road buried under terrain that should have been cut away for it). The
@@ -783,19 +790,19 @@ def _get_struct_mask(n):
 _PAVEMENT_CACHE = None
 
 
-def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r):
+def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank):
     """Probe points covering every non-structure road's pavement, bucketed
-    by terrain tile - see PAVEMENT_SAMPLE_M. Each is (x cm, y cm, elevation
-    m, tangent x/y, grade m per cm along it): stations plus midpoints, each
-    fanned across the full pavement width on its own normal. Banking only
-    raises the outer edge, so the centerline height is the conservative cap."""
+    by terrain tile - see PAVEMENT_SAMPLE_M. Each is (x cm, y cm, centerline
+    elevation m, tangent x/y, grade m per cm along it, bank slope, lateral
+    offset m, half-width m): stations plus midpoints, each fanned across the
+    full pavement width on its own normal (see pavement_ceiling for the bank)."""
     global _PAVEMENT_CACHE
     if _PAVEMENT_CACHE is not None:
         return _PAVEMENT_CACHE
     lens = [len(s["east_m"]) for s in json.loads(STATIONS_PATH.read_text())["segments"]]
     struct = _get_struct_mask(len(st_x_cm))
     hw_cm = (st_clamp_r - SKIRT_EXTRA) * 100.0
-    cols = [[] for _ in range(6)]
+    cols = [[] for _ in range(9)]
     k = int(np.ceil(2.0 * hw_cm.max() / 100.0 / PAVEMENT_SAMPLE_M)) + 1
     fan = np.linspace(-1.0, 1.0, k)
     off = 0
@@ -803,17 +810,19 @@ def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r):
         sl = slice(off, off + n_st)
         off += n_st
         x, y, z, h, s = st_x_cm[sl], st_y_cm[sl], st_elev[sl], hw_cm[sl], struct[sl]
+        b = st_bank[sl, 0]
         if n_st >= 2:   # interleave midpoints: 2.5 m along at 5 m station spacing
             ok = ~(s[:-1] | s[1:])
             x = np.concatenate([x[~s], ((x[:-1] + x[1:]) / 2)[ok]])
             y = np.concatenate([y[~s], ((y[:-1] + y[1:]) / 2)[ok]])
             z = np.concatenate([z[~s], ((z[:-1] + z[1:]) / 2)[ok]])
             h = np.concatenate([h[~s], np.maximum(h[:-1], h[1:])[ok]])
+            b = np.concatenate([b[~s], ((b[:-1] + b[1:]) / 2)[ok]])
             t = np.concatenate([np.arange(n_st)[~s], (np.arange(n_st - 1) + 0.5)[ok]])
             order = np.argsort(t)
-            x, y, z, h = x[order], y[order], z[order], h[order]
+            x, y, z, h, b = x[order], y[order], z[order], h[order], b[order]
         else:
-            x, y, z, h = x[~s], y[~s], z[~s], h[~s]
+            x, y, z, h, b = x[~s], y[~s], z[~s], h[~s], b[~s]
         if len(x) == 0:
             continue
         if len(x) >= 2:
@@ -826,14 +835,15 @@ def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r):
         rep = lambda a: np.repeat(a, k)
         for c, a in zip(cols, ((x[:, None] - ty[:, None] * h[:, None] * fan).ravel(),
                                (y[:, None] + tx[:, None] * h[:, None] * fan).ravel(),
-                               rep(z), rep(tx), rep(ty), rep(grade))):
+                               rep(z), rep(tx), rep(ty), rep(grade), rep(b),
+                               (h[:, None] / 100.0 * fan).ravel(), rep(h / 100.0))):
             c.append(a)
-    px, py, pz, ptx, pty, pg = (np.concatenate(c) for c in cols)
+    px, py, pz, ptx, pty, pg, pb, po, ph = (np.concatenate(c) for c in cols)
     tile = TERRAIN_TILE_SIZE_CM
     key = np.floor(px / tile).astype(np.int64) * 1_000_003 + np.floor(py / tile).astype(np.int64)
     order = np.argsort(key, kind="stable")
     key = key[order]
-    arrs = [a[order] for a in (px, py, pz, ptx, pty, pg)]
+    arrs = [a[order] for a in (px, py, pz, ptx, pty, pg, pb, po, ph)]
     uniq, first = np.unique(key, return_index=True)
     bounds = np.append(first, len(key))
     _PAVEMENT_CACHE = {int(u): tuple(a[lo:hi] for a in arrs)
@@ -845,7 +855,12 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
     """(n x n) cap grid (m, inf where no road): the four corners of every
     cell a pavement probe falls in get that road's grade line - margin_m. Probes
     up to one cell outside the tile still cap this tile's shared edge
-    corners, identically to the neighbor that owns the cell."""
+    corners, identically to the neighbor that owns the cell.
+
+    Across the road the cap is the bank plane (see station_bank), held flat
+    past the raised edge and extended PAVEMENT_CEIL_LOW_EXT_M down past the
+    low one: concave across the pavement, so a triangle between capped
+    corners (a chord) stays under it to within the margin."""
     cap = np.full(n * n, np.inf)
     cell = (x1_cm - x0_cm) / (n - 1)
     for dx in (-1, 0, 1):
@@ -853,7 +868,7 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
             b = buckets.get((tx + dx) * 1_000_003 + (ty + dy))
             if b is None:
                 continue
-            px, py, pz, ptx, pty, pg = b
+            px, py, pz, ptx, pty, pg, pb, po, ph = b
             m = ((px >= x0_cm - cell) & (px <= x1_cm + cell)
                  & (py >= y0_cm - cell) & (py <= y1_cm + cell))
             if not m.any():
@@ -866,9 +881,12 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
                     i, j = i0 + di, j0 + dj
                     ok = (i >= 0) & (i < n) & (j >= 0) & (j < n)
                     q = np.where(m)[0][ok]
-                    along = ((x0_cm + i[ok] * cell - px[q]) * ptx[q]
-                             + (y0_cm + j[ok] * cell - py[q]) * pty[q])
-                    np.minimum.at(cap, j[ok] * n + i[ok], pz[q] + pg[q] * along - margin_m)
+                    dx_c, dy_c = x0_cm + i[ok] * cell - px[q], y0_cm + j[ok] * cell - py[q]
+                    along = dx_c * ptx[q] + dy_c * pty[q]
+                    o = po[q] + (dy_c * ptx[q] - dx_c * pty[q]) / 100.0   # m, right of travel
+                    lift = np.clip(pb[q] * o, -np.abs(pb[q]) * (ph[q] + PAVEMENT_CEIL_LOW_EXT_M),
+                                   np.abs(pb[q]) * ph[q])
+                    np.minimum.at(cap, j[ok] * n + i[ok], pz[q] + pg[q] * along + lift - margin_m)
     return cap.reshape(n, n)
 
 
@@ -922,6 +940,25 @@ def load_stations():
               f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
     return lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs
+
+
+def station_bank(east, north, bank_scale=None):
+    """(n, 3) per-station (bank slope, UE right-normal x, y) for load_stations()'
+    east/north (or experimental_junction_pads' regraded copy, with its pad
+    bank fade as `bank_scale`), computed per tunnel-split run exactly as the
+    road ribbons are - see road_mesh_common.bank_slopes. Extra trailing
+    entries (pad-rim anchors) and runs too short to bank stay 0."""
+    out = np.zeros((len(east), 3))
+    off = 0
+    for seg in json.loads(STATIONS_PATH.read_text())["segments"]:
+        k = len(seg["east_m"])
+        for lo, hi in split_excluding_tunnels(np.array(seg.get("is_tunnel", [False] * k), dtype=bool)):
+            if hi - lo >= 2:
+                sl = slice(off + lo, off + hi)
+                out[sl] = np.column_stack(bank_slopes(
+                    east[sl], north[sl], bank_scale=None if bank_scale is None else bank_scale[sl]))
+        off += k
+    return out
 
 
 def sample_dem(lat_arr, lon_arr, zoom, session, cache):
@@ -1007,7 +1044,7 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   drop=TERRAIN_CARVE_DROP_M,
                   cut_inner=TERRAIN_CARVE_CUT_INNER_M,
                   cut_outer=TERRAIN_CARVE_CUT_OUTER_M,
-                  st_clamp_r=None):
+                  st_clamp_r=None, st_bank=None):
     """Same inverse-distance-stamp + smoothstep blend as
     road_mesh_common.carve_heightmap, but operating directly in the local
     east/north METER frame instead of a lon/lat-bounded pixel grid - no
@@ -1035,7 +1072,12 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     tiles rather than an actual leak. Processing stations in fixed-size
     chunks and keeping a running nearest-distance/elevation bounds peak
     memory to grid_points x CARVE_STATION_CHUNK regardless of how many
-    stations a tile has nearby."""
+    stations a tile has nearby.
+
+    `st_bank` (station_bank rows, UE frame) tilts the nearest station's
+    target height across the road onto its banked pavement plane, held at
+    the edge height beyond the pavement, so the shoulder meets a raised
+    edge instead of staying at centerline height under it."""
     if len(st_east) == 0:
         return elev_grid
     shape = elev_grid.shape
@@ -1048,6 +1090,7 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     # 2026-09-06) - carried alongside best_elev from the same nearest
     # station; the old constant everywhere when the caller has no widths.
     best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
+    best_bank = np.zeros((P, 5))   # nearest station's east, north, slope, right-normal east/north
     for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
         sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
         sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
@@ -1061,6 +1104,13 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
         if st_clamp_r is not None:
             sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
             best_clamp = np.where(better, sc[nearest], best_clamp)
+        if st_bank is not None:
+            sb = st_bank[c0:c0 + CARVE_STATION_CHUNK][nearest]
+            best_bank = np.where(better[:, None], np.column_stack(
+                [sx[0, nearest], sy[0, nearest], sb[:, 0], sb[:, 1], -sb[:, 2]]), best_bank)
+    hw = best_clamp - SKIRT_EXTRA
+    o = (gx - best_bank[:, 0]) * best_bank[:, 3] + (gy - best_bank[:, 1]) * best_bank[:, 4]
+    best_elev = best_elev + best_bank[:, 2] * np.clip(o, -hw, hw)
     raw = elev_grid.reshape(-1)
     is_cut = raw > best_elev
     px_inner = np.where(is_cut, cut_inner, inner)
@@ -1221,7 +1271,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     plus (verts Px3 cm, uvs Px2, tris Tx3) - the single production function
     both main() (writes the ODT1 sidecar) and verify_terrain_fit.py (checks
     the actual built mesh, not a reimplementation) call into."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r = station_data
+    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
     tile_cm = TERRAIN_TILE_SIZE_CM
     near_cache, far_cache = caches
@@ -1266,7 +1316,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     if keep.any():
         elev = carve_grid_m(elev, east_m, north_m,
                              st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep],
-                             st_clamp_r=st_clamp_r[keep])
+                             st_clamp_r=st_clamp_r[keep], st_bank=st_bank[keep])
 
     if is_near:
         gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
@@ -1298,7 +1348,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # road >NEAR_MARGIN_M away) skips it: its triangles cover no pavement,
     # and a neighbor's road 100 m in would drag its corners down to road
     # height (up to 49 m seams against the near tile that owns the road).
-    buckets = _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r)
+    buckets = _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank)
     if is_near or (tx * 1_000_003 + ty) in buckets:
         cap = pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty,
                                PAVEMENT_CEIL_MARGIN_NEAR_M if is_near else HARD_CLAMP_MARGIN_M)
@@ -1516,7 +1566,7 @@ def main():
 
     lat0, lon0, east, north, elev, exclude, clamp_r, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r)
+    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r, station_bank(east, north))
 
     tiles = classify_tiles(station_data)
 

@@ -104,6 +104,7 @@ V3_BACKUP_DIR = OUT_DIR_V2 / "_roadv3_backup_junction_pads"
 TERRAIN_BACKUP_DIR = OUT_DIR / "_terrain_backup_junction_pads"
 SIDECAR_PATH = OUT_DIR / f"roadstations_{AREA_NAME}.bin"
 SIDECAR_BACKUP_DIR = OUT_DIR / "_sidecar_backup_junction_pads"
+BANK_SCALE_PATH = SIDECAR_BACKUP_DIR / f"bank_scale_{AREA_NAME}.npz"
 
 # How close (UE-frame cm) a regraded station's ORIGINAL x/y has to land to a
 # sidecar entry's x/y to count as "the same station" - both are computed by
@@ -2753,7 +2754,7 @@ def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()
     st_exclude) tuple build_tile()/carve_grid_m() consume, each carrying its
     junction's own pinned elevation - see the module comment above for why
     this replaces a separate feather/blend pass instead of adding one."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r = station_data
+    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     if not junctions:
         return station_data
     rim_x, rim_y, rim_elev = [], [], []
@@ -2794,11 +2795,12 @@ def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()
             np.concatenate([st_y_cm, rim_y_cm]),
             np.concatenate([st_elev, rim_elev]),
             np.concatenate([st_exclude, rim_exclude]),
-            np.concatenate([st_clamp_r, rim_clamp]))
+            np.concatenate([st_clamp_r, rim_clamp]),
+            np.concatenate([st_bank, np.zeros((len(rim_x), 3))]))
 
 
 def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded_elev,
-                                  terrain_exclude, st_clamp_r, spur_anchors=()):
+                                  terrain_exclude, st_clamp_r, spur_anchors=(), bank_scale=None):
     """Re-carve the (small) set of terrain tiles a snapped junction actually
     touches, from the SAME regraded station arrays the road pads/ribbons
     above were just built from - reuses build_terrain_mesh_tiles.build_tile()
@@ -2842,7 +2844,9 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     st_x_cm = regraded_east * 100.0
     st_y_cm = -regraded_north * 100.0
     station_data = _augment_station_data_with_pad_rims(
-        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r),
+        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r,
+         # the same faded bank main() builds the ribbons with
+         btmt.station_bank(regraded_east, regraded_north, bank_scale)),
         junctions, spur_anchors)
 
     gen_id_bytes = pack_generation_id(compute_generation_id())
@@ -2924,6 +2928,11 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_ea
     if not SIDECAR_BACKUP_DIR.exists():
         SIDECAR_BACKUP_DIR.mkdir(parents=True)
     backup_path = SIDECAR_BACKUP_DIR / SIDECAR_PATH.name
+    # a patched sidecar keeps its original gen-id, so a mismatch means a
+    # fresh rebuild replaced it and the backup is a previous bake's baseline
+    if backup_path.exists() and read_station_sidecar(backup_path)[0] != read_station_sidecar(SIDECAR_PATH)[0]:
+        backup_path.unlink()
+        print(f"stale sidecar backup (other generation) removed: {backup_path}")
     if not backup_path.exists():
         backup_path.write_bytes(SIDECAR_PATH.read_bytes())
         print(f"backed up original (unpatched) station sidecar -> {backup_path}")
@@ -3356,9 +3365,9 @@ def main():
         seg["north_m"] = regraded_north[off:off + cnt].tolist()
         off += cnt
 
-    def carve_and_patch():
+    def carve_and_patch(bank_scale=None):
         regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
-                                      terrain_exclude, clamp_r, spur_anchors)
+                                      terrain_exclude, clamp_r, spur_anchors, bank_scale)
 
         # The runtime terrain carve (AODTerrainManager) doesn't only read the
         # road-mesh tiles patched above - it reads roadstations_{AREA_NAME}.bin,
@@ -3564,7 +3573,10 @@ def main():
 
     # after pad-swallow (2026-10-01): carving before it left every grown
     # pad's new lobes without rim anchors - terrain up to 4.4 m proud
-    carve_and_patch()
+    carve_and_patch(1.0 - pad_w)
+    # verify_road_fit checks banked edges against this same faded bank
+    SIDECAR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    np.savez(BANK_SCALE_PATH, scale=1.0 - pad_w, gen=read_station_sidecar(SIDECAR_PATH)[0])
 
     all_chunks = list(connector_chunks)
     total_km = 0.0

@@ -102,7 +102,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from road_mesh_common import (ROAD_HALF_WIDTH, half_width_for_stations,
+from road_mesh_common import (ROAD_HALF_WIDTH, bank_slopes, half_width_for_stations,
                                junction_agreement_pass, road_class_and_lanes,
                                road_ue_z_m, reconcile_junction_elevations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
@@ -280,6 +280,7 @@ def main():
         else:
             half_w = np.full(n, ROAD_HALF_WIDTH)
         probe_off = half_w + GUARDRAIL_PROBE_EXTRA_M
+        bank = bank_slopes(east, north)[0]
         rail_off = half_w + GUARDRAIL_RAIL_EXTRA_M
 
         for side in (-1.0, 1.0):
@@ -332,7 +333,9 @@ def main():
                 else:
                     n_skipped_junction += 1
 
-            z_cm = road_z_ue_m * 100.0
+            # seated on the banked edge's height (terrain holds it outward);
+            # rx, ry is LEFT of travel, the bank slope per metre to the right
+            z_cm = (road_z_ue_m - bank * side * half_w) * 100.0
 
             for run_start, run_end in contiguous_runs(keep_mask):
                 run_len_m = s[run_end - 1] - s[run_start]
