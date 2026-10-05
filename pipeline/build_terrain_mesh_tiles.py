@@ -755,7 +755,7 @@ _LAKE_BEDS_CACHE = None
 def _get_lake_beds():
     """Lazily loads+caches load_lake_beds() once per process - build_tile()
     calls this internally (no signature change) so every existing caller
-    (build_forest_elevation.py, experimental_junction_pads.py,
+    (experimental_junction_pads.py,
     verify_terrain_fit.py, this module's own main()) picks up lake-bed
     depression automatically and identically, off the same disk read done
     only once."""
@@ -1532,7 +1532,7 @@ def _sample_one_tile(job):
 
 def sample_built_tiles(jobs, station_data):
     """For consumers that build tiles in memory (verify_terrain_fit's
-    pre-bake check, build_forest_elevation): jobs are ((tx, ty), is_near,
+    pre-bake check): jobs are ((tx, ty), is_near,
     x cm array, y cm array). Builds each tile in the BAKE_WORKERS pool and
     yields, in job order, its mesh height (cm, NaN = off-mesh) at each point."""
     with ProcessPoolExecutor(BAKE_WORKERS, initializer=_init_bake_worker,

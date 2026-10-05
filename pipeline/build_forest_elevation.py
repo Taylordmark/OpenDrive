@@ -1,10 +1,10 @@
 """Bakes an elevation reference grid for AODForestManager's tree ground
-truth. Ground-truth height comes from the ACTUAL built terrain mesh
-(build_terrain_mesh_tiles.build_tile(), the same production function
-AODTerrainManager and verify_terrain_fit.py both use), not a raw DEM sample
-- so a tree's baked height always matches what's actually rendered
-underfoot, whether that spot lands in a NEAR (fine, road-adjacent) or FAR
-(coarse background) tile.
+truth. Ground-truth height comes from the SHIPPED terrain_*.bin tiles on
+disk (2026-10-05; was an in-memory build_terrain_mesh_tiles.build_tile()
+rebuild, which missed experimental_junction_pads.py's terrain re-carve) - so
+a tree's baked height always matches what's actually rendered underfoot.
+Must run after every terrain write: rebuild_area.py runs it after the
+terrain bake, and experimental_junction_pads.py re-runs it after its own.
 
 Rewritten 2026-07-25 for the Arc 7.0 pivot: the previous version sampled
 build_terrain_tiles.py's old live-streaming-era z/x/y quantized-mesh tile
@@ -20,10 +20,7 @@ approach as before, just pointed at the new tiling scheme (world-space
 tx/ty tiles, near/far classified the same way classify_tiles() does)
 instead of geo-referenced z/x/y ones.
 
-No new DEM fetch caching of its own - build_terrain_mesh_tiles.build_tile()
-fetches (or reuses an in-memory) Terrarium tile per (zoom, tx, ty) exactly
-like the main tile bake does; candidates are grouped by tile so each tile is
-only fetched/carved once no matter how many forest points land in it.
+Candidates are grouped by tile so each tile file is only read once.
 
 Candidate points are generated as cross-section fans (perpendicular to the
 route at intervals along it), not a full grid over the route's bounding
@@ -44,6 +41,8 @@ from pathlib import Path
 import numpy as np
 
 import build_terrain_mesh_tiles as btmt
+from bin_tile_io import parse_terrain_tile_bin
+from road_mesh_common import sample_mesh_heights
 from test_areas import AREA_NAME
 
 STATION_STRIDE = 6        # every 6th 5 m station = 30 m along-route spacing
@@ -78,20 +77,9 @@ def fan_points(east, north):
 
 
 def main():
-    # station_data (for build_tile's carving/exclusion) comes from the new
-    # pipeline's own loader; fan_points still needs each segment's own
-    # contiguous east/north arrays for its tangent math, so segments are
-    # read directly here too (load_stations() only returns pre-concatenated
-    # arrays, which would break the i-1/i+1 tangent lookup at segment seams).
-    st_east, st_north, st_elev, st_exclude, st_clamp_r, _wall_pairs = btmt.load_stations()
-    # load_stations() returns east/north in METERS - callers convert to the
-    # cm/y-flipped world frame themselves (matches verify_terrain_fit.py's
-    # own unpacking; this file used to skip that conversion, which was the
-    # actual bug behind this rewrite's near-total sample-miss rate).
-    st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    station_data = (st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r,
-                    btmt.station_bank(st_east, st_north))
-
+    # fan_points needs each segment's own contiguous east/north arrays for
+    # its tangent math (a pre-concatenated array would break the i-1/i+1
+    # tangent lookup at segment seams), so segments are read directly.
     data = json.loads(STATIONS_PATH.read_text())
     all_e, all_n = [], []
     for seg in data["segments"]:
@@ -114,24 +102,27 @@ def main():
         tiles[(int(tx_all[i]), int(ty_all[i]))].append(i)
     print(f"{len(tiles)} distinct terrain tile(s) touched by the fan")
 
+    # Sample the SHIPPED terrain tiles on disk, not an in-memory build_tile()
+    # rebuild (2026-10-05): experimental_junction_pads.py re-carves terrain
+    # tiles around its pads after the main bake, and a rebuild from
+    # road_stations.json can't see that - trees sat 7-31 m off the ground
+    # 37-95 m from pads. Reading what's shipped is also exactly what
+    # verify_forest_elevation_fit.py checks against.
     elev_cm = np.full(len(x_cm), np.nan, dtype=np.float64)
     n_miss = 0
-    jobs, job_idxs = [], []
-    for (tx, ty), idxs in tiles.items():
-        d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
-        if d > btmt.RENDER_DISTANCE_M:
-            # shouldn't happen (FOREST_RADIUS_M << RENDER_DISTANCE_M), but a
-            # candidate this far from the route has no built tile to sample
+    for n_done, ((tx, ty), idxs) in enumerate(tiles.items(), 1):
+        idxs = np.array(idxs)
+        parsed = parse_terrain_tile_bin(OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin")
+        if parsed is None:
             n_miss += len(idxs)
             continue
-        idxs = np.array(idxs)
-        jobs.append(((tx, ty), d <= btmt.NEAR_MARGIN_M, x_cm[idxs], y_cm[idxs]))
-        job_idxs.append(idxs)
-    for n_built, (idxs, hs) in enumerate(zip(job_idxs, btmt.sample_built_tiles(jobs, station_data)), 1):
+        positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
+        triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
+        hs = sample_mesh_heights(positions, triangles, x_cm[idxs], y_cm[idxs])
         n_miss += int(np.isnan(hs).sum())
         elev_cm[idxs] = hs
-        if n_built % 20 == 0:
-            print(f"  {n_built}/{len(tiles)} tile(s) sampled")
+        if n_done % 20 == 0:
+            print(f"  {n_done}/{len(tiles)} tile(s) sampled")
 
     if n_miss:
         print(f"WARNING: {n_miss} point(s) had no built tile or fell outside "
@@ -145,7 +136,7 @@ def main():
                 d2 = (x_cm[valid] - x_cm[i]) ** 2 + (y_cm[valid] - y_cm[i]) ** 2
                 elev_cm[i] = elev_cm[valid[np.argmin(d2)]]
 
-    # h_cm from build_tile() is already the final UE-frame Z (road_ue_z_m
+    # tile vertex Z is already the final UE-frame Z (road_ue_z_m
     # bakes the origin-height shift in at build time - no separate
     # ORIGIN_HEIGHT_M subtraction needed here, unlike the old live-streaming
     # version where a georeference actor applied that shift at

@@ -61,8 +61,8 @@ filenames:
      (needs road_stations.json; reuses classify_biomes.py's imagery/
      classification functions directly)
  22. build_forest_elevation.py -> elev_*.bin (needs road_stations.json;
-     ground-truths tree height against the just-built terrain tiles via
-     build_terrain_mesh_tiles.build_tile())
+     samples the shipped terrain_*.bin tiles on disk;
+     experimental_junction_pads.py re-runs it after re-carving terrain)
  23. verify_terrain_fit.py    -> offline gate. Rewritten 2026-08-21
      (AUDIT-RELIABILITY.md SS4): now reads the ACTUAL terrain .bin tiles
      this script just wrote to Content/ (not an in-memory rebuild) as its
