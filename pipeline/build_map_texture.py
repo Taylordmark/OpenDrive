@@ -21,15 +21,14 @@ Outputs data/road_tiles/<AREA_NAME>_test/map_texture.png
 """
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 import test_areas
-from classify_biomes import classify_rgb, fetch_mosaic
-from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_LATLON
+from classify_biomes import classify_rgb, fetch_mosaic, sample_bilinear
+from test_areas import AREA_NAME, local_rect, lonlat_bbox, to_lonlat
 
 # Optional per-area wider bbox the map background should also cover, even
 # though the OSM road network (and this script's own default road-station
@@ -40,9 +39,9 @@ from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_LATLON
 # their own.
 BACKGROUND_BBOX_SNWE = getattr(test_areas, "BACKGROUND_BBOX_SNWE", None)
 
-M_PER_DEG_LAT = 111132.0
 MARGIN_M = 2000.0       # same buffer classify_biomes.py fetches beyond the road bbox
 OUT_PX = 768             # square output resolution
+SUPERSAMPLE = 3          # resample at 3x, then PIL's filtered downscale
 
 # classify_rgb()'s w_water = dark-and-blue-tinted - true for real water, but
 # ALSO true for shadowed mountain slopes under blue-sky ambient light, which
@@ -74,58 +73,32 @@ COLOR_WATER = np.array([58, 102, 150], dtype=np.float32)
 
 def main():
     data = json.loads(STATIONS_PATH.read_text())
-    lon = np.concatenate([np.array(seg["lon"]) for seg in data["segments"]])
-    lat = np.concatenate([np.array(seg["lat"]) for seg in data["segments"]])
-
-    buf_lat = MARGIN_M / M_PER_DEG_LAT
-    buf_lon = MARGIN_M / (M_PER_DEG_LAT * math.cos(math.radians(float(lat.mean()))))
-    west, east = float(lon.min() - buf_lon), float(lon.max() + buf_lon)
-    south, north = float(lat.min() - buf_lat), float(lat.max() + buf_lat)
+    east_m = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
+    north_m = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
+    e0, n0 = float(east_m.min() - MARGIN_M), float(north_m.min() - MARGIN_M)
+    e1, n1 = float(east_m.max() + MARGIN_M), float(north_m.max() + MARGIN_M)
 
     # Widen to also cover BACKGROUND_BBOX_SNWE (if this area defines one) -
     # union, not replace, so a background bbox smaller than the road
     # network's own extent (shouldn't happen, but not assumed) can't
-    # shrink the map. Same square-padding/imagery-fetch/crop logic below
-    # runs unchanged either way, it just operates on a wider west/south/
-    # east/north than the road-only default.
+    # shrink the map.
     if BACKGROUND_BBOX_SNWE is not None:
-        bg_s, bg_w, bg_n, bg_e = BACKGROUND_BBOX_SNWE
-        west, east = min(west, bg_w), max(east, bg_e)
-        south, north = min(south, bg_s), max(north, bg_n)
+        be0, bn0, be1, bn1 = local_rect(BACKGROUND_BBOX_SNWE)
+        e0, n0, e1, n1 = min(e0, be0), min(n0, bn0), max(e1, be1), max(n1, bn1)
 
-    # Real bug found 2026-07-28 (Taylor, live: the road network looked
-    # "shrunk toward the center" relative to the map's coastline art): on a
-    # non-square bbox (Oahu's road network is ~67 km E-W but only ~53 km
-    # N-S), the OLD code below fetched this exact rectangle then cropped the
-    # WIDER axis down to match the narrower one, silently discarding the
-    # real east/west coastline pixels. DrawStageMap (ODRaceHUD.cpp) fits the
-    # road-network panel to the road's own (uncropped, full-width) bounding
-    # box, so the panel ends up wider than the texture's actual coverage -
-    # WorldToUV clamps out-of-range UVs to the nearest edge texel, which
-    # repeats whatever (still-inland) color sat at the crop boundary rather
-    # than showing a coastline there. Net effect: the background paints
-    # land all the way to the panel edge on the cropped axis while the real,
-    # correctly-scaled road polyline stops short at the true coast - reading
-    # as "the roads are inset" when actually the BACKGROUND was cropped too
-    # small. Fixed by expanding the FETCH bbox to already be square in real
-    # meters (before fetching, not after) - the narrower axis (here, N-S)
-    # gets padded outward, not the wider one cropped inward, so no real
-    # coastline data is ever discarded. mercantile tile-alignment still
-    # rounds the actual fetched extent slightly, so the crop-to-square step
-    # below is kept as a small residual correction, not the primary mechanism.
-    lat0 = float(lat.mean())
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
-    width_m = (east - west) * m_per_deg_lon
-    height_m = (north - south) * M_PER_DEG_LAT
-    target_span_m = max(width_m, height_m)
-    if height_m < target_span_m:
-        pad_deg = (target_span_m - height_m) / 2.0 / M_PER_DEG_LAT
-        south, north = south - pad_deg, north + pad_deg
-    if width_m < target_span_m:
-        pad_deg = (target_span_m - width_m) / 2.0 / m_per_deg_lon
-        west, east = west - pad_deg, east + pad_deg
+    # Square in local metres, padding the narrower axis outward - never
+    # cropping the wider one (2026-07-28 Oahu bug: a cropped axis lost real
+    # coastline and the road read as "inset" against the map art).
+    # (2026-10-05) The square is built in the local frame and every output
+    # pixel is sampled through to_lonlat, not cropped out of the lon/lat
+    # mosaic: under LCC the mosaic is rotated by meridian convergence (~2.4
+    # deg at far_gasquet), so no axis-aligned crop of it lines up with UE.
+    span_m = max(e1 - e0, n1 - n0)
+    center_east_m, center_north_m = (e0 + e1) / 2.0, (n0 + n1) / 2.0
+    e0, n1 = center_east_m - span_m / 2.0, center_north_m + span_m / 2.0
 
-    mosaic, bounds = fetch_mosaic(west, south, east, north)
+    s_, w, n_, e = lonlat_bbox(e0, n1 - span_m, e0 + span_m, n1)
+    mosaic, bounds = fetch_mosaic(w, s_, e, n_)
     # classify_rgb() now also returns w_bare (2026-08-27, classify_biomes.py
     # desert-detection fix) - unused here, this is a map-texture blend, not
     # a biome classification.
@@ -143,35 +116,15 @@ def main():
     total = np.clip(w_forest + w_grass + w_rock + w_water, 1e-3, None)
     rgb = (w_forest[..., None] * COLOR_FOREST + w_grass[..., None] * COLOR_GRASS
            + w_rock[..., None] * COLOR_ROCK + w_water[..., None] * COLOR_WATER) / total[..., None]
-    img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
 
-    # crop the fetched mosaic (tile-aligned, NOT square in meters - longitude
-    # degrees are narrower than latitude degrees away from the equator) down
-    # to a square in real-world meters, centered on the same bbox, so a
-    # single span_cm value describes both axes for the engine side - no
-    # aspect-ratio bookkeeping needed in ODRaceHUD's UV math.
-    w, s, e, n = bounds
-    lat0 = float(lat.mean())
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
-    width_m = (e - w) * m_per_deg_lon
-    height_m = (n - s) * M_PER_DEG_LAT
-    span_m = min(width_m, height_m)   # inscribe, don't stretch - crop to a square that's fully covered by data
-    crop_frac_x = span_m / width_m
-    crop_frac_y = span_m / height_m
-    px_w, px_h = img.size
-    cx0 = int(px_w * (1 - crop_frac_x) / 2)
-    cy0 = int(px_h * (1 - crop_frac_y) / 2)
-    img = img.crop((cx0, cy0, px_w - cx0, px_h - cy0))
+    # row 0 = north, col 0 = west, in the local frame
+    n_px = OUT_PX * SUPERSAMPLE
+    t = (np.arange(n_px) + 0.5) / n_px * span_m
+    g_lon, g_lat = to_lonlat(*np.meshgrid(e0 + t, n1 - t))
+    rgb = np.stack([sample_bilinear(rgb[..., c], bounds, g_lon, g_lat) for c in range(3)], axis=-1)
+    img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
     img = img.resize((OUT_PX, OUT_PX), Image.BILINEAR)
     img.save(OUT_PNG)
-
-    # center of that square crop, in the same local frame build_road_stations.py
-    # anchors everything to (test_areas.ORIGIN_LATLON)
-    lat0_area, lon0_area = ORIGIN_LATLON
-    center_lon = (w + e) / 2
-    center_lat = (s + n) / 2
-    center_east_m = (center_lon - lon0_area) * m_per_deg_lon
-    center_north_m = (center_lat - lat0_area) * M_PER_DEG_LAT
 
     meta = {
         "center_x_cm": round(center_east_m * 100.0, 2),

@@ -20,6 +20,8 @@ To add an area:
 """
 import os
 
+from world_frame import WORLDS, lcc_forward, lcc_inverse
+
 AREAS = {
     # Skagit Valley / North Cascades foothills, WA (2026-07-20 - 2026-07-26)
     # - the known-good reference config the whole open-world pipeline was
@@ -120,22 +122,24 @@ AREAS = {
     ),
 
     # Gasquet, US 199 along the Smith River (2026-10-02) - the far-corner
-    # physics test for a California-wide world: the origin sits 7.8 deg
-    # east at the same latitude, so the whole area is ~646 km from the world
-    # origin (UE X ~ -6.46e7 cm), about where Crescent City would land from
-    # the state's centre. Drive it and compare handling with summit_county.
-    # Origin 116.5 m (z12 at bbox centre); z15 12x12 grid read 94..583 m,
-    # padded. Bake with OD_AREA=far_gasquet.
+    # physics test for a California-wide world. Drive it and compare
+    # handling with summit_county. Origin 116.5 m (z12 at bbox centre); z15
+    # 12x12 grid read 94..583 m, padded. Bake with OD_AREA=far_gasquet.
+    # (2026-10-05) Now a real member of the "california" world: its frame
+    # is the state-wide LCC, so it sits ~613 km from the world origin
+    # (east -330 km, north +517 km), where it really is. Was a fake origin
+    # 7.8 deg east at the same latitude (~646 km) under the old equirect.
     "far_gasquet": dict(
         bbox_snwe=(41.835, -123.985, 41.860, -123.945),
         background_bbox_snwe=None,
-        origin_latlon=(41.8475, -123.965 + 7.8),
+        world="california",
         origin_height_m=116.5,
         elev_plausible_m=(0.0, 900.0),
         max_building_levels=4,
     ),
-    # far_gasquet's control: same bbox at the usual centred origin, so its
-    # tiles diff against far_gasquet's to isolate large-coordinate effects.
+    # far_gasquet's control: same bbox in its own centred frame, so its
+    # tiles diff against far_gasquet's to isolate large-coordinate effects
+    # (expect an offset plus ~2.4 deg of meridian convergence between them).
     "near_gasquet": dict(
         bbox_snwe=(41.835, -123.985, 41.860, -123.945),
         background_bbox_snwe=None,
@@ -161,18 +165,52 @@ AREA_NAME = ACTIVE_AREA
 # (south, west, north, east)
 BBOX_SNWE = _ACTIVE["bbox_snwe"]
 
-# Local-frame origin (lat, lon): every east/north metre in the pipeline and
-# every UE cm is measured from here. Defaults to the bbox centre. An area may
-# set "origin_latlon" to sit far from the world origin (2026-10-02: the
-# California-scale physics test). Same latitude only: the frame is still
-# equirectangular at cos(origin lat), and several stages scale by their own
-# local latitude, so a latitude shift would stretch them against each other
-# until a state-wide projection replaces it.
-ORIGIN_LATLON = tuple(_ACTIVE.get("origin_latlon")
-                      or ((BBOX_SNWE[0] + BBOX_SNWE[2]) / 2, (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2))
-if abs(ORIGIN_LATLON[0] - (BBOX_SNWE[0] + BBOX_SNWE[2]) / 2) > 1e-9:
-    raise ValueError(f"{ACTIVE_AREA}: origin_latlon must keep the bbox centre latitude "
-                     f"{(BBOX_SNWE[0] + BBOX_SNWE[2]) / 2} (got {ORIGIN_LATLON[0]})")
+# Local east/north frame (2026-10-05, replaces ORIGIN_LATLON + the
+# per-stage equirectangular math): every east/north metre in the pipeline
+# and every UE cm is an ellipsoidal Lambert Conformal Conic coordinate
+# (world_frame.py). An area with world="california" uses that world's LCC
+# with the local origin at the world origin; any other area gets its own LCC
+# centred on itself (standard parallels at the bbox south/north edges,
+# origin at the bbox centre). The old equirect used 111132 m/deg on both
+# axes, so it ran ~0.3% short east-west (at Gasquet); this is ellipsoid-true.
+# Meridians converge under LCC, so a lon/lat raster can't be mapped onto
+# this grid axis-aligned - sample it per point through to_lonlat().
+_S, _W, _N, _E = BBOX_SNWE
+FRAME_LCC = (WORLDS[_ACTIVE["world"]] if "world" in _ACTIVE
+             else (_S, _N, (_S + _N) / 2, (_W + _E) / 2))
+
+
+def to_local(lon, lat):
+    """lon/lat degrees -> (east_m, north_m) in the active frame. Vectorised."""
+    return lcc_forward(lon, lat, *FRAME_LCC)
+
+
+def to_lonlat(east_m, north_m):
+    """(east_m, north_m) -> (lon, lat) degrees. Vectorised."""
+    return lcc_inverse(east_m, north_m, *FRAME_LCC)
+
+
+def _edges(x0, y0, x1, y1, k=65):
+    import numpy as np   # not at module level: unreal/ scripts import this file
+    t = np.linspace(0.0, 1.0, k)
+    return (np.concatenate([x0 + (x1 - x0) * t, np.full(k, x1), x1 - (x1 - x0) * t, np.full(k, x0)]),
+            np.concatenate([np.full(k, y0), y0 + (y1 - y0) * t, np.full(k, y1), y1 - (y1 - y0) * t]))
+
+
+def local_rect(snwe):
+    """Local (east_min, north_min, east_max, north_max) m covering a lon/lat
+    bbox - from its projected edges (parallels map to arcs), not corners."""
+    lon, lat = _edges(snwe[1], snwe[0], snwe[3], snwe[2])
+    e, n = to_local(lon, lat)
+    return float(e.min()), float(n.min()), float(e.max()), float(n.max())
+
+
+def lonlat_bbox(east_min, north_min, east_max, north_max):
+    """(south, west, north, east) covering a local-frame rectangle - from
+    its inverse-projected edges, not a linear metres->degrees conversion."""
+    lon, lat = to_lonlat(*_edges(east_min, north_min, east_max, north_max))
+    return float(lat.min()), float(lon.min()), float(lat.max()), float(lon.max())
+
 
 # Background-visuals bbox: wider than BBOX_SNWE, used ONLY by
 # build_terrain_mesh_tiles.py (raw-DEM far tiles, no road carving, no

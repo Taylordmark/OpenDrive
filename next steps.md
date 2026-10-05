@@ -141,8 +141,12 @@ Group these into a few drive sessions. Each line says what to judge.
 ## 4. World pipeline
 
 - **California-scale world (agreed order, 2026-10-02):**
-  1. World grid: an LCC projection replacing the equirectangular frame,
-     cut into 64 km chunks, each with its own local origin.
+  1. ~~World grid: an LCC projection replacing the equirectangular frame,
+     cut into 64 km chunks, each with its own local origin.~~ Done
+     2026-10-05 (`world_frame.py`). Caveats:
+     - the sidecar formats still carry one origin per area; per-chunk
+       origins come with the chunked bake (step 3);
+     - the vertical datum is still per area (`ORIGIN_HEIGHT_M`).
   2. Runtime chunk streaming (load/unload chunks around the car).
   3. Two-pass chunked bake, so a chunk's edges match its neighbours'.
   4. Horizon culling of distant tiles.
@@ -155,7 +159,8 @@ Group these into a few drive sessions. Each line says what to judge.
   before a second hot zone exists. No zone priority order has been chosen yet.
 - **Alaska and high latitude:**
   - Mercator tile counts grow as 1/cos²(lat): 4.3× at 63°N;
-  - the equirectangular frame has 6.9% edge error over ±2°;
+  - the old equirectangular frame had 6.9% edge error over ±2°; the
+    per-area LCC (2026-10-05) is conformal, so only its scale varies;
   - so keep Alaskan zones short in latitude.
 - **§7.0 step 4, landmarks:** about 1,000 named OSM structures filtered by
   prominence along driving routes. Authored or kitbashed assets placed at

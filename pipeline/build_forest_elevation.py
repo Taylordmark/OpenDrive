@@ -83,13 +83,13 @@ def main():
     # contiguous east/north arrays for its tangent math, so segments are
     # read directly here too (load_stations() only returns pre-concatenated
     # arrays, which would break the i-1/i+1 tangent lookup at segment seams).
-    lat0, lon0, st_east, st_north, st_elev, st_exclude, st_clamp_r, _wall_pairs = btmt.load_stations()
+    st_east, st_north, st_elev, st_exclude, st_clamp_r, _wall_pairs = btmt.load_stations()
     # load_stations() returns east/north in METERS - callers convert to the
     # cm/y-flipped world frame themselves (matches verify_terrain_fit.py's
     # own unpacking; this file used to skip that conversion, which was the
     # actual bug behind this rewrite's near-total sample-miss rate).
     st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r,
+    station_data = (st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r,
                     btmt.station_bank(st_east, st_north))
 
     data = json.loads(STATIONS_PATH.read_text())

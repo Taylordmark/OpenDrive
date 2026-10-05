@@ -17,16 +17,13 @@ Outputs data/road_tiles/<AREA_NAME>_test/road_labels.json
 """
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
 
-from test_areas import AREA_NAME
+from test_areas import AREA_NAME, to_local
 
 SAMPLE_STRIDE = 10   # every 10th station (~50 m spacing), same as classify_biomes.py
-
-M_PER_DEG_LAT = 111132.0
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
@@ -36,7 +33,6 @@ OUT_PATH = STATIONS_PATH.parent / "road_labels.json"
 
 def main():
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
     places = json.loads(PLACES_PATH.read_text(encoding="utf-8"))
 
     lon = np.concatenate([np.array(seg["lon"]) for seg in data["segments"]])
@@ -51,12 +47,11 @@ def main():
     print(f"{len(lon)} sample point(s) (every {SAMPLE_STRIDE}th station)")
 
     # project places into the SAME local east/north meter frame road
-    # stations already use (origin_latlon), so nearest-distance is a plain
-    # Euclidean lookup, not a lat/lon haversine one
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    # stations already use (test_areas.to_local), so nearest-distance is a
+    # plain Euclidean lookup, not a lat/lon haversine one
     place_names = [p["name"] for p in places]
-    place_east = np.array([(p["lon"] - lon0) * m_per_deg_lon for p in places])
-    place_north = np.array([(p["lat"] - lat0) * M_PER_DEG_LAT for p in places])
+    place_east, place_north = to_local(np.array([p["lon"] for p in places], dtype=float),
+                                       np.array([p["lat"] for p in places], dtype=float))
 
     city_label = []
     for e, n in zip(east_m, north_m):

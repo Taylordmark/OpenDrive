@@ -90,7 +90,7 @@ def compute_generation_id() -> str:
 
     if STATIONS_PATH.is_file():
         data = json.loads(STATIONS_PATH.read_text())
-        h.update(repr(data.get("origin_latlon")).encode("utf-8"))
+        h.update(repr(data.get("frame_lcc")).encode("utf-8"))
         for seg in data.get("segments", []):
             # Round to mm - strips float repr/json round-trip noise, not a
             # precision requirement; a real station edit changes values by

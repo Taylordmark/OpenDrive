@@ -21,9 +21,8 @@ build_building_mesh.py+export_building_mesh_bin.py) end to end:
      ~108 m below grade at the Blue River Parkway / 6th Street junction
      (verify_terrain_fit.py's 2026-09-04 max-dev=108.91m failure).
   2. Project each closed way's ring into the SAME local east/north meter
-     frame every other pipeline stage uses (road_stations.json's own
-     origin_latlon - keeps water in registration with roads/terrain/
-     buildings, which all key off that same origin).
+     frame every other pipeline stage uses (test_areas.to_local - keeps
+     water in registration with roads/terrain/buildings).
   3. Sample DEM elevation (terrain_common's Terrarium fetch, bilinear via
      build_terrain_mesh_tiles.sample_dem - reused rather than
      reimplemented) at a grid of INTERIOR points (not the shoreline ring -
@@ -140,11 +139,9 @@ from scipy.spatial import cKDTree
 from build_terrain_mesh_tiles import NEAR_DEM_ZOOM, sample_dem
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import ROAD_HALF_WIDTH, road_ue_z_m
-from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local, to_lonlat
 
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
-
-M_PER_DEG_LAT = 111132.0
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw" / f"{AREA_NAME}_test"
@@ -573,7 +570,7 @@ def build_road_point_index():
     origin-relative) plus a parallel is_bridge/tangent array, for the
     waterway/road-overlap check (build_waterway_ribbons). Returns None if
     road_stations.json has no segments (shouldn't happen - build_water_tiles
-    already requires it for the shared origin - but degrade to "no road
+    already requires it - but degrade to "no road
     overlap check" rather than crash)."""
     if not STATIONS_PATH.is_file():
         return None
@@ -687,7 +684,7 @@ def retained_t_intervals(gap_intervals):
     return retained
 
 
-def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache, road_idx):
+def build_waterway_ribbons(chains, session, dem_cache, road_idx):
     """Centerline (lat/lon chain) -> list of per-segment flat ribbon quads
     ("lake" dicts, SAME shape build_lake_mesh's caller already produces) +
     a summary dict for verify_waterways_stats.txt. See module docstring for
@@ -702,16 +699,14 @@ def build_waterway_ribbons(chains, lat0, lon0, m_per_deg_lon, session, dem_cache
     for chain in chains:
         lat = np.array([lat for lat, lon in chain["latlon"]])
         lon = np.array([lon for lat, lon in chain["latlon"]])
-        east_m = (lon - lon0) * m_per_deg_lon
-        north_m = (lat - lat0) * M_PER_DEG_LAT
+        east_m, north_m = to_local(lon, lat)
         if len(east_m) < 2:
             continue
 
         rs_e, rs_n = resample_polyline(east_m, north_m, WATERWAY_RESAMPLE_M)
         if len(rs_e) < 2:
             continue
-        rs_lat = lat0 + rs_n / M_PER_DEG_LAT
-        rs_lon = lon0 + rs_e / m_per_deg_lon
+        rs_lon, rs_lat = to_lonlat(rs_e, rs_n)
         raw_elev = sample_dem(rs_lat, rs_lon, NEAR_DEM_ZOOM, session, dem_cache)
 
         # Flow direction: a river flows high -> low. Compare mean elevation
@@ -1060,10 +1055,7 @@ def write_tile(path, lakes, gen_id_bytes):
 def main():
     if not STATIONS_PATH.is_file():
         raise SystemExit(f"{STATIONS_PATH} not found - run build_road_stations.py first "
-                          f"(water needs the shared world-frame origin_latlon it writes).")
-    station_data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = station_data["origin_latlon"]
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+                          f"(water needs its road points for the waterway/road overlap check).")
 
     polygons = fetch_water_polygons()
     if not polygons:
@@ -1084,8 +1076,8 @@ def main():
             n_flowing += 1
             continue
         ring_ll = poly["nodes"]
-        east_m = np.array([(lon - lon0) * m_per_deg_lon for _, lon in ring_ll])
-        north_m = np.array([(lat - lat0) * M_PER_DEG_LAT for lat, _ in ring_ll])
+        east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
+                                   np.array([lat for lat, _ in ring_ll]))
 
         area_m2 = polygon_area_m2(east_m, north_m)
         if area_m2 < MIN_AREA_M2:
@@ -1095,8 +1087,7 @@ def main():
         int_e, int_n, used_fallback = interior_points_m(east_m, north_m)
         if used_fallback:
             n_fallback_elev += 1
-        int_lat = lat0 + int_n / M_PER_DEG_LAT
-        int_lon = lon0 + int_e / m_per_deg_lon
+        int_lon, int_lat = to_lonlat(int_e, int_n)
         elevs = sample_dem(int_lat, int_lon, NEAR_DEM_ZOOM, session, dem_cache)
         surface_elev_m = float(np.percentile(elevs, SURFACE_PERCENTILE))
         surface_z_cm = road_ue_z_m(surface_elev_m, 0.0, ORIGIN_HEIGHT_M) * 100.0
@@ -1130,7 +1121,7 @@ def main():
     if road_idx is None:
         print("  WARNING: no road points loaded - waterway/road overlap check skipped")
     ribbons, chain_summaries, ww_stats = build_waterway_ribbons(
-        chains, lat0, lon0, m_per_deg_lon, session, dem_cache, road_idx)
+        chains, session, dem_cache, road_idx)
     for rb in ribbons:
         cx_cm, cy_cm = rb["centroid_cm"]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)

@@ -87,14 +87,11 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt
 
 from generation_id import compute_generation_id, pack_generation_id
-from test_areas import AREA_NAME
-
-M_PER_DEG_LAT = 111132.0
+from test_areas import AREA_NAME, to_local
 
 ROOT = Path(__file__).resolve().parent.parent
 ROAD_DIR = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
 RAW_DIR = ROOT / "data" / "raw" / f"{AREA_NAME}_test"
-META_PATH = ROAD_DIR / "road_test_meta.json"
 BIOMES_PATH = ROAD_DIR / "road_biomes.json"
 SETTLEMENTS_PATH = ROAD_DIR / "settlement_tiles.json"
 WATER_PATH = RAW_DIR / "osm_water.json"
@@ -135,9 +132,8 @@ ALPINE_BIOME_IDS = {6, 7}                # Alpine, Arctic
 SETTLEMENT_DENSITY = {"City": 255, "AmericanTown": 140}
 
 
-def project_latlon(lat, lon, lat0, lon0, m_per_deg_lon):
-    east_m = (lon - lon0) * m_per_deg_lon
-    north_m = (lat - lat0) * M_PER_DEG_LAT
+def project_latlon(lat, lon):
+    east_m, north_m = to_local(lon, lat)
     return east_m * 100.0, -north_m * 100.0   # x_cm, y_cm (UE +X=east, +Y=south)
 
 
@@ -149,7 +145,7 @@ def load_biome_grid_lookup():
     return x_cm, y_cm, biome
 
 
-def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
+def rasterize_water(cols, rows, ox_cm, oy_cm):
     """Two independent boolean cell masks (next steps.md SS7.29 lake-vs-
     creek split, replaces ODA1's single combined `water` mask):
       - lake_mask:     True where a grid cell's 100 m FOOTPRINT (not just
@@ -191,7 +187,7 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
             if not ring or len(ring) < 3:
                 continue
             latlon = np.asarray(ring, dtype=np.float64)
-            x_cm, y_cm = project_latlon(latlon[:, 0], latlon[:, 1], lat0, lon0, m_per_deg_lon)
+            x_cm, y_cm = project_latlon(latlon[:, 0], latlon[:, 1])
             verts = np.column_stack([x_cm, y_cm])
             try:
                 shp = ShapelyPolygon(verts)
@@ -250,7 +246,7 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
             if not pts_ll or len(pts_ll) < 2:
                 continue
             latlon = np.asarray(pts_ll, dtype=np.float64)
-            x_cm, y_cm = project_latlon(latlon[:, 0], latlon[:, 1], lat0, lon0, m_per_deg_lon)
+            x_cm, y_cm = project_latlon(latlon[:, 0], latlon[:, 1])
             seg_pts = np.column_stack([x_cm, y_cm])
             for i in range(len(seg_pts) - 1):
                 a, b = seg_pts[i], seg_pts[i + 1]
@@ -289,10 +285,7 @@ def rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon):
 
 
 def main():
-    meta = json.loads(META_PATH.read_text())
-    lat0, lon0 = meta["origin_latlon"]
     import math
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     bx, by, biome = load_biome_grid_lookup()
     settlements = json.loads(SETTLEMENTS_PATH.read_text())["tiles"] if SETTLEMENTS_PATH.is_file() else {}
@@ -342,7 +335,7 @@ def main():
         n_settlement_cells += (r1 - r0) * (c1 - c0)
 
     # --- lake and waterway distance per cell (independent channels, ODA2) ---
-    lake_mask, waterway_mask = rasterize_water(cols, rows, ox_cm, oy_cm, lat0, lon0, m_per_deg_lon)
+    lake_mask, waterway_mask = rasterize_water(cols, rows, ox_cm, oy_cm)
 
     def dist_from_mask(mask):
         if mask.any():

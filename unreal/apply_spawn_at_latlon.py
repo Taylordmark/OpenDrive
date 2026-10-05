@@ -28,7 +28,7 @@ from pathlib import Path
 import unreal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
-from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, to_local
 
 # UE's embedded Python (this commandlet) has no numpy/PIL/requests - only
 # stdlib. So unlike every other pipeline script, this one can't import
@@ -128,7 +128,6 @@ LAT, LON = 21.57160, -157.87490   # real-world Punaluu, windward Oahu coast
 YAW_DEG = 0.0
 # ----------------------------------------
 
-M_PER_DEG_LAT = 111132.0
 DEM_ZOOM = 15   # matches build_road_stations.py's own DEM_ZOOM
 SPAWN_CLEARANCE_CM = 2000.0   # 20 m - same streaming catch-up margin every
                                # other spawn point in this project uses
@@ -166,16 +165,11 @@ def sample_elevation(lat, lon, zoom):
             + v10 * (1 - fx) * fy + v11 * fx * fy)
 
 
-lat0_area = (BBOX_SNWE[0] + BBOX_SNWE[2]) / 2
-lon0_area = (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2
-m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0_area))
-
 if not (BBOX_SNWE[0] <= LAT <= BBOX_SNWE[2] and BBOX_SNWE[1] <= LON <= BBOX_SNWE[3]):
     raise SystemExit(f"({LAT},{LON}) is outside this area's bbox {BBOX_SNWE} - "
                       f"wrong AREA_NAME ('{AREA_NAME}') or a typo in LAT/LON")
 
-east_m = (LON - lon0_area) * m_per_deg_lon
-north_m = (LAT - lat0_area) * M_PER_DEG_LAT
+east_m, north_m = to_local(LON, LAT)
 elev_m = sample_elevation(LAT, LON, DEM_ZOOM)
 z_cm = (elev_m - ORIGIN_HEIGHT_M) * 100.0
 log(f"({LAT},{LON}) -> east={east_m:.0f}m north={north_m:.0f}m elev={elev_m:.1f}m")

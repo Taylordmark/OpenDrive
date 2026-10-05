@@ -2750,11 +2750,11 @@ def _pad_interior_points(j, spacing_m=PAD_INTERIOR_SPACING_M):
 
 def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()):
     """Appends one synthetic, never-excluded "station" per rim point (see
-    _pad_rim_points) to the (lat0, lon0, st_x_cm, st_y_cm, st_elev,
-    st_exclude) tuple build_tile()/carve_grid_m() consume, each carrying its
+    _pad_rim_points) to the (st_x_cm, st_y_cm, st_elev, st_exclude, ...)
+    tuple build_tile()/carve_grid_m() consume, each carrying its
     junction's own pinned elevation - see the module comment above for why
     this replaces a separate feather/blend pass instead of adding one."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
+    st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     if not junctions:
         return station_data
     rim_x, rim_y, rim_elev = [], [], []
@@ -2790,8 +2790,7 @@ def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()
     # of one, so the hard clamp covers the whole pad
     rim_clamp[n_rim:n_in] = PAD_INTERIOR_SPACING_M
     rim_clamp[n_in:] = ROAD_HALF_WIDTH + SKIRT_EXTRA
-    return (lat0, lon0,
-            np.concatenate([st_x_cm, rim_x_cm]),
+    return (np.concatenate([st_x_cm, rim_x_cm]),
             np.concatenate([st_y_cm, rim_y_cm]),
             np.concatenate([st_elev, rim_elev]),
             np.concatenate([st_exclude, rim_exclude]),
@@ -2799,7 +2798,7 @@ def _augment_station_data_with_pad_rims(station_data, junctions, spur_anchors=()
             np.concatenate([st_bank, np.zeros((len(rim_x), 3))]))
 
 
-def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded_elev,
+def regrade_terrain_at_junctions(junctions, regraded_east, regraded_north, regraded_elev,
                                   terrain_exclude, st_clamp_r, spur_anchors=(), bank_scale=None):
     """Re-carve the (small) set of terrain tiles a snapped junction actually
     touches, from the SAME regraded station arrays the road pads/ribbons
@@ -2844,7 +2843,7 @@ def regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_
     st_x_cm = regraded_east * 100.0
     st_y_cm = -regraded_north * 100.0
     station_data = _augment_station_data_with_pad_rims(
-        (lat0, lon0, st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r,
+        (st_x_cm, st_y_cm, regraded_elev, terrain_exclude, st_clamp_r,
          # the same faded bank main() builds the ribbons with
          btmt.station_bank(regraded_east, regraded_north, bank_scale)),
         junctions, spur_anchors)
@@ -3030,7 +3029,7 @@ def main():
         restore()
         return
 
-    lat0, lon0, east, north, elev, terrain_exclude, clamp_r, _wp = btmt.load_stations()
+    east, north, elev, terrain_exclude, clamp_r, _wp = btmt.load_stations()
     raw = json.loads(btmt.STATIONS_PATH.read_text())
     seg_ids = np.concatenate([
         np.full(len(seg["east_m"]), si, dtype=np.int32)
@@ -3366,7 +3365,7 @@ def main():
         off += cnt
 
     def carve_and_patch(bank_scale=None):
-        regrade_terrain_at_junctions(junctions, lat0, lon0, regraded_east, regraded_north, regraded,
+        regrade_terrain_at_junctions(junctions, regraded_east, regraded_north, regraded,
                                       terrain_exclude, clamp_r, spur_anchors, bank_scale)
 
         # The runtime terrain carve (AODTerrainManager) doesn't only read the

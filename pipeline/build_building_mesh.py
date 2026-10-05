@@ -46,9 +46,8 @@ from pathlib import Path
 import numpy as np
 
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m
-from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
-M_PER_DEG_LAT = 111132.0
 ROAD_EXCLUSION_M = ROAD_HALF_WIDTH + SKIRT_EXTRA + 2.0   # +2 m slop margin
 
 LEVEL_HEIGHT_M = 3.2
@@ -162,11 +161,10 @@ OUT_PATH = STATIONS_PATH.parent / "building_mesh.json"
 
 def load_stations():
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
-    return lat0, lon0, east, north, elev
+    return east, north, elev
 
 
 def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
@@ -223,9 +221,8 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
 
 
 def main():
-    lat0, lon0, st_east, st_north, st_elev = load_stations()
+    st_east, st_north, st_elev = load_stations()
     st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     # Tile-bucket every station once (same TERRAIN_TILE_SIZE_CM grid the
     # settlement classification already uses) so the per-building nearest-
@@ -260,9 +257,9 @@ def main():
     facade_counts = defaultdict(int)
     for b in buildings_raw:
         ring_ll = b["nodes"]
-        east_m = [(lon - lon0) * m_per_deg_lon for _, lon in ring_ll]
-        north_m = [(lat - lat0) * M_PER_DEG_LAT for lat, _ in ring_ll]
-        ring_xy_cm = [(e * 100.0, -n * 100.0) for e, n in zip(east_m, north_m)]
+        east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
+                                   np.array([lat for lat, _ in ring_ll]))
+        ring_xy_cm = [(e * 100.0, -n * 100.0) for e, n in zip(east_m.tolist(), north_m.tolist())]
 
         cx_cm = sum(p[0] for p in ring_xy_cm) / len(ring_xy_cm)
         cy_cm = sum(p[1] for p in ring_xy_cm) / len(ring_xy_cm)

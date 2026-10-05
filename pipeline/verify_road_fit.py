@@ -197,7 +197,7 @@ def _shipped_stations(east, north, elev):
 
 
 def check_road_vs_terrain_fit():
-    lat0, lon0, east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
+    east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
     fit_idx = np.where(~exclude)[0]
@@ -286,7 +286,7 @@ def _station_edge_points(east, north, seg_idx, hw):
 
 
 def check_poke_through():
-    _lat0, _lon0, east, north, elev, _excl, _clamp_r, _walls = btmt.load_stations()
+    east, north, elev, _excl, _clamp_r, _walls = btmt.load_stations()
     _e, _n, _z, seg_idx, _si, _rn = brw.load_station_arrays()
     hw = brw.load_station_half_widths()
     idx = np.where(~btmt._get_struct_mask(len(east)))[0]

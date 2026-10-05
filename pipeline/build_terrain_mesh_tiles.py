@@ -70,7 +70,7 @@ from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
                               half_width_for_stations, road_ue_z_m,
                                classify_wall_stations, sample_mesh_heights)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, local_rect, to_lonlat
 
 # Optional per-area wider bbox for background-visuals-only far tiles (raw
 # DEM, no road carving, no collision) - see test_areas.py's own comment.
@@ -78,8 +78,6 @@ from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 # except green_valley so far) don't need a stub None assignment of their
 # own.
 BACKGROUND_BBOX_SNWE = getattr(test_areas, "BACKGROUND_BBOX_SNWE", None)
-
-M_PER_DEG_LAT = 111132.0
 
 NEAR_MARGIN_M = 60.0        # tile-granularity buffer beyond the literal
                              # 5-10 m stray corridor
@@ -891,7 +889,7 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
 
 
 def load_stations():
-    """Returns (lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs).
+    """Returns (east, north, elev, exclude, clamp_r, wall_pairs).
     `exclude` is True for any station the terrain carve must skip (real
     bridge/tunnel, OR an elevation conflict - either wall-eligible or
     out-of-scope, see classify_wall_stations()). `clamp_r` (2026-09-06,
@@ -905,7 +903,6 @@ def load_stations():
     this same loader so its run-clustering always starts from the identical
     pair list terrain carving used to decide what to exclude."""
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
@@ -939,7 +936,7 @@ def load_stations():
               f"excluded from the terrain carve the same way is_bridge "
               f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
-    return lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs
+    return east, north, elev, exclude, clamp_r, wall_pairs
 
 
 def station_bank(east, north, bank_scale=None):
@@ -1271,8 +1268,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     plus (verts Px3 cm, uvs Px2, tris Tx3) - the single production function
     both main() (writes the ODT1 sidecar) and verify_terrain_fit.py (checks
     the actual built mesh, not a reimplementation) call into."""
-    lat0, lon0, st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
     near_cache, far_cache = caches
 
@@ -1294,8 +1290,9 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
 
     east_m = gx_cm_fine / 100.0
     north_m = -gy_cm_fine / 100.0
-    lat = lat0 + north_m / M_PER_DEG_LAT
-    lon = lon0 + east_m / m_per_deg_lon
+    # per vertex through the frame (2026-10-05): under LCC the DEM's lon/lat
+    # grid is rotated by meridian convergence, never axis-aligned with ours
+    lon, lat = to_lonlat(east_m, north_m)
 
     elev = sample_dem(lat.reshape(-1), lon.reshape(-1), zoom, session, cache).reshape(sample_n, sample_n)
 
@@ -1432,23 +1429,22 @@ def write_tile_bin(path, tile, gen_id_bytes):
         f.write(struct.pack(f"<{tris.size}I", *tris.reshape(-1)))
 
 
-def background_bbox_tile_range(lat0, lon0):
+def background_bbox_tile_range():
     """Tile-index bounds (tx0, tx1, ty0, ty1) covering BACKGROUND_BBOX_SNWE,
-    in the same local east/north-cm frame (relative to the road network's
-    own origin_latlon) build_tile()'s gx_cm/gy_cm grid uses - NOT a fresh
+    in the same local east/north-cm frame (test_areas.to_local, projected
+    edges) build_tile()'s gx_cm/gy_cm grid uses - NOT a fresh
     lat/lon->tile-index derivation of its own, so a background tile and a
     corridor tile with the same (tx, ty) are guaranteed to be the exact
     same physical square. Returns None if BACKGROUND_BBOX_SNWE isn't set
     for this area."""
     if BACKGROUND_BBOX_SNWE is None:
         return None
-    s, w, n_, e = BACKGROUND_BBOX_SNWE
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    e0, n0, e1, n1 = local_rect(BACKGROUND_BBOX_SNWE)
     tile_cm = TERRAIN_TILE_SIZE_CM
     # same north_m/east_m -> gy_cm/gx_cm sign convention as build_tile():
     # gy_cm = -north_m * 100, gx_cm = east_m * 100
-    x_cm = [(lon - lon0) * m_per_deg_lon * 100.0 for lon in (w, e)]
-    y_cm = [-(lat - lat0) * M_PER_DEG_LAT * 100.0 for lat in (s, n_)]
+    x_cm = [e0 * 100.0, e1 * 100.0]
+    y_cm = [-n0 * 100.0, -n1 * 100.0]
     tx0, tx1 = int(min(x_cm) // tile_cm), int(max(x_cm) // tile_cm)
     ty0, ty1 = int(min(y_cm) // tile_cm), int(max(y_cm) // tile_cm)
     return tx0, tx1, ty0, ty1
@@ -1460,7 +1456,7 @@ def classify_tiles(station_data):
     tile key covering that wider bbox, added as far/no-collision unless
     already claimed as near by the road-distance pass above - a
     background tile never downgrades a driveable one."""
-    lat0, lon0, st_x_cm, st_y_cm, *_ = station_data
+    st_x_cm, st_y_cm, *_ = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
     pad = RENDER_DISTANCE_M * 100.0
     tx0 = int((st_x_cm.min() - pad) // tile_cm)
@@ -1477,7 +1473,7 @@ def classify_tiles(station_data):
             elif d <= RENDER_DISTANCE_M:
                 tiles[(tx, ty)] = False
 
-    bg_range = background_bbox_tile_range(lat0, lon0)
+    bg_range = background_bbox_tile_range()
     if bg_range is not None:
         bx0, bx1, by0, by1 = bg_range
         n_added = 0
@@ -1564,9 +1560,9 @@ def main():
         if arg.startswith("--bbox-cm="):
             bbox_cm = tuple(float(v) for v in arg.split("=", 1)[1].split(","))
 
-    lat0, lon0, east, north, elev, exclude, clamp_r, _wall_pairs_unused = load_stations()
+    east, north, elev, exclude, clamp_r, _wall_pairs_unused = load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r, station_bank(east, north))
+    station_data = (st_x_cm, st_y_cm, elev, exclude, clamp_r, station_bank(east, north))
 
     tiles = classify_tiles(station_data)
 

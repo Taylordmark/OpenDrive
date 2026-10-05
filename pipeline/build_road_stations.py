@@ -16,8 +16,8 @@ Reads   data/raw/<AREA_NAME>_test/osm.json          (fetch_osm_network.py)
 Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
     {
       "area": AREA_NAME,
-      "origin_latlon": [lat0, lon0],   # bbox center - shared anchor for every
-                                        # local east/north frame in this project
+      "frame_lcc": [lat1, lat2, lat0, lon0],   # test_areas.FRAME_LCC - the
+                                        # LCC every east_m/north_m below is in
       "segments": [
         {"name": "seg000", "lat": [...], "lon": [...],
          "is_bridge": [...],  # bool per station (2026-07-20) - True means
@@ -129,7 +129,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_LATLON
+from test_areas import AREA_NAME, BBOX_SNWE, FRAME_LCC, to_local, to_lonlat
 from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
 from road_mesh_common import (STATION_SPACING, resample_stations,
                                grade_smooth_elevation, road_class_grade_arrays,
@@ -201,8 +201,6 @@ BRIDGE_LIFT_RAMP_GRADE = 0.06
 # WARNING, not a rejection - a real OSM road never gets deleted for being
 # steep, see the 2026-07-28 conversation for why.
 STRUCTURE_GRADE_WARN = 0.15
-
-M_PER_DEG_LAT = 111132.0
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw" / f"{AREA_NAME}_test"
@@ -631,20 +629,15 @@ def main():
     print(f"Merged into {len(chains)} chains (real junctions/dead-ends)")
     junction_degree = junction_node_degree(ways)
 
-    # local frame anchored at the test-area bbox center - the SAME origin
-    # the old georeference actor used (test_areas.BBOX_SNWE via
-    # build_terrain_tiles.py's origin_latlon), so every consumer's local
-    # east/north math stays consistent with everyone else's.
-    lat0, lon0 = ORIGIN_LATLON   # the bbox centre unless the area sets one
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
-
+    # local frame: test_areas.to_local (2026-10-05, the shared LCC) - every
+    # consumer converts through the same pair, never its own math.
     scored = []
     for chain, struct, tunnel, names, oneway, highway, meta in chains:
         latlon = np.array([nodes[n] for n in chain])
         is_struct = np.array(struct, dtype=bool)
         is_tunnel = np.array(tunnel, dtype=bool)
-        length = float(np.sum(np.hypot(np.diff(latlon[:, 0]) * M_PER_DEG_LAT,
-                                        np.diff(latlon[:, 1]) * m_per_deg_lon)))
+        ce, cn = to_local(latlon[:, 1], latlon[:, 0])
+        length = float(np.sum(np.hypot(np.diff(ce), np.diff(cn))))
         # chain (2026-09-04, Arc 7.17; whole chain since 2026-10-01): the OSM
         # node ids this chain runs through - kept through scored/kept below so
         # main()'s junction pass knows exactly which real junction nodes (via
@@ -672,13 +665,11 @@ def main():
     n_spike_repairs = 0
     for idx, (length, latlon, is_struct, is_tunnel, names, oneway, highway, meta,
               chain_nodes) in enumerate(kept):
-        east = (latlon[:, 1] - lon0) * m_per_deg_lon
-        north = (latlon[:, 0] - lat0) * M_PER_DEG_LAT
+        east, north = to_local(latlon[:, 1], latlon[:, 0])
         s, e, n = resample_stations(east, north, STATION_SPACING)
         if len(s) < MIN_SEGMENT_STATIONS:
             continue
-        lat_s = lat0 + n / M_PER_DEG_LAT
-        lon_s = lon0 + e / m_per_deg_lon
+        lon_s, lat_s = to_lonlat(e, n)
         # same arc-length parametrization resample_stations() used
         # internally, recomputed here to carry is_struct onto the
         # resampled grid (nearest-ish via linear interp + threshold - a
@@ -943,8 +934,7 @@ def main():
             # or MIN_SEGMENT_STATIONS) - nothing to unify against.
             continue
         lat_n, lon_n = nodes[node_id]
-        ej = (lon_n - lon0) * m_per_deg_lon
-        nj = (lat_n - lat0) * M_PER_DEG_LAT
+        ej, nj = to_local(lon_n, lat_n)
         elevs = []
         for seg_i, s_node in incident:
             lo, hi = offsets[seg_i], offsets[seg_i + 1]
@@ -1114,7 +1104,7 @@ def main():
 
     out = {
         "area": AREA_NAME,
-        "origin_latlon": [lat0, lon0],
+        "frame_lcc": list(FRAME_LCC),
         "segments": segments,
     }
     (OUT / "road_stations.json").write_text(json.dumps(out))

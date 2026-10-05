@@ -344,8 +344,8 @@ import numpy as np
 import requests
 
 from road_mesh_common import ROAD_HALF_WIDTH, bank_slopes, road_ue_z_m, reconcile_junction_elevations
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
-from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_lonlat
+from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, sample_dem,
                                        lakes_near, load_lake_beds, _point_in_polygon,
                                        WATER_SHORE_BLEND_M)
 
@@ -479,6 +479,9 @@ _DEBUG_REBOUND_DUMP = [] if os.environ.get("OD_DEBUG_REBOUND") == "1" else None
 
 
 def _way_length_m(way, node_latlon):
+    # ground length for tag weighting only, never a frame coordinate - so it
+    # keeps its own equirect approximation (2026-10-05)
+    M_PER_DEG_LAT = 111132.0
     nds = way.get("nodes", [])
     total = 0.0
     for a, b in zip(nds, nds[1:]):
@@ -688,7 +691,7 @@ def build_station_runs(ox_cm, oy_cm, z_cm, drop_cm, tile_size_cm):
     return runs
 
 
-def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_seg,
+def compute_side(seg, side, lakes, junction_touched_seg,
                   is_bridge_osm_seg, session, dem_cache):
     """One side's full detection pipeline (DEM probe -> drop -> hysteresis
     classification -> min-run demotion). Split out from main() so the bridge
@@ -722,8 +725,7 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
     edge_e = east + rx * EMBANK_EDGE_OFFSET_M * side
     edge_n = north + ry * EMBANK_EDGE_OFFSET_M * side
 
-    probe_lat = lat0 + probe_n / M_PER_DEG_LAT
-    probe_lon = lon0 + probe_e / m_per_deg_lon
+    probe_lon, probe_lat = to_lonlat(probe_e, probe_n)
     terrain_elev = sample_dem(probe_lat, probe_lon, NEAR_DEM_ZOOM, session, dem_cache)
 
     drop_m = elev - terrain_elev
@@ -795,7 +797,7 @@ def compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes, junction_touched_s
     }
 
 
-def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, report):
+def subclassify_bridge_runs(seg_i, side, d, other, report):
     """§7.21: re-tests every BRIDGE_CLS run against the water/OSM-tag/short-
     and-both-sided discriminator (module docstring). Demotes a failing run's
     cls_arr in place to EMBANK_CLS with a capped drop_cm, and appends one
@@ -968,8 +970,7 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
             drop_cm[run_start:run_end] = np.minimum(drop_cm[run_start:run_end], cap_cm)
 
         mid = (run_start + run_end) // 2
-        mid_lat = lat0 + d["north"][mid] / M_PER_DEG_LAT
-        mid_lon = lon0 + d["east"][mid] / m_per_deg_lon
+        mid_lon, mid_lat = to_lonlat(d["east"][mid], d["north"][mid])
 
         report.append({
             "seg": int(seg_i), "side": int(side), "road_name": road_name_top,
@@ -988,8 +989,6 @@ def subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, re
 
 def main():
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     lakes = load_lake_beds()
     if lakes:
@@ -1041,7 +1040,7 @@ def main():
 
         sides = {}
         for side in (-1.0, 1.0):
-            sides[side] = compute_side(seg, side, lat0, lon0, m_per_deg_lon, lakes,
+            sides[side] = compute_side(seg, side, lakes,
                                         junction_touched_seg, is_bridge_osm_seg,
                                         session, dem_cache)
             n_skipped_junction += int((sides[side]["in_junction_box"] &
@@ -1102,7 +1101,7 @@ def main():
             other = sides[-side]
             n_bridge_runs_pre += len(contiguous_runs(d["cls_arr"] == BRIDGE_CLS))
             before_report_len = len(bridge_report)
-            subclassify_bridge_runs(seg_i, side, d, other, lat0, lon0, m_per_deg_lon, bridge_report)
+            subclassify_bridge_runs(seg_i, side, d, other, bridge_report)
             n_bridge_runs_demoted += sum(
                 1 for rec in bridge_report[before_report_len:] if not rec["genuine"])
 

@@ -46,7 +46,6 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/parking_<AREA_NAME>_test_tile_<tx>_<
 """
 
 import json
-import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -56,11 +55,9 @@ from fetch_cache import overpass_json
 from build_water_tiles import assemble_outer_rings, build_lake_mesh, polygon_area_m2, write_tile
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import road_ue_z_m
-from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
-
-M_PER_DEG_LAT = 111132.0
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw" / f"{AREA_NAME}_test"
@@ -163,20 +160,18 @@ def fetch_parking_polygons():
 
 def load_stations():
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
-    return lat0, lon0, east, north, elev
+    return east, north, elev
 
 
 def main():
     if not STATIONS_PATH.is_file():
         raise SystemExit(f"{STATIONS_PATH} not found - run build_road_stations.py first "
-                          f"(parking needs the shared world-frame origin and station elevations).")
-    lat0, lon0, st_east, st_north, st_elev = load_stations()
+                          f"(parking needs the station elevations).")
+    st_east, st_north, st_elev = load_stations()
     st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     # Same tile-bucketed nearest-station lookup build_building_mesh.py
     # established, duplicated rather than imported (that module has no
@@ -205,8 +200,8 @@ def main():
 
     for poly in polygons:
         ring_ll = poly["nodes"]
-        east_m = np.array([(lon - lon0) * m_per_deg_lon for _, lon in ring_ll])
-        north_m = np.array([(lat - lat0) * M_PER_DEG_LAT for lat, _ in ring_ll])
+        east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
+                                   np.array([lat for lat, _ in ring_ll]))
 
         area_m2 = polygon_area_m2(east_m, north_m)
         if area_m2 < MIN_AREA_M2:

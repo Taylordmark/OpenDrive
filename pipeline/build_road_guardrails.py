@@ -96,7 +96,6 @@ Outputs data/road_tiles/<AREA_NAME>_test/road_guardrails.json
 """
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
@@ -105,8 +104,8 @@ import requests
 from road_mesh_common import (ROAD_HALF_WIDTH, bank_slopes, half_width_for_stations,
                                junction_agreement_pass, road_class_and_lanes,
                                road_ue_z_m, reconcile_junction_elevations)
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
-from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, M_PER_DEG_LAT, sample_dem,
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_lonlat
+from build_terrain_mesh_tiles import (NEAR_DEM_ZOOM, sample_dem,
                                        lakes_near, load_lake_beds, _point_in_polygon,
                                        WATER_SHORE_BLEND_M)
 
@@ -194,8 +193,6 @@ def build_station_runs(ox_cm, oy_cm, z_cm, tile_size_cm):
 
 def main():
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
 
     # NOT loading settlement tiles here - see the module docstring's
     # exclusions note for why a blanket town-tile mask was tried and
@@ -289,8 +286,7 @@ def main():
             rail_e = east + rx * rail_off * side
             rail_n = north + ry * rail_off * side
 
-            probe_lat = lat0 + probe_n / M_PER_DEG_LAT
-            probe_lon = lon0 + probe_e / m_per_deg_lon
+            probe_lon, probe_lat = to_lonlat(probe_e, probe_n)
             terrain_elev = sample_dem(probe_lat, probe_lon, NEAR_DEM_ZOOM, session, dem_cache)
 
             drop_m = elev - terrain_elev

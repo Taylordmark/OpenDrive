@@ -631,6 +631,25 @@ run since before §7.49, so 1,276 junctions had no pad.
   around a local component origin, and the sky atmosphere's planet top
   follows the camera (1 km snap). Taylor's drive: handling and collision
   good; the sky wasn't checked.
+- **World grid** (2026-10-05). `world_frame.py`: ellipsoidal LCC (WGS84)
+  plus a 64 km chunk grid. `test_areas.to_local`/`to_lonlat` replace
+  `ORIGIN_LATLON` and every stage's `m_per_deg_lon` math; lon/lat rasters
+  are sampled per point. `world="california"` puts an area in the state-wide
+  frame (parallels 34/40.5, origin 37.25 N 120 W, scale −0.16% to +0.19%
+  over the state); other areas get an LCC centred on their bbox.
+  - `far_gasquet` is now a California member, ~613 km from the origin. Its
+    stations are `near_gasquet`'s scaled 1.0017 and rotated −2.40° (meridian
+    convergence).
+  - The old equirect ran ~0.3% short east-west, so shipped coordinates
+    shift slightly on a rebake.
+  - The station sidecar stores `frame_lcc`, and `generation_id` hashes it.
+  - The Tail of the Dragon stage still uses its own equirect frame.
+  - Rebaked near/far/Summit: `verify_road_fit` and `verify_terrain_fit`
+    PASS. Lip gaps over 0.3 m: 2.2% / 2.2% / 3.5%. Summit's worst edge
+    poke is +0.25 m (was +0.09), from one 30 m stretch.
+  - `verify_terrain_seams` and `verify_forest_elevation_fit` fail the same
+    way at HEAD. Junction pads regrade terrain after the forest grid is
+    baked.
 
 ### Release engineering
 

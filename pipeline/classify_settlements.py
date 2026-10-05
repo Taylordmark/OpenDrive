@@ -35,23 +35,19 @@ place-class/regularity-based selection for the other 4 archetypes
 (Industrial, Suburban, Rural Hamlet, European Village) is still future
 work; the seam for it stays `pick_archetype()` below.
 
-Usage:  python classify_settlements.py    (needs osm_buildings.json and
-                                             road_stations.json first)
+Usage:  python classify_settlements.py    (needs osm_buildings.json first)
 
 Reads   data/raw/<AREA_NAME>_test/osm_buildings.json
-        data/road_tiles/<AREA_NAME>_test/road_stations.json (for origin_latlon)
 Outputs data/road_tiles/<AREA_NAME>_test/settlement_tiles.json
         {"tiles": {"<tx>,<ty>": "AmericanTown"|"City", ...}}
 """
 
 import json
-import math
 from collections import defaultdict
 from pathlib import Path
 
-from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
+from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, to_local
 
-M_PER_DEG_LAT = 111132.0
 MIN_BUILDINGS_PER_TILE = 3   # below this, a tile isn't "populated" - just a
                               # stray footprint or two near town's edge
 CITY_DENSITY_PER_TILE = 150  # >= this many footprints in one 2 km tile reads
@@ -94,16 +90,13 @@ def pick_archetype(building_count, residential_fraction):
 
 
 def main():
-    lat0, lon0 = json.loads(STATIONS_PATH.read_text())["origin_latlon"]
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
     buildings = json.loads(BUILDINGS_PATH.read_text())
 
     counts = defaultdict(int)
     residential_counts = defaultdict(int)
     for b in buildings:
         lat, lon = footprint_centroid(b["nodes"])
-        east_m = (lon - lon0) * m_per_deg_lon
-        north_m = (lat - lat0) * M_PER_DEG_LAT
+        east_m, north_m = to_local(lon, lat)
         x_cm, y_cm = east_m * 100.0, -north_m * 100.0
         tx = int(x_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(y_cm // TERRAIN_TILE_SIZE_CM)

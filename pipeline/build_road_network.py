@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from generation_id import compute_generation_id, pack_generation_id
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
+from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
                               build_road_chunks, half_width_for_stations,
                               road_ue_z_m, unpaved_stations)
@@ -118,7 +118,6 @@ def main():
     if not STATIONS_PATH.exists():
         raise SystemExit(f"{STATIONS_PATH} not found - run build_road_stations.py first.")
     data = json.loads(STATIONS_PATH.read_text())
-    lat0, lon0 = data["origin_latlon"]
 
     MIN_RUN_STATIONS = 2   # a lone leftover station either side of a tunnel
                             # portal can't form a chunk (build_road_chunks
@@ -267,7 +266,9 @@ def main():
     yaw = math.degrees(math.atan2(lcy[i0 + LOOKAHEAD] - lcy[i0], lcx[i0 + LOOKAHEAD] - lcx[i0]))
     road_test_meta = {
         "area": AREA_NAME,
-        "origin_latlon": [lat0, lon0],
+        # bbox centre, for fetch_climate.py's point lookup - NOT a frame
+        # origin any more (2026-10-05, the frame is road_stations' frame_lcc)
+        "center_latlon": [(BBOX_SNWE[0] + BBOX_SNWE[2]) / 2, (BBOX_SNWE[1] + BBOX_SNWE[3]) / 2],
         "segments": len(segments),
         "total_length_km": round(total_km, 2),
         "player_start": {

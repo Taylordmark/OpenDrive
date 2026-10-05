@@ -133,7 +133,7 @@ def all_names():
 
 def run(name):
     out_dir, meta = find_dir(name)
-    lat, lon = meta["origin_latlon"]
+    lat, lon = meta.get("center_latlon") or meta["origin_latlon"]   # area / stage meta
 
     url = ("https://power.larc.nasa.gov/api/temporal/climatology/point"
            f"?parameters=PRECTOTCORR,T2M&community=RE"

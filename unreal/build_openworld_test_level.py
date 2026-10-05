@@ -124,13 +124,8 @@ if ROADS_ENABLED:
     road_meta = json.loads(ROAD_META_PATH.read_text())
     road_start = road_meta["player_start"]
 else:
-    import math
-    M_PER_DEG_LAT = 111132.0
-    origin_lat0, origin_lon0 = 21.479999999999997, -157.97500000000002   # test_areas.BBOX_SNWE center
-    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(origin_lat0))
-    lat, lon = ALA_MOANA_LATLON
-    east_m = (lon - origin_lon0) * m_per_deg_lon
-    north_m = (lat - origin_lat0) * M_PER_DEG_LAT
+    lat, lon = ALA_MOANA_LATLON   # Oahu only, like the 306.0 below
+    east_m, north_m = test_areas.to_local(lon, lat)
     road_start = {
         "location_cm": [east_m * 100.0, -north_m * 100.0,
                          (ALA_MOANA_ELEV_M - 306.0) * 100.0],   # 306.0 = ORIGIN_HEIGHT_M
@@ -479,21 +474,24 @@ if not unreal.EditorAssetLibrary.does_asset_exist("/Game/OpenDrive/Materials/M_W
         "at least once to create it (Content/ is git-ignored, doesn't survive a fresh checkout)")
 water_mat = unreal.load_asset("/Game/OpenDrive/Materials/M_WaterStylized")
 
-import math
 south, west, north, east = test_areas.BBOX_SNWE
-lat0 = (south + north) / 2.0
-lon0 = (west + east) / 2.0
-M_PER_DEG_LAT = 111132.0
-m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+# bbox corners through the shared frame (2026-10-05) - the bbox centre is
+# no longer the local origin for a world member (far_gasquet sits ~600 km
+# out), so the plane is centred on the bbox itself; corners, not edges, are
+# plenty under WATER_MARGIN_M (and need no numpy - UE's Python has none)
+corners = [test_areas.to_local(lon, lat) for lat in (south, north) for lon in (west, east)]
+ce, cn = [e for e, _ in corners], [n for _, n in corners]
 # generous margin past the real bbox so the shoreline never clips into a
 # visible flat-plane edge at the horizon
 WATER_MARGIN_M = 20000.0
-half_width_cm = ((east - west) * m_per_deg_lon / 2.0 + WATER_MARGIN_M) * 100.0
-half_height_cm = ((north - south) * M_PER_DEG_LAT / 2.0 + WATER_MARGIN_M) * 100.0
+half_width_cm = ((max(ce) - min(ce)) / 2.0 + WATER_MARGIN_M) * 100.0
+half_height_cm = ((max(cn) - min(cn)) / 2.0 + WATER_MARGIN_M) * 100.0
 sea_level_z_cm = -test_areas.ORIGIN_HEIGHT_M * 100.0
 
 water = actor_sub.spawn_actor_from_class(
-    unreal.StaticMeshActor, unreal.Vector(0.0, 0.0, sea_level_z_cm), unreal.Rotator(0, 0, 0))
+    unreal.StaticMeshActor,
+    unreal.Vector((max(ce) + min(ce)) * 50.0, -(max(cn) + min(cn)) * 50.0, sea_level_z_cm),
+    unreal.Rotator(0, 0, 0))
 water.set_actor_label("Ocean")
 water.set_folder_path(FOLDER)
 water_mesh_comp = water.get_component_by_class(unreal.StaticMeshComponent)

@@ -123,7 +123,7 @@ def _fit_station_data(shipped=False):
     two checks are directly comparable. `shipped`: junction-pad regraded/
     XY-snapped stations at their shipped position and height (2026-10-01 -
     the pre-snap corridor can sit 15+ m from the road, beside a pad)."""
-    lat0, lon0, east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
+    east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     if shipped:
         from verify_road_fit import _shipped_stations
         east, north, z = _shipped_stations(east, north, elev)
@@ -409,9 +409,9 @@ def check_prebake_consistency():
     for that) - it answers "would baking right now, from today's code and
     today's stations, produce a consistent world," independent of whatever
     partial/stale state Content/OpenDrive/Masks/ happens to be in."""
-    lat0, lon0, east, north, elev, exclude, clamp_r, wall_pairs = btmt.load_stations()
+    east, north, elev, exclude, clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
-    station_data = (lat0, lon0, st_x_cm, st_y_cm, elev, exclude, clamp_r, btmt.station_bank(east, north))
+    station_data = (st_x_cm, st_y_cm, elev, exclude, clamp_r, btmt.station_bank(east, north))
 
     fit_idx = np.where(~exclude)[0]
 

@@ -45,7 +45,8 @@ from scipy.spatial import cKDTree
 
 from fetch_cache import cached_bytes
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
-from test_areas import AREA_NAME, BACKGROUND_BBOX_SNWE, BBOX_SNWE, TERRAIN_TILE_SIZE_CM
+from test_areas import (AREA_NAME, BACKGROUND_BBOX_SNWE, BBOX_SNWE, TERRAIN_TILE_SIZE_CM,
+                        local_rect, lonlat_bbox, to_lonlat)
 
 IMG_ZOOM = 13        # ~19 m/px at this latitude - regional biome character,
                       # not fine detail, so far coarser than terrain's z15
@@ -153,20 +154,20 @@ def dem_derivatives(dem, bounds):
     return grade, northness, moisture
 
 
-def coarse_grid(lat0, lon0, bbox_snwe, corridor_east, corridor_north):
-    """V1: GRID_SPACING_M lattice (local east/north frame, same equirect
-    projection build_road_stations.py uses) over bbox_snwe, minus any point
+def coarse_grid(rect, corridor_east, corridor_north):
+    """V1: GRID_SPACING_M lattice (local east/north frame, test_areas.to_local)
+    over rect (east_min, north_min, east_max, north_max), minus any point
     within half a spacing of a corridor sample - near the road the dense
     corridor samples stay authoritative, exactly as before."""
-    s, w, n, e = bbox_snwe
-    m_lon = 111132.0 * math.cos(math.radians(lat0))
-    east = np.arange((w - lon0) * m_lon, (e - lon0) * m_lon, GRID_SPACING_M)
-    north = np.arange((s - lat0) * 111132.0, (n - lat0) * 111132.0, GRID_SPACING_M)
+    e0, n0, e1, n1 = rect
+    east = np.arange(e0, e1, GRID_SPACING_M)
+    north = np.arange(n0, n1, GRID_SPACING_M)
     ge, gn = (a.ravel() for a in np.meshgrid(east, north))
     d, _ = cKDTree(np.column_stack([corridor_east, corridor_north])).query(np.column_stack([ge, gn]))
     keep = d > GRID_SPACING_M / 2.0
     ge, gn = ge[keep], gn[keep]
-    return ge, gn, lat0 + gn / 111132.0, lon0 + ge / m_lon
+    g_lon, g_lat = to_lonlat(ge, gn)
+    return ge, gn, g_lat, g_lon
 
 
 def classify_rgb(mosaic):
@@ -395,8 +396,8 @@ def main():
     # it survives the shared SAMPLE_STRIDE subsampling below intact.
     grade = np.concatenate([segment_ruggedness(seg["elev_m"], seg["s_m"])
                              for seg in data["segments"]])
-    # east_m/north_m are already in the SAME local frame (origin = bbox
-    # center) every other consumer uses - reuse directly rather than
+    # east_m/north_m are already in the SAME local frame (test_areas.
+    # to_local) every other consumer uses - reuse directly rather than
     # re-deriving the lon/lat projection a second time. UE frame is
     # +X=east, +Y=south (road_mesh_common.py), so Y_cm = -north_m * 100.
     east_m = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
@@ -415,26 +416,24 @@ def main():
     x_cm, y_cm = east_m * 100.0, -north_m * 100.0
     print(f"{len(lon)} sample point(s) (every {SAMPLE_STRIDE}th station)")
 
-    buf_lat = MARGIN_M / 111132.0
-    buf_lon = MARGIN_M / (111132.0 * math.cos(math.radians(float(lat.mean()))))
     # V1: grid covers the whole rendered terrain (background bbox when the
     # area has one); the fetch covers corridor+margin AND that grid. Tiles
     # are aligned to the global z13 lattice, so corridor pixels (and thus
     # corridor classifications) are identical to a corridor-only fetch.
-    gs, gw, gn_, ge_ = BACKGROUND_BBOX_SNWE or BBOX_SNWE
     # + one terrain tile of padding: tiles are grid-aligned, so the edge ring
     # of baked terrain tiles overhangs the bbox by up to a tile (the first
     # unpadded run left 24-100% of those edge tiles' verts untinted).
-    pad_lat = TERRAIN_TILE_SIZE_CM / 100.0 / 111132.0
-    pad_lon = pad_lat / math.cos(math.radians((gs + gn_) / 2.0))
-    gs, gw, gn_, ge_ = gs - pad_lat, gw - pad_lon, gn_ + pad_lat, ge_ + pad_lon
-    west = min(float(lon.min() - buf_lon), gw)
-    east = max(float(lon.max() + buf_lon), ge_)
-    south = min(float(lat.min() - buf_lat), gs)
-    north = max(float(lat.max() + buf_lat), gn_)
+    # Pads are in local metres, fetch bboxes their projected-edge lon/lat
+    # cover (2026-10-05) - LCC rotates the local rectangle against lon/lat.
+    pad = TERRAIN_TILE_SIZE_CM / 100.0
+    ge0, gn0, ge1, gn1 = local_rect(BACKGROUND_BBOX_SNWE or BBOX_SNWE)
+    grid_rect = (ge0 - pad, gn0 - pad, ge1 + pad, gn1 + pad)
+    gs, gw, gn_, ge_ = lonlat_bbox(*grid_rect)
+    cs, cw, cn, ce = lonlat_bbox(east_m.min() - MARGIN_M, north_m.min() - MARGIN_M,
+                                 east_m.max() + MARGIN_M, north_m.max() + MARGIN_M)
+    west, east, south, north = min(cw, gw), max(ce, ge_), min(cs, gs), max(cn, gn_)
 
-    lat0, lon0 = data["origin_latlon"]
-    g_east, g_north, g_lat, g_lon = coarse_grid(lat0, lon0, (gs, gw, gn_, ge_), east_m, north_m)
+    g_east, g_north, g_lat, g_lon = coarse_grid(grid_rect, east_m, north_m)
     print(f"{len(g_lon)} coarse grid point(s) at {GRID_SPACING_M:.0f} m")
 
     dem, dem_bounds = fetch_mosaic(west, south, east, north, DEM_ZOOM, _fetch_dem_tile)
