@@ -391,8 +391,15 @@ void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
 
 		const FVector Start = Xf.TransformPosition(W.Attach);
 		FHitResult Hit;
+		// only ground counts (2026-10-06, PLAN-REALISM.md Phase 0): a car on
+		// its side, or nosed up a building, casts these rays INTO the wall,
+		// and the springs plus driven tires then pushed/climbed off it - the
+		// tumble half of "hit a building, launched". Nothing drivable is
+		// steeper than ~60 deg. Abs() so a flipped-winding ground mesh still
+		// reads as ground.
 		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start,
-			Start - Up * (RestLen + W.Radius), ECC_Visibility, Query);
+			Start - Up * (RestLen + W.Radius), ECC_Visibility, Query)
+			&& FMath::Abs(Hit.ImpactNormal.Z) > 0.5f;
 		if (bHit)
 		{
 			const float NewLen =
@@ -859,10 +866,11 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 	TraceAlphaF = TraceFyF = TraceFyR = TraceFxR = 0.0f;
 	bAbsActiveThisTick = false;
 
-	int32 DrivenCount = 0;
+	int32 DrivenCount = 0, ContactCount = 0;
 	for (const FODWheel& W : Wheels)
 	{
 		DrivenCount += W.bDriven ? 1 : 0;
+		ContactCount += W.bInContact ? 1 : 0;
 	}
 
 	// filled per wheel below, consumed after the loop by the axle-paired ABS
@@ -974,7 +982,12 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			// held, skip tire force generation outright rather than trying
 			// to size a clamp against a measurement this same loop keeps
 			// perturbing.
-			if (bParkHold)
+			//
+			// Same zeroing with fewer than two wheels down (2026-10-06,
+			// PLAN-REALISM.md Phase 0): one wheel can't carry a car, so a lone
+			// contact is a wheel clipping something mid-tumble/mid-crash, and
+			// its spun-up driven tire would otherwise throw the car further.
+			if (bParkHold || ContactCount < 2)
 			{
 				Fx = 0.0f;
 				Fy = 0.0f;

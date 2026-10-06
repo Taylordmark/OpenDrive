@@ -109,8 +109,12 @@ Group these into a few drive sessions. Each line says what to judge.
   - the overall Crew 2 pass verdict;
   - the Super car's rear-wing read;
   - the parking asphalt tone.
-- **Crash response:** after hitting a building the car tumbles implausibly
-  (speeds in the thousands). A clean stop or crumple is wanted.
+- **Crash response** (PLAN-REALISM.md Phase 0, code in, never driven): hit
+  a building, a guardrail and a wall at 30/60/100 mph. The car should stop
+  or glance off, never launch; judge the thump and shake too. Run with
+  `-odcrashtrace` and send one log: every hit should end in an
+  `ODCrashTrace: SUMMARY ... PASS`, and the `HIT` lines' `solver=` vs `pre=`
+  speeds say whether depenetration was the spike.
 
 ## 3. Gameplay and UX
 

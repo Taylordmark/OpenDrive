@@ -237,6 +237,7 @@ same `-odtrace`/`-odrev` hooks plus `-abslog=<file>`.
 | `-odrec=D` | Record D s of audio → `Saved/AudioTest/odrec.wav` (`pipeline/analyze_audio_test.py` verifies pitch; `pipeline/analyze_brap.py` verifies limiter-chatter envelope modulation) |
 | `-odtune=N` | Auto-cycle tuning presets every N s |
 | `-odtrace` | 10 Hz vehicle trace (rpm/gear/thr/speed/slip/loads/yaw/susp/surface/tc/esc/abs/relax) to the log |
+| `-odcrashtrace` | Crash trace (`ODCrashTrace:` lines): per-frame body velocity/spin/wheel contacts around each wall hit or one-frame velocity jump (10 frames before, 2 s after), each hit's normal/penetration/solver vs. response speed, then `SUMMARY ... PASS/FAIL` (peak speed after ≤ impact speed) |
 | `-odmenu=T` | Open the pause menu at T s + screenshot (headless menu QA) |
 | `-odmaskbin` | Force the cooked forest-mask sidecar path in editor builds (packaging QA) |
 

@@ -230,6 +230,37 @@ public:
 	UPROPERTY(EditAnywhere, Category = "OutOfBounds")
 	float StuckGraceSec = 2.5f;
 
+	// --- crash response (2026-10-06, PLAN-REALISM.md Phase 0; D1: a clean
+	// stop, impact sound + small shake, no damage) ---
+	/** Rate Chaos may push the body out of an overlap it first finds already
+	 *  penetrating (cm/s). Chaos's default is unlimited: it resolves the whole
+	 *  depth in one step, so a car ~1 m into a merged building trimesh left
+	 *  at depth/dt - hundreds of m/s. Applied with CCD at BeginPlay. */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashMaxDepenetrationCmS = 300.0f;
+
+	/** Share of the into-wall speed handed back as bounce. */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashRestitution = 0.1f;
+
+	/** Most angular velocity one impact may add (deg/s). */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashMaxSpinDegS = 90.0f;
+
+	/** Into-wall speed below which a contact is a scrape, left to the solver
+	 *  (cm/s, ~4.5 mph) - a rail brush keeps its "Crew 2 deflect" feel. */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashMinNormalSpeedCmS = 200.0f;
+
+	/** Into-wall speed that maps to a full-strength impact sound and shake
+	 *  (cm/s, ~50 mph). */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashFullSpeedCmS = 2235.0f;
+
+	/** Camera shake amplitude at full strength (deg). */
+	UPROPERTY(EditAnywhere, Category = "Crash")
+	float CrashShakeDeg = 2.0f;
+
 	/** Remaining seconds on the off-road countdown for the HUD warning, or
 	 *  <0 when not out of bounds (also <0 on levels with no AODRoadManager,
 	 *  where the feature is entirely inert - e.g. Tail of the Dragon). */
@@ -393,6 +424,31 @@ private:
 	bool bOobStuckReset = false;    // last countdown/reset was the stuck trigger
 	                                 // (HUD wording only)
 	TWeakObjectPtr<class AODRoadManager> OobRoadMgr;   // nearest as of the last scan
+
+	// --- crash response state (see the Crash UPROPERTYs) ---
+	/** Body OnComponentHit: wall/building/rail/trunk impacts get a defined
+	 *  response computed from the PRE-step velocity (CrashPreVel), so nothing
+	 *  the solver did that step - depenetration included - reaches the car. */
+	UFUNCTION()
+	void OnBodyHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+	// body velocity as of this frame's (pre-physics) Tick; the hit handler
+	// runs after the step, when the body already holds the solver's output
+	FVector CrashPreVel = FVector::ZeroVector;
+	FVector CrashPreAngVel = FVector::ZeroVector;   // deg/s
+	float CrashShake = 0.0f;   // 0..1, decays in Tick
+
+	// -odcrashtrace: per-frame body state for the frames around an impact
+	// (a short pre-impact ring, then 2 s after), each hit's normal/
+	// penetration/solver output, and a peak-vs-impact speed summary
+	void TickCrashTrace(double Now);
+	void OpenCrashTraceWindow(double Now, float ImpactCmS, const TCHAR* Why);
+	bool bCrashTrace = false;
+	TArray<FString> CrashTraceRing;
+	int32 CrashTraceRingNext = 0;
+	double CrashTraceUntil = 0.0;      // >0 while a window is open
+	float CrashTraceImpactCmS = 0.0f;  // speed at the impact(s) in this window
+	float CrashTracePeakCmS = 0.0f;    // highest speed seen after them
 	// generous: the road tile at the spawn point now gets priority in
 	// AODRoadManager's own wait-queue (closest-to-player, not first-parsed),
 	// so this should rarely be hit, but a long fallback is cheap insurance

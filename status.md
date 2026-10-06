@@ -140,6 +140,13 @@ scale, built from open data, with a stylized "real places, storybook look".
   - Attack-mode gearbox and clutch-bite launch.
 - **Park hold** (`bParkHold`): zeroes tire forces and pins wheel ω
   (`b3f3cf0`).
+- **Crash response code** (2026-10-06, PLAN-REALISM.md Phase 0, compiled,
+  not driven): body CCD plus a 3 m/s initial-overlap depenetration cap;
+  `AODVehiclePawn::OnBodyHit` answers wall-steep hits from the pre-step
+  velocity (restitution 0.1, Coulomb scrub by the surface's friction, +90°/s
+  spin cap) with the road synth's impact thump and a camera shake;
+  suspension rays ignore surfaces steeper than 60°; tire forces are zeroed
+  below two wheel contacts. Hook `-odcrashtrace`.
 
 ## Arc 2 — Atmosphere ✅
 

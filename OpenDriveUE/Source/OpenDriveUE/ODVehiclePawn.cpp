@@ -16,6 +16,8 @@
 #include "EngineUtils.h"
 #include "ODInputConfig.h"
 #include "ODRoadManager.h"
+#include "ODRoadNoiseSynth.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
@@ -468,6 +470,16 @@ void AODVehiclePawn::BeginPlay()
 	FParse::Value(FCommandLine::Get(), TEXT("odveh="), VehSwapAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odsetvat="), SetVAt);
 	FParse::Value(FCommandLine::Get(), TEXT("odsetv="), SetVCmS);
+	bCrashTrace = FParse::Param(FCommandLine::Get(), TEXT("odcrashtrace"));
+
+	// crash response (PLAN-REALISM.md Phase 0): CCD so a 100 mph hit (~75 cm
+	// a frame) can't tunnel into a building tile's thin trimesh, and a capped
+	// initial-overlap push-out for whatever still gets in. Set here rather
+	// than as constructor defaults so they win over anything serialized; both
+	// are BodyInstance fields, so they survive ApplyVehicleDef's SetStaticMesh.
+	Body->SetUseCCD(true);
+	Body->BodyInstance.SetMaxDepenetrationVelocity(CrashMaxDepenetrationCmS);
+	Body->OnComponentHit.AddUniqueDynamic(this, &AODVehiclePawn::OnBodyHit);
 
 	// -odvehidx=N: jump straight to vehicle def index N at spawn (headless
 	// screenshot verification of a specific car - 2026-08-27, procedural car
@@ -1279,6 +1291,18 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// that mouse nudges barely dented.
 	UpdateFreeLook(DeltaSeconds);
 
+	// crash shake (OnBodyHit): smooth noise on the camera's own relative
+	// rotation - the spring arm above it is the freelook's - ~0.25 s at full
+	// strength; the last tick writes it back to zero
+	if (CrashShake > 0.0f && !bInShowroom)
+	{
+		CrashShake = FMath::Max(CrashShake - DeltaSeconds * 4.0f, 0.0f);
+		const float A = CrashShakeDeg * CrashShake;
+		const float T = GetWorld()->GetTimeSeconds() * 30.0f;
+		Camera->SetRelativeRotation(FRotator(FMath::PerlinNoise1D(T) * A,
+			FMath::PerlinNoise1D(T + 17.0f) * A, FMath::PerlinNoise1D(T + 41.0f) * A * 0.5f));
+	}
+
 	// controller/wheel device selection (2026-08-27) - resolves ActiveDevice
 	// (Auto = last-device-wins) from this frame's latched axis/key state.
 	UpdateActiveInputDevice();
@@ -1456,7 +1480,168 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		}
 	}
 
+	// pre-step velocity for OnBodyHit - last, after the -odsetv hook above
+	if (Body->IsSimulatingPhysics())
+	{
+		if (bCrashTrace)
+		{
+			TickCrashTrace(GetWorld()->GetTimeSeconds());
+		}
+		CrashPreVel = Body->GetPhysicsLinearVelocity();
+		CrashPreAngVel = Body->GetPhysicsAngularVelocityInDegrees();
+	}
+
 	TickOutOfBounds(DeltaSeconds);
+}
+
+void AODVehiclePawn::OnBodyHit(UPrimitiveComponent*, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
+{
+	if (!bGroundSnapped || bInShowroom || !Body->IsSimulatingPhysics())
+	{
+		return;
+	}
+	// contact normal pointing out of the wall toward the car. Chaos's sign
+	// depends on the pair's internal order, so take it from geometry.
+	FVector N = Hit.ImpactNormal;
+	if (FVector::DotProduct(N, Body->GetCenterOfMass() - Hit.ImpactPoint) < 0.0f)
+	{
+		N = -N;
+	}
+	const FVector V0 = CrashPreVel;
+	const FVector W0 = CrashPreAngVel;
+	const float Vn = -FVector::DotProduct(V0, N);   // speed into the wall
+	// Walls only. Buildings, retaining walls, rails, trunks AND the road and
+	// terrain are all the same BlockAll WorldStatic, so the normal is what
+	// tells them apart: steeper than ~53 deg is a wall. Ground contacts
+	// (bottoming out, landing on the roof/side) stay with the solver.
+	const bool bWall = FMath::Abs(N.Z) < 0.6f;
+	const bool bCrash = bWall && Vn > CrashMinNormalSpeedCmS;
+	const FVector VSolver = Body->GetPhysicsLinearVelocity();
+	const FVector WSolver = Body->GetPhysicsAngularVelocityInDegrees();
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (bCrash)
+	{
+		// Built from the PRE-step velocity, so whatever the solver did this
+		// step can't leak out. Keep CrashRestitution of the into-wall speed
+		// as bounce; scrub tangential speed Coulomb-style with the surface's
+		// own friction (a glancing hit keeps most of it, and PM_GuardrailSlick
+		// rails still deflect); cap the spin the hit adds.
+		const FVector Vt = V0 + N * Vn;
+		const float VtLen = Vt.Size();
+		const float Mu = Hit.PhysMaterial.IsValid() ? Hit.PhysMaterial->Friction : 0.7f;
+		const float Keep = VtLen > 1.0f
+			? FMath::Max(VtLen - Mu * (1.0f + CrashRestitution) * Vn, 0.0f) / VtLen
+			: 0.0f;
+		const FVector VOut = Vt * Keep + N * (Vn * CrashRestitution);
+		const FVector WOut = W0 + (WSolver - W0).GetClampedToMaxSize(CrashMaxSpinDegS);
+		Body->SetPhysicsLinearVelocity(VOut);
+		Body->SetPhysicsAngularVelocityInDegrees(WOut);
+		// a second wall in the same step (a corner) builds on this result
+		CrashPreVel = VOut;
+		CrashPreAngVel = WOut;
+
+		// feedback (D1): the road synth's impact thump - no crash sample in
+		// content_src/audio yet - plus a small camera shake, both by Vn
+		const float Strength = FMath::Clamp(Vn / CrashFullSpeedCmS, 0.0f, 1.0f);
+		if (UODRoadNoiseSynth* Road = FindComponentByClass<UODRoadNoiseSynth>())
+		{
+			Road->TriggerImpact(Strength);
+		}
+		CrashShake = FMath::Max(CrashShake, Strength);
+
+		if (bCrashTrace)
+		{
+			OpenCrashTraceWindow(Now, V0.Size(), TEXT("wall hit"));
+		}
+	}
+	if (bCrashTrace && Now < CrashTraceUntil)
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("ODCrashTrace: HIT t=%.3f crash=%d other=%s/%s n=(%.2f,%.2f,%.2f) "
+			     "pen=%.1f impulse=%.0f mu=%.2f vn=%.0f pre=%.0f solver=%.0f "
+			     "out=%.0f w_pre=%.0f w_solver=%.0f w_out=%.0f"),
+			Now, bCrash ? 1 : 0, OtherActor ? *OtherActor->GetName() : TEXT("none"),
+			OtherComp ? *OtherComp->GetName() : TEXT("none"), N.X, N.Y, N.Z,
+			Hit.PenetrationDepth, NormalImpulse.Size(),
+			Hit.PhysMaterial.IsValid() ? Hit.PhysMaterial->Friction : -1.0f,
+			Vn, V0.Size(), VSolver.Size(), Body->GetPhysicsLinearVelocity().Size(),
+			W0.Size(), WSolver.Size(),
+			Body->GetPhysicsAngularVelocityInDegrees().Size());
+	}
+}
+
+void AODVehiclePawn::OpenCrashTraceWindow(double Now, float ImpactCmS, const TCHAR* Why)
+{
+	// a window that ran out but hasn't printed its SUMMARY yet (that happens
+	// next Tick) just extends, merging the two impacts
+	if (CrashTraceUntil <= 0.0)
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODCrashTrace: OPEN (%s) at %.0f cm/s - pre-impact frames:"),
+			Why, ImpactCmS);
+		for (int32 i = 0; i < CrashTraceRing.Num(); ++i)
+		{
+			UE_LOG(LogTemp, Display, TEXT("ODCrashTrace: pre %s"),
+				*CrashTraceRing[(CrashTraceRingNext + i) % CrashTraceRing.Num()]);
+		}
+		CrashTraceRing.Reset();
+		CrashTraceRingNext = 0;
+		CrashTraceImpactCmS = 0.0f;
+		CrashTracePeakCmS = 0.0f;
+	}
+	CrashTraceImpactCmS = FMath::Max(CrashTraceImpactCmS, ImpactCmS);
+	CrashTraceUntil = Now + 2.0;
+}
+
+void AODVehiclePawn::TickCrashTrace(double Now)
+{
+	const FVector V = Body->GetPhysicsLinearVelocity();
+	const FVector W = Body->GetPhysicsAngularVelocityInDegrees();
+	int32 Contacts = 0;
+	for (int32 i = 0; i < Movement->NumWheels(); ++i)
+	{
+		Contacts += Movement->IsWheelInContact(i) ? 1 : 0;
+	}
+	const FVector Loc = GetActorLocation();
+	const FString Line = FString::Printf(
+		TEXT("t=%.3f spd=%.0f v=(%.0f,%.0f,%.0f) w=(%.0f,%.0f,%.0f) wheels=%d pos=(%.0f,%.0f,%.0f)"),
+		Now, V.Size(), V.X, V.Y, V.Z, W.X, W.Y, W.Z, Contacts, Loc.X, Loc.Y, Loc.Z);
+
+	// a one-frame jump no wall hit explains (a launch off a roof or a gentle
+	// face, a depenetration pop) opens a window too - CrashPreVel is still
+	// last frame's here
+	if (Now >= CrashTraceUntil && (V - CrashPreVel).Size() > 1500.0f)
+	{
+		OpenCrashTraceWindow(Now, CrashPreVel.Size(), TEXT("velocity jump"));
+	}
+	if (Now < CrashTraceUntil)
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODCrashTrace: %s"), *Line);
+		CrashTracePeakCmS = FMath::Max(CrashTracePeakCmS, V.Size());
+		return;
+	}
+	if (CrashTraceUntil > 0.0)
+	{
+		// Phase 0 check: the car may stop or glance off, never leave faster
+		// than it arrived
+		UE_LOG(LogTemp, Display,
+			TEXT("ODCrashTrace: SUMMARY impact=%.0f cm/s (%.0f mph) peak after=%.0f cm/s "
+			     "(%.0f mph) -> %s"),
+			CrashTraceImpactCmS, CrashTraceImpactCmS * 0.0223694f, CrashTracePeakCmS,
+			CrashTracePeakCmS * 0.0223694f,
+			CrashTracePeakCmS <= CrashTraceImpactCmS ? TEXT("PASS") : TEXT("FAIL"));
+		CrashTraceUntil = 0.0;
+	}
+	constexpr int32 RingSize = 10;
+	if (CrashTraceRing.Num() < RingSize)
+	{
+		CrashTraceRing.Add(Line);
+	}
+	else
+	{
+		CrashTraceRing[CrashTraceRingNext] = Line;
+		CrashTraceRingNext = (CrashTraceRingNext + 1) % RingSize;
+	}
 }
 
 void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)

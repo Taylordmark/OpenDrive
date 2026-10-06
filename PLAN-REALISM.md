@@ -42,27 +42,16 @@ thousands. The body is a simulated rigid body (`ODVehiclePawn.cpp:47`) with
 tire forces from `UODVehicleMovement`. Buildings use merged per-tile
 trimesh collision.
 
-1. **Triage first.** Log `BodyInstance` linear and angular velocity for the
-   frames around a building hit, behind a `-odcrashtrace` flag (same pattern
-   as `-odtrace`). Taylor provides one capture. Then confirm whether the
-   spike comes from depenetration (car deep inside a thin trimesh at speed)
-   or from the tire model still pushing while the car is airborne or on its
-   side. Fix whichever it is. Don't just clamp the symptom.
-2. **Likely fixes (pick per the triage):**
-   - Set `MaxDepenetrationVelocity` on the car body (a few m/s) and enable
-     CCD on the body, so fast hits don't tunnel into the trimesh.
-   - In an `OnComponentHit` handler: remove most of the velocity into the
-     hit normal (restitution about 0.1), scrub the tangential velocity with a
-     friction factor, and cap the angular velocity that the impact causes.
-   - Zero the tire forces when fewer than two wheels have contact (Park hold
-     already does this).
-3. **Feedback:** an impact "crunch" one-shot scaled by the normal speed
-   (CC0, normalized like the §5.4 loops) and a small camera shake. No damage
-   visuals (D1).
-4. **Check:** a small C++-free mirror isn't worth it. Instead, extend the
-   trace hook so one scripted `-odrev` run into a known building logs the
-   peak speed after impact. Pass if it's ≤ the impact speed. (That run is
-   Taylor's, per the no-launch rule.)
+The code is in (2026-10-06, see `status.md`): the `-odcrashtrace` hook,
+CCD and a depenetration cap, the `OnBodyHit` wall response, tire forces zeroed
+below two contacts, a synth thump and a camera shake. What remains:
+
+1. **Capture.** Taylor sends one `-odcrashtrace` log. Its `HIT` lines'
+   `solver=` vs `pre=` speeds confirm that depenetration was the spike. Every
+   `SUMMARY` should read PASS.
+2. **Crunch sample (gap).** There's no CC0 crash sample in `content_src/audio`,
+   so the road synth's thump (`UODRoadNoiseSynth::TriggerImpact`) stands in.
+   Swap one in, normalized like the §5.4 loops, if the thump reads too soft.
 
 **Drive check:** hit a building, a guardrail and a wall at 30/60/100 mph.
 The car should stop or glance off, never launch.
