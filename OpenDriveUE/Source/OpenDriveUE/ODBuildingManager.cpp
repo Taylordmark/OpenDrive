@@ -387,10 +387,17 @@ bool AODBuildingManager::IsNearRoadCorridor(double WorldX, double WorldY)
 	if (!bCorridorSearched)
 	{
 		bCorridorSearched = true;
+		// this area's own road manager, matched by prefix (2026-10-05, large
+		// world: several area sets can be live, first-found may be another's)
+		FString Area = BuildingTilePrefix;
+		Area.RemoveFromStart(TEXT("buildings_"));
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
-			CorridorCenterline = It->RoadCenterline;   // world cm, already loaded
-			break;
+			if (It->RoadTilePrefix == TEXT("road_") + Area)
+			{
+				CorridorCenterline = It->RoadCenterline;   // world cm, already loaded
+				break;
+			}
 		}
 		for (int32 i = 0; i < CorridorCenterline.Num(); ++i)
 		{

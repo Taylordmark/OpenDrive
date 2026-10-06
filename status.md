@@ -181,6 +181,33 @@ were decoupled from it on 2026-07-20.
   and persistence are still open.
 - **4.4** (§7.31): settings (11 rows, Off/TSR upscaler) and generated credits
   (30/30). Saved under `OpenDrive.Graphics` and `OpenDrive.Audio`.
+- **Area picker** (2026-10-05, not yet compiled or built). Garage Options tab
+  has an Area row: every `/Game/Areas/OpenWorld_<area>` level (AssetRegistry)
+  plus Tail of the Dragon and the current level. The row only picks; Drive /
+  Resume (labelled "Load Area") calls `OpenLevel`, landing in the new level's
+  garage. Car, engine, drivetrain and tuning ride the travel URL
+  (`odvehidx`/`odengine`/`oddrive`/`odtunepreset`); exhaust, season and input
+  device were already in GameUserSettings.ini.
+  - `build_openworld_test_level.py` saves to `/Game/Areas/OpenWorld_<OD_AREA>`
+    with a per-area `map_texture_<area>`; `OD_LEVEL=/Game/OpenWorldTest`
+    rebuilds the old level, still the ini startup map.
+  - `DefaultGame.ini` always-cooks `/Game/Areas` and lists both fixed maps.
+  - Tail of the Dragon has no `AODMainMenu`: only the car carries there, and
+    there's no garage to switch back from.
+- **Garage vistas** (2026-10-05, not yet compiled or built). On the Season,
+  Time of Day, Weather and Area rows the garage shows the car on a real road
+  in the picked area (`menu_spots.json`), panel on the right; other rows keep
+  the garage room. Every area with a spot gets an offset copy of its
+  terrain/road/forest/water/guardrail managers at menu start
+  (`AODGameMode::SpawnVistaSet`, `ODMenuVista.h` wedge filter: 1 km full
+  detail, coarse terrain to 20 km as a trial), 200 km apart from x = 2000 km.
+  The real managers and area streamer are frozen while vistas exist. An
+  optional `sea_z_cm` per spot adds a sea plane.
+  - New Time of Day (7 presets) and Weather (Auto + 12 states) rows, saved
+    to GameUserSettings.ini like Season.
+  - Drive starts at the area's spot (same level: `StartAt`; other area:
+    `odspawnx/odspawny/odspawnyaw` URL options, auto-start after load).
+  - (2026-10-05) Per-vista climate: a shown vista swaps the weather to its area's `climate_<area>_test.json` and its forest copy's biome/elevation at the spot; the Weather row offers only states that climate can produce (`AODWeatherController::CanProduce`, shared `StateWeights`), and an impossible forced pick falls back to Auto (vista swap, level start).
 
 ## Arc 5 — Audio (5.1, 5.2, 5.4 done)
 
@@ -650,6 +677,49 @@ run since before §7.49, so 1,276 junctions had no pad.
   - `verify_terrain_seams` and `verify_forest_elevation_fit` fail the same
     way at HEAD. Junction pads regrade terrain after the forest grid is
     baked.
+- **Streaming, pipeline side** (2026-10-05). World members share one
+  vertical datum (`world_frame.WORLD_DATUM_M`, sea level), so
+  `ORIGIN_HEIGHT_M` is 0 for them. Non-world areas keep their own origin.
+  - `gv_west`/`gv_east`: green_valley split at −118.45 (CA-14, Sierra Hwy,
+    Soledad/Bouquet/San Francisquito Canyon Rds cross it). Baked.
+  - Halo and owned tiles (step 3 start). An area may set `own_rect_cm`
+    (UE cm, None = open, on the 2 km grid). The gv halves meet at
+    X = 142 km, the tile edge nearest −118.45. Each bakes ~3–3.8 km past
+    it. `prune_unowned_tiles.py` runs after the last writer and again
+    after pads, and deletes every tile family outside the rect. The forest
+    grid is clipped where it's baked. Gates check owned stations only.
+    `worlds.json` rects now abut at 142 km.
+  - Gates: gv_east terrain/forest PASS; gv_west forest PASS, terrain
+    FAIL (4 interior stations up to 3.16 m below, same as unclipped).
+    Road fit FAILs on both. Most misses are within 200 m of the cut, where
+    the road chunk belongs to the other half. A few are interior: misses
+    (6 west, 2 east) and edge pokes up to +0.42 m.
+  - Cut seam (`verify_area_seam.py`): terrain step median 0, max 15.1 m.
+    Planned road z agrees to 0.14 m at 60 crossings. At the cut line
+    itself, 1 crossing has road from both halves and 4 have none.
+    Step 3's two-pass bake must close this.
+  - Whole-area files still keep the halo, so these are duplicated across
+    the halves: centerline/map lines, labels, routegraph, roadstations,
+    biome, building centroids, map texture.
+  - `build_world_manifest.py` (last `rebuild_area` stage) writes
+    `Masks/worlds.json`: each baked world member and its terrain-tile rect
+    in UE cm. `tests/test_world_manifest.py` mirrors the runtime rule
+    (spawn under 8 km, destroy over 16 km, home pinned).
+  - far_gasquet rebaked at datum 0: road/terrain/forest gates PASS, edge
+    poke max −0.05 m (unchanged); seams still fail as at HEAD.
+- **Streaming, runtime side** (2026-10-05, not yet compiled). `AODGameMode`
+  folds the six Ensure*Manager spawns into `SpawnAreaSet(area)` (home: same
+  as before). If `worlds.json` lists the home area, Tick (2 Hz) spawns a
+  whole manager set for each other member under 8 km from its rect and
+  destroys it past 16 km; home is never touched.
+  - Singletons made multi-set: out-of-bounds uses the nearest road manager;
+    teleport lift 6 km, ground trace 6.1 km; loading gate/progress and
+    `-odpick` span every manager; building/barrier bind their own area's
+    road; season pushes to every MID; HUD nav and route use the nearest
+    road, minimap draws every area's centerline; weather biome from the
+    nearest forest.
+  - Not multi-set yet: ambient sound and climate (home only); forest skips
+    tiles outside its elevation-grid box, so overlapping boxes double-plant.
 
 ### Release engineering
 

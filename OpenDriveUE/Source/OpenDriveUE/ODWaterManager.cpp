@@ -286,8 +286,8 @@ void AODWaterManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
-	if (!Player)
+	FVector Loc;
+	if (!Vista.StreamCenter(this, Loc))
 	{
 		return;
 	}
@@ -296,7 +296,6 @@ void AODWaterManager::Tick(float DeltaSeconds)
 	// lake placement never depends on the player's own settled height or on
 	// AODTerrainManager's streamed collision, so there's nothing to wait on;
 	// water tiles can start streaming from the very first Tick().
-	const FVector Loc = Player->GetActorLocation();
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 
@@ -315,7 +314,8 @@ void AODWaterManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key))
+				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key)
+					|| !Vista.WantsTile(Key, TileSizeCm))
 				{
 					continue;
 				}

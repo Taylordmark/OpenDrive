@@ -380,8 +380,18 @@ void AODSeasonController::ComputeParamsForClock(float Clock, float& OutFall, flo
 
 void AODSeasonController::PushParamsToMIDs()
 {
-	if (AODTerrainManager* Terrain = TerrainMgr.Get())
+	// Pushes to EVERY terrain/water/forest/road manager, not just the cached
+	// first-found ones (2026-10-05, large world: AODGameMode spawns whole area
+	// sets mid-drive, each with its own MIDs). The cached weak ptrs remain
+	// FindManagers()' "anything to bind yet" check.
+	UWorld* World = GetWorld();
+	if (!World)
 	{
+		return;
+	}
+	for (TActorIterator<AODTerrainManager> It(World); It; ++It)
+	{
+		AODTerrainManager* Terrain = *It;
 		if (UMaterialInstanceDynamic* GroundMID = Terrain->GetGroundMID())
 		{
 			// Reference elevation for the melt-compression fix's identity
@@ -411,8 +421,9 @@ void AODSeasonController::PushParamsToMIDs()
 			GroundMID->SetScalarParameterValue(TEXT("SpringGreen"), SpringGreen);
 		}
 	}
-	if (AODWaterManager* Water = WaterMgr.Get())
+	for (TActorIterator<AODWaterManager> It(World); It; ++It)
 	{
+		AODWaterManager* Water = *It;
 		if (UMaterialInstanceDynamic* WaterMID = Water->GetWaterMID())
 		{
 			WaterMID->SetScalarParameterValue(TEXT("FreezeBlend"), FreezeBlend);
@@ -423,8 +434,9 @@ void AODSeasonController::PushParamsToMIDs()
 				Weather ? FMath::Clamp((Weather->WindSpeedMs - 10.0f) / 25.0f, 0.0f, 1.0f) : 0.0f);
 		}
 	}
-	if (AODForestManager* Forest = ForestMgr.Get())
+	for (TActorIterator<AODForestManager> It(World); It; ++It)
 	{
+		AODForestManager* Forest = *It;
 		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
 		{
 			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
@@ -458,8 +470,9 @@ void AODSeasonController::PushParamsToMIDs()
 	}
 	// Weather W2 (sec 7.40): wet road = darker + glossier (unreal/
 	// apply_road_material.py's "Wetness" param, 0 = the dry baseline).
-	if (AODRoadManager* Road = RoadMgr.Get())
+	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{
+		AODRoadManager* Road = *It;
 		if (UMaterialInstanceDynamic* RoadMID = Road->GetRoadMID())
 		{
 			const AODWeatherController* Weather = WeatherCtl.Get();

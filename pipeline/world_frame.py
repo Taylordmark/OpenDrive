@@ -30,6 +30,13 @@ WORLDS = {
     "california": (34.0, 40.5, 37.25, -120.0),
 }
 
+# (2026-10-05, step 2) Each world's shared vertical datum: absolute metres at
+# UE Z = 0 for every member area (test_areas.ORIGIN_HEIGHT_M), so adjacent
+# areas' Z agree where they meet. Sea level.
+WORLD_DATUM_M = {
+    "california": 0.0,
+}
+
 # Chunks are corner-aligned at the frame origin, so the 2 km terrain tiles
 # and 500 m road tiles (also origin-aligned) nest inside them exactly.
 CHUNK_SIZE_M = 64000.0

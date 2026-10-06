@@ -79,7 +79,7 @@ filenames:
 
 Not included (deliberately out of scope - these feed the separate
 Tail-of-the-Dragon stage or standalone stage assets, not the Arc 7 area
-Masks pipeline): fetch_data.py, fetch_imagery.py, fetch_climate.py,
+Masks pipeline): fetch_data.py, fetch_imagery.py,
 build_stage.py, make_road_texture.py, make_detail_textures.py,
 make_tree_meshes.py, make_car_mesh.py, make_car_gt.py, export_road_obj.py,
 make_forest_mask_bin.py (reads data/stages/tail_of_the_dragon/... directly),
@@ -163,10 +163,19 @@ STAGES = [
     ("export_place_labels_bin.py", "export labels_*.bin"),
     ("classify_biomes.py", "classify road-corridor biomes -> road_biomes.json"),
     ("export_biome_bin.py", "export biome_*.bin"),
+    # (2026-10-05) was missing: every area without a hand-run climate file got
+    # ODWeatherController's mild default climate. Needs road_test_meta.json +
+    # road_biomes.json (storm weights); this area only, not its no-arg "all".
+    (f"fetch_climate.py {AREA_NAME}_test", "fetch climate normals + storm weights -> climate_*.json"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
+    # (2026-10-05, step 3) after the last tile writer: the gates check owned tiles only
+    ("prune_unowned_tiles.py", "delete tiles outside the area's owned rect (its halo)"),
+    ("build_menu_spots.py", "pick the garage-menu backdrop spot -> menu_spots.json"),
     ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
     ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
+    # (2026-10-05) after the gates: lists every baked world member, this one included
+    ("build_world_manifest.py", "write Content/OpenDrive/Masks/worlds.json (streamed world members)"),
 ]
 
 
@@ -174,7 +183,8 @@ def main():
     print(f"=== rebuild_area.py: AREA_NAME = {AREA_NAME!r} ({len(STAGES)} stages) ===")
     t_start = time.time()
 
-    for i, (script, desc) in enumerate(STAGES, start=1):
+    for i, (cmd, desc) in enumerate(STAGES, start=1):
+        script, *args = cmd.split()
         script_path = PIPELINE_DIR / script
         if not script_path.is_file():
             print(f"\n[{i}/{len(STAGES)}] FAILED: {script} not found at {script_path}")
@@ -182,7 +192,7 @@ def main():
 
         print(f"\n[{i}/{len(STAGES)}] {script} - {desc}")
         t0 = time.time()
-        result = subprocess.run([sys.executable, str(script_path)])
+        result = subprocess.run([sys.executable, str(script_path), *args])
         dt = time.time() - t0
 
         if result.returncode != 0:

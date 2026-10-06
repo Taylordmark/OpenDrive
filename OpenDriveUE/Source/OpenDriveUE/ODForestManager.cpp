@@ -493,7 +493,8 @@ bool AODForestManager::LoadElevationGrid()
 			*BinPath, N, Bin.Num());
 		return false;
 	}
-	ElevationGrid.SetNumUninitialized(N);
+	// menu vista (2026-10-05): keep only the points near the wedge
+	ElevationGrid.Reserve(Vista.bActive ? 0 : N);
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
@@ -501,15 +502,21 @@ bool AODForestManager::LoadElevationGrid()
 		FMemory::Memcpy(&X, P, 4);
 		FMemory::Memcpy(&Y, P + 4, 4);
 		FMemory::Memcpy(&Z, P + 8, 4);
-		ElevationGrid[i].WorldXY = FVector2D(X, Y);
-		ElevationGrid[i].Z = Z;
+		if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
+		{
+			continue;
+		}
+		const int32 Idx = ElevationGrid.AddUninitialized();
+		ElevationGrid[Idx].WorldXY = FVector2D(X, Y);
+		ElevationGrid[Idx].Z = Z;
+		ElevationBounds += FVector2D(X, Y);
 		const int32 CellX = FMath::FloorToInt(X / ElevationCellCm);
 		const int32 CellY = FMath::FloorToInt(Y / ElevationCellCm);
-		ElevationBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(i);
+		ElevationBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d elevation grid point(s) from %s"),
-		N, *BinPath);
+		ElevationGrid.Num(), *BinPath);
 	return true;
 }
 
@@ -539,21 +546,25 @@ bool AODForestManager::LoadCenterline()
 			*BinPath, N, Bin.Num());
 		return false;
 	}
-	RoadCenterline.SetNumUninitialized(N);
+	RoadCenterline.Reserve(Vista.bActive ? 0 : N);
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
 		float X, Y;
 		FMemory::Memcpy(&X, P, 4);
 		FMemory::Memcpy(&Y, P + 4, 4);
-		RoadCenterline[i] = FVector2D(X, Y);
+		if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
+		{
+			continue;   // menu vista (2026-10-05)
+		}
+		const int32 Idx = RoadCenterline.Add(FVector2D(X, Y));
 		const int32 CellX = FMath::FloorToInt(X / CenterlineCellCm);
 		const int32 CellY = FMath::FloorToInt(Y / CenterlineCellCm);
-		CenterlineBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(i);
+		CenterlineBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d centerline point(s) from %s, exclusion %.1f m"),
-		N, *BinPath, PavementExclusionCm / 100.0);
+		RoadCenterline.Num(), *BinPath, PavementExclusionCm / 100.0);
 	return true;
 }
 
@@ -627,6 +638,13 @@ bool AODForestManager::LoadRoadStations()
 			     "road-exclusion check disabled (PM_Asphalt trace check only)"),
 			*BinPath);
 		return false;
+	}
+	if (Vista.bActive)
+	{
+		Loaded.RemoveAll([this](const FRoadStation& St)
+		{
+			return !Vista.WantsPoint(FVector2D(St.X, St.Y), VistaLoadPadCm);
+		});
 	}
 	const int32 NumStations = Loaded.Num();
 	RoadStationHash.Build(MoveTemp(Loaded));
@@ -1324,7 +1342,8 @@ float AODForestManager::ForestWeightAt(double WorldX, double WorldY) const
 	return MaskR[Y * MaskRes + X] / 255.0f;
 }
 
-bool AODForestManager::BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM) const
+bool AODForestManager::BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM,
+	float* OutDistSqCm) const
 {
 	if (!bUsePointBiomes || BiomePoints.Num() == 0)
 	{
@@ -1348,6 +1367,10 @@ bool AODForestManager::BiomeSampleAt(double WorldX, double WorldY, EODBiome& Out
 	}
 	OutBiome = Nearest->Biome;
 	OutElevDeltaM = Nearest->ElevM - (float)(ElevSum / BiomePoints.Num());
+	if (OutDistSqCm)
+	{
+		*OutDistSqCm = BestD2;
+	}
 	return true;
 }
 
@@ -1611,9 +1634,12 @@ bool AODForestManager::RaycastRuntimeGround(double WorldX, double WorldY,
 	// replaced - a fixed +-1000 m band put the trace's own start point
 	// underground on Green Valley's higher terrain and could register a hit
 	// against unrelated lower geometry).
+	// tile coords are actor-local; a menu vista copy sits at an XY offset
+	// (2026-10-05) - zero for every real manager
+	const FVector Off(GetActorLocation().X, GetActorLocation().Y, 0.0);
 	FHitResult Hit;
-	const FVector Start(WorldX, WorldY, PlayerZHint + GroundTraceMarginCm);
-	const FVector End(WorldX, WorldY, PlayerZHint - GroundTraceMarginCm);
+	const FVector Start = FVector(WorldX, WorldY, PlayerZHint + GroundTraceMarginCm) + Off;
+	const FVector End = FVector(WorldX, WorldY, PlayerZHint - GroundTraceMarginCm) + Off;
 	FCollisionQueryParams Params;
 	Params.bReturnPhysicalMaterial = true;
 	Params.AddIgnoredActor(this);          // our own trunk capsules
@@ -1666,7 +1692,7 @@ bool AODForestManager::RaycastRuntimeGround(double WorldX, double WorldY,
 		}
 		return false;
 	}
-	OutHit = Hit.ImpactPoint;
+	OutHit = Hit.ImpactPoint - Off;
 	return true;
 }
 
@@ -1713,9 +1739,10 @@ bool AODForestManager::HeightOnlyAt(double WorldX, double WorldY, float& OutZ) c
 	// Same PlayerZHint-relative trace range as GroundAt()'s raycast branch -
 	// see PlayerZHint's declaration comment (ODForestManager.h) for why a
 	// fixed absolute +-1000 m band was wrong on Green Valley's terrain.
+	const FVector Off(GetActorLocation().X, GetActorLocation().Y, 0.0);   // menu vista offset, see RaycastRuntimeGround
 	FHitResult Hit;
-	const FVector Start(WorldX, WorldY, PlayerZHint + GroundTraceMarginCm);
-	const FVector End(WorldX, WorldY, PlayerZHint - GroundTraceMarginCm);
+	const FVector Start = FVector(WorldX, WorldY, PlayerZHint + GroundTraceMarginCm) + Off;
+	const FVector End = FVector(WorldX, WorldY, PlayerZHint - GroundTraceMarginCm) + Off;
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
@@ -2054,7 +2081,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		Hism->SetCastShadow(!bLowVeg);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
-		Hism->AddInstances(Batches[m], false, true);
+		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
 		Tile.Hisms.Add(Hism);
 
 		// One-time proof-of-fix readback (2026-08-27, "hitting a bush stops/
@@ -2260,11 +2287,13 @@ void AODForestManager::Tick(float DeltaSeconds)
 	// belongs INSIDE the kinematic settle hold, not on the frame physics
 	// releases - see IsGroundResolved()'s declaration comment.
 	if (const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Player);
-		VehiclePawn && !VehiclePawn->IsGroundResolved())
+		!Vista.bActive && VehiclePawn && !VehiclePawn->IsGroundResolved())
 	{
 		return;
 	}
-	const FVector Loc = Player->GetActorLocation();
+	// menu vista (2026-10-05): build around the car's spot (area-local),
+	// its road Z as the trace hint; no trunk collision, no -odshot
+	const FVector Loc = Vista.bActive ? Vista.Focus : Player->GetActorLocation();
 	// see PlayerZHint's declaration comment (ODForestManager.h) - GroundAt()/
 	// HeightOnlyAt()'s raycast fallback traces relative to this instead of a
 	// hardcoded absolute Z.
@@ -2293,6 +2322,14 @@ void AODForestManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
+				// not this area's tile (2026-10-05, large world) - see ElevationBounds
+				if ((bUseElevationGrid && !ElevationBounds.Intersect(FBox2D(
+						FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
+						FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
+					|| !Vista.WantsTile(Key, TileSizeCm))
+				{
+					continue;
+				}
 				if (!Tiles.Contains(Key))
 				{
 					// BuildTile() returning false (see its own comment) leaves
@@ -2323,6 +2360,10 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
+	if (Vista.bActive)
+	{
+		return;
+	}
 	UpdateCollision(Loc);
 
 	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot.

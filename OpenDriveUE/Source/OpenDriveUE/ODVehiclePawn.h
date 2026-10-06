@@ -240,6 +240,11 @@ public:
 	 *  wording only ("STUCK" vs "OFF ROAD"). */
 	bool IsOobStuckReset() const { return bOobStuckReset; }
 
+	/** Road manager nearest the car as of the last 2 Hz out-of-bounds scan
+	 *  (2026-10-05, large world) - AODRaceHUD's nav uses it. Null before the
+	 *  first scan / on levels with no road. */
+	class AODRoadManager* GetNearestRoadMgr() const { return OobRoadMgr.Get(); }
+
 	/** Place the car at a FIXED, self-contained location (the main menu's
 	 *  showroom void, 2026-07-28) with no ground-snap wait at all - unlike
 	 *  TeleportToSpawn, which waits on real streamed terrain/road, this
@@ -387,8 +392,7 @@ private:
 	float OobCountdownSec = -1.0f;  // HUD-visible remaining grace, <0 = clear
 	bool bOobStuckReset = false;    // last countdown/reset was the stuck trigger
 	                                 // (HUD wording only)
-	TWeakObjectPtr<class AODRoadManager> OobRoadMgr;
-	bool bOobRoadMgrSearched = false;
+	TWeakObjectPtr<class AODRoadManager> OobRoadMgr;   // nearest as of the last scan
 	// generous: the road tile at the spawn point now gets priority in
 	// AODRoadManager's own wait-queue (closest-to-player, not first-parsed),
 	// so this should rarely be hit, but a long fallback is cheap insurance

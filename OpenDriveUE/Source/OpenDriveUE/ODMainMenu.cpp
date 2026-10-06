@@ -1,16 +1,33 @@
 #include "ODMainMenu.h"
 
+#include "AssetRegistry/ARFilter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
+#include "Dom/JsonObject.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
+#include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInterface.h"
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UnrealClient.h"
 
 #include "ODCreditsMenu.h"
+#include "ODDayNightController.h"
 #include "ODEngineSynth.h"
+#include "ODForestManager.h"
+#include "ODGameMode.h"
 #include "ODGarageEnvironment.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
@@ -22,6 +39,7 @@
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
+#include "ODWeatherController.h"
 
 namespace
 {
@@ -117,10 +135,60 @@ constexpr float ExhaustPopStep = 0.05f;
 const TCHAR* const SeasonNames[] = {TEXT("Auto"), TEXT("Summer"), TEXT("Fall"), TEXT("Winter"), TEXT("Spring")};
 const TCHAR* SeasonConfigSection = TEXT("OpenDrive.Season");
 
+// Time of Day / Weather rows (2026-10-05). Hours feed AODDayNightController::
+// TimeOfDay (Morning = its StartHour default, so an unset config changes
+// nothing); weather names are AODWeatherController's EODWeatherState names.
+struct FTimePreset
+{
+	const TCHAR* Name;
+	float Hour;
+};
+const FTimePreset TimeOfDayPresets[] = {
+	{TEXT("Dawn"), 6.4f}, {TEXT("Morning"), 10.0f}, {TEXT("Noon"), 12.0f}, {TEXT("Afternoon"), 15.0f},
+	{TEXT("Golden Hour"), 17.5f}, {TEXT("Dusk"), 18.3f}, {TEXT("Night"), 22.0f},
+};
+const TCHAR* const WeatherNames[] = {
+	TEXT("Auto"), TEXT("Clear"), TEXT("Overcast"), TEXT("Rain"), TEXT("HeavyRain"), TEXT("Sleet"), TEXT("Snow"),
+	TEXT("Blizzard"), TEXT("Fog"), TEXT("DustStorm"), TEXT("Thunderstorm"), TEXT("Tornado"), TEXT("Hurricane"),
+};
+// WeatherNames[i] = EODWeatherState(i - 1) - WeatherPossible() relies on it
+static_assert(UE_ARRAY_COUNT(WeatherNames) == (int32)EODWeatherState::Hurricane + 2, "Auto + one per EODWeatherState");
+const TCHAR* TimeConfigSection = TEXT("OpenDrive.TimeOfDay");
+const TCHAR* WeatherConfigSection = TEXT("OpenDrive.Weather");
+
+// Garage-menu vistas (2026-10-05) - tunables. Each area's copy is shifted so
+// its car spot lands at (VistaBaseXCm + i * VistaSpacingCm, 0): far outside
+// every real area (California is ~1e8 cm across), 200 km apart so no vista's
+// panorama tiles or sea plane reach another's (their Z frames differ - one
+// area's sea plane would flood a high area's terrain). Z stays real (the
+// atmosphere and the season snow line read absolute height).
+constexpr double VistaBaseXCm = 2.0e8;
+constexpr double VistaSpacingCm = 2.0e7;
+constexpr double VistaFarCm = 100000.0;        // full-detail wedge reach past the car
+// panorama trial: coarse/background terrain tiles in the same wedge out to
+// here (FODVistaRegion::PanoFarCm); 0 = off
+constexpr double VistaPanoFarCm = 2000000.0;
+// sea plane (spot's optional "sea_z_cm"): same mesh/material as the level
+// builder's Ocean (unreal/build_openworld_test_level.py), a square this
+// half-size centred on the car - well past the horizon from road height
+constexpr double VistaSeaHalfCm = 6000000.0;
+constexpr double VistaPatchCm = 3000.0;        // ground disc around car + camera
+constexpr double VistaHalfAngleDeg = 45.0;     // = the camera's 90 deg FOV
+// Camera framing: behind the car (opposite view yaw), shifted right of its
+// line so the car sits left of centre and the right third stays clear for
+// the menu panel. Looks along the view yaw, pitched slightly down.
+constexpr double VistaCamBackCm = 700.0;
+constexpr double VistaCamSideCm = 250.0;
+constexpr double VistaCamHeightCm = 150.0;     // above the road surface
+constexpr double VistaCamPitchDeg = -4.0;
+// rows that show the vista instead of the garage room: Season, Time, Weather, Area
+constexpr int32 FirstVistaRow = 10;
+constexpr int32 LastVistaRow = 13;
+
 const FODMenuTab MenuTabs[] = {
 	{TEXT("CAR"), 0, 4},       // Car, Engine, Drivetrain, Tuning
 	{TEXT("SOUND"), 4, 5},     // Exhaust preset + its 4 sliders
-	{TEXT("OPTIONS"), 9, 4},   // Input Device, Season, Settings, Credits
+	{TEXT("OPTIONS"), 9, 7},   // Input Device, Season, Time of Day, Weather, Area, Settings, Credits
 };
 
 template <typename T>
@@ -149,6 +217,39 @@ void AODMainMenu::BeginPlay()
 	LoadExhaustConfig();   // restore last session's exhaust pick before ApplyExhaust() ever runs
 	GConfig->GetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
 	SeasonIdx = FMath::Clamp(SeasonIdx, 0, (int32)UE_ARRAY_COUNT(SeasonNames) - 1);
+	GConfig->GetInt(TimeConfigSection, TEXT("TimeIdx"), TimeIdx, GGameUserSettingsIni);
+	TimeIdx = FMath::Clamp(TimeIdx, 0, (int32)UE_ARRAY_COUNT(TimeOfDayPresets) - 1);
+	GConfig->GetInt(WeatherConfigSection, TEXT("WeatherIdx"), WeatherIdx, GGameUserSettingsIni);
+	WeatherIdx = FMath::Clamp(WeatherIdx, 0, (int32)UE_ARRAY_COUNT(WeatherNames) - 1);
+	FindAreaLevels();
+	LoadMenuSpots();
+	// car picks carried across a garage Area switch (2026-10-05, see OpenArea());
+	// the car itself rides odvehidx= into AODVehiclePawn::BeginPlay
+	const FURL& Url = GetWorld()->URL;
+	if (const TCHAR* V = Url.GetOption(TEXT("odengine="), nullptr))
+	{
+		EngineIdx = FMath::Clamp(FCString::Atoi(V), 0, (int32)UE_ARRAY_COUNT(Engines) - 1);
+	}
+	if (const TCHAR* V = Url.GetOption(TEXT("oddrive="), nullptr))
+	{
+		DriveIdx = FMath::Clamp(FCString::Atoi(V), 0, (int32)UE_ARRAY_COUNT(Layouts) - 1);
+	}
+	if (const TCHAR* V = Url.GetOption(TEXT("odtunepreset="), nullptr))
+	{
+		CarriedTuneIdx = FCString::Atoi(V);
+	}
+	// Drive from another area's menu (2026-10-05): start straight at its spot
+	const TCHAR* SpotX = Url.GetOption(TEXT("odspawnx="), nullptr);
+	const TCHAR* SpotY = Url.GetOption(TEXT("odspawny="), nullptr);
+	if (SpotX && SpotY)
+	{
+		bPendingSpot = true;
+		PendingSpot = FVector2D(FCString::Atod(SpotX), FCString::Atod(SpotY));
+		if (const TCHAR* V = Url.GetOption(TEXT("odspawnyaw="), nullptr))
+		{
+			PendingSpotYaw = FCString::Atof(V);
+		}
+	}
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
 	{
@@ -237,16 +338,18 @@ void AODMainMenu::BeginPlay()
 				{
 					return false;
 				}
-				const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld());
-				if (Road)
+				// every road manager (2026-10-05, large world: one per streamed
+				// area set), and StartAt is told which one the index belongs to
+				for (TActorIterator<AODRoadManager> It(GetWorld()); It && !bPickDone; ++It)
 				{
+					const AODRoadManager* Road = *It;
 					const TArray<FTownNode>& Nodes = Road->GetTownNodes();
 					for (int32 i = 0; i < Nodes.Num(); ++i)
 					{
 						if (Nodes[i].Name.Contains(PickTown))
 						{
 							bPickDone = true;
-							StartAt(i);
+							StartAt(i, Road);
 							UE_LOG(LogTemp, Display,
 								TEXT("ODMainMenu: -odpick spawned at '%s'"), *Nodes[i].Name);
 							break;
@@ -281,6 +384,7 @@ void AODMainMenu::OpenMenu()
 	bGarageMode = false;
 	Selected = 0;
 	TabIdx = 0;
+	AreaIdx = CurrentAreaIdx;   // a pending Area pick never outlives the screen it was made on
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
 	// Deliberately NOT pausing here (2026-07-28, unlike OpenGarage() below) -
@@ -309,6 +413,7 @@ void AODMainMenu::OpenGarage()
 	bGarageMode = true;
 	Selected = 0;
 	TabIdx = 0;
+	AreaIdx = CurrentAreaIdx;
 	bEntered = false;   // re-sync the displayed engine/drivetrain with reality
 	UGameplayStatics::SetGamePaused(this, true);
 	// 2026-08-27 fix: this call was missing entirely, so the pause menu's
@@ -360,11 +465,18 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		const double Now = GetWorld()->GetTimeSeconds();
 		const AODVehiclePawn* Pawn = FindPawn();
 		const bool bPawnReady = Pawn && Pawn->IsGroundSnapped();
-		const AODTerrainManager* Terrain = FindActor<AODTerrainManager>(GetWorld());
-		const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld());
-		const bool bTerrainSettled = !Terrain
-			|| Terrain->IsInitialStreamingSettled(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector);
-		const bool bRoadSettled = !Road || Road->IsInitialStreamingSettled();
+		// AND over every terrain/road manager (2026-10-05, large world: one
+		// per streamed area set) - none at all still counts as settled.
+		bool bTerrainSettled = true;
+		for (TActorIterator<AODTerrainManager> It(GetWorld()); It; ++It)
+		{
+			bTerrainSettled = bTerrainSettled && It->IsInitialStreamingSettled(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector);
+		}
+		bool bRoadSettled = true;
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+		{
+			bRoadSettled = bRoadSettled && It->IsInitialStreamingSettled();
+		}
 		const bool bAllSettled = bPawnReady && bTerrainSettled && bRoadSettled;
 
 		if (bAllSettled)
@@ -418,6 +530,12 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	{
 		EnterCarConfig();
 	}
+	if (bEntered && bPendingSpot && !bGarageMode)
+	{
+		StartAt(-1);   // arrived via an Area switch's Drive: straight to the spot
+		return;
+	}
+	UpdateScene();
 }
 
 void AODMainMenu::EnterCarConfig()
@@ -480,10 +598,39 @@ void AODMainMenu::EnterCarConfig()
 	// until the player picks one, same as the pause menu); exhaust reapplies
 	// the persisted/current values every entry since the synth is recreated
 	// per-car (AODVehicleAudio::EnsureSynths) and wouldn't otherwise remember.
+	if (CarriedTuneIdx != INDEX_NONE)
+	{
+		// one-shot: the tuning pick carried in by an Area switch (2026-10-05)
+		TuneIdx = CarriedTuneIdx;
+		CarriedTuneIdx = INDEX_NONE;
+		ApplyTuning();
+	}
 	ApplyEngine();
 	ApplyDrivetrain();
 	ApplyExhaust();
 	ApplySeason();
+	if (!bGarageMode)
+	{
+		// fresh menu only: a mid-drive garage visit keeps the running clock and sky
+		float OdHour = 0.0f;
+		if (!FParse::Value(FCommandLine::Get(), TEXT("odhour="), OdHour))
+		{
+			ApplyTimeOfDay();
+		}
+		if (WeatherIdx != 0)
+		{
+			ApplyWeather();
+		}
+		if (UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>())
+		{
+			GarageCamXf = Cam->GetComponentTransform();
+		}
+		ShownVista = INDEX_NONE;
+		if (!bPendingSpot)
+		{
+			SpawnVistas();
+		}
+	}
 	bEntered = true;
 }
 
@@ -609,9 +756,21 @@ void AODMainMenu::Activate()
 	{
 		if (Selected == NumRows() - 1)          // "Drive" / "Resume Driving" row
 		{
-			if (bGarageMode)
+			if (AreaIdx != CurrentAreaIdx)
+			{
+				OpenArea();             // Area row changed: leaving the garage loads it
+			}
+			else if (bGarageMode)
 			{
 				ResumeFromGarage();
+			}
+			else if (Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid)
+			{
+				// this area's menu spot (2026-10-05): drive from where the vista showed it
+				bPendingSpot = true;
+				PendingSpot = FVector2D(Spots[AreaIdx].CarCm.X, Spots[AreaIdx].CarCm.Y);
+				PendingSpotYaw = Spots[AreaIdx].CarYawDeg;
+				StartAt(-1);
 			}
 			else
 			{
@@ -773,6 +932,31 @@ void AODMainMenu::Adjust(int32 Dir)
 		GConfig->SetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
+	case 11:
+		TimeIdx = (TimeIdx + Dir + UE_ARRAY_COUNT(TimeOfDayPresets)) % UE_ARRAY_COUNT(TimeOfDayPresets);
+		ApplyTimeOfDay();
+		GConfig->SetInt(TimeConfigSection, TEXT("TimeIdx"), TimeIdx, GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
+		break;
+	case 12:
+		// only states the active climate can produce (2026-10-05); Auto always can
+		do
+		{
+			WeatherIdx = (WeatherIdx + Dir + UE_ARRAY_COUNT(WeatherNames)) % UE_ARRAY_COUNT(WeatherNames);
+		} while (!WeatherPossible(WeatherIdx));
+		ApplyWeather();
+		GConfig->SetInt(WeatherConfigSection, TEXT("WeatherIdx"), WeatherIdx, GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
+		break;
+	case 13:
+		// Area row (2026-10-05): picks only - nothing loads until "Drive"
+		// (Activate()), so cycling past an area doesn't reload the world; the
+		// vista (UpdateScene) swaps to the picked area's preloaded copy
+		if (const int32 N = AreaLevels.Num(); N > 0)
+		{
+			AreaIdx = (AreaIdx + Dir + N) % N;
+		}
+		break;
 	default:
 		break;
 	}
@@ -875,6 +1059,60 @@ void AODMainMenu::ApplySeason()
 	}
 }
 
+void AODMainMenu::ApplyTimeOfDay()
+{
+	if (AODDayNightController* DayNight = FindActor<AODDayNightController>(GetWorld()))
+	{
+		DayNight->TimeOfDay = TimeOfDayPresets[TimeIdx].Hour;
+	}
+}
+
+void AODMainMenu::ApplyWeather()
+{
+	if (AODWeatherController* Weather = FindActor<AODWeatherController>(GetWorld()))
+	{
+		if (!WeatherPossible(WeatherIdx))
+		{
+			// (2026-10-05) a saved/carried pick this climate never produces -> Auto,
+			// saved so the row and the next level agree
+			UE_LOG(LogTemp, Display, TEXT("ODMainMenu: weather %s impossible here - Auto"), WeatherNames[WeatherIdx]);
+			WeatherIdx = 0;
+			GConfig->SetInt(WeatherConfigSection, TEXT("WeatherIdx"), WeatherIdx, GGameUserSettingsIni);
+			GConfig->Flush(false, GGameUserSettingsIni);
+		}
+		Weather->ForceState(WeatherNames[WeatherIdx], /*bInstant*/true);
+	}
+}
+
+bool AODMainMenu::WeatherPossible(int32 Idx) const
+{
+	// ponytail: tests the weather's active climate - a vista's, else this
+	// level's. An Area pick with no menu spot (no vista) is filtered by this
+	// level's climate; its own level re-checks at start. Load every AreaKeys
+	// climate if that misleads.
+	const AODWeatherController* Weather = FindActor<AODWeatherController>(GetWorld());
+	return Idx == 0 || !Weather || Weather->CanProduce((EODWeatherState)(Idx - 1));
+}
+
+void AODMainMenu::SetWeatherClimate(int32 Vista)
+{
+	AODWeatherController* Weather = FindActor<AODWeatherController>(GetWorld());
+	if (!Weather)
+	{
+		return;
+	}
+	const bool bVista = Spots.IsValidIndex(Vista);
+	Weather->SetVistaClimate(bVista ? &Spots[Vista].Climate : nullptr,
+		bVista ? Spots[Vista].Forest.Get() : nullptr, bVista ? FVector2D(Spots[Vista].CarCm) : FVector2D::ZeroVector);
+	// Auto re-rolls in the new climate; a vista also drops a forced state its
+	// area never produces. Home keeps it: the Drive row shows the garage room,
+	// and the pick may be for the area about to load (its level re-checks).
+	if (WeatherIdx == 0 || (bVista && !WeatherPossible(WeatherIdx)))
+	{
+		ApplyWeather();
+	}
+}
+
 namespace
 {
 const TCHAR* ExhaustConfigSection = TEXT("OpenDrive.Exhaust");
@@ -947,18 +1185,19 @@ void AODMainMenu::GoToMap()
 	SetCursorVisible(true);
 }
 
-void AODMainMenu::StartAt(int32 TownIdx)
+void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 {
 	AODVehiclePawn* Pawn = FindPawn();
 	if (!Pawn)
 	{
 		return;
 	}
+	DestroyVistas();   // and un-freeze the real area streaming before the teleport
 
 	FVector2D Target = FVector2D::ZeroVector;   // only read when bHaveTarget is true
 	float Yaw = Pawn->GetActorRotation().Yaw;
 	bool bHaveTarget = false;
-	if (AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld());
+	if (const AODRoadManager* Road = InRoad ? InRoad : FindActor<AODRoadManager>(GetWorld());
 		Road && Road->GetTownNodes().IsValidIndex(TownIdx))
 	{
 		FVector2D Snap;
@@ -969,6 +1208,14 @@ void AODMainMenu::StartAt(int32 TownIdx)
 			Yaw = SnapYaw;
 			bHaveTarget = true;
 		}
+	}
+	if (bPendingSpot)
+	{
+		// menu spot (2026-10-05) - same TeleportToSpawn ground snap + loading gate
+		bPendingSpot = false;
+		Target = PendingSpot;
+		Yaw = PendingSpotYaw;
+		bHaveTarget = true;
 	}
 
 	Pawn->SetShowroom(false);
@@ -1042,6 +1289,284 @@ void AODMainMenu::ResumeFromGarage()
 	bGarageMode = false;
 }
 
+void AODMainMenu::FindAreaLevels()
+{
+	AreaLevels.Reset();
+	AreaNames.Reset();
+	AreaKeys.Reset();
+	// AssetRegistry, not a list file (2026-10-05): the cooked registry knows
+	// every packaged /Game/Areas map (DefaultGame.ini always-cooks the folder).
+	// Uncooked, the same forced scan as AODVehiclePawn::LoadVehicleDefs - a
+	// -game launch can query before the async content scan reaches the folder.
+	IAssetRegistry& AR =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	if (!FPlatformProperties::RequiresCookedData())
+	{
+		AR.ScanPathsSynchronous({TEXT("/Game/Areas")}, /*bForceRescan*/true);
+	}
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UWorld::StaticClass()->GetClassPathName());
+	Filter.PackagePaths.Add(TEXT("/Game/Areas"));
+	TArray<FAssetData> Found;
+	AR.GetAssets(Filter, Found);
+	for (const FAssetData& A : Found)
+	{
+		AreaLevels.Add(A.PackageName.ToString());
+	}
+	AreaLevels.Sort();
+	AreaLevels.Add(TEXT("/Game/TailOfTheDragon"));
+	// the level we're on is always listed, so the row starts on it (adds
+	// OpenWorldTest, which lives outside /Game/Areas)
+	const FString Current = UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName());
+	CurrentAreaIdx = AreaLevels.AddUnique(Current);
+	AreaIdx = CurrentAreaIdx;
+
+	for (const FString& Level : AreaLevels)
+	{
+		// "/Game/Areas/OpenWorld_summit_county" -> "Summit County"
+		FString Key = FPackageName::GetShortName(Level);
+		Key.RemoveFromStart(TEXT("OpenWorld_"));
+		FString Name = FName::NameToDisplayString(Key, false);
+		if (Level == Current && !Level.StartsWith(TEXT("/Game/Areas/")))
+		{
+			// OpenWorldTest: its area is only in the road manager's prefix
+			// (same derivation as AODGameMode's HomeArea)
+			if (const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld()))
+			{
+				FString Area = Road->RoadTilePrefix;
+				Area.RemoveFromStart(TEXT("road_"));
+				Area.RemoveFromEnd(TEXT("_test"));
+				Name = FString::Printf(TEXT("%s (%s)"), *FName::NameToDisplayString(Area, false), *Name);
+				Key = Area;
+			}
+		}
+		AreaNames.Add(Name);
+		AreaKeys.Add(Key);
+	}
+}
+
+void AODMainMenu::OpenArea()
+{
+	if (!AreaLevels.IsValidIndex(AreaIdx))
+	{
+		return;
+	}
+	// OpenLevel resets every actor, so the session-only car picks ride the
+	// travel URL (2026-10-05) and are read back in BeginPlay (this class) and
+	// AODVehiclePawn::BeginPlay (odvehidx=). Exhaust/Season/Input Device are
+	// already in GameUserSettings.ini and need nothing here.
+	// ponytail: URL options, not a GameInstance - add one if more state
+	// (route, time of day) ever needs to survive a level switch.
+	FString Options = FString::Printf(TEXT("odengine=%d?oddrive=%d"), EngineIdx, DriveIdx);
+	if (const AODVehiclePawn* Pawn = FindPawn())
+	{
+		Options += FString::Printf(TEXT("?odvehidx=%d"), Pawn->GetVehicleIndex());
+	}
+	if (const AODTuningManager* Tuning = FindActor<AODTuningManager>(GetWorld());
+		Tuning && Tuning->GetPresetIndex() != INDEX_NONE)
+	{
+		Options += FString::Printf(TEXT("?odtunepreset=%d"), Tuning->GetPresetIndex());
+	}
+	if (Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid)
+	{
+		// start the car at the picked area's menu spot (2026-10-05) - read back
+		// in BeginPlay, consumed by StartAt() once the pawn is ready
+		Options += FString::Printf(TEXT("?odspawnx=%.0f?odspawny=%.0f?odspawnyaw=%.1f"),
+			Spots[AreaIdx].CarCm.X, Spots[AreaIdx].CarCm.Y, Spots[AreaIdx].CarYawDeg);
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Area -> %s (%s)"), *AreaLevels[AreaIdx], *Options);
+	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
+}
+
+// ---- garage-menu vistas (2026-10-05) ---------------------------------------
+
+void AODMainMenu::LoadMenuSpots()
+{
+	// {"<area>": {"car_cm": [x, y, z], "car_yaw_deg", "view_yaw_deg", "source"}}
+	// (pipeline/build_menu_spots.py). Missing file/area = that area keeps the
+	// garage room on every row and Drive goes to map-select as before.
+	Spots.Reset();
+	Spots.SetNum(AreaLevels.Num());
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/menu_spots.json");
+	if (!FFileHelper::LoadFileToString(Text, *Path)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
+	{
+		return;
+	}
+	for (int32 i = 0; i < AreaKeys.Num(); ++i)
+	{
+		const TSharedPtr<FJsonObject>* Spot = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Car = nullptr;
+		double CarYaw = 0.0, ViewYaw = 0.0;
+		if (!Root->TryGetObjectField(AreaKeys[i], Spot)
+			|| !(*Spot)->TryGetArrayField(TEXT("car_cm"), Car) || Car->Num() != 3
+			|| !(*Spot)->TryGetNumberField(TEXT("car_yaw_deg"), CarYaw)
+			|| !(*Spot)->TryGetNumberField(TEXT("view_yaw_deg"), ViewYaw))
+		{
+			continue;
+		}
+		FODMenuSpot& S = Spots[i];
+		S.bValid = true;
+		S.CarCm = FVector((*Car)[0]->AsNumber(), (*Car)[1]->AsNumber(), (*Car)[2]->AsNumber());
+		S.CarYawDeg = (float)CarYaw;
+		S.ViewYawDeg = (float)ViewYaw;
+		double SeaZ = 0.0;
+		S.bHasSea = (*Spot)->TryGetNumberField(TEXT("sea_z_cm"), SeaZ);
+		S.SeaZCm = SeaZ;
+	}
+}
+
+FVector AODMainMenu::VistaCarWorld(int32 Area) const
+{
+	return FVector(VistaBaseXCm + Area * VistaSpacingCm, 0.0, Spots[Area].CarCm.Z);
+}
+
+void AODMainMenu::SpawnVistas()
+{
+	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+	if (bVistasSpawned || !GM)
+	{
+		return;
+	}
+	bVistasSpawned = true;
+	for (int32 i = 0; i < Spots.Num(); ++i)
+	{
+		if (!Spots[i].bValid)
+		{
+			continue;
+		}
+		AODWeatherController::LoadClimateFile(AreaKeys[i] + TEXT("_test"), Spots[i].Climate);
+		const double ViewRad = FMath::DegreesToRadians((double)Spots[i].ViewYawDeg);
+		FODVistaRegion Region;
+		Region.bActive = true;
+		Region.Focus = Spots[i].CarCm;
+		Region.Dir = FVector2D(FMath::Cos(ViewRad), FMath::Sin(ViewRad));
+		Region.BackCm = VistaCamBackCm;
+		Region.FarCm = VistaFarCm;
+		Region.PatchCm = VistaPatchCm;
+		Region.HalfAngleRad = FMath::DegreesToRadians(VistaHalfAngleDeg);
+		Region.PanoFarCm = VistaPanoFarCm;
+		for (AActor* A : GM->SpawnVistaSet(AreaKeys[i], VistaCarWorld(i) - Spots[i].CarCm, Region))
+		{
+			VistaActors.Add(A);
+			if (AODForestManager* Forest = Cast<AODForestManager>(A))
+			{
+				Spots[i].Forest = Forest;
+			}
+		}
+		if (Spots[i].bHasSea)
+		{
+			const FVector Car = VistaCarWorld(i);
+			if (AStaticMeshActor* Sea = GetWorld()->SpawnActor<AStaticMeshActor>(
+					FVector(Car.X, Car.Y, Spots[i].SeaZCm), FRotator::ZeroRotator))
+			{
+				UStaticMeshComponent* Comp = Sea->GetStaticMeshComponent();
+				Comp->SetMobility(EComponentMobility::Movable);   // runtime mesh swap needs it
+				Comp->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
+				Comp->SetMaterial(0, LoadObject<UMaterialInterface>(nullptr,
+					TEXT("/Game/OpenDrive/Materials/M_WaterStylized.M_WaterStylized")));
+				Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Comp->SetCastShadow(false);
+				Sea->SetActorScale3D(FVector(VistaSeaHalfCm / 50.0, VistaSeaHalfCm / 50.0, 1.0));   // Plane = 100 uu
+				VistaActors.Add(Sea);
+			}
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: spawned %d vista manager(s)"), VistaActors.Num());
+	if (VistaActors.Num() > 0)
+	{
+		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
+	}
+}
+
+void AODMainMenu::DestroyVistas()
+{
+	if (!bVistasSpawned)
+	{
+		return;
+	}
+	for (AActor* A : VistaActors)
+	{
+		if (IsValid(A))
+		{
+			A->Destroy();
+		}
+	}
+	VistaActors.Reset();
+	bVistasSpawned = false;
+	if (ShownVista != INDEX_NONE)
+	{
+		SetWeatherClimate(INDEX_NONE);   // its forest copy is gone
+	}
+	ShownVista = INDEX_NONE;
+	if (AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>())
+	{
+		GM->FreezeStreaming(false);
+	}
+}
+
+void AODMainMenu::UpdateScene()
+{
+	if (bGarageMode || !bEntered || bSettingsOpen || bCreditsOpen)
+	{
+		return;
+	}
+	const bool bVistaRow = Selected >= FirstVistaRow && Selected <= LastVistaRow;
+	const int32 Want = bVistaRow && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
+		? AreaIdx : INDEX_NONE;
+	if (Want == ShownVista)
+	{
+		return;
+	}
+	AODVehiclePawn* Pawn = FindPawn();
+	if (!Pawn)
+	{
+		return;
+	}
+	ShownVista = Want;
+	UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>();
+	AODGarageEnvironment* Garage = EnsureGarageEnvironment();
+	if (Want == INDEX_NONE)
+	{
+		// back into the garage room exactly as EnterCarConfig() framed it
+		Pawn->PlaceInShowroom(ShowroomLocationCm);
+		Pawn->SetShowroom(true);
+		Pawn->SetActorRotation(FRotator(0.0f, ShowroomYawDeg, 0.0f));
+		SetWeatherClimate(INDEX_NONE);   // home climate, sampled at the showroom like level start
+		if (Cam)
+		{
+			Cam->SetWorldTransform(GarageCamXf);
+		}
+		if (Garage)
+		{
+			Garage->SetActive(true);
+		}
+		return;
+	}
+	if (Garage)
+	{
+		Garage->SetActive(false);
+	}
+	const FODMenuSpot& S = Spots[Want];
+	const FVector Car = VistaCarWorld(Want);   // road surface under the car
+	const UODVehicleMovement* Move = FindMovement();
+	Pawn->PlaceInShowroom(Car + FVector(0.0, 0.0, Move ? Move->GetRestGroundClearanceCm() : 0.0f));
+	Pawn->SetActorRotation(FRotator(0.0f, S.CarYawDeg, 0.0f));
+	Pawn->SetShowroom(true);   // detaches the camera; placed for the vista below
+	SetWeatherClimate(Want);   // this vista's climate (2026-10-05)
+	if (Cam)
+	{
+		const FRotator View(0.0, S.ViewYawDeg, 0.0);
+		const FVector Fwd = View.Vector();
+		const FVector Right = FRotator(0.0, S.ViewYawDeg + 90.0, 0.0).Vector();
+		const FVector CamPos = Car - Fwd * VistaCamBackCm + Right * VistaCamSideCm
+			+ FVector(0.0, 0.0, VistaCamHeightCm);
+		Cam->SetWorldLocationAndRotation(CamPos, FRotator(VistaCamPitchDeg, S.ViewYawDeg, 0.0));
+	}
+}
+
 AODGarageEnvironment* AODMainMenu::EnsureGarageEnvironment()
 {
 	if (GarageEnv.IsValid())
@@ -1068,15 +1593,21 @@ void AODMainMenu::GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTo
 	OutTerrainReady = OutTerrainTotal = 0;
 	OutRoadReady = OutRoadTotal = 0;
 
+	// summed over every terrain/road manager (2026-10-05, large world)
 	const AODVehiclePawn* Pawn = FindPawn();
-	if (const AODTerrainManager* Terrain = FindActor<AODTerrainManager>(GetWorld()))
+	for (TActorIterator<AODTerrainManager> It(GetWorld()); It; ++It)
 	{
-		Terrain->GetStreamingProgress(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector,
-			OutTerrainReady, OutTerrainTotal);
+		int32 Ready = 0, Total = 0;
+		It->GetStreamingProgress(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector, Ready, Total);
+		OutTerrainReady += Ready;
+		OutTerrainTotal += Total;
 	}
-	if (const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld()))
+	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 	{
-		Road->GetStreamingProgress(OutRoadReady, OutRoadTotal);
+		int32 Ready = 0, Total = 0;
+		It->GetStreamingProgress(Ready, Total);
+		OutRoadReady += Ready;
+		OutRoadTotal += Total;
 	}
 }
 
@@ -1173,15 +1704,28 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue = SeasonNames[SeasonIdx];
 		break;
 	case 11:
+		OutLabel = TEXT("Time of Day");
+		OutValue = TimeOfDayPresets[TimeIdx].Name;
+		break;
+	case 12:
+		OutLabel = TEXT("Weather");
+		OutValue = WeatherNames[WeatherIdx];
+		break;
+	case 13:
+		OutLabel = TEXT("Area");
+		OutValue = AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : FString();
+		break;
+	case 14:
 		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
-	case 12:
+	case 15:
 		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
-	case 13:
-		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
+	case 16:
+		OutLabel = AreaIdx != CurrentAreaIdx ? TEXT("Load Area  →")
+			: bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
 		OutValue.Empty();
 		break;
 	default:

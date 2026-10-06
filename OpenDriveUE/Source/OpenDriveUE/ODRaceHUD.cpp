@@ -348,32 +348,49 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	const TArray<FVector2D> FallbackSmooth =
 		(!bHaveCenterline && bHaveGates) ? SmoothPolyline(*Gates) : TArray<FVector2D>();
 	const TArray<FVector2D>& Smooth = bHaveCenterline ? *Centerline : FallbackSmooth;
-	for (int32 i = 1; i < Smooth.Num(); ++i)
+	auto DrawRoads = [&](const TArray<FVector2D>& Line)
 	{
-		// MapCenterline's NAN-sentinel segment breaks (see its own comment) -
-		// skip the edge entirely rather than drawing a connector line between
-		// two unrelated streets. RoadCenterline/gate polylines never contain
-		// these, so this is a no-op cost for those callers.
-		if (IsCenterlineBreak(Smooth[i - 1]) || IsCenterlineBreak(Smooth[i]))
+		for (int32 i = 1; i < Line.Num(); ++i)
 		{
-			continue;
+			// MapCenterline's NAN-sentinel segment breaks (see its own comment) -
+			// skip the edge entirely rather than drawing a connector line between
+			// two unrelated streets. RoadCenterline/gate polylines never contain
+			// these, so this is a no-op cost for those callers.
+			if (IsCenterlineBreak(Line[i - 1]) || IsCenterlineBreak(Line[i]))
+			{
+				continue;
+			}
+			FVector2D A = ToMap(FVector(Line[i - 1], 0));
+			FVector2D B = ToMap(FVector(Line[i], 0));
+			if (!ClipToPanel(A, B))
+			{
+				continue;
+			}
+			FCanvasLineItem Seg(A, B);
+			Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
+			Seg.LineThickness = 3.0f;
+			Canvas->DrawItem(Seg);
 		}
-		FVector2D A = ToMap(FVector(Smooth[i - 1], 0));
-		FVector2D B = ToMap(FVector(Smooth[i], 0));
-		if (!ClipToPanel(A, B))
+	};
+	DrawRoads(Smooth);
+	// every other streamed area's map centerline too (2026-10-05, large
+	// world); the bbox fit above and the map texture stay home-only
+	if (RoadMgr)
+	{
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
-			continue;
+			if (*It != RoadMgr && &It->MapCenterline != Centerline)
+			{
+				DrawRoads(It->MapCenterline);
+			}
 		}
-		FCanvasLineItem Seg(A, B);
-		Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
-		Seg.LineThickness = 3.0f;
-		Canvas->DrawItem(Seg);
 	}
 
-	// navigation route (SS7.37) - on every map panel (mini, pause, world)
-	if (RoadMgr && RoadMgr->HasRoute())
+	// navigation route (SS7.37) - on every map panel (mini, pause, world);
+	// from the nav (nearest) road manager (2026-10-05, large world)
+	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr && NavMgr->HasRoute())
 	{
-		const TArray<FVector2D>& R = RoadMgr->GetRoutePoints();
+		const TArray<FVector2D>& R = NavMgr->GetRoutePoints();
 		for (int32 i = 1; i < R.Num(); ++i)
 		{
 			FVector2D A = ToMap(FVector(R[i - 1], 0));
@@ -478,10 +495,16 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	}
 	UFont* Font = GEngine->GetLargeFont();
 
-	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-		FLinearColor(0, 0, 0, 0.55f));
-	Dim.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Dim);
+	// garage-menu vista (2026-10-05): no full-screen dim over the outdoor view,
+	// and the panel moves to the right so the car (left of centre) stays clear
+	const bool bVista = Menu->GetStage() == EODMenuStage::CarConfig && Menu->IsVistaShown();
+	if (!bVista)
+	{
+		FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
+			FLinearColor(0, 0, 0, 0.55f));
+		Dim.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(Dim);
+	}
 
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
@@ -534,7 +557,8 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		const bool bGarage = Menu->IsGarageMode();
 		const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
 		const float H = TabbedPanelHeight(Tabs);
-		DrawTabbedPanel(70.0f, FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), 640.0f,
+		DrawTabbedPanel(bVista ? Canvas->SizeX - 70.0f - 640.0f : 70.0f,
+			FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), 640.0f,
 			bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"),
 			Tabs, Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
@@ -906,6 +930,17 @@ FString FormatNavDist(float Cm)
 
 AODRoadManager* AODRaceHUD::FindNavRoadMgr() const
 {
+	// Large world (2026-10-05): the road manager nearest the player (the
+	// pawn's own 2 Hz out-of-bounds scan), so routes/towns follow the area
+	// being driven; else the first with a route graph, as before.
+	// ponytail: routes don't cross areas - each area's graph is separate.
+	if (const AODVehiclePawn* Veh = Cast<AODVehiclePawn>(GetOwningPawn()))
+	{
+		if (AODRoadManager* Near = Veh->GetNearestRoadMgr(); Near && Near->HasRouteGraph())
+		{
+			return Near;
+		}
+	}
 	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 	{
 		if (It->HasRouteGraph())
@@ -986,8 +1021,11 @@ void AODRaceHUD::ClearRouteKey()
 	}
 }
 
-void AODRaceHUD::DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* Centerline)
+void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>* Centerline)
 {
+	// towns/route/fast travel use the nav (nearest) road manager; the passed-in
+	// one only supplies the home map texture (2026-10-05, large world)
+	AODRoadManager* RoadMgr = FindNavRoadMgr();
 	APlayerController* PC = GetOwningPlayerController();
 	if (!PC || !RoadMgr || !RoadMgr->HasRouteGraph())
 	{
@@ -1130,7 +1168,7 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* 
 			for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
 			{
 				CloseWorldMap();
-				It->TravelToTown(Hover);
+				It->TravelToTown(Hover, RoadMgr);
 				return;
 			}
 		}
@@ -1146,7 +1184,7 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* RoadMgr, const TArray<FVector2D>* 
 		FLinearColor(0.04f, 0.05f, 0.07f, 1.0f));
 	Canvas->DrawItem(Backdrop);
 	DrawStageMap(Centerline, nullptr, false, INDEX_NONE, Mid.X - Side * 0.5f, Mid.Y - Side * 0.5f,
-		Side, 0.6f, WorldMapRadiusM, false, RoadMgr, &WorldMapCenter);
+		Side, 0.6f, WorldMapRadiusM, false, MapTexMgr, &WorldMapCenter);
 
 	for (int32 i = 0; i < Towns.Num(); ++i)
 	{
@@ -1278,13 +1316,22 @@ void AODRaceHUD::DrawHUD()
 	// (open-world levels included) - its own CenterlineFilePrefix, when set,
 	// lets the map draw a route there even with no checkpoint race. Only
 	// needed as a fallback when there's no Race to draw from instead.
+	// Large world (2026-10-05): with several area sets live, prefer the one
+	// carrying the (home-only) map texture - actor iteration order isn't a
+	// promise that the level-placed home manager comes first.
 	AODRoadManager* RoadMgr = nullptr;
 	if (!Race)
 	{
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
-			RoadMgr = *It;
-			break;
+			if (!RoadMgr || It->MapTexture)
+			{
+				RoadMgr = *It;
+			}
+			if (It->MapTexture)
+			{
+				break;
+			}
 		}
 	}
 	// Prefer RoadMgr's map-only simplified/segment-safe centerline (see its
@@ -1483,9 +1530,9 @@ void AODRaceHUD::DrawHUD()
 	}
 
 	// ---- navigation next-turn / distance panel (SS7.37)
-	if (RoadMgr && !bMenuOpen)
+	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr && !bMenuOpen)
 	{
-		DrawNavPanel(RoadMgr);
+		DrawNavPanel(NavMgr);   // nearest area's road (2026-10-05, large world)
 	}
 
 	// ---- pause menu (stopgap shell; ESC toggles, AODPauseMenu owns state) -

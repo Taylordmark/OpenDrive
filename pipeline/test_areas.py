@@ -20,7 +20,12 @@ To add an area:
 """
 import os
 
-from world_frame import WORLDS, lcc_forward, lcc_inverse
+from world_frame import WORLD_DATUM_M, WORLDS, lcc_forward, lcc_inverse
+
+# (2026-10-05, step 3) gv_west/gv_east boundary, UE X cm in the california
+# frame: the 2 km terrain-tile edge nearest -118.45 at 34.535 N (218 m west
+# of it). tests/test_world_manifest.py re-derives it.
+_GV_CUT_X_CM = 14200000.0
 
 AREAS = {
     # Skagit Valley / North Cascades foothills, WA (2026-07-20 - 2026-07-26)
@@ -113,10 +118,17 @@ AREAS = {
     # approach; Filbert drops ~16% over the Hyde->Leavenworth block. Origin
     # 70.4 m (z12 at bbox center); z15 12x12 grid read 22..98 m, padded.
     # Bake with OD_AREA=sf_russian_hill.
+    # (2026-10-05) Extended north down Hyde St to Beach St / Aquatic Park
+    # (the garage-menu spot, looking out over the bay) and west to keep
+    # Hyde's north end inside. Background bbox reaches Alcatraz, Angel
+    # Island, the Golden Gate and the Marin Headlands / Sausalito. Origin
+    # 55.0 m (z12 at the new bbox center); z15 12x12 grid read -3..98 m, so
+    # the range still holds (it only clamps road stations; the background's
+    # -110..317 m bay floor / Marin never reaches it).
     "sf_russian_hill": dict(
-        bbox_snwe=(37.7988, -122.4202, 37.8019, -122.4154),
-        background_bbox_snwe=None,
-        origin_height_m=70.4,
+        bbox_snwe=(37.7988, -122.4225, 37.8080, -122.4154),
+        background_bbox_snwe=(37.79, -122.50, 37.87, -122.40),
+        origin_height_m=55.0,
         elev_plausible_m=(-20.0, 250.0),
         max_building_levels=12,
     ),
@@ -129,14 +141,41 @@ AREAS = {
     # is the state-wide LCC, so it sits ~613 km from the world origin
     # (east -330 km, north +517 km), where it really is. Was a fake origin
     # 7.8 deg east at the same latitude (~646 km) under the old equirect.
+    # (2026-10-05, step 2) Its Z datum is the world's (sea level), not the
+    # 116.5 m origin - world members carry no origin_height_m.
     "far_gasquet": dict(
         bbox_snwe=(41.835, -123.985, 41.860, -123.945),
         background_bbox_snwe=None,
         world="california",
-        origin_height_m=116.5,
         elev_plausible_m=(0.0, 900.0),
         max_building_levels=4,
     ),
+    # green_valley split at -118.45 into two adjacent "california" members
+    # (2026-10-05, step 2: the first streamed pair). The meridian crosses
+    # CA-14, Sierra Hwy, Soledad/Bouquet/San Francisquito/Vasquez/Placerita
+    # Canyon Rds and Elizabeth Lake Rd. Elev range and building cap are
+    # green_valley's. green_valley itself stays as it was.
+    # (2026-10-05, step 3) Each half owns the tiles on its side of
+    # _GV_CUT_X_CM and bakes a halo 3.0-3.8 km past it (bbox edge -118.415 /
+    # -118.489), so roads and junctions at the cut have context;
+    # prune_unowned_tiles.py drops the halo's tiles.
+    "gv_west": dict(
+        bbox_snwe=(34.35, -118.62, 34.72, -118.415),
+        own_rect_cm=(None, None, _GV_CUT_X_CM, None),
+        background_bbox_snwe=None,
+        world="california",
+        elev_plausible_m=(0.0, 2200.0),
+        max_building_levels=8,
+    ),
+    "gv_east": dict(
+        bbox_snwe=(34.35, -118.489, 34.72, -118.28),
+        own_rect_cm=(_GV_CUT_X_CM, None, None, None),
+        background_bbox_snwe=None,
+        world="california",
+        elev_plausible_m=(0.0, 2200.0),
+        max_building_levels=8,
+    ),
+
     # far_gasquet's control: same bbox in its own centred frame, so its
     # tiles diff against far_gasquet's to isolate large-coordinate effects
     # (expect an offset plus ~2.4 deg of meridian convergence between them).
@@ -233,7 +272,34 @@ ROAD_REF_REGEX = None
 # elevations into UE-frame cm (currently: build_road_network.py) MUST
 # subtract this first, or geometry floats ~ORIGIN_HEIGHT_M metres above the
 # rendered terrain (the Palmdale ~800 m offset bug, caught by -odseam).
-ORIGIN_HEIGHT_M = _ACTIVE["origin_height_m"]
+#
+# (2026-10-05) A world member uses its world's shared datum instead
+# (world_frame.WORLD_DATUM_M, sea level), so neighbouring areas meet in Z.
+ORIGIN_HEIGHT_M = (WORLD_DATUM_M[_ACTIVE["world"]] if "world" in _ACTIVE
+                   else _ACTIVE["origin_height_m"])
+
+# (2026-10-05, step 3) The UE-cm rect (xmin, ymin, xmax, ymax) whose tiles
+# this area ships, None = open end; edges on the 2 km terrain grid (500 m
+# road tiles nest). Its bbox bakes past it (a halo); prune_unowned_tiles.py
+# deletes the rest. None = owns everything it bakes.
+OWN_RECT_CM = _ACTIVE.get("own_rect_cm")
+
+
+def owns(x_cm, y_cm):
+    """True where UE (x_cm, y_cm) is inside OWN_RECT_CM (half-open). A tile
+    is owned iff its min corner is. Vectorised."""
+    import numpy as np
+    x, y = np.asarray(x_cm, dtype=float), np.asarray(y_cm, dtype=float)
+    ok = np.ones(np.broadcast(x, y).shape, dtype=bool)
+    if OWN_RECT_CM:
+        x0, y0, x1, y1 = OWN_RECT_CM
+        for v, lo, hi in ((x, x0, x1), (y, y0, y1)):
+            if lo is not None:
+                ok &= v >= lo
+            if hi is not None:
+                ok &= v < hi
+    return ok
+
 
 # Hard per-area sanity cap on building story count (build_building_mesh.py),
 # applied to EVERY level count that ends up data-driven - a real OSM

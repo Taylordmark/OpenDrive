@@ -1431,12 +1431,11 @@ void AODRoadManager::Tick(float DeltaSeconds)
 	ProcessPendingPhysicsRefresh();
 	ProcessPendingChunkBuilds();
 
-	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
-	if (!Player)
+	FVector Loc;
+	if (!Vista.StreamCenter(this, Loc))
 	{
 		return;
 	}
-	const FVector Loc = Player->GetActorLocation();
 	if (!bSpawnAnchorCaptured)
 	{
 		SpawnAnchor = Loc;
@@ -1521,7 +1520,8 @@ void AODRoadManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key))
+				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key)
+					|| !Vista.WantsTile(Key, TileSizeCm, MaxChunkSpanCm * 0.5))
 				{
 					continue;
 				}

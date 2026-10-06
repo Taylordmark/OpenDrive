@@ -4,6 +4,17 @@ against OpenDriveUE with the editor CLOSED:
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
 
+The level's (home) area is test_areas.ACTIVE_AREA: set OD_AREA in the
+environment that launches the editor (e.g. OD_AREA=gv_west) to pick another
+baked area (2026-10-05). Other world members stream in via worlds.json.
+
+Per-area levels (2026-10-05): the level saves to /Game/Areas/OpenWorld_<area>
+(Content/Areas/OpenWorld_<area>.umap), one per OD_AREA, which the garage's
+Area row discovers at runtime (AODMainMenu, AssetRegistry on /Game/Areas).
+Building one area never touches another's level or map texture
+(map_texture_<area>). OD_LEVEL=/Game/OpenWorldTest still rebuilds the old
+single level (DefaultEngine.ini's startup map) when wanted.
+
 Creates a NEW, separate level (/Game/OpenWorldTest) - the open-world
 free-roam level, kept apart from TailOfTheDragon.umap. Renamed 2026-07-24
 from an earlier live-streamed-terrain-tileset-based version: the Arc 7.0
@@ -33,7 +44,7 @@ Expect the same off-road void-fall risk here until BARRIER_ENABLED comes
 back on too.
 
 To REBUILD after the level already exists: delete
-OpenDriveUE/Content/OpenWorldTest.umap from disk yourself BEFORE
+OpenDriveUE/Content/Areas/OpenWorld_<area>.umap (or OpenWorldTest.umap) from disk yourself BEFORE
 launching this script, not from inside it. Deleting it from Python in the
 same process that then calls new_level() does not work reliably here - the
 asset registry's on-disk cache still reports the package as present for the
@@ -48,6 +59,7 @@ instead of failing, which then can't be saved ("no filename").
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -56,13 +68,15 @@ import unreal
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pipeline"))
 import test_areas   # noqa: E402 - BBOX_SNWE/ORIGIN_HEIGHT_M for the sea-level water plane below
 
-LEVEL = "/Game/OpenWorldTest"
 FOLDER = "OpenWorldTest"
 
 # sourced directly from pipeline/test_areas.py (single source of truth -
 # used to independently hardcode "oahu"/"skagit_cascades" here, which drifted
 # from the pipeline's own AREA_NAME more than once).
 AREA_NAME = test_areas.AREA_NAME
+
+# one level per area (2026-10-05) - see the module docstring
+LEVEL = os.environ.get("OD_LEVEL", f"/Game/Areas/OpenWorld_{AREA_NAME}")
 
 # see module docstring - each flag independently gates its own manager.
 # PlayerStart still uses road_test_meta.json's point (a real, already-
@@ -147,7 +161,7 @@ actor_sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 if not lls.new_level(LEVEL):
     raise RuntimeError(
         f"could not create new level {LEVEL} - if it already exists, "
-        f"delete OpenDriveUE/Content/{LEVEL.split('/')[-1]}.umap from disk "
+        f"delete OpenDriveUE/Content/{LEVEL[len('/Game/'):]}.umap from disk "
         f"yourself first, then rerun this script as a fresh process")
 log(f"created level {LEVEL}")
 
@@ -289,11 +303,14 @@ if ROADS_ENABLED:
         import_task = unreal.AssetImportTask()
         import_task.filename = str(map_tex_png)
         import_task.destination_path = MAP_TEX_DIR
+        # per-area asset (2026-10-05): one shared "map_texture" would be
+        # replaced by every area's build, repainting the other areas' maps
+        import_task.destination_name = f"map_texture_{AREA_NAME}"
         import_task.automated = True
         import_task.save = False
         import_task.replace_existing = True
         unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([import_task])
-        map_tex = unreal.load_asset(f"{MAP_TEX_DIR}/map_texture")
+        map_tex = unreal.load_asset(f"{MAP_TEX_DIR}/map_texture_{AREA_NAME}")
         if map_tex is None:
             log("WARNING: map_texture.png import failed - mini-map/full map "
                 "will fall back to flat-color background")

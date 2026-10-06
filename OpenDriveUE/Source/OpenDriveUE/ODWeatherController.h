@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "ODWeatherController.generated.h"
 
+class AODForestManager;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 
@@ -133,11 +134,28 @@ public:
 	float WarningShownAt = -100.0f;
 
 	/** QA: a state name forces and holds it; "Auto" (or empty) resumes the
-	 *  random walk with an immediate roll. False on an unknown name. */
-	bool ForceState(const FString& Name);
+	 *  random walk with an immediate roll. False on an unknown name.
+	 *  bInstant (garage menu, 2026-10-05): skip the ramp, road wetness
+	 *  jumps to match. */
+	bool ForceState(const FString& Name, bool bInstant = false);
 
 	/** Immediate re-roll (garage season lock changed) - no-op while forced. */
 	void Reroll();
+
+	/** Garage Weather row (2026-10-05): true if S has weight > 0 under the
+	 *  Auto walk's weighting (StateWeights) in at least one month of the
+	 *  active climate, at the active biome/elevation sample (SampleBiome). */
+	bool CanProduce(EODWeatherState S) const;
+
+	/** Garage-menu vista (2026-10-05): the Auto walk and CanProduce use
+	 *  InClimate, with biome/elevation from Forest (the vista's own copy) at
+	 *  SpotCm (area-local), instead of the home climate at the player. Null =
+	 *  back to home. No re-roll - the caller re-forces/re-rolls. */
+	void SetVistaClimate(const FODClimate* InClimate, AODForestManager* Forest, const FVector2D& SpotCm);
+
+	/** Content/OpenDrive/Masks/climate_<Area>.json into Out (Area = "<area>_test"
+	 *  or a level's snake-case name). False + Out untouched when missing/bad. */
+	static bool LoadClimateFile(const FString& Area, FODClimate& Out);
 
 private:
 	struct FTargets
@@ -148,6 +166,10 @@ private:
 
 	void LoadClimate();
 	void Roll();
+	/** Biome multipliers (BIOME_MULT row) + elevation delta for the lapse: the
+	 *  vista's forest at its spot, else the nearest forest manager's point to
+	 *  the player. Neutral/0 without point-biome data. */
+	void SampleBiome(const float*& OutMult, float& OutElevDeltaM, int32& OutBiomeIdx) const;
 	void EnterState(EODWeatherState NewState, float HoldSeconds);
 	FTargets Published() const;
 	void Warn(const FString& Text);
@@ -172,7 +194,11 @@ private:
 	float HurricaneAge = 0.0f, HurricaneLen = 900.0f;
 	bool bHurricaneEye = false;
 
-	FODClimate Climate;
+	FODClimate Climate;       // active: HomeClimate, or the shown vista's (SetVistaClimate)
+	FODClimate HomeClimate;   // this level's, from LoadClimate()
+	bool bVista = false;
+	TWeakObjectPtr<AODForestManager> VistaForest;
+	FVector2D VistaSpotCm = FVector2D::ZeroVector;
 	FTargets From, To;
 	float RampT = 1.0f;
 	float HoldLeft = 0.0f;

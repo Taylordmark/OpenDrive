@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ODMenuTabs.h"
+#include "ODWeatherController.h"
 #include "ODMainMenu.generated.h"
 
 class AODVehiclePawn;
@@ -10,6 +11,23 @@ class UODVehicleMovement;
 class AODGarageEnvironment;
 class AODSettingsMenu;
 class AODCreditsMenu;
+class AODForestManager;
+
+/** One area's garage-menu car spot (2026-10-05), from
+ *  Content/OpenDrive/Masks/menu_spots.json (pipeline/build_menu_spots.py). */
+struct FODMenuSpot
+{
+	bool bValid = false;
+	FVector CarCm = FVector::ZeroVector;   // area-local UE cm, Z = road surface
+	float CarYawDeg = 0.0f;
+	float ViewYawDeg = 0.0f;               // camera looks this way, from behind the car
+	bool bHasSea = false;                  // optional "sea_z_cm": the view looks over sea-level water
+	double SeaZCm = 0.0;                   // area-local sea level (= -ORIGIN_HEIGHT_M * 100)
+	// per-vista weather (2026-10-05), set by SpawnVistas: the area's
+	// climate_<area>_test.json and its vista forest copy (biome/elevation at the spot)
+	FODClimate Climate;
+	TWeakObjectPtr<AODForestManager> Forest;
+};
 
 /** Which screen of the front-end the player is on. */
 UENUM()
@@ -89,11 +107,16 @@ public:
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
 	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
-	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Season,
-	// Settings, Credits, Drive (5.2: exhaust preset row + 4 slider rows, same
-	// value-cycling idiom as the rows above them; Settings/Credits added
-	// Arc 4.4, next steps.md SS4.4/SS7.31; Season SS7.38 - see Adjust()/GetRow() in the .cpp).
-	int32 NumRows() const { return 14; }
+	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Season, Time of
+	// Day, Weather, Area, Settings, Credits, Drive (5.2: exhaust preset row + 4
+	// slider rows, same value-cycling idiom as the rows above them; Settings/
+	// Credits added Arc 4.4, next steps.md SS4.4/SS7.31; Season SS7.38; Area
+	// 2026-10-05, Time of Day/Weather 2026-10-05 between Season and Area - see
+	// Adjust()/GetRow() in the .cpp).
+	int32 NumRows() const { return 17; }
+	/** True while the outdoor area vista (not the garage room) is on screen -
+	 *  the HUD moves the panel right and drops its dim (2026-10-05). */
+	bool IsVistaShown() const { return ShownVista != INDEX_NONE; }
 	int32 GetSelected() const { return Selected; }
 	/** Car / Sound / Options tabs over the rows above; Drive is the footer. */
 	TArrayView<const FODMenuTab> GetTabs() const;
@@ -131,7 +154,7 @@ public:
 
 	/** World-map fast travel (SS7.37): the same teleport + Loading-screen path
 	 *  as picking a town on the front-end map. */
-	void TravelToTown(int32 TownIdx) { StartAt(TownIdx); }
+	void TravelToTown(int32 TownIdx, const class AODRoadManager* InRoad = nullptr) { StartAt(TownIdx, InRoad); }
 
 	/** Cursor + input mode for a menu/map (also used by AODRaceHUD's world map). */
 	void SetCursorVisible(bool bVisible);
@@ -153,8 +176,22 @@ private:
 	// stage transitions
 	void EnterCarConfig();       // showroom + first live apply (once pawn ready)
 	void GoToMap();
-	void StartAt(int32 TownIdx); // teleport + enter Loading (-1 = current spot)
+	void StartAt(int32 TownIdx, const class AODRoadManager* InRoad = nullptr); // teleport + enter Loading (-1 = current spot); null road = first found
 	void ResumeFromGarage();     // garage mode's "Drive"/Escape: no teleport, just unpause
+
+	// Area row (2026-10-05): AreaLevels = every /Game/Areas level (AssetRegistry,
+	// build_openworld_test_level.py writes them) + TailOfTheDragon + the current
+	// level if it's neither (OpenWorldTest). The row only picks; "Drive" with
+	// AreaIdx != CurrentAreaIdx calls OpenArea() instead of map-select/resume.
+	void FindAreaLevels();
+	void OpenArea();             // OpenLevel(AreaLevels[AreaIdx]) carrying the car picks as URL options
+	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_gv_west"
+	TArray<FString> AreaNames;   // readable, parallel to AreaLevels
+	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
+	int32 AreaIdx = 0;
+	int32 CurrentAreaIdx = 0;
+	// odtunepreset= from the travel URL, applied once by EnterCarConfig() (needs the pawn)
+	int32 CarriedTuneIdx = INDEX_NONE;
 
 	// live application of the current selection
 	void ApplyEngine();
@@ -162,6 +199,10 @@ private:
 	void ApplyTuning();
 	void ApplyExhaust();     // pushes current Exhaust* fields to the synth
 	void ApplySeason();      // pushes SeasonIdx to AODSeasonController (lock or Auto)
+	void ApplyTimeOfDay();   // TimeIdx -> AODDayNightController::TimeOfDay
+	void ApplyWeather();     // WeatherIdx -> AODWeatherController::ForceState (instant); Auto if the climate can't
+	bool WeatherPossible(int32 Idx) const;   // Auto, or AODWeatherController::CanProduce
+	void SetWeatherClimate(int32 Vista);     // the weather's climate -> Spots[Vista]'s (INDEX_NONE = home)
 	void ChangeCar(int32 Dir);
 
 	// persistence (Arc 5.2) - GConfig into GameUserSettings.ini, same
@@ -217,6 +258,34 @@ private:
 	// Season row (SS7.38): index into SeasonNames[] (ODMainMenu.cpp), 0 = Auto
 	// (the 4 h loop). Persisted beside the exhaust keys in GameUserSettings.ini.
 	int32 SeasonIdx = 0;
+	// Time of Day / Weather rows (2026-10-05): TimeOfDayPresets[] / WeatherNames[]
+	// in the .cpp (Weather 0 = Auto). Persisted like Season; GameUserSettings.ini
+	// is what carries them into the next level, same as Season/Exhaust.
+	int32 TimeIdx = 1;
+	int32 WeatherIdx = 0;
+
+	// Garage-menu vistas (2026-10-05): the car parked on a real road per area,
+	// live terrain behind it. Spots parallel AreaLevels; every area with a spot
+	// gets an offset copy of its terrain/road/forest/water/guardrail managers
+	// (AODGameMode::SpawnVistaSet), all preloaded at menu entry so the Area row
+	// switches instantly. Shown on the Season/Time/Weather/Area rows; every
+	// other row keeps the garage room.
+	void LoadMenuSpots();
+	void SpawnVistas();
+	void DestroyVistas();
+	void UpdateScene();          // per Tick in CarConfig: garage room <-> AreaIdx's vista
+	FVector VistaCarWorld(int32 Area) const;
+	TArray<FODMenuSpot> Spots;
+	UPROPERTY()
+	TArray<TObjectPtr<AActor>> VistaActors;
+	bool bVistasSpawned = false;
+	int32 ShownVista = INDEX_NONE;
+	FTransform GarageCamXf;      // EnterCarConfig's garage framing, restored on the way back
+	// Drive at a spot: set by Activate() (same area) or the odspawnx/y/yaw travel
+	// options (OpenArea() to another area -> auto-start there); StartAt() consumes it.
+	bool bPendingSpot = false;
+	FVector2D PendingSpot = FVector2D::ZeroVector;
+	float PendingSpotYaw = 0.0f;
 
 	bool bEntered = false;   // EnterCarConfig() has run (pawn was ready)
 

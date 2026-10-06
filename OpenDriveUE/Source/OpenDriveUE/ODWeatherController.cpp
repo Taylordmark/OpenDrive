@@ -145,6 +145,48 @@ namespace
 		return FMath::Lerp(Vals[((I % 12) + 12) % 12], Vals[(((I + 1) % 12) + 12) % 12], T);
 	}
 
+	/** The Auto walk's per-state weights (2026-10-05: shared by Roll and
+	 *  CanProduce, so the garage Weather row offers exactly what the walk can
+	 *  roll). Prev gates the event states like the walk: Tornado only out of a
+	 *  Thunderstorm, no Hurricane out of Tornado/Hurricane. OutT/OutP = the
+	 *  month's lapsed temperature and precip, for the log. */
+	void StateWeights(const FODClimate& C, float Month, float ElevDeltaM, const float* Mult, EODWeatherState Prev,
+		float (&W)[NumStates], float& OutT, float& OutP)
+	{
+		const float T = Monthly(C.MonthlyTempC, Month) - LAPSE_C_PER_KM * ElevDeltaM / 1000.0f;
+		const float P = Monthly(C.MonthlyPrecipMm, Month);
+		const float Pw = FMath::Min(P / PRECIP_REF_MM, PRECIP_CAP) * Mult[0];
+		const float Dry = FMath::Clamp(1.0f - P / DRY_MM, 0.0f, 1.0f);
+		const float S = FMath::Clamp((RAIN_T_C - T) / (RAIN_T_C - SNOW_T_C), 0.0f, 1.0f);
+		const float Warm = FMath::Clamp((T - THUNDER_T_C) / THUNDER_RAMP_C, 0.0f, 1.0f);
+		const float RainFam = W_PRECIP * Pw * (1.0f - S) * (1.0f - S);
+		const float SnowFam = W_PRECIP * Pw * S * S * SNOW_BOOST;
+
+		for (float& V : W) { V = 0.0f; }
+		W[(int32)EODWeatherState::Clear] = W_CLEAR + W_CLEAR_DRY * Dry;
+		W[(int32)EODWeatherState::Overcast] = W_OVERCAST + W_OVERCAST_WET * FMath::Min(Pw, 1.0f);
+		W[(int32)EODWeatherState::Rain] = RainFam * RAIN_SPLIT[0];
+		W[(int32)EODWeatherState::HeavyRain] = RainFam * RAIN_SPLIT[1];
+		W[(int32)EODWeatherState::Thunderstorm] = RainFam * RAIN_SPLIT[2] * Warm;
+		W[(int32)EODWeatherState::Sleet] = W_PRECIP * Pw * 2.0f * S * (1.0f - S);
+		W[(int32)EODWeatherState::Snow] = SnowFam * SNOW_SPLIT[0];
+		W[(int32)EODWeatherState::Blizzard] = SnowFam * SNOW_SPLIT[1];
+		W[(int32)EODWeatherState::Fog] = W_FOG * Mult[1] * (0.5f + 0.5f * FMath::Min(Pw, 1.0f));
+		W[(int32)EODWeatherState::DustStorm] = W_DUST * C.DustStorm * Dry * Mult[2];
+		if (Prev == EODWeatherState::Thunderstorm)
+		{
+			W[(int32)EODWeatherState::Tornado] = W_TORNADO * C.Tornado
+				* FMath::Clamp((T - TORNADO_T_C) / TORNADO_RAMP_C, 0.0f, 1.0f);
+		}
+		if (Prev != EODWeatherState::Tornado && Prev != EODWeatherState::Hurricane)
+		{
+			W[(int32)EODWeatherState::Hurricane] = W_HURRICANE * C.Hurricane
+				* FMath::Clamp((T - HURRICANE_T_C) / HURRICANE_RAMP_C, 0.0f, 1.0f);
+		}
+		OutT = T;
+		OutP = P;
+	}
+
 	FString StateName(EODWeatherState S)
 	{
 		return StaticEnum<EODWeatherState>()->GetNameStringByValue((int64)S);
@@ -223,6 +265,12 @@ void AODWeatherController::LoadClimate()
 			Area += FChar::ToLower(C);
 		}
 	}
+	LoadClimateFile(Area, HomeClimate);
+	Climate = HomeClimate;
+}
+
+bool AODWeatherController::LoadClimateFile(const FString& Area, FODClimate& Out)
+{
 	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
 		/ FString::Printf(TEXT("climate_%s.json"), *Area);
 
@@ -236,23 +284,96 @@ void AODWeatherController::LoadClimate()
 		|| !Obj->TryGetArrayField(TEXT("monthly_precip_mm"), Precip) || Precip->Num() != 12)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODWeatherController: no usable climate at '%s' - mild default climate"), *Path);
-		return;
+		return false;
 	}
 	for (int32 m = 0; m < 12; ++m)
 	{
-		Climate.MonthlyTempC[m] = (*Temps)[m]->AsNumber();
-		Climate.MonthlyPrecipMm[m] = (*Precip)[m]->AsNumber();
+		Out.MonthlyTempC[m] = (*Temps)[m]->AsNumber();
+		Out.MonthlyPrecipMm[m] = (*Precip)[m]->AsNumber();
 	}
 	const TSharedPtr<FJsonObject>* Storms = nullptr;
 	if (Obj->TryGetObjectField(TEXT("storms"), Storms))
 	{
 		double V = 0.0;
-		if ((*Storms)->TryGetNumberField(TEXT("hurricane"), V)) Climate.Hurricane = V;
-		if ((*Storms)->TryGetNumberField(TEXT("tornado"), V)) Climate.Tornado = V;
-		if ((*Storms)->TryGetNumberField(TEXT("dust_storm"), V)) Climate.DustStorm = V;
+		if ((*Storms)->TryGetNumberField(TEXT("hurricane"), V)) Out.Hurricane = V;
+		if ((*Storms)->TryGetNumberField(TEXT("tornado"), V)) Out.Tornado = V;
+		if ((*Storms)->TryGetNumberField(TEXT("dust_storm"), V)) Out.DustStorm = V;
 	}
 	UE_LOG(LogTemp, Display, TEXT("ODWeatherController: climate '%s' storms hurr=%.2f torn=%.2f dust=%.2f"),
-		*Path, Climate.Hurricane, Climate.Tornado, Climate.DustStorm);
+		*Path, Out.Hurricane, Out.Tornado, Out.DustStorm);
+	return true;
+}
+
+void AODWeatherController::SetVistaClimate(const FODClimate* InClimate, AODForestManager* Forest, const FVector2D& SpotCm)
+{
+	bVista = InClimate != nullptr;
+	Climate = bVista ? *InClimate : HomeClimate;
+	VistaForest = Forest;
+	VistaSpotCm = SpotCm;
+}
+
+void AODWeatherController::SampleBiome(const float*& OutMult, float& OutElevDeltaM, int32& OutBiomeIdx) const
+{
+	// Biome + elevation at the player (nearest classified biome point).
+	// No point-biome data (Tail of the Dragon, Palmdale) -> neutral
+	// multipliers and no lapse, same as sim_weather.py's None biome.
+	OutMult = NEUTRAL_MULT;
+	OutElevDeltaM = 0.0f;
+	OutBiomeIdx = -1;
+	EODBiome Biome;
+	float Delta = 0.0f;
+	if (bVista)
+	{
+		// garage vista (2026-10-05): its own forest manager at the spot, in
+		// area-local cm - the far-offset car is in no area's frame
+		if (VistaForest.IsValid() && VistaForest->BiomeSampleAt(VistaSpotCm.X, VistaSpotCm.Y, Biome, Delta))
+		{
+			OutElevDeltaM = Delta;
+			OutBiomeIdx = (int32)Biome;
+			OutMult = BIOME_MULT[OutBiomeIdx];
+		}
+		return;
+	}
+	if (const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+	{
+		// nearest forest manager's sample (2026-10-05, large world: one per
+		// streamed area set); climate itself stays the home area's
+		float BestD2 = TNumericLimits<float>::Max();
+		for (TActorIterator<AODForestManager> It(GetWorld()); It; ++It)
+		{
+			float D2 = 0.0f;
+			if (It->BiomeSampleAt(Player->GetActorLocation().X, Player->GetActorLocation().Y, Biome, Delta, &D2)
+				&& D2 < BestD2)
+			{
+				BestD2 = D2;
+				OutElevDeltaM = Delta;
+				OutBiomeIdx = (int32)Biome;
+				OutMult = BIOME_MULT[OutBiomeIdx];
+			}
+		}
+	}
+}
+
+bool AODWeatherController::CanProduce(EODWeatherState S) const
+{
+	const float* Mult = NEUTRAL_MULT;
+	float ElevDeltaM = 0.0f;
+	int32 BiomeIdx = -1;
+	SampleBiome(Mult, ElevDeltaM, BiomeIdx);
+	for (int32 m = 0; m < 12; ++m)
+	{
+		float W[NumStates];
+		float T = 0.0f, P = 0.0f;
+		// Prev = Thunderstorm opens both event gates; a Tornado also needs that
+		// month's Thunderstorm to roll out of
+		StateWeights(Climate, m + 0.5f, ElevDeltaM, Mult, EODWeatherState::Thunderstorm, W, T, P);
+		if (W[(int32)S] > 0.0f
+			&& (S != EODWeatherState::Tornado || W[(int32)EODWeatherState::Thunderstorm] > 0.0f))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void AODWeatherController::Tick(float DeltaSeconds)
@@ -304,56 +425,13 @@ void AODWeatherController::Roll()
 	float Month = 6.5f;
 	for (TActorIterator<AODSeasonController> It(GetWorld()); It; ++It) { Month = It->MonthOfYear(); break; }
 
-	// Biome + elevation at the player (nearest classified biome point).
-	// No point-biome data (Tail of the Dragon, Palmdale) -> neutral
-	// multipliers and no lapse, same as sim_weather.py's None biome.
 	const float* Mult = NEUTRAL_MULT;
 	float ElevDeltaM = 0.0f;
 	int32 BiomeIdx = -1;
-	if (const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
-	{
-		for (TActorIterator<AODForestManager> It(GetWorld()); It; ++It)
-		{
-			EODBiome Biome;
-			if (It->BiomeSampleAt(Player->GetActorLocation().X, Player->GetActorLocation().Y, Biome, ElevDeltaM))
-			{
-				BiomeIdx = (int32)Biome;
-				Mult = BIOME_MULT[BiomeIdx];
-			}
-			break;
-		}
-	}
-
-	const float T = Monthly(Climate.MonthlyTempC, Month) - LAPSE_C_PER_KM * ElevDeltaM / 1000.0f;
-	const float P = Monthly(Climate.MonthlyPrecipMm, Month);
-	const float Pw = FMath::Min(P / PRECIP_REF_MM, PRECIP_CAP) * Mult[0];
-	const float Dry = FMath::Clamp(1.0f - P / DRY_MM, 0.0f, 1.0f);
-	const float S = FMath::Clamp((RAIN_T_C - T) / (RAIN_T_C - SNOW_T_C), 0.0f, 1.0f);
-	const float Warm = FMath::Clamp((T - THUNDER_T_C) / THUNDER_RAMP_C, 0.0f, 1.0f);
-	const float RainFam = W_PRECIP * Pw * (1.0f - S) * (1.0f - S);
-	const float SnowFam = W_PRECIP * Pw * S * S * SNOW_BOOST;
-
-	float W[NumStates] = {};
-	W[(int32)EODWeatherState::Clear] = W_CLEAR + W_CLEAR_DRY * Dry;
-	W[(int32)EODWeatherState::Overcast] = W_OVERCAST + W_OVERCAST_WET * FMath::Min(Pw, 1.0f);
-	W[(int32)EODWeatherState::Rain] = RainFam * RAIN_SPLIT[0];
-	W[(int32)EODWeatherState::HeavyRain] = RainFam * RAIN_SPLIT[1];
-	W[(int32)EODWeatherState::Thunderstorm] = RainFam * RAIN_SPLIT[2] * Warm;
-	W[(int32)EODWeatherState::Sleet] = W_PRECIP * Pw * 2.0f * S * (1.0f - S);
-	W[(int32)EODWeatherState::Snow] = SnowFam * SNOW_SPLIT[0];
-	W[(int32)EODWeatherState::Blizzard] = SnowFam * SNOW_SPLIT[1];
-	W[(int32)EODWeatherState::Fog] = W_FOG * Mult[1] * (0.5f + 0.5f * FMath::Min(Pw, 1.0f));
-	W[(int32)EODWeatherState::DustStorm] = W_DUST * Climate.DustStorm * Dry * Mult[2];
-	if (State == EODWeatherState::Thunderstorm)
-	{
-		W[(int32)EODWeatherState::Tornado] = W_TORNADO * Climate.Tornado
-			* FMath::Clamp((T - TORNADO_T_C) / TORNADO_RAMP_C, 0.0f, 1.0f);
-	}
-	if (State != EODWeatherState::Tornado && State != EODWeatherState::Hurricane)
-	{
-		W[(int32)EODWeatherState::Hurricane] = W_HURRICANE * Climate.Hurricane
-			* FMath::Clamp((T - HURRICANE_T_C) / HURRICANE_RAMP_C, 0.0f, 1.0f);
-	}
+	SampleBiome(Mult, ElevDeltaM, BiomeIdx);
+	float W[NumStates];
+	float T = 0.0f, P = 0.0f;
+	StateWeights(Climate, Month, ElevDeltaM, Mult, State, W, T, P);
 
 	float Total = 0.0f;
 	for (float V : W) { Total += V; }
@@ -568,13 +646,23 @@ FVector2D AODWeatherController::WindAtMs(const FVector& WorldPos) const
 	return W;
 }
 
-bool AODWeatherController::ForceState(const FString& Name)
+bool AODWeatherController::ForceState(const FString& Name, bool bInstant)
 {
+	auto Snap = [this, bInstant]()
+	{
+		if (bInstant)
+		{
+			From = To;
+			RampT = 1.0f;
+			Wetness = To.Precip > 0.05f ? 1.0f : 0.0f;
+		}
+	};
 	if (Name.IsEmpty() || Name.Equals(TEXT("Auto"), ESearchCase::IgnoreCase))
 	{
 		bForced = false;
 		UE_LOG(LogTemp, Display, TEXT("ODWeatherController: QA force released - random walk resumes"));
 		Roll();
+		Snap();
 		return true;
 	}
 	for (int32 i = 0; i < NumStates; ++i)
@@ -585,6 +673,7 @@ bool AODWeatherController::ForceState(const FString& Name)
 				*StateName(State), *StateName((EODWeatherState)i));
 			bForced = true;
 			EnterState((EODWeatherState)i, 0.0f);
+			Snap();
 			return true;
 		}
 	}

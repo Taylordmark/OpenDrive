@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
+#include "ODMenuVista.h"
 #include "Templates/SharedPointer.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "ODTerrainManager.generated.h"
@@ -186,6 +187,10 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Garage-menu vista copy (2026-10-05): set before FinishSpawning by
+	 *  AODGameMode::SpawnVistaSet; streams around Vista.Focus, wedge only. */
+	FODVistaRegion Vista;
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin". */

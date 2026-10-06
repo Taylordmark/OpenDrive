@@ -2,7 +2,22 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
+#include "ODMenuVista.h"
 #include "ODGameMode.generated.h"
+
+/** One streamable neighbour of the home area (2026-10-05, large world). */
+USTRUCT()
+struct FODStreamArea
+{
+	GENERATED_BODY()
+
+	FString Name;
+	FBox2D Rect = FBox2D(ForceInit);   // UE cm, from worlds.json
+	bool bLive = false;
+	// UPROPERTY so GC sees the spawned set (ULevel::Actors roots it anyway)
+	UPROPERTY()
+	TArray<TObjectPtr<AActor>> Actors;
+};
 
 /**
  * OD game mode (template exorcism, 2026-07-17): spawns AODVehiclePawn and
@@ -17,80 +32,49 @@ public:
 	AODGameMode();
 
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Garage-menu vista (2026-10-05): one area's terrain/road/forest/water/
+	 *  guardrail managers, translated by Offset (XY only) and streaming just
+	 *  Region (area-local). Tagged ODVistaTag. Caller owns/destroys them. */
+	TArray<AActor*> SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region);
+
+	/** Pauses every non-vista area manager's Tick and the area-set streamer
+	 *  while the menu parks the car at a far vista offset, so the real
+	 *  managers neither unload around the garage nor probe tiles there. */
+	void FreezeStreaming(bool bFreeze);
 
 private:
-	/** Open-world forest bootstrap (2026-08-26): Tail of the Dragon has its
-	 *  AODForestManager hand-placed in the .umap (Landscape-mask path,
-	 *  DefaultBiome=DeciduousForest); OpenWorldTest never got one, so
-	 *  open-world drives showed zero trees/vegetation. Editing a .umap
-	 *  headlessly is fragile, and this is the one GameMode class every level
-	 *  in the project already shares (GlobalDefaultGameMode in
-	 *  DefaultEngine.ini) - runtime-spawning here, guarded by "does a forest
-	 *  manager already exist", is the same shape as everything else that
-	 *  varies by level (AODRoadManager/AODTerrainManager are placed once per
-	 *  map with their tile-prefix UPROPERTYs already baked in) without
-	 *  needing a second hand-authored placement for every open-world area. */
-	void EnsureForestManager();
+	/** Spawns one area's manager set (2026-10-05, large world; folds the
+	 *  old EnsureForest/Water/Parking/Guardrail/Embankment/BridgeManager).
+	 *  Prefixes follow "<family>_<area>_test", same table as unreal/
+	 *  build_openworld_test_level.py. For HomeArea it does exactly what the
+	 *  old Ensure* calls did: the level-placed terrain/road/building/wall/
+	 *  barrier managers are left alone, and each other class is skipped if
+	 *  one already exists. Any other area gets the whole set. Returns what
+	 *  it spawned. */
+	TArray<AActor*> SpawnAreaSet(const FString& Area, const FVector& Offset = FVector::ZeroVector,
+		const FODVistaRegion* Vista = nullptr);
 
-	/** Open-world water bootstrap (2026-08-27, WATER feature) - same shape
-	 *  as EnsureForestManager() above: no open-world level has an
-	 *  AODWaterManager hand-placed yet, so this runtime-spawns one, guarded
-	 *  by "does a water manager already exist" the same way forest is,
-	 *  deriving its tile prefix from the level's own AODRoadManager rather
-	 *  than requiring a second hand-authored placement per area. */
-	void EnsureWaterManager();
-
-	/** Paved town-context bootstrap (art-direction §7.15, 2026-09-03) - same
-	 *  "find or spawn" shape as EnsureWaterManager() above, deriving
-	 *  AODParkingManager's tile prefix from the level's own AODRoadManager
-	 *  the same way. Streams baked OSM parking-lot polygons as flat paved
-	 *  ground patches so towns read as towns (buildings on paved context,
-	 *  not bare terrain) - see pipeline/build_parking_tiles.py. */
-	void EnsureParkingManager();
+	/** Reads Content/OpenDrive/Masks/worlds.json once into StreamAreas: the
+	 *  other members of the world HomeArea belongs to. Absent file or home
+	 *  not listed = StreamAreas stays empty and Tick() does nothing. */
+	void LoadWorldManifest();
 
 	/** Art-direction Phase 1 (2026-09-01): same "find or spawn" shape as
-	 *  EnsureForestManager/EnsureWaterManager above, guarding on
+	 *  SpawnAreaSet above, guarding on
 	 *  AODAtmosphereController itself rather than any one of the several
 	 *  actor classes it in turn finds-or-spawns (SkyAtmosphere/
 	 *  ExponentialHeightFog/VolumetricCloud/PostProcessVolume) - see that
 	 *  class for why. */
 	void EnsureAtmosphereController();
 
-	/** Visible guardrails (2026-09-04) - same "find or spawn" shape as
-	 *  EnsureParkingManager above, deriving AODGuardrailManager's tile
-	 *  prefix from the level's own AODRoadManager the same way. Streams
-	 *  runtime-extruded W-beam/Jersey-barrier ribbons wherever the road
-	 *  rides high above the surrounding terrain - see
-	 *  pipeline/build_road_guardrails.py. */
-	void EnsureGuardrailManager();
-
-	/** Embankment skirts (2026-09-07) - same "find or spawn" shape as
-	 *  EnsureGuardrailManager above, deriving AODEmbankmentManager's tile
-	 *  prefix from the level's own AODRoadManager the same way. Streams
-	 *  runtime-extruded sloped earthen skirts wherever the road rides
-	 *  2.5-7m above the surrounding terrain (below that the terrain meets
-	 *  the road on its own; above that is the later bridge-deck task's
-	 *  job) - see pipeline/build_road_embankments.py. */
-	void EnsureEmbankmentManager();
-
-	/** Bridge decks (2026-09-07, §7.21) - same "find or spawn" shape as
-	 *  EnsureEmbankmentManager above, deriving AODBridgeManager's tile prefix
-	 *  from the level's own AODRoadManager the same way. Streams runtime-
-	 *  extruded concrete deck fascia + pier columns wherever pipeline/
-	 *  build_road_embankments.py's own §7.21 sub-classification pass kept a
-	 *  "bridge"-class run as a genuine short span (most of the raw >7m-drop
-	 *  classification is actually a mountainside sidehill cut and gets
-	 *  demoted to the embankment skirt above instead - see that module's
-	 *  docstring). */
-	void EnsureBridgeManager();
-
 	/** Seasons feature (2026-09-07) - same "find or spawn" shape as
 	 *  EnsureAtmosphereController above (no per-level tile-prefix needed,
 	 *  applies identically everywhere): spawns AODSeasonController, which in
 	 *  turn finds AODTerrainManager/AODWaterManager/AODForestManager (spawned
-	 *  by the Ensure* calls above, in order, earlier in this same BeginPlay)
-	 *  and drives their ground/water/foliage MIDs through a looping season
-	 *  clock. */
+	 *  by SpawnAreaSet above, earlier in this same BeginPlay) and drives
+	 *  their ground/water/foliage MIDs through a looping season clock. */
 	void EnsureSeasonController();
 
 	/** Weather W1 (next steps.md sec 7.39) - same shape as
@@ -100,10 +84,17 @@ private:
 	void EnsureWeatherController();
 
 	/** Ambient biome/city audio (Arc 5.4 / next steps.md SS7.28, 2026-09-07) -
-	 *  same "find or spawn" shape as EnsureEmbankmentManager above, deriving
+	 *  same "find or spawn" shape as SpawnAreaSet above, deriving
 	 *  AODAmbientSoundManager's zone-file name from the level's own
 	 *  AODRoadManager the same way. Crossfades wind/forest/settlement/water
 	 *  ambient loops against pipeline/build_ambient_zones.py's baked zone
 	 *  grid as the player drives - see that class for the full design. */
 	void EnsureAmbientSoundManager();
+
+	/** "<area>" from the level's own road manager's "road_<area>_test", "" with none. */
+	FString HomeArea;
+	UPROPERTY()
+	TArray<FODStreamArea> StreamAreas;
+	double LastStreamCheckTime = -1.0e9;
+	bool bStreamingFrozen = false;
 };

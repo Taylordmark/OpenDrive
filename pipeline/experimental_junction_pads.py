@@ -82,6 +82,7 @@ from pathlib import Path
 import numpy as np
 
 import build_forest_elevation
+import prune_unowned_tiles
 import build_terrain_mesh_tiles as btmt
 from export_road_mesh_bin import write_tile
 from export_road_mesh_bin_v2 import write_tile as write_tile_v3
@@ -3893,6 +3894,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # this run re-writes road tiles and re-carves terrain in the halo too
+    # (2026-10-05, step 3) - keep only the owned ones
+    prune_unowned_tiles.main()
     # Re-bake the tree ground-truth grid from the terrain tiles this run just
     # re-carved (or --restore just put back) - it's baked earlier in
     # rebuild_area.py, so left alone it keeps the pre-pad ground (2026-10-05).

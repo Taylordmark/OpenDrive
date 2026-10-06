@@ -43,7 +43,7 @@ import numpy as np
 import build_terrain_mesh_tiles as btmt
 from bin_tile_io import parse_terrain_tile_bin
 from road_mesh_common import sample_mesh_heights
-from test_areas import AREA_NAME
+from test_areas import AREA_NAME, owns
 
 STATION_STRIDE = 6        # every 6th 5 m station = 30 m along-route spacing
 LATERAL_SPACING_M = 30.0
@@ -92,6 +92,10 @@ def main():
 
     x_cm = east * 100.0
     y_cm = -north * 100.0
+    # the grid's extent is the forest's ownership at runtime, so it ends
+    # where the area's owned tiles do (2026-10-05, step 3)
+    keep = owns(x_cm, y_cm)
+    x_cm, y_cm = x_cm[keep], y_cm[keep]
 
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
     tx_all = np.floor(x_cm / tile_cm).astype(int)

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "UObject/WeakObjectPtrTemplates.h"
+#include "ODMenuVista.h"
 #include "ODRoadManager.generated.h"
 
 class UDynamicMeshComponent;
@@ -128,6 +129,9 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet. */
+	FODVistaRegion Vista;
 
 	/** Shared road-chunk MID (Weather W2 wetness), null if M_Road failed to load. */
 	UMaterialInstanceDynamic* GetRoadMID() const;

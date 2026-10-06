@@ -131,16 +131,22 @@ def all_names():
             + [p.parent.name for p in sorted((ROOT / "data" / "road_tiles").glob("*/road_test_meta.json"))])
 
 
-def run(name):
-    out_dir, meta = find_dir(name)
-    lat, lon = meta.get("center_latlon") or meta["origin_latlon"]   # area / stage meta
-
+def power_climatology(lat, lon):
+    """NASA POWER climatology at a point -> {"PRECTOTCORR": mm/day, "T2M": C},
+    each keyed by MONTHS + "ANN". Also classify_biomes.py's aridity gate."""
     url = ("https://power.larc.nasa.gov/api/temporal/climatology/point"
            f"?parameters=PRECTOTCORR,T2M&community=RE"
            f"&longitude={lon:.4f}&latitude={lat:.4f}&format=JSON")
     r = requests.get(url, timeout=60, headers=HEADERS)
     r.raise_for_status()
-    p = r.json()["properties"]["parameter"]
+    return r.json()["properties"]["parameter"]
+
+
+def run(name):
+    out_dir, meta = find_dir(name)
+    lat, lon = meta.get("center_latlon") or meta["origin_latlon"]   # area / stage meta
+
+    p = power_climatology(lat, lon)
     annual_mm = p["PRECTOTCORR"]["ANN"] * 365.25   # mm/day climatology -> mm/yr
     t_ann = p["T2M"]["ANN"]
 

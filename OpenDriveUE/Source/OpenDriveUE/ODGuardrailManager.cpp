@@ -337,7 +337,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 				}
 				Accum += SegLen;
 			}
-			Hism->AddInstances(PostXfs, false, true);
+			Hism->AddInstances(PostXfs, false, /*bWorldSpace*/false);   // relative to the actor (2026-10-05, menu vistas are offset copies)
 			Tile.PostHisms.Add(Hism);
 		}
 	}
@@ -367,12 +367,11 @@ void AODGuardrailManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
-	if (!Player)
+	FVector Loc;
+	if (!Vista.StreamCenter(this, Loc))
 	{
 		return;
 	}
-	const FVector Loc = Player->GetActorLocation();
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 
@@ -391,7 +390,8 @@ void AODGuardrailManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key))
+				if (Tiles.Contains(Key) || PendingTiles.Contains(Key) || MissingTiles.Contains(Key)
+					|| !Vista.WantsTile(Key, TileSizeCm))
 				{
 					continue;
 				}

@@ -62,7 +62,7 @@ import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -200,7 +200,8 @@ def check_road_vs_terrain_fit():
     east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
-    fit_idx = np.where(~exclude)[0]
+    # owned stations only: the halo's tiles are pruned (2026-10-05, step 3)
+    fit_idx = np.where(~exclude & owns(st_x_cm, st_y_cm))[0]
     n_excluded = int(np.sum(exclude))
     print(f"{len(east)} road station(s) loaded"
           + (f" ({n_excluded} excluded - bridge/tunnel or an auto-detected "
@@ -289,7 +290,7 @@ def check_poke_through():
     east, north, elev, _excl, _clamp_r, _walls = btmt.load_stations()
     _e, _n, _z, seg_idx, _si, _rn = brw.load_station_arrays()
     hw = brw.load_station_half_widths()
-    idx = np.where(~btmt._get_struct_mask(len(east)))[0]
+    idx_all = np.where(~btmt._get_struct_mask(len(east)))[0]
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
     e0, n0 = east, north
     from experimental_junction_pads import BANK_SCALE_PATH, SIDECAR_PATH, read_station_sidecar
@@ -317,6 +318,7 @@ def check_poke_through():
     for label, prefix, pe, pn in probes:
         loader = lambda tx, ty: _load_terrain_tile(tx, ty, prefix)
         poke = np.full(len(east), np.nan)
+        idx = idx_all[owns(pe[idx_all] * 100.0, -pn[idx_all] * 100.0)]   # owned probes (step 3)
         x_cm, y_cm = pe[idx] * 100.0, -pn[idx] * 100.0
         h = _sample_with_neighbors(loader, np.floor(x_cm / tile_cm).astype(int),
                                    np.floor(y_cm / tile_cm).astype(int), x_cm, y_cm)

@@ -44,6 +44,7 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 
 from fetch_cache import cached_bytes
+from fetch_climate import power_climatology
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
 from test_areas import (AREA_NAME, BACKGROUND_BBOX_SNWE, BBOX_SNWE, TERRAIN_TILE_SIZE_CM,
                         local_rect, lonlat_bbox, to_lonlat)
@@ -269,9 +270,17 @@ MONTANE_CUTOFF_M = 2200.0
 # below).
 ALPINE_RISE_ABOVE_VALLEY_M = 900.0
 
+# Aridity gate (2026-10-05): the Desert branch needs the area's annual
+# precip (NASA POWER, fetch_climate.power_climatology) under the semi-arid
+# ceiling. Without it, urban pavement/roofs - bright, warm, low-green - read
+# as w_bare: sf_russian_hill (~580 mm/yr) baked
+# 225/268 corridor samples DesertScrub. Green Valley (285-340 mm) passes.
+# ponytail: one area-centre value, not a precip raster - fine at area scale.
+ARID_MAX_PRECIP_MM = 500.0
+
 
 def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
-                grade=1.0, area_elev_min_m=0.0):
+                grade=1.0, area_elev_min_m=0.0, annual_precip_mm=0.0):
     """Elevation/latitude bands tuned for the Skagit/Cascades loop specifically
     (see module docstring) - not a general-purpose elevation->biome model. A
     real per-region model is the ESA WorldCover + climate-raster work (7.3).
@@ -318,6 +327,7 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
     combined to read as "sparse tiny trees, bare gravel hillsides" over what
     should be dense lodgepole/spruce forest."""
     abs_lat = abs(lat_deg)
+    arid = annual_precip_mm < ARID_MAX_PRECIP_MM   # see ARID_MAX_PRECIP_MM
     alpine_floor_m = max(1200.0, area_elev_min_m + ALPINE_RISE_ABOVE_VALLEY_M)
     if w_rock > 0.35 and grade > CANYON_GRADE_MIN:
         if elev_m > alpine_floor_m or (elev_m > 500.0 and abs_lat > 35.0
@@ -351,7 +361,7 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
     # likely dormant alpine meadow grass, dry scree, or a sunlit forest gap
     # than true desert, and the branches below (forest/grass split, Alpine
     # gate above) already handle those correctly once this stops eating them.
-    if w_bare > 0.35 and w_forest < 0.6 and elev_m < MONTANE_CUTOFF_M:
+    if arid and w_bare > 0.35 and w_forest < 0.6 and elev_m < MONTANE_CUTOFF_M:
         return BIOME_DESERT
     if w_forest >= w_grass:
         if abs_lat < 23.5:
@@ -410,6 +420,10 @@ def main():
     # (Skagit near sea level vs. summit_county's 2364-4053 m span) without
     # per-area special-casing.
     area_elev_min_m = float(elev.min())
+    s, w, n, e = BBOX_SNWE
+    annual_precip_mm = power_climatology((s + n) / 2, (w + e) / 2)["PRECTOTCORR"]["ANN"] * 365.25
+    print(f"annual precip {annual_precip_mm:.0f} mm -> Desert "
+          f"{'allowed' if annual_precip_mm < ARID_MAX_PRECIP_MM else 'off'}")
     lon, lat, elev = lon[::SAMPLE_STRIDE], lat[::SAMPLE_STRIDE], elev[::SAMPLE_STRIDE]
     grade = grade[::SAMPLE_STRIDE]
     east_m, north_m = east_m[::SAMPLE_STRIDE], north_m[::SAMPLE_STRIDE]
@@ -462,7 +476,7 @@ def main():
 
     biomes = [pick_biome(float(sf[i]), float(sg[i]), float(sr[i]), float(sw[i]),
                           float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]),
-                          area_elev_min_m)
+                          area_elev_min_m, annual_precip_mm)
               for i in range(len(lon))]
     forest_weight = np.clip(sf + 0.3 * sg, 0, 1)   # density signal, not just the forest channel
 

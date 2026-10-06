@@ -445,6 +445,14 @@ void AODTerrainManager::LoadRoadStationSidecar()
 		return;
 	}
 
+	if (Vista.bActive)
+	{
+		// menu vista (2026-10-05): keep only stations a wanted tile can carve
+		Loaded.RemoveAll([this](const FRoadStation& St)
+		{
+			return !Vista.WantsPoint(FVector2D(St.X, St.Y), 1.25 * TileSizeCm);
+		});
+	}
 	TSharedRef<FStationSpatialHash, ESPMode::ThreadSafe> Hash = MakeShared<FStationSpatialHash, ESPMode::ThreadSafe>();
 	const int32 NumStations = Loaded.Num();
 	Hash->Build(MoveTemp(Loaded));
@@ -1696,12 +1704,11 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 
 	ProcessPendingTileBuilds();
 
-	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
-	if (!Player)
+	FVector Loc;
+	if (!Vista.StreamCenter(this, Loc))
 	{
 		return;
 	}
-	const FVector Loc = Player->GetActorLocation();
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 
@@ -1729,7 +1736,9 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				if (Tiles.Contains(Key) || PendingCoarseTiles.Contains(Key) || MissingCoarseTiles.Contains(Key))
+				// vista: coarse out to the panorama reach (2026-10-05 trial)
+				if (Tiles.Contains(Key) || PendingCoarseTiles.Contains(Key) || MissingCoarseTiles.Contains(Key)
+					|| !Vista.WantsTile(Key, TileSizeCm, 0.0, FMath::Max(Vista.FarCm, Vista.PanoFarCm)))
 				{
 					continue;
 				}
@@ -1755,8 +1764,10 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
 				const FTerrainTile* Existing = Tiles.Find(Key);
+				// vista: Near only inside the full-detail wedge, panorama stays coarse
 				if (!Existing || Existing->Fidelity == ETileFidelity::Near
-					|| PendingNearTiles.Contains(Key) || MissingNearTiles.Contains(Key))
+					|| PendingNearTiles.Contains(Key) || MissingNearTiles.Contains(Key)
+					|| !Vista.WantsTile(Key, TileSizeCm))
 				{
 					continue;
 				}

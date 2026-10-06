@@ -78,7 +78,7 @@ from bin_tile_io import parse_terrain_tile_bin, read_generation_id_header
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, owns
 from road_mesh_common import ROAD_LIFT
 from road_mesh_common import (CONFLICT_SAME_CHAIN_GAP_STATIONS, STATION_SPACING,
                               WALL_EMBED_MARGIN_M, classify_wall_stations, sample_mesh_heights)
@@ -130,7 +130,8 @@ def _fit_station_data(shipped=False):
         elev = z - ROAD_LIFT
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
-    fit_idx = np.where(~exclude)[0]
+    # owned stations only: the halo's tiles are pruned (2026-10-05, step 3)
+    fit_idx = np.where(~exclude & owns(st_x_cm, st_y_cm))[0]
     n_excluded = int(np.sum(exclude))
     print(f"{len(east)} road station(s) loaded"
           + (f" ({n_excluded} excluded from the fit checks - bridge/tunnel or "

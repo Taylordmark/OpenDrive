@@ -348,8 +348,10 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 	// asphalt ground-snap trace always starts ABOVE the real road surface -
 	// the centerline data is XY-only, so RoadPoint.Z carries no useful height,
 	// and the road corridor in these areas sits well under this ceiling.
+	// 6 km, was 1 km (2026-10-05, large world): California's frame is sea-level
+	// datum with 4.4 km peaks; TrySnapToGround's trace reaches 6.1 km down.
 	Body->SetSimulatePhysics(false);
-	SetActorLocation(FVector(RoadPoint.X, RoadPoint.Y, 100000.0f),
+	SetActorLocation(FVector(RoadPoint.X, RoadPoint.Y, 600000.0f),
 		false, nullptr, ETeleportType::TeleportPhysics);
 	SetActorRotation(FRotator(0.0f, YawDeg, 0.0f));
 
@@ -473,7 +475,14 @@ void AODVehiclePawn::BeginPlay()
 	// an absolute index immediately so a batch of -odshot runs can each grab
 	// one car without chaining cycle counts.
 	int32 VehIdx = -1;
-	if (FParse::Value(FCommandLine::Get(), TEXT("odvehidx="), VehIdx) && Vehicles.IsValidIndex(VehIdx))
+	FParse::Value(FCommandLine::Get(), TEXT("odvehidx="), VehIdx);
+	// same index as a travel-URL option (2026-10-05): the garage's Area row
+	// carries the picked car across OpenLevel this way (AODMainMenu::OpenArea)
+	if (const TCHAR* Opt = GetWorld()->URL.GetOption(TEXT("odvehidx="), nullptr))
+	{
+		VehIdx = FCString::Atoi(Opt);
+	}
+	if (Vehicles.IsValidIndex(VehIdx))
 	{
 		SetVehicleByIndex(VehIdx);
 	}
@@ -526,7 +535,7 @@ void AODVehiclePawn::TrySnapToGround()
 	const FVector Loc = GetActorLocation();
 	FHitResult Hit;
 	const FVector Start(Loc.X, Loc.Y, Loc.Z + 10000.0f);     // 100 m above current
-	const FVector End(Loc.X, Loc.Y, Loc.Z - 500000.0f);      // 5 km below - generous
+	const FVector End(Loc.X, Loc.Y, Loc.Z - 610000.0f);      // 6.1 km below - covers TeleportToSpawn's 6 km lift (2026-10-05)
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	Params.bReturnPhysicalMaterial = true;
@@ -579,7 +588,7 @@ void AODVehiclePawn::TrySnapToGround()
 				const FVector2D Offset(FMath::Cos(AngRad) * Rings[RingIdx],
 					FMath::Sin(AngRad) * Rings[RingIdx]);
 				const FVector ProbeStart(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z + 10000.0f);
-				const FVector ProbeEnd(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z - 500000.0f);
+				const FVector ProbeEnd(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z - 610000.0f);
 				FHitResult ProbeHit;
 				if (GetWorld()->LineTraceSingleByChannel(ProbeHit, ProbeStart, ProbeEnd,
 						ECC_Visibility, Params)
@@ -1462,13 +1471,34 @@ void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)
 		OobOffRoadSec = OobAirSec = OobStuckSec = 0.0f;
 		return;
 	}
-	if (!bOobRoadMgrSearched)
+	const FVector Loc = GetActorLocation();
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastOobScanTime > 0.5)   // O(centerline) scan, 2 Hz is plenty
 	{
-		bOobRoadMgrSearched = true;
+		LastOobScanTime = Now;
+		// Large world (2026-10-05): min distance over EVERY road manager (one
+		// per streamed area set, see AODGameMode::SpawnAreaSet), not the first
+		// one found - otherwise driving into a second area reads as "far from
+		// the (home) road" and resets the car. The nearest manager is also the
+		// one the reset below snaps to.
+		double BestCm = TNumericLimits<double>::Max();
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
-			OobRoadMgr = *It;
-			break;
+			FVector2D Nearest;
+			float NearestYaw = 0.0f;
+			if (It->NearestRoadPoint(FVector2D(Loc.X, Loc.Y), Nearest, NearestYaw))
+			{
+				const double DistCm = FVector2D::Distance(FVector2D(Loc.X, Loc.Y), Nearest);
+				if (DistCm < BestCm)
+				{
+					BestCm = DistCm;
+					OobRoadMgr = *It;
+				}
+			}
+		}
+		if (BestCm < TNumericLimits<double>::Max())
+		{
+			OobDistNowCm = (float)BestCm;
 		}
 	}
 	// No road manager = no centerline to measure against or reset to (Tail
@@ -1477,19 +1507,6 @@ void AODVehiclePawn::TickOutOfBounds(float DeltaSeconds)
 	if (!Road)
 	{
 		return;
-	}
-
-	const FVector Loc = GetActorLocation();
-	const double Now = GetWorld()->GetTimeSeconds();
-	if (Now - LastOobScanTime > 0.5)   // O(centerline) scan, 2 Hz is plenty
-	{
-		LastOobScanTime = Now;
-		FVector2D Nearest;
-		float NearestYaw = 0.0f;
-		if (Road->NearestRoadPoint(FVector2D(Loc.X, Loc.Y), Nearest, NearestYaw))
-		{
-			OobDistNowCm = FVector2D::Distance(FVector2D(Loc.X, Loc.Y), Nearest);
-		}
 	}
 
 	const bool bAnyContact = Movement->IsWheelInContact(0)

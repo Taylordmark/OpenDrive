@@ -51,8 +51,16 @@ void AODBarrierManager::BeginPlay()
 	{
 		if (UWorld* World = GetWorld())
 		{
+			// this area's own road manager, matched by prefix (2026-10-05,
+			// large world: several area sets can be live at once)
+			FString OwnArea = BarrierTilePrefix;
+			OwnArea.RemoveFromStart(TEXT("barrier_"));
 			for (TActorIterator<AODRoadManager> It(World); It; ++It)
 			{
+				if (It->RoadTilePrefix != TEXT("road_") + OwnArea)
+				{
+					continue;
+				}
 				FString Area = It->RoadTilePrefix;
 				Area.RemoveFromStart(TEXT("road_"));
 				Area.RemoveFromEnd(TEXT("_test"));

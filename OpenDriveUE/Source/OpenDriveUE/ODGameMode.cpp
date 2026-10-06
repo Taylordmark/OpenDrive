@@ -1,397 +1,400 @@
 #include "ODGameMode.h"
 
+#include "Dom/JsonObject.h"
 #include "EngineUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "ODAmbientSoundManager.h"
 #include "ODAtmosphereController.h"
+#include "ODBarrierManager.h"
 #include "ODBridgeManager.h"
+#include "ODBuildingManager.h"
 #include "ODEmbankmentManager.h"
 #include "ODForestManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
+#include "ODTerrainManager.h"
 #include "ODVehiclePawn.h"
+#include "ODWallManager.h"
 #include "ODWeatherController.h"
 #include "ODParkingManager.h"
 #include "ODWaterManager.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 AODGameMode::AODGameMode()
 {
 	DefaultPawnClass = AODVehiclePawn::StaticClass();
 	HUDClass = AODRaceHUD::StaticClass();
+	// area-set streaming (2026-10-05, large world) - Tick() no-ops unless
+	// worlds.json lists the home area, see LoadWorldManifest()
+	PrimaryActorTick.bCanEverTick = true;
 }
 
 void AODGameMode::BeginPlay()
 {
 	Super::BeginPlay();
-	EnsureForestManager();
-	EnsureWaterManager();
-	EnsureParkingManager();
-	EnsureGuardrailManager();
-	EnsureEmbankmentManager();
-	EnsureBridgeManager();
-	EnsureAtmosphereController();
-	EnsureSeasonController();
-	EnsureWeatherController();
-	EnsureAmbientSoundManager();
-}
-
-void AODGameMode::EnsureForestManager()
-{
-	UWorld* World = GetWorld();
-	if (!World)
-	{
-		return;
-	}
-
-	// Tail of the Dragon already has one hand-placed (Landscape-mask path) -
-	// leave it alone. Only open-world levels (no forest manager in the
-	// .umap yet) fall through to the runtime spawn below.
-	for (TActorIterator<AODForestManager> It(World); It; ++It)
-	{
-		return;
-	}
 
 	// AODRoadManager is the same actor ODMainMenu's -odpick hook reads
 	// (GetTownNodes()) and is placed once per open-world map with its
 	// RoadTilePrefix already baked in for whichever area that map currently
-	// represents (e.g. "road_green_valley_test") - no runtime area-name
-	// parsing exists anywhere in this project, the prefix IS the area
+	// represents (e.g. "road_green_valley_test") - the prefix IS the area
 	// selection. No road manager means no open-world tile data at all
-	// (a bare/menu-only map), so there's nothing to grow a forest on.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	// (a bare/menu-only map, or Tail of the Dragon), so nothing to spawn.
+	if (UWorld* World = GetWorld())
 	{
-		Road = *It;
-		break;
+		for (TActorIterator<AODRoadManager> It(World); It; ++It)
+		{
+			// "road_<area>_test" -> "<area>" -> "biome_<area>_test"/etc. This
+			// is exactly the naming convention unreal/build_openworld_test_level.py
+			// uses for its level-placed managers, and matches the "road_"/
+			// "terrain_"/"biome_" family on disk in Content/OpenDrive/Masks/.
+			HomeArea = It->RoadTilePrefix;
+			HomeArea.RemoveFromStart(TEXT("road_"));
+			HomeArea.RemoveFromEnd(TEXT("_test"));
+			if (HomeArea.IsEmpty())
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
+					     "'%s' - skipping area manager spawns"), *It->RoadTilePrefix);
+			}
+			break;
+		}
 	}
-	if (!Road)
+	if (!HomeArea.IsEmpty())
 	{
-		return;
+		SpawnAreaSet(HomeArea);
 	}
-
-	// "road_<area>_test" -> "<area>" -> "biome_<area>_test"/etc. This is
-	// exactly the naming convention unreal/build_openworld_test_level.py
-	// already uses for its own (currently FOREST_ENABLED=False,
-	// bake-into-the-umap) ForestManager spawn - mirrored here rather than
-	// invented fresh, and matches the "road_"/"terrain_"/"biome_" family
-	// already on disk in Content/OpenDrive/Masks/ for every baked area.
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping forest manager spawn"), *Road->RoadTilePrefix);
-		return;
-	}
-
-	// Deferred spawn (2026-08-26 fix, found via -odshot QA): a plain
-	// SpawnActor() runs BeginPlay() - and therefore LoadBiomePoints() -
-	// synchronously before this function gets a chance to set
-	// BiomeFilePrefix on the result, so the manager always loaded with an
-	// empty prefix and logged "no biome data available - forest disabled"
-	// regardless of what got assigned right after. SpawnActorDeferred() lets
-	// BiomeFilePrefix land before BeginPlay ever runs, same as how a
-	// hand-placed .umap instance's properties are already set before its
-	// own BeginPlay fires.
-	AODForestManager* Forest = World->SpawnActorDeferred<AODForestManager>(
-		AODForestManager::StaticClass(), FTransform::Identity);
-	if (!Forest)
-	{
-		return;
-	}
-	// DefaultBiome is left at its DeciduousForest default (Tail of the
-	// Dragon's own character) deliberately - BiomeFilePrefix below activates
-	// LoadBiomePoints()'s point-classified path, and BlendAt() only falls
-	// back to DefaultBiome per-tile when a tile has no classified point
-	// within BiomeBlendRadiusCm at all. Elevation/centerline/building-centroid
-	// prefixes are set the same as biome even though not every area has
-	// those sidecars baked yet (e.g. no elev_green_valley_test.bin on disk
-	// as of this writing) - Load*() each independently no-op false on a
-	// missing file (same "optional feature" convention every one of these
-	// prefixes already documents in ODForestManager.h), so this just
-	// activates them automatically once/if the pipeline bakes them, with no
-	// further code change. Until then GroundAt() falls back to its
-	// physics-raycast path unchanged, which works fine here since
-	// AODTerrainManager's near-fidelity tiles carry real BlockAll collision
-	// out to CollisionRadius (2 km), well past the ~96 m tiles/120 m
-	// ForestBandCm this manager ever scatters into.
-	Forest->BiomeFilePrefix = FString::Printf(TEXT("biome_%s_test"), *Area);
-	Forest->ElevationFilePrefix = FString::Printf(TEXT("elev_%s_test"), *Area);
-	Forest->CenterlineFilePrefix = FString::Printf(TEXT("centerline_%s_test"), *Area);
-	Forest->BuildingCentroidFilePrefix = FString::Printf(TEXT("building_centroids_%s_test"), *Area);
-	// roadstations_{area}.bin - NO "_test" suffix, unlike every prefix above
-	// (matches AODTerrainManager::LoadRoadStationSidecar's own area-name
-	// derivation; confirmed against the real exported file on disk,
-	// Content/OpenDrive/Masks/roadstations_green_valley.bin). See
-	// AODForestManager::RoadStationFilePrefix's comment for why this
-	// data-driven road exclusion was added alongside CenterlineFilePrefix
-	// above (2026-08-26, Taylor's live-drive "trees on the road" report).
-	Forest->RoadStationFilePrefix = FString::Printf(TEXT("roadstations_%s"), *Area);
-	// water_{area}_test_tile_*.bin - the SAME baked lake tiles
-	// EnsureWaterManager() below points AODWaterManager at, reused here
-	// purely for polygon geometry (2026-09-03, reviewer defect: trees/bushes
-	// found standing in open water at Dillon Reservoir). See
-	// AODForestManager::WaterTilePrefix's header comment.
-	Forest->WaterTilePrefix = FString::Printf(TEXT("water_%s_test"), *Area);
-	Forest->FinishSpawning(FTransform::Identity);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODForestManager for open-world area '%s' "
-		     "(BiomeFilePrefix='%s')"), *Area, *Forest->BiomeFilePrefix);
+	EnsureAtmosphereController();
+	EnsureSeasonController();
+	EnsureWeatherController();
+	// ponytail: one ambient-sound manager, the home area's zones only - a
+	// streamed area set plays home's zone grid (silent outside it). Spawn one
+	// per set (and crossfade) if the neighbouring areas sound wrong.
+	EnsureAmbientSoundManager();
+	LoadWorldManifest();
 }
 
-void AODGameMode::EnsureWaterManager()
+TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region)
 {
+	return SpawnAreaSet(Area, FVector(Offset.X, Offset.Y, 0.0), &Region);
+}
+
+void AODGameMode::FreezeStreaming(bool bFreeze)
+{
+	bStreamingFrozen = bFreeze;
 	UWorld* World = GetWorld();
 	if (!World)
 	{
 		return;
 	}
-
-	// Same "already hand-placed, leave it alone" guard as EnsureForestManager.
-	for (TActorIterator<AODWaterManager> It(World); It; ++It)
+	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		return;
+		AActor* A = *It;
+		if (!A->ActorHasTag(ODVistaTag)
+			&& (A->IsA<AODTerrainManager>() || A->IsA<AODRoadManager>() || A->IsA<AODBuildingManager>()
+				|| A->IsA<AODWallManager>() || A->IsA<AODBarrierManager>() || A->IsA<AODForestManager>()
+				|| A->IsA<AODWaterManager>() || A->IsA<AODParkingManager>() || A->IsA<AODGuardrailManager>()
+				|| A->IsA<AODEmbankmentManager>() || A->IsA<AODBridgeManager>()))
+		{
+			A->SetActorTickEnabled(!bFreeze);
+		}
 	}
-
-	// Same AODRoadManager-derived area-name convention as EnsureForestManager
-	// above - the road manager's own RoadTilePrefix IS the area selection,
-	// no separate runtime area-name source exists anywhere in this project.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
-	{
-		Road = *It;
-		break;
-	}
-	if (!Road)
-	{
-		return;
-	}
-
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping water manager spawn"), *Road->RoadTilePrefix);
-		return;
-	}
-
-	// Plain SpawnActor is fine here (unlike EnsureForestManager's
-	// SpawnActorDeferred) - AODWaterManager::BeginPlay() only loads its own
-	// material by a fixed path, it never reads WaterTilePrefix synchronously
-	// during BeginPlay (that's only read later, from Tick()'s tile-streaming
-	// loop), so there's no property-must-land-before-BeginPlay race to guard
-	// against the way AODForestManager's LoadBiomePoints() has.
-	AODWaterManager* Water = World->SpawnActor<AODWaterManager>();
-	if (!Water)
-	{
-		return;
-	}
-	Water->WaterTilePrefix = FString::Printf(TEXT("water_%s_test"), *Area);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODWaterManager for open-world area '%s' "
-		     "(WaterTilePrefix='%s')"), *Area, *Water->WaterTilePrefix);
 }
 
-void AODGameMode::EnsureParkingManager()
+TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Offset, const FODVistaRegion* Vista)
 {
+	TArray<AActor*> Out;
 	UWorld* World = GetWorld();
-	if (!World)
+	if (!World || Area.IsEmpty())
 	{
-		return;
+		return Out;
+	}
+	// Home area (2026-10-05): exactly the old Ensure*Manager behaviour - its
+	// terrain/road/building/wall/barrier managers are level-placed, and each
+	// other class is skipped when one already exists in the .umap (Tail of
+	// the Dragon's hand-placed forest, OpenWorldTest's baked-in one).
+	// Every other area gets the whole set, level-placed families included,
+	// with the same properties unreal/build_openworld_test_level.py bakes.
+	const bool bHome = !Vista && (Area == HomeArea);
+	// Menu vista copy (2026-10-05): only the families with a vista mode
+	// (FODVistaRegion) - terrain, road, forest, water, guardrail.
+	// ponytail: no buildings/walls/barriers/parking/embankments/bridges in
+	// vistas; each needs its Tick filtered and (buildings) its ground trace
+	// offset like the forest's. Add per class if a vista looks bare.
+	const FTransform Xf(Offset);
+
+	// Deferred spawn everywhere (2026-08-26 fix, found via -odshot QA): a
+	// plain SpawnActor() runs BeginPlay() synchronously before the caller
+	// can set any tile/file prefix, and the forest (LoadBiomePoints), road
+	// (LoadCenterline/route graph/labels) and terrain (road-station/biome
+	// sidecars) managers all read theirs in BeginPlay. Deferring lets the
+	// prefixes land first, same as a hand-placed .umap instance's properties.
+	// Water/parking/guardrail/embankment/bridge only read theirs from Tick(),
+	// so for them this is equivalent to the old SpawnActor-then-assign.
+	auto Begin = [&](UClass* Cls, bool bLevelPlaced) -> AActor*
+	{
+		if (Vista && Cls != AODTerrainManager::StaticClass() && Cls != AODRoadManager::StaticClass()
+			&& Cls != AODForestManager::StaticClass() && Cls != AODWaterManager::StaticClass()
+			&& Cls != AODGuardrailManager::StaticClass())
+		{
+			return nullptr;
+		}
+		if (bHome)
+		{
+			if (bLevelPlaced)
+			{
+				return nullptr;
+			}
+			for (TActorIterator<AActor> It(World, Cls); It; ++It)
+			{
+				return nullptr;   // already hand-placed - leave it alone
+			}
+		}
+		return World->SpawnActorDeferred<AActor>(Cls, Xf);
+	};
+	auto Finish = [&](AActor* A)
+	{
+		if (Vista)
+		{
+			A->Tags.Add(ODVistaTag);
+		}
+		A->FinishSpawning(Xf);
+		Out.Add(A);
+		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned %s for area '%s'"),
+			*A->GetClass()->GetName(), *Area);
+	};
+
+	if (AODTerrainManager* Terrain = Cast<AODTerrainManager>(Begin(AODTerrainManager::StaticClass(), true)))
+	{
+		Terrain->TerrainTilePrefix = FString::Printf(TEXT("terrain_%s_test"), *Area);
+		// build_openworld_test_level.py's 6.2 km: past the 6 km far-tile bake
+		Terrain->VisualRadius = 620000.0f;
+		if (Vista)
+		{
+			Terrain->Vista = *Vista;   // wedge-filtered; default CollisionRadius gives its tiles Near
+			// ring reach must cover the panorama wedge (coarse, 2026-10-05 trial)
+			Terrain->VisualRadius = FMath::Max(Terrain->VisualRadius, (float)Vista->PanoFarCm);
+		}
+		Finish(Terrain);
+	}
+	// road before barrier: AODBarrierManager::BeginPlay binds to its area's
+	// road manager by prefix
+	if (AODRoadManager* Road = Cast<AODRoadManager>(Begin(AODRoadManager::StaticClass(), true)))
+	{
+		Road->RoadTilePrefix = FString::Printf(TEXT("road_%s_test"), *Area);
+		if (Vista)
+		{
+			Road->Vista = *Vista;   // chunks only: no route graph/map/labels to load
+		}
+		else
+		{
+			Road->CenterlineFilePrefix = FString::Printf(TEXT("centerline_%s_test"), *Area);
+			Road->MapCenterlineFilePrefix = FString::Printf(TEXT("centerline_map_%s_test"), *Area);
+			Road->PlaceLabelFilePrefix = FString::Printf(TEXT("labels_%s_test"), *Area);
+		}
+		// MapTexture stays home-only (ODRaceHUD draws it from the home manager)
+		Finish(Road);
+	}
+	if (AODBuildingManager* Building = Cast<AODBuildingManager>(Begin(AODBuildingManager::StaticClass(), true)))
+	{
+		Building->BuildingTilePrefix = FString::Printf(TEXT("buildings_%s_test"), *Area);
+		Finish(Building);
+	}
+	if (AODWallManager* Wall = Cast<AODWallManager>(Begin(AODWallManager::StaticClass(), true)))
+	{
+		Wall->WallTilePrefix = FString::Printf(TEXT("walls_%s_test"), *Area);
+		Finish(Wall);
+	}
+	if (AODBarrierManager* Barrier = Cast<AODBarrierManager>(Begin(AODBarrierManager::StaticClass(), true)))
+	{
+		Barrier->BarrierTilePrefix = FString::Printf(TEXT("barrier_%s_test"), *Area);
+		Finish(Barrier);
 	}
 
-	// Same "already hand-placed, leave it alone" guard as EnsureWaterManager.
-	for (TActorIterator<AODParkingManager> It(World); It; ++It)
+	if (AODForestManager* Forest = Cast<AODForestManager>(Begin(AODForestManager::StaticClass(), false)))
 	{
-		return;
+		// DefaultBiome is left at its DeciduousForest default deliberately -
+		// BiomeFilePrefix activates LoadBiomePoints()'s point-classified path,
+		// and BlendAt() only falls back to DefaultBiome per-tile when a tile
+		// has no classified point within BiomeBlendRadiusCm at all. Each
+		// Load*() below independently no-ops false on a missing file (the
+		// "optional feature" convention ODForestManager.h documents), so an
+		// area without a given sidecar baked yet just runs without it.
+		Forest->BiomeFilePrefix = FString::Printf(TEXT("biome_%s_test"), *Area);
+		Forest->ElevationFilePrefix = FString::Printf(TEXT("elev_%s_test"), *Area);
+		Forest->CenterlineFilePrefix = FString::Printf(TEXT("centerline_%s_test"), *Area);
+		Forest->BuildingCentroidFilePrefix = FString::Printf(TEXT("building_centroids_%s_test"), *Area);
+		// roadstations_{area}.bin - NO "_test" suffix, unlike every prefix above
+		// (matches AODTerrainManager::LoadRoadStationSidecar's own area-name
+		// derivation). See AODForestManager::RoadStationFilePrefix's comment
+		// (2026-08-26, Taylor's live-drive "trees on the road" report).
+		Forest->RoadStationFilePrefix = FString::Printf(TEXT("roadstations_%s"), *Area);
+		// water_{area}_test_tile_*.bin - the SAME baked lake tiles the water
+		// manager below streams, reused here purely for polygon geometry
+		// (2026-09-03, trees found standing in open water at Dillon Reservoir).
+		Forest->WaterTilePrefix = FString::Printf(TEXT("water_%s_test"), *Area);
+		if (Vista)
+		{
+			Forest->Vista = *Vista;
+			Forest->SpawnRadius = 60000.0f;   // = the tree HISM far cull
+		}
+		Finish(Forest);
 	}
-
-	// Same AODRoadManager-derived area-name convention as EnsureWaterManager
-	// above.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	if (AODWaterManager* Water = Cast<AODWaterManager>(Begin(AODWaterManager::StaticClass(), false)))
 	{
-		Road = *It;
-		break;
+		Water->WaterTilePrefix = FString::Printf(TEXT("water_%s_test"), *Area);
+		if (Vista)
+		{
+			Water->Vista = *Vista;
+		}
+		Finish(Water);
 	}
-	if (!Road)
+	if (AODParkingManager* Parking = Cast<AODParkingManager>(Begin(AODParkingManager::StaticClass(), false)))
 	{
-		return;
+		Parking->ParkingTilePrefix = FString::Printf(TEXT("parking_%s_test"), *Area);
+		Finish(Parking);
 	}
-
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
+	if (AODGuardrailManager* Guardrail = Cast<AODGuardrailManager>(Begin(AODGuardrailManager::StaticClass(), false)))
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping parking manager spawn"), *Road->RoadTilePrefix);
-		return;
+		Guardrail->GuardrailTilePrefix = FString::Printf(TEXT("guardrail_%s_test"), *Area);
+		if (Vista)
+		{
+			Guardrail->Vista = *Vista;
+		}
+		Finish(Guardrail);
 	}
-
-	// Plain SpawnActor is fine here - same reasoning as EnsureWaterManager's
-	// AODWaterManager spawn (BeginPlay only loads a fixed-path material, the
-	// tile prefix is only read later from Tick()'s streaming loop).
-	AODParkingManager* Parking = World->SpawnActor<AODParkingManager>();
-	if (!Parking)
+	if (AODEmbankmentManager* Embankment = Cast<AODEmbankmentManager>(Begin(AODEmbankmentManager::StaticClass(), false)))
 	{
-		return;
+		Embankment->EmbankmentTilePrefix = FString::Printf(TEXT("embankment_%s_test"), *Area);
+		Finish(Embankment);
 	}
-	Parking->ParkingTilePrefix = FString::Printf(TEXT("parking_%s_test"), *Area);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODParkingManager for open-world area '%s' "
-		     "(ParkingTilePrefix='%s')"), *Area, *Parking->ParkingTilePrefix);
+	if (AODBridgeManager* Bridge = Cast<AODBridgeManager>(Begin(AODBridgeManager::StaticClass(), false)))
+	{
+		Bridge->BridgeTilePrefix = FString::Printf(TEXT("bridge_%s_test"), *Area);
+		Finish(Bridge);
+	}
+	return Out;
 }
 
-void AODGameMode::EnsureGuardrailManager()
+void AODGameMode::LoadWorldManifest()
 {
-	UWorld* World = GetWorld();
-	if (!World)
+	// Content/OpenDrive/Masks/worlds.json (pipeline/build_world_manifest.py):
+	// {"<world>": [{"name": "<area>", "rect_cm": [xmin, ymin, xmax, ymax]}, ...]}.
+	// Absent file / home area not listed = no streaming at all (Summit, Tail
+	// of the Dragon, every non-world area behave exactly as before).
+	if (HomeArea.IsEmpty())
 	{
 		return;
 	}
-
-	// Same "already hand-placed, leave it alone" guard as EnsureParkingManager.
-	for (TActorIterator<AODGuardrailManager> It(World); It; ++It)
+	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json");
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *Path))
 	{
 		return;
 	}
-
-	// Same AODRoadManager-derived area-name convention as EnsureParkingManager.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
+	TSharedPtr<FJsonObject> Root;
+	if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
 	{
-		Road = *It;
-		break;
-	}
-	if (!Road)
-	{
+		UE_LOG(LogTemp, Warning, TEXT("ODGameMode: couldn't parse %s - no area streaming"), *Path);
 		return;
 	}
-
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& World : Root->Values)
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping guardrail manager spawn"), *Road->RoadTilePrefix);
-		return;
+		const TArray<TSharedPtr<FJsonValue>>* Members = nullptr;
+		if (!World.Value.IsValid() || !World.Value->TryGetArray(Members))
+		{
+			continue;
+		}
+		TArray<FODStreamArea> Found;
+		bool bHasHome = false;
+		for (const TSharedPtr<FJsonValue>& V : *Members)
+		{
+			const TSharedPtr<FJsonObject>* Obj = nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* R = nullptr;
+			FString Name;
+			if (!V.IsValid() || !V->TryGetObject(Obj) || !(*Obj)->TryGetStringField(TEXT("name"), Name)
+				|| !(*Obj)->TryGetArrayField(TEXT("rect_cm"), R) || R->Num() != 4)
+			{
+				continue;
+			}
+			if (Name == HomeArea)
+			{
+				bHasHome = true;   // home's level-placed set is never streamed
+				continue;
+			}
+			FODStreamArea& A = Found.AddDefaulted_GetRef();
+			A.Name = Name;
+			A.Rect = FBox2D(FVector2D((*R)[0]->AsNumber(), (*R)[1]->AsNumber()),
+				FVector2D((*R)[2]->AsNumber(), (*R)[3]->AsNumber()));
+		}
+		if (bHasHome)
+		{
+			StreamAreas = MoveTemp(Found);
+			UE_LOG(LogTemp, Display, TEXT("ODGameMode: world '%s' - home '%s', %d other area(s) to stream"),
+				*World.Key, *HomeArea, StreamAreas.Num());
+			return;
+		}
 	}
-
-	AODGuardrailManager* Guardrail = World->SpawnActor<AODGuardrailManager>();
-	if (!Guardrail)
-	{
-		return;
-	}
-	Guardrail->GuardrailTilePrefix = FString::Printf(TEXT("guardrail_%s_test"), *Area);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODGuardrailManager for open-world area '%s' "
-		     "(GuardrailTilePrefix='%s')"), *Area, *Guardrail->GuardrailTilePrefix);
 }
 
-void AODGameMode::EnsureEmbankmentManager()
+void AODGameMode::Tick(float DeltaSeconds)
 {
-	UWorld* World = GetWorld();
-	if (!World)
+	Super::Tick(DeltaSeconds);
+	if (StreamAreas.Num() == 0 || bStreamingFrozen)
 	{
 		return;
 	}
-
-	// Same "already hand-placed, leave it alone" guard as EnsureGuardrailManager.
-	for (TActorIterator<AODEmbankmentManager> It(World); It; ++It)
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastStreamCheckTime < 0.5)
 	{
 		return;
 	}
-
-	// Same AODRoadManager-derived area-name convention as EnsureGuardrailManager.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
-	{
-		Road = *It;
-		break;
-	}
-	if (!Road)
+	LastStreamCheckTime = Now;
+	const APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!Pawn)
 	{
 		return;
 	}
-
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
+	// Spawn an area's set under 8 km from its rect (0 inside), destroy it
+	// past 16 km - the gap is hysteresis so a set doesn't thrash on the edge.
+	// Mirrored by pipeline/tests/test_world_manifest.py; change both together.
+	const FVector2D P(Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y);
+	for (FODStreamArea& A : StreamAreas)
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping embankment manager spawn"), *Road->RoadTilePrefix);
-		return;
+		const double D = FMath::Sqrt(A.Rect.ComputeSquaredDistanceToPoint(P));
+		if (!A.bLive && D < 800000.0)
+		{
+			A.Actors.Reset();
+			for (AActor* Actor : SpawnAreaSet(A.Name))
+			{
+				A.Actors.Add(Actor);
+			}
+			A.bLive = true;
+			UE_LOG(LogTemp, Display, TEXT("ODGameMode: area '%s' in range (%.1f km) - spawned %d actors"),
+				*A.Name, D / 100000.0, A.Actors.Num());
+		}
+		else if (A.bLive && D > 1600000.0)
+		{
+			// In-flight async tile loads are safe: every manager's worker only
+			// parses into by-value data, and its game-thread completion checks
+			// its WeakThis, which Destroy() (EndPlay + MarkAsGarbage) invalidates.
+			for (AActor* Actor : A.Actors)
+			{
+				if (IsValid(Actor))
+				{
+					Actor->Destroy();
+				}
+			}
+			A.Actors.Reset();
+			A.bLive = false;
+			UE_LOG(LogTemp, Display, TEXT("ODGameMode: area '%s' out of range (%.1f km) - destroyed"),
+				*A.Name, D / 100000.0);
+		}
 	}
-
-	AODEmbankmentManager* Embankment = World->SpawnActor<AODEmbankmentManager>();
-	if (!Embankment)
-	{
-		return;
-	}
-	Embankment->EmbankmentTilePrefix = FString::Printf(TEXT("embankment_%s_test"), *Area);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODEmbankmentManager for open-world area '%s' "
-		     "(EmbankmentTilePrefix='%s')"), *Area, *Embankment->EmbankmentTilePrefix);
-}
-
-void AODGameMode::EnsureBridgeManager()
-{
-	UWorld* World = GetWorld();
-	if (!World)
-	{
-		return;
-	}
-
-	// Same "already hand-placed, leave it alone" guard as EnsureEmbankmentManager.
-	for (TActorIterator<AODBridgeManager> It(World); It; ++It)
-	{
-		return;
-	}
-
-	// Same AODRoadManager-derived area-name convention as EnsureEmbankmentManager.
-	AODRoadManager* Road = nullptr;
-	for (TActorIterator<AODRoadManager> It(World); It; ++It)
-	{
-		Road = *It;
-		break;
-	}
-	if (!Road)
-	{
-		return;
-	}
-
-	FString Area = Road->RoadTilePrefix;
-	Area.RemoveFromStart(TEXT("road_"));
-	Area.RemoveFromEnd(TEXT("_test"));
-	if (Area.IsEmpty())
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODGameMode: couldn't derive an area name from RoadTilePrefix "
-			     "'%s' - skipping bridge manager spawn"), *Road->RoadTilePrefix);
-		return;
-	}
-
-	AODBridgeManager* Bridge = World->SpawnActor<AODBridgeManager>();
-	if (!Bridge)
-	{
-		return;
-	}
-	Bridge->BridgeTilePrefix = FString::Printf(TEXT("bridge_%s_test"), *Area);
-	UE_LOG(LogTemp, Display,
-		TEXT("ODGameMode: spawned AODBridgeManager for open-world area '%s' "
-		     "(BridgeTilePrefix='%s')"), *Area, *Bridge->BridgeTilePrefix);
 }
 
 void AODGameMode::EnsureAtmosphereController()
@@ -402,8 +405,8 @@ void AODGameMode::EnsureAtmosphereController()
 		return;
 	}
 
-	// Unlike Forest/Water above, this doesn't need an AODRoadManager/area
-	// name - it isn't tile-streamed, and applies identically to every level.
+	// Unlike the area managers above, this doesn't need an AODRoadManager/
+	// area name - it isn't tile-streamed, and applies identically to every level.
 	for (TActorIterator<AODAtmosphereController> It(World); It; ++It)
 	{
 		return;
@@ -455,13 +458,13 @@ void AODGameMode::EnsureAmbientSoundManager()
 		return;
 	}
 
-	// Same "already hand-placed, leave it alone" guard as EnsureEmbankmentManager.
+	// Same "already hand-placed, leave it alone" guard as SpawnAreaSet's.
 	for (TActorIterator<AODAmbientSoundManager> It(World); It; ++It)
 	{
 		return;
 	}
 
-	// Same AODRoadManager-derived area-name convention as EnsureEmbankmentManager.
+	// Same AODRoadManager-derived area-name convention as SpawnAreaSet.
 	AODRoadManager* Road = nullptr;
 	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
+#include "ODMenuVista.h"
 #include "ODForestManager.generated.h"
 
 class UCapsuleComponent;
@@ -120,6 +121,12 @@ public:
 	AODForestManager();
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet.
+	 *  Set before FinishSpawning so BeginPlay's elevation/centerline/station
+	 *  loads keep only points within VistaLoadPadCm of the wedge. */
+	FODVistaRegion Vista;
+	static constexpr double VistaLoadPadCm = 25000.0;   // > ForestBandCm + one tile
 
 	/** Read-only accessor into BiomeRecipeTable (ODForestManager.cpp,
 	 *  anonymous-namespace, not header-visible) - added 2026-08-27 so
@@ -560,8 +567,11 @@ public:
 	 *  normals are for the stage's typical height; AODWeatherController
 	 *  applies a lapse rate to the delta). False with no point-biome data
 	 *  (Landscape-mask path / missing biome_*.bin). ODB1 points carry
-	 *  ElevM 0, so the delta is 0 there. */
-	bool BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM) const;
+	 *  ElevM 0, so the delta is 0 there. OutDistSqCm (optional, 2026-10-05
+	 *  large world): squared distance to that point, so the weather can pick
+	 *  the nearest of several areas' forest managers. */
+	bool BiomeSampleAt(double WorldX, double WorldY, EODBiome& OutBiome, float& OutElevDeltaM,
+		float* OutDistSqCm = nullptr) const;
 
 private:
 	// One shared MID (evergreen/Conifer canopy only, see ConiferSpeciesIndex
@@ -651,6 +661,12 @@ private:
 	TMap<FIntPoint, TArray<int32>> ElevationBuckets;
 	bool bUseElevationGrid = false;
 	static constexpr float ElevationCellCm = 6000.0f;   // 60 m, > the grid's own ~30 m spacing
+	// XY bounds of ElevationGrid (2026-10-05, large world): Tick() skips tiles
+	// outside it, so two area sets' forest managers don't both plant every
+	// tile (BlendAt falls back to DefaultBiome, it never says "not mine").
+	// ponytail: AABB only - neighbouring areas still double-plant where their
+	// boxes overlap; switch to the area's own rect from worlds.json if visible.
+	FBox2D ElevationBounds = FBox2D(ForceInit);
 
 	TArray<FVector2D> RoadCenterline;
 	TMap<FIntPoint, TArray<int32>> CenterlineBuckets;

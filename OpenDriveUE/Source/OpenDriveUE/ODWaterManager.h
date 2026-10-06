@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODMenuVista.h"
 #include "ODWaterManager.generated.h"
 
 class UDynamicMeshComponent;
@@ -75,6 +76,9 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet. */
+	FODVistaRegion Vista;
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin". */
