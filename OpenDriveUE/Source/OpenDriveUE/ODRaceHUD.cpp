@@ -45,6 +45,15 @@ void AODRaceHUD::BeginPlay()
 		EnableInput(PC);
 		RefreshODManagedKeyBindings();
 	}
+	GConfig->GetBool(TEXT("OpenDrive.HUD"), TEXT("MiniMapHeadingUp"), bMiniMapHeadingUp,
+		GGameUserSettingsIni);
+}
+
+void AODRaceHUD::SetMiniMapHeadingUp(bool bOn)
+{
+	bMiniMapHeadingUp = bOn;
+	GConfig->SetBool(TEXT("OpenDrive.HUD"), TEXT("MiniMapHeadingUp"), bOn, GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
 void AODRaceHUD::RefreshODManagedKeyBindings()
@@ -179,10 +188,23 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	FVector2D Center;
 	float Scale;
 	const float Pad = 14.0f;
+	// heading-up mini-map: world rotated so the car's forward is screen-up,
+	// centered ahead of the car so more of the road ahead shows
+	const bool bHeadingUp = bMiniMapHeadingUp && bCircular && ZoomRadiusM > 0.0f
+		&& Pawn && !CenterOverride;
+	FVector2D Rot(1.0f, 0.0f);   // (cos, sin) of the world->screen rotation
 	if (ZoomRadiusM > 0.0f && (Pawn || CenterOverride))
 	{
 		Center = CenterOverride ? *CenterOverride : FVector2D(Pawn->GetActorLocation());
 		Scale = (PanelSize * 0.5f - Pad) / (ZoomRadiusM * 100.0f);
+		if (bHeadingUp)
+		{
+			// world X=east, Y=south maps straight to screen, so forward sits at
+			// angle Yaw on screen; rotate by -90-Yaw to point it up
+			const float Yaw = FMath::DegreesToRadians(Pawn->GetActorRotation().Yaw);
+			Rot = FVector2D(FMath::Cos(-HALF_PI - Yaw), FMath::Sin(-HALF_PI - Yaw));
+			Center += FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * (ZoomRadiusM * 100.0f * 0.35f);
+		}
 	}
 	else
 	{
@@ -213,7 +235,14 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	const FVector2D PanelMid(PanelX + PanelSize * 0.5f, PanelY + PanelSize * 0.5f);
 	auto ToMap = [&](const FVector& W)
 	{
-		return PanelMid + (FVector2D(W) - Center) * Scale;
+		const FVector2D D = (FVector2D(W) - Center) * Scale;
+		return PanelMid + FVector2D(D.X * Rot.X - D.Y * Rot.Y, D.X * Rot.Y + D.Y * Rot.X);
+	};
+	// inverse of ToMap (screen offset from PanelMid -> world), for texture UVs
+	auto ScreenToWorld = [&](const FVector2D& S)
+	{
+		const FVector2D D = (S - PanelMid) / Scale;
+		return Center + FVector2D(D.X * Rot.X + D.Y * Rot.Y, -D.X * Rot.Y + D.Y * Rot.X);
 	};
 	auto Dot = [&](const FVector2D& M, float R, const FLinearColor& C)
 	{
@@ -263,8 +292,8 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 				const FVector2D P0 = PanelMid + R * FVector2D(FMath::Cos(A0), FMath::Sin(A0));
 				const FVector2D P1 = PanelMid + R * FVector2D(FMath::Cos(A1), FMath::Sin(A1));
 				FCanvasTriangleItem TriItem(PanelMid, P0, P1,
-					CenterUV, WorldToUV(Center + (P0 - PanelMid) / Scale),
-					WorldToUV(Center + (P1 - PanelMid) / Scale), TexRes);
+					CenterUV, WorldToUV(ScreenToWorld(P0)),
+					WorldToUV(ScreenToWorld(P1)), TexRes);
 				TriItem.BlendMode = SE_BLEND_Translucent;
 				Canvas->DrawItem(TriItem);
 			}
@@ -453,7 +482,8 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	{
 		const FVector2D P = ToMap(Pawn->GetActorLocation());
 		const float Yaw = FMath::DegreesToRadians(Pawn->GetActorRotation().Yaw);
-		const FVector2D Fwd(FMath::Cos(Yaw), FMath::Sin(Yaw));
+		const FVector2D W(FMath::Cos(Yaw), FMath::Sin(Yaw));
+		const FVector2D Fwd(W.X * Rot.X - W.Y * Rot.Y, W.X * Rot.Y + W.Y * Rot.X);
 		const FVector2D Side(-Fwd.Y, Fwd.X);
 		const FVector2D Tri2[3] = {P + Fwd * 9.0f,
 			P - Fwd * 5.0f + Side * 5.0f, P - Fwd * 5.0f - Side * 5.0f};
@@ -482,6 +512,13 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 			L.LineThickness = 3.0f;
 			Canvas->DrawItem(L);
 			Prev = Cur;
+		}
+		// north tick on the bezel when the map rotates (world north = -Y)
+		if (bHeadingUp)
+		{
+			const FVector2D N = PanelMid + R * FVector2D(Rot.Y, -Rot.X);
+			Dot(N, 5.0f, FLinearColor(0.9f, 0.15f, 0.15f));
+			Dot(N, 2.0f, FLinearColor::White);
 		}
 	}
 }

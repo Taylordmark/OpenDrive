@@ -76,14 +76,16 @@ STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stati
 OSM_PATH = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
-# Map-only simplification tolerance (cm) - this line is a schematic overview,
-# not a driving surface, so an aggressive tolerance is fine (matches the
-# project's existing stylized/low-poly art direction elsewhere). 30 m.
-MAP_SIMPLIFY_TOLERANCE_CM = 3000.0
+# Map-only simplification tolerance (cm). Was 30 m (fine for the whole-area
+# overview), but the mini-map shows ~90 m radius, where 30 m cut corners and
+# the road no longer lined up with the route line (2026-10-06). 1.5 m is
+# under a pixel at mini-map zoom; straights still collapse to their ends.
+MAP_SIMPLIFY_TOLERANCE_CM = 150.0
 
-# Route graph (see module docstring). Stride 4 = ~20 m node spacing - plenty
-# for a map route line and turn detection, ~4x fewer nodes for A*.
-ROUTE_STRIDE = 4
+# Route graph (see module docstring). Stride 1 = a node per 5 m station, so
+# the route line drawn from the nodes follows the road through hairpins
+# (stride 4's 20 m chords cut them; 2026-10-06). ~4x the A* nodes.
+ROUTE_STRIDE = 1
 ROUTE_ENDPOINT_JOIN_M = 12.0   # segment ends sit 3-10 m off the road they join
 ROUTE_ENDPOINT_DZ_M = 12.0     # motorway_link ends disagree with the motorway by 5-10 m
 ROUTE_CROSS_JOIN_M = 4.0       # stations are <=5 m apart, so a real shared node is <~3.5 m

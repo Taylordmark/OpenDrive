@@ -51,6 +51,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Map", meta = (ClampMin = 20, ClampMax = 800))
 	float MiniMapZoomM = 90.0f;
 
+	/** Mini-map rotates with the car (travel direction up) instead of north-up.
+	 *  Pause-menu row; saved in GameUserSettings [OpenDrive.HUD]. */
+	bool IsMiniMapHeadingUp() const { return bMiniMapHeadingUp; }
+	void SetMiniMapHeadingUp(bool bOn);
+
 	/** Re-derives ToggleMap/ZoomMapIn/ZoomMapOut's keys from FODInputConfig
 	 *  and rebuilds them - called at BeginPlay and again live by
 	 *  AODRebindMenu after a rebind (Arc 4.1, SS7.32). */
@@ -86,6 +91,7 @@ private:
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
 
 	TArray<FKey> LastODManagedKeys;
+	bool bMiniMapHeadingUp = false;
 
 	/**
 	 * Draw the stage map into a panel. ZoomRadiusM <= 0 fits the whole route

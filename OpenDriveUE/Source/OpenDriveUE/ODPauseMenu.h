@@ -8,6 +8,7 @@
 class UODVehicleMovement;
 class AODSettingsMenu;
 class AODCreditsMenu;
+class AODRaceHUD;
 
 /**
  * In-game pause menu (ESC / P). Deliberately minimal (2026-07-25, Taylor's
@@ -17,8 +18,8 @@ class AODCreditsMenu;
  * screen; the "Garage" row opens that screen in place
  * (AODMainMenu::OpenGarage()) without leaving the drive. Rows are
  * Resume, World Map (SS7.37 - hands the screen to AODRaceHUD's world map),
- * Traction, ABS, Garage, Settings, Credits, Main Menu (back to the
- * front-end), Quit. Drawn on canvas by ODRaceHUD; arrows navigate/change,
+ * Traction, ABS, Mini-Map (north-up / travel direction), Garage, Settings,
+ * Credits, Main Menu (back to the front-end), Quit. Drawn on canvas by ODRaceHUD; arrows navigate/change,
  * Enter activates.
  *
  * Settings/Credits (Arc 4.4, next steps.md SS4.4/SS7.31): AODSettingsMenu/
@@ -41,7 +42,7 @@ public:
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
 	int32 GetSelected() const { return Selected; }
-	int32 NumRows() const { return 9; }
+	int32 NumRows() const { return 10; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
@@ -75,6 +76,7 @@ private:
 	FKey LastPauseKey;
 
 	UODVehicleMovement* FindMovement() const;
+	AODRaceHUD* FindHud() const;
 	/** One-time Sport-gearbox shift params at BeginPlay - preserves the
 	 *  current shift feel now that the gearbox row is gone (no UI). */
 	void ApplyGearbox();

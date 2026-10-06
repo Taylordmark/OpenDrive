@@ -193,6 +193,12 @@ were decoupled from it on 2026-07-20.
     Rule (e) joins unlinked one-way dead ends to the nearest end within 100 m.
     Summit: wrong-way on the 8 test routes 81 km → 0.2 km. All six area graphs
     re-exported.
+  - Mini-map accuracy (2026-10-06, compiled, not driven): map line
+    simplified at 1.5 m (was 30 m; 21.6 m → 1.4 m off at the Dennison Rd
+    hairpin) and route graph at stride 1 (a node per 5 m station, 274k on
+    Summit), so the route line follows the road. Pause-menu "Mini-Map" row:
+    North / Travel (heading-up, view shifted ahead of the car, red north tick
+    on the bezel), saved under `OpenDrive.HUD`.
 - **4.3:** live car/engine/drivetrain/tuning picker in the garage. Picks
   persist (2f0a03f): `OpenDrive.Car` (VehicleIdx, read by the pawn; EngineIdx,
   DriveIdx, TunePreset) and `OpenDrive.Area`, saved on change, out-of-range

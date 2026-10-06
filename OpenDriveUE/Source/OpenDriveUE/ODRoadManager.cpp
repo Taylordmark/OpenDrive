@@ -225,7 +225,7 @@ void AODRoadManager::LoadRouteGraph()
 
 int32 AODRoadManager::NearestRouteNode(const FVector2D& Q) const
 {
-	// ponytail: brute-force O(N) (~73k nodes on summit_county) - only runs on
+	// ponytail: brute-force O(N) (~290k nodes on summit_county) - only runs on
 	// a route pick or a >=2 s-throttled reroute; grid-bucket it if it shows up
 	int32 Best = INDEX_NONE;
 	double BestD2 = TNumericLimits<double>::Max();
@@ -405,10 +405,10 @@ bool AODRoadManager::GetNextTurn(float& OutDistCm, float& OutAngleDeg) const
 void AODRoadManager::UpdateRouteProgress(const FVector2D& P)
 {
 	// windowed nearest-segment search around the last known segment (the
-	// player can't cover 60 x ~20 m nodes between frames); a teleport/fast
+	// player can't cover 240 x ~5 m nodes between frames); a teleport/fast
 	// travel just reads as "off route" and reroutes below
-	const int32 Lo = FMath::Max(0, RouteSeg - 3);
-	const int32 Hi = FMath::Min(RoutePts.Num() - 2, RouteSeg + 60);
+	const int32 Lo = FMath::Max(0, RouteSeg - 12);
+	const int32 Hi = FMath::Min(RoutePts.Num() - 2, RouteSeg + 240);
 	double BestD2 = TNumericLimits<double>::Max();
 	for (int32 i = Lo; i <= Hi; ++i)
 	{

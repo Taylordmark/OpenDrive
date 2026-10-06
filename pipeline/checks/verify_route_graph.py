@@ -125,7 +125,7 @@ def route_turns(pts, cum, deg_path):
 def progress(pts, cum, seg, p):
     """Mirror of AODRoadManager::UpdateRouteProgress's windowed search ->
     (seg, progress_cm, remaining_cm, off_route_dist_cm)."""
-    lo, hi = max(0, seg - 3), min(len(pts) - 2, seg + 60)
+    lo, hi = max(0, seg - 12), min(len(pts) - 2, seg + 240)
     best = (np.inf, seg, 0.0)
     for i in range(lo, hi + 1):
         a, d = pts[i], pts[i + 1] - pts[i]
@@ -275,8 +275,11 @@ def main():
                 arrived = True
                 break
         mid = pts[len(pts) // 2]
-        cand = np.flatnonzero((np.hypot(*(nodes - mid).T) > 15000) & (np.hypot(*(nodes - mid).T) < 40000)
+        cand = np.flatnonzero((np.hypot(*(nodes - mid).T) > 15000) & (np.hypot(*(nodes - mid).T) < 100000)
                               & (labels == labels[path[0]]))
+        # stride-1 graph: the nearest candidate can lie on the route itself,
+        # so keep only nodes truly off it (> 150 m from every route point)
+        cand = cand[[np.hypot(*(pts - nodes[c]).T).min() > 15000 for c in cand]]
         stray = nodes[cand[np.argmin(np.hypot(*(nodes[cand] - mid).T))]]
         _, _, _, off = progress(pts, cum, len(pts) // 2, stray)
         new_path, new_len = find_path(nodes, adj, nearest(nodes, stray), path[-1])

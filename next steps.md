@@ -109,6 +109,9 @@ Group these into a few drive sessions. Each line says what to judge.
     the right carriageway (e.g. Frisco→Breckenridge via CO 9) (§7.37);
   - garage picks (car, engine, drivetrain, tuning, area) survive a restart;
   - `-odspawnx/y` spawns facing along the road.
+  - mini-map: roads and the route line up through hairpins; the Travel
+    (heading-up) mode reads well; route pick/reroute has no hitch on the
+    4x denser graph.
 - **Art:**
   - the overall Crew 2 pass verdict;
   - the Super car's rear-wing read;

@@ -315,7 +315,7 @@ void AODPauseMenu::Activate()
 			}
 		}
 	}
-	else if (Selected == 4)               // Garage (car/engine/drivetrain/tuning, in place)
+	else if (Selected == 5)               // Garage (car/engine/drivetrain/tuning, in place)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
@@ -323,17 +323,17 @@ void AODPauseMenu::Activate()
 			Main->OpenGarage();           // keeps the game paused; Back/esc resumes here
 		}
 	}
-	else if (Selected == 5)               // Settings
+	else if (Selected == 6)               // Settings
 	{
 		EnsureSettingsMenu();
 		bSettingsOpen = true;
 	}
-	else if (Selected == 6)               // Credits
+	else if (Selected == 7)               // Credits
 	{
 		EnsureCreditsMenu();
 		bCreditsOpen = true;
 	}
-	else if (Selected == 7)               // Main Menu (front-end Main screen)
+	else if (Selected == 8)               // Main Menu (front-end Main screen)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
@@ -341,7 +341,7 @@ void AODPauseMenu::Activate()
 			Main->OpenMenu();             // keeps the game paused
 		}
 	}
-	else if (Selected == 8)               // Quit Game
+	else if (Selected == 9)               // Quit Game
 	{
 		UKismetSystemLibrary::QuitGame(this,
 			UGameplayStatics::GetPlayerController(this, 0),
@@ -389,9 +389,21 @@ void AODPauseMenu::Adjust(int32 Dir)
 				D->bAbsEnabled ? TEXT("on") : TEXT("off"));
 		}
 		break;
+	case 4:  // mini-map orientation: North <-> Travel (heading-up)
+		if (AODRaceHUD* Hud = FindHud())
+		{
+			Hud->SetMiniMapHeadingUp(!Hud->IsMiniMapHeadingUp());
+		}
+		break;
 	default:
 		break;
 	}
+}
+
+AODRaceHUD* AODPauseMenu::FindHud() const
+{
+	const APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	return PC ? Cast<AODRaceHUD>(PC->GetHUD()) : nullptr;
 }
 
 UODVehicleMovement* AODPauseMenu::FindMovement() const
@@ -443,22 +455,30 @@ void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		}
 		break;
 	case 4:
+		OutLabel = TEXT("Mini-Map");
+		OutValue = TEXT("?");
+		if (const AODRaceHUD* Hud = FindHud())
+		{
+			OutValue = Hud->IsMiniMapHeadingUp() ? TEXT("Travel") : TEXT("North");
+		}
+		break;
+	case 5:
 		OutLabel = TEXT("Garage");
 		OutValue.Empty();
 		break;
-	case 5:
+	case 6:
 		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
-	case 6:
+	case 7:
 		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
-	case 7:
+	case 8:
 		OutLabel = TEXT("Main Menu");
 		OutValue.Empty();
 		break;
-	case 8:
+	case 9:
 		OutLabel = TEXT("Quit Game");
 		OutValue.Empty();
 		break;
