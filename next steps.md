@@ -11,6 +11,10 @@ When something here is finished, delete it from this file and add a line to
 
 ---
 
+Realism work (traffic, roadside furniture, crash response, unpaved surfaces,
+water/coast, tunnels, wet weather) is phased in
+[`PLAN-REALISM.md`](PLAN-REALISM.md).
+
 ## 1. Now: road/terrain fit follow-ups (from §7.43–7.47)
 
 - **Dennison Road hairpin (Taylor to judge in a drive).** Station 184480 at
