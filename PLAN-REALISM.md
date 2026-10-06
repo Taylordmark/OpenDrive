@@ -23,15 +23,15 @@ stylized, low-poly, intentional.
 
 ---
 
-## Decisions needed from Taylor (before the phase that needs them)
+## Decisions (Taylor, 2026-10-05)
 
-| # | Question | Needed by | Default if unanswered |
-|---|---|---|---|
-| D1 | Crash outcome: a clean stop only, or also stylized cosmetic damage (crumpled panels or a tint, no deformation sim)? | Phase 0 | Clean stop + impact sound, no damage visuals |
-| D2 | Unpaved roads get a third grip tier. This is still "on the road", so the two-tier off-road rule (`SurfaceGrip`, 2026-07-20) stands. OK? | Phase 2 | Yes, gravel 0.80 / dirt 0.70 of on-road grip |
-| D3 | Traffic in time trials: off, or the same as free roam? | Phase 3 | Off in a race, on in free roam |
-| D4 | Traffic density default, and whether the settings get a slider | Phase 3 | Medium, with an Off/Low/Medium/High row in settings |
-| D5 | Do traffic cars obey signals/stops strictly, or "mostly" (some run ambers)? | Phase 3 | Strictly. Simpler, and replication-friendly |
+| # | Question | Decision |
+|---|---|---|
+| D1 | Crash outcome | **A clean stop for now.** Impact sound and camera shake, no damage visuals. |
+| D2 | A third grip level for unpaved roads | **Yes.** The two-tier off-road rule (`SurfaceGrip`, 2026-07-20) stays: unpaved roads are still "on the road". |
+| D3 | Traffic in time trials | **Off in a race, on in free roam.** |
+| D4 | Traffic density | **Varies by population and time of day, realistically.** Hitting I-5 at rush hour should mean being stuck in traffic. No fixed density level. |
+| D5 | Signal/stop compliance | **Strict for now.** |
 
 ---
 
@@ -57,8 +57,8 @@ trimesh collision.
    - Zero the tire forces when fewer than two wheels have contact (Park hold
      already does this).
 3. **Feedback:** an impact "crunch" one-shot scaled by the normal speed
-   (CC0, normalized like the §5.4 loops) and a small camera shake. Add
-   damage visuals only if D1 says so.
+   (CC0, normalized like the §5.4 loops) and a small camera shake. No damage
+   visuals (D1).
 4. **Check:** a small C++-free mirror isn't worth it. Instead, extend the
    trace hook so one scripted `-odrev` run into a known building logs the
    peak speed after impact. Pass if it's ≤ the impact speed. (That run is
@@ -126,7 +126,8 @@ uses it.
    `oneway` chunk flag, and write the class in the chunk header.
    `AODRoadManager` picks `M_Road_Gravel` / `M_Road_Dirt`, with no lane
    markings and their own physmats `PM_Gravel` / `PM_Dirt`.
-3. `SurfaceGrip`: add the third tier per D2. Weather wetness lowers unpaved
+3. `SurfaceGrip`: add the third tier (D2), with gravel 0.80 and dirt 0.70 of
+   on-road grip as starting values, tuned in the drive check. Weather wetness lowers unpaved
    grip more than asphalt (mud).
 4. `UODRoadNoiseSynth`: a gravel crunch layer keyed on the same physmat.
 5. **Check:** print a per-area count of km per class, plus a test of the tag
@@ -153,45 +154,98 @@ feel fair, and does the sound sell it?
   wrong-way edges on ramps, and the main component covers ≥ 98% of the km
   (this also covers the Blue River/Jefferson split).
 
-### 3b. Traffic runtime (`AODTrafficManager`)
-- **Agents are kinematic, not simulated:** each follows its lane polyline
-  at an arc-length position, with Z from the polyline. That's cheap, has no
-  physics jitter, and stays deterministic.
-- **Behaviour:**
-  - IDM car-following, with the player car as a possible leader;
-  - lane choice only at junctions (no lane changes in v1);
-  - gap acceptance at stop/give-way;
-  - fixed-cycle signal phases;
-  - a speed limit plus a per-agent factor (0.9–1.1).
-- **Spawning:**
-  - a ring 400–1500 m from the player, out of view, and despawn behind;
-  - density by highway class × settlement × hour (fewer at night);
-  - seeded per edge and time bucket (decision 4).
-- **Collision:** a kinematic box with a hit on contact with the player. On
-  contact the agent becomes simulated physics and goes through Phase 0's
-  crash handling, then despawns after it settles. This is why Phase 0 comes
-  first.
-- **Perf budget:** ≤ 1 ms/frame for 60 agents. Agents past 600 m tick at
-  2 Hz. Mark it `ponytail:` if it starts as an O(N²) leader search.
-- **Multi-set:** one manager for the world that reads the nearest area's
-  graph, like HUD nav.
+### 3b. Traffic demand (pipeline, D4)
+Density comes from real volumes and real daily patterns, not a setting.
+- **Volumes:** FHWA HPMS AADT (annual average daily traffic) for each
+  federal-aid road segment. It's public domain and nationwide, and covers
+  I-5, US/state routes and major arterials. A new fetch goes in the §7.50
+  cache. Match it to OSM chains by `ref` plus distance along the
+  centerline. Add it to README § Data credits / `build_credits.py`
+  (decision 6).
+- **Fallback for unmatched roads** (locals, most residential): AADT from
+  highway class × the population around it. Population comes from the US
+  Census block-group density raster (public domain), sampled per station.
+  This also replaces the settlement guess for local streets.
+- **Hourly and weekly shape:** the FHWA Traffic Monitoring Guide hourly and
+  day-of-week factors (urban vs rural, weekday vs weekend). Urban
+  interstates get the two-peak commute curve (7–9 and 16–19), with the
+  peak direction set by the side of the edge facing the city centre.
+- **Per directed edge, store:** AADT, direction split, the urban/rural
+  profile id and capacity (lanes × ~1,900 veh/h/lane on freeways, less on
+  arterials). Put it in the `ODN1` sidecar.
+- **Check:** a test that I-5 near a city at 17:30 on a weekday has demand
+  above capacity (so it jams) and is free-flowing at 03:00. A per-area plot
+  of demand / capacity by hour goes in `scratchpad/`.
 
-### 3c. Look and sound
+### 3c. Traffic runtime (`AODTrafficManager`)
+- **Clock:** `AODDayNightController` has `TimeOfDay` but no day count. Add
+  a day counter (it ticks when the hour wraps) so weekday/weekend works.
+  Weekdays are the default on a fresh start.
+- **Target density per edge** comes from the fundamental diagram: hourly
+  flow q = AADT × hour factor × direction split. Below capacity, take the
+  free-flow branch of the diagram; above it, the congested branch. A jam
+  is a stopped queue near jam density (~130 veh/km/lane) behind the
+  bottleneck (lane drop, merge, signal). IDM then produces stop-and-go by
+  itself.
+- **Two tiers, so a jam fits the budget.** A jammed 4+4-lane I-5 over a
+  1.5 km radius is ~3,000 cars:
+  - *Near tier (≤ ~300 m, up to ~150 agents):* kinematic agents on their
+    lane polylines at an arc-length position, with Z from the polyline.
+    - IDM following, with the player car as a possible leader.
+    - Lane choice at junctions, plus mandatory lane changes before a split
+      or exit (MOBIL rule). Discretionary lane changes are v2.
+    - Gap acceptance at stop/give-way.
+    - Fixed-cycle signals, obeyed strictly (D5).
+    - Per-agent speed factor 0.9–1.1 of the limit.
+  - *Far tier:* no agents. Each edge is split into cells with a density and
+    speed, stepped at 1–2 Hz (cell transmission model). Cars are drawn as
+    HISM instances spaced at the cell density and moving at the cell speed.
+    The two tiers swap cars at the 300 m boundary, so the queue you join is
+    the one you saw from a distance.
+- **Spawn and persistence:** on load, fill every edge in range to its
+  target density straight away, so you can start in the middle of a jam.
+  After that, cars enter at the edges of the range and leave behind the
+  player. A jam ahead stays until the clock moves past the peak.
+  Everything is seeded per edge and time bucket (decision 4).
+- **Collision:** near-tier agents are kinematic boxes. On contact with the
+  player an agent becomes simulated physics and goes through Phase 0's
+  crash handling, then despawns once it has settled. This is why Phase 0
+  comes first. Far-tier instances have no collision (they're always out of
+  reach).
+- **Perf budget:** ≤ 1.5 ms/frame at a full I-5 jam (150 near agents +
+  ~3,000 far instances). The far tier's cost is the per-cell update and the
+  HISM transform writes. Mark it `ponytail:` if the leader search starts
+  O(N²).
+- **Multi-set:** one manager for the world, reading the nearest area's
+  graph like HUD nav does. Cells at area seams hand off to the neighbouring
+  area's edge.
+
+### 3d. Look and sound
 - The five car meshes with a random paint parameter (shared with 4.3
-  cosmetics), headlights at night and brake lights from IDM deceleration.
-- Pass-by audio: the closest 4 agents get a cheap engine synth instance,
-  and the rest are silent.
+  cosmetics). Headlights at night, and brake lights from IDM deceleration
+  (far tier: from the cell speed dropping). A jam at night reads as a river
+  of brake lights.
+- Pass-by audio: the closest 4 agents get a cheap engine synth instance.
+  A jam adds an idle-traffic ambient bed, scaled by nearby density.
 
-### 3d. Settings and modes
-- Per D3/D4: a traffic row in settings (saved under `OpenDrive.Graphics`),
-  and the race manager suppresses spawns on a stage.
+### 3e. Modes
+- Race (D3): the race manager turns traffic off on a stage.
+- There's no density setting (D4). The only knob is a hidden
+  `-odtraffic=0` QA flag.
 
-- **Check:** `tests/test_idm.py` (stop behind a stopped leader with no
-  overlap, reach the speed limit on a free road) and a Python mirror of the
-  junction gap rule.
+- **Checks:**
+  - `tests/test_idm.py`: stop behind a stopped leader with no overlap, and
+    reach the speed limit on a free road;
+  - `tests/test_ctm.py`: a lane drop above capacity grows a queue
+    upstream, and the queue clears once demand falls;
+  - a Python mirror of the junction gap rule;
+  - a near/far handoff test: the car count is conserved across the 300 m
+    boundary.
 
-**Drive check:** free roam through Frisco and on I-70. Look for density,
-pop-in, junction deadlocks and how traffic reacts to the player.
+**Drive check:** Frisco and I-70 at midday and at 17:30. Also a
+California member on I-5 near a city at rush hour (needs that area baked).
+Look for density, pop-in, the jam feeling stuck, junction deadlocks, and
+how traffic reacts to the player.
 
 ---
 
@@ -258,7 +312,7 @@ pop-in, junction deadlocks and how traffic reacts to the player.
 | 0 Crash | S | — |
 | 1 Furniture | M | — |
 | 2 Surfaces | S | — |
-| 3 Traffic | L | 0, 1 (junction control), nav one-way via 3a |
+| 3 Traffic | XL (with the D4 demand model and the far tier) | 0, 1 (junction control), nav one-way via 3a |
 | 4 Water/coast | M | — |
 | 5 Tunnels/stacks | M–L | — |
 | 6 Wet weather | S–M | — |
