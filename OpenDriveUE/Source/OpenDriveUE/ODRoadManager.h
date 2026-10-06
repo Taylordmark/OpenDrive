@@ -380,7 +380,7 @@ private:
 	TArray<FVector2D> RouteNodes;
 	TArray<int32> RouteAdjStart;   // RouteNodes.Num()+1
 	TArray<int32> RouteAdjNode;
-	TArray<float> RouteAdjLen;     // cm
+	TArray<float> RouteAdjLen;     // A* cost, cm (wrong-way arcs x WrongWayCostMult)
 
 	TArray<FVector2D> RoutePts;
 	TArray<float> RouteCum;        // arc length (cm) from RoutePts[0]

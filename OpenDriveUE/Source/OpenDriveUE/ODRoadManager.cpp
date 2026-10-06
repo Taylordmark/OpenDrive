@@ -149,6 +149,9 @@ constexpr float TurnMergeCm = 3000.0f;   // junction nodes this close = one turn
 constexpr float OffRouteCm = 5000.0f;    // reroute past 50 m off the route line
 constexpr double RerouteCooldownS = 2.0;
 constexpr float ArriveCm = 3000.0f;
+// one-way (2026-10-06): a wrong-way arc costs this much more, so a legal route
+// always wins and a graph gap still routes (shortest wrong-way stretch)
+constexpr float WrongWayCostMult = 20.0f;
 }
 
 void AODRoadManager::LoadRouteGraph()
@@ -168,7 +171,10 @@ void AODRoadManager::LoadRouteGraph()
 	const int64 N = ReadU32LE(Bin.GetData() + 4);
 	const int64 EOff = 8 + N * 8;
 	const int64 E = Bin.Num() >= EOff + 4 ? ReadU32LE(Bin.GetData() + EOff) : -1;
-	if (N <= 0 || E < 0 || Bin.Num() != EOff + 4 + E * 12)
+	// optional trailing one-way block (2026-10-06): E * int8, +1 = a->b only,
+	// -1 = b->a only, 0 = both. Older files end at the edges: all two-way.
+	const bool bHasOneway = Bin.Num() == EOff + 4 + E * 13;
+	if (N <= 0 || E < 0 || (Bin.Num() != EOff + 4 + E * 12 && !bHasOneway))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODRoadManager: %s truncated/corrupt"), *BinPath);
 		return;
@@ -202,15 +208,19 @@ void AODRoadManager::LoadRouteGraph()
 	RouteAdjNode.SetNumUninitialized(E * 2);
 	RouteAdjLen.SetNumUninitialized(E * 2);
 	TArray<int32> Fill(RouteAdjStart.GetData(), N);
+	const int8* Oneway = bHasOneway ? reinterpret_cast<const int8*>(EP + E * 12) : nullptr;
 	for (int64 e = 0; e < E; ++e)
 	{
 		const int32 A = ReadU32LE(EP + e * 12), B = ReadU32LE(EP + e * 12 + 4);
 		const float L = ReadF32LE(EP + e * 12 + 8);
-		RouteAdjNode[Fill[A]] = B; RouteAdjLen[Fill[A]++] = L;
-		RouteAdjNode[Fill[B]] = A; RouteAdjLen[Fill[B]++] = L;
+		const int8 Dir = Oneway ? Oneway[e] : 0;
+		// both arcs stay (junction degree for turn prompts ignores one-way);
+		// the wrong-way one just costs WrongWayCostMult x
+		RouteAdjNode[Fill[A]] = B; RouteAdjLen[Fill[A]++] = Dir < 0 ? L * WrongWayCostMult : L;
+		RouteAdjNode[Fill[B]] = A; RouteAdjLen[Fill[B]++] = Dir > 0 ? L * WrongWayCostMult : L;
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges from %s"),
-		N, E, *BinPath);
+	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges (one-way %s) from %s"),
+		N, E, bHasOneway ? TEXT("yes") : TEXT("no, old file"), *BinPath);
 }
 
 int32 AODRoadManager::NearestRouteNode(const FVector2D& Q) const

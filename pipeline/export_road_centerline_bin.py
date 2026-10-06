@@ -52,8 +52,13 @@ segment ends within ROUTE_END_END_JOIN_M (junction pullback), (d) the
 shortest end-end pair within ROUTE_BRIDGE_JOIN_M that joins two still-separate
 pieces (Kruskal-style) - all
 gated on elevation (and, for (b)-(d), neither being a bridge/tunnel/structure)
-so a grade-separated overpass never becomes a fake intersection. Oneway is
-ignored (known limitation - see SS7.37). AODRoadManager loads this at
+so a grade-separated overpass never becomes a fake intersection.
+Oneway (2026-10-06): an optional trailing block E * int8 follows the edges,
++1 = a->b only, -1 = b->a only, 0 = both (old files without it = all two-way).
+road_stations.json's "oneway" bool has no direction (chains reverse ways), so
+station_oneway_dirs() re-reads the raw osm.json and matches each station to
+the nearest directed OSM way. Only along-segment edges get a direction; link
+edges stay two-way. AODRoadManager loads this at
 BeginPlay (path derived from CenterlineFilePrefix, centerline_ -> routegraph_)
 and runs A* on it; pipeline/checks/verify_route_graph.py is the Python mirror.
 """
@@ -64,10 +69,11 @@ from pathlib import Path
 
 import numpy as np
 
-from test_areas import AREA_NAME
+from test_areas import AREA_NAME, to_local
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
+OSM_PATH = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 # Map-only simplification tolerance (cm) - this line is a schematic overview,
@@ -91,6 +97,7 @@ ROUTE_END_END_DZ_M = 3.0
 # ONLY when it joins two still-disconnected pieces (road filtering drops some
 # short interchange connectors, leaving e.g. Silverthorne an island)
 ROUTE_BRIDGE_JOIN_M = 60.0
+ROUTE_ONEWAY_END_JOIN_M = 100.0   # rule (e): unlinked one-way dead ends only
 
 
 def simplify_rdp(points, epsilon):
@@ -128,12 +135,72 @@ def simplify_rdp(points, epsilon):
     return points[keep]
 
 
-def build_route_graph(segments):
-    """-> (nodes_cm Nx2 float64, edges list of (a, b, len_cm)). See the
-    module docstring for the node/link rules."""
+ONEWAY_MATCH_M = 3.0   # station -> own OSM way (densified at <=5 m) is <=2.5 m
+
+
+def oneway_travel_dir(tags):
+    """+1 = travel along the way's node order, -1 = against, 0 = two-way.
+    OSM: yes/1/true, -1/reverse; implied for motorway, motorway_link and
+    roundabouts unless explicitly tagged; reversible/alternating = 0."""
+    v = tags.get("oneway")
+    if v is None:
+        implied = (tags.get("highway") in ("motorway", "motorway_link")
+                   or tags.get("junction") in ("roundabout", "circular"))
+        return 1 if implied else 0
+    return {"yes": 1, "1": 1, "true": 1, "-1": -1, "reverse": -1}.get(v, 0)
+
+
+def station_oneway_dirs(segments, osm):
+    """Per segment, an int8 array: +1 = travel in increasing station order,
+    -1 = decreasing, 0 = two-way. Each station takes the nearest point of a
+    densified directed OSM way within ONEWAY_MATCH_M whose heading is near-
+    parallel to the station's; its sign is the travel direction."""
+    from scipy.spatial import cKDTree
+
+    nodes = {e["id"]: (e["lon"], e["lat"]) for e in osm["elements"] if e["type"] == "node"}
+    pts, vec = [], []
+    for w in osm["elements"]:
+        d = oneway_travel_dir(w.get("tags", {})) if w["type"] == "way" else 0
+        ll = np.array([nodes[n] for n in w.get("nodes", []) if n in nodes]) if d else []
+        if len(ll) < 2:
+            continue
+        p = np.stack(to_local(ll[:, 0], ll[:, 1]), axis=1)
+        for a, b in zip(p[:-1], p[1:]):
+            k = max(int(np.ceil(np.hypot(*(b - a)) / 5.0)), 1)
+            t = np.arange(k + 1)[:, None] / k
+            pts.append(a + (b - a) * t)
+            vec.append(np.repeat([(b - a) * d], k + 1, axis=0))
+    out = []
+    if not pts:
+        return [np.zeros(len(seg["east_m"]), dtype=np.int8) for seg in segments]
+    pts, vec = np.concatenate(pts), np.concatenate(vec)
+    vec /= np.maximum(np.hypot(vec[:, 0], vec[:, 1]), 1e-9)[:, None]
+    tree = cKDTree(pts)
+    for seg in segments:
+        xy = np.stack([seg["east_m"], seg["north_m"]], axis=1)
+        dirs = np.zeros(len(xy), dtype=np.int8)
+        if len(xy) >= 2:
+            tan = np.gradient(xy, axis=0)
+            tan /= np.maximum(np.hypot(tan[:, 0], tan[:, 1]), 1e-9)[:, None]
+            dist, j = tree.query(xy, distance_upper_bound=ONEWAY_MATCH_M)
+            hit = np.isfinite(dist)
+            dot = np.zeros(len(xy))
+            dot[hit] = (tan[hit] * vec[j[hit]]).sum(axis=1)
+            dirs[dot > 0.7] = 1
+            dirs[dot < -0.7] = -1
+        out.append(dirs)
+    return out
+
+
+def build_route_graph(segments, station_dirs=None):
+    """-> (nodes_cm Nx2 float64, edges list of (a, b, len_cm, dir)). dir is
+    +1 a->b only, -1 b->a only, 0 both; station_dirs (station_oneway_dirs())
+    None = all two-way. See the module docstring for the node/link rules."""
     from scipy.spatial import cKDTree
 
     xy, z, seg_id, s_m, structural, ends = [], [], [], [], [], []
+    sdir = (np.concatenate(station_dirs) if station_dirs is not None
+            else np.zeros(sum(len(seg["east_m"]) for seg in segments), dtype=np.int8))
     off = 0
     for k, seg in enumerate(segments):
         n = len(seg["east_m"])
@@ -199,6 +266,29 @@ def build_route_graph(segments):
         if ra != rb:
             parent[ra] = rb
             links.add((min(a, b), max(a, b)))
+    # (e) one-way dead ends (2026-10-06): a still-unlinked carriageway end that
+    # travel runs into (sink) or out of (source) joins the nearest other end
+    # within ROUTE_ONEWAY_END_JOIN_M that isn't the same kind. Dropped short
+    # connectors (e.g. CO 9 / Swan Mtn Rd, 72 m) otherwise trap one-way
+    # routing; two-way routing just reversed down the other carriageway.
+    is_first = np.append(True, seg_id[1:] != seg_id[:-1])
+    sink = (is_last & (sdir == 1)) | (is_first & (sdir == -1))
+    source = (is_first & (sdir == 1)) | (is_last & (sdir == -1))
+    linked = {i for ab in links for i in ab}
+    for e in ends_arr[(sink | source)[ends_arr]]:
+        if e in linked or structural[e]:
+            continue
+        best = None
+        for jj in etree.query_ball_point(xy[e], ROUTE_ONEWAY_END_JOIN_M):
+            j = ends_arr[jj]
+            if (seg_id[j] == seg_id[e] or structural[j] or abs(z[j] - z[e]) > ROUTE_END_END_DZ_M
+                    or (sink[e] and sink[j]) or (source[e] and source[j])):
+                continue
+            d = float(np.hypot(*(xy[j] - xy[e])))
+            if best is None or d < best[0]:
+                best = (d, j)
+        if best:
+            links.add((min(e, best[1]), max(e, best[1])))
     for a, b in links:
         keep[a] = keep[b] = True
 
@@ -208,11 +298,13 @@ def build_route_graph(segments):
     edges = []
     for i0, i1 in zip(kept[:-1], kept[1:]):
         if seg_id[i0] == seg_id[i1]:
+            # one-way only when both ends agree (a way change mid-edge = two-way)
+            d = int(sdir[i0]) if sdir[i0] == sdir[i1] else 0
             edges.append((int(node_of[i0]), int(node_of[i1]),
-                          max(float(s_m[i1] - s_m[i0]) * 100.0, 1.0)))
+                          max(float(s_m[i1] - s_m[i0]) * 100.0, 1.0), d))
     for a, b in sorted(links):
         edges.append((int(node_of[a]), int(node_of[b]),
-                      max(float(np.hypot(*(xy[a] - xy[b]))) * 100.0, 1.0)))
+                      max(float(np.hypot(*(xy[a] - xy[b]))) * 100.0, 1.0), 0))
     nodes_cm = np.stack([xy[kept, 0] * 100.0, -xy[kept, 1] * 100.0], axis=1)
     return nodes_cm, edges
 
@@ -223,7 +315,8 @@ def write_route_graph(path, nodes_cm, edges):
         f.write(struct.pack("<I", len(nodes_cm)))
         f.write(np.asarray(nodes_cm, dtype="<f4").tobytes())
         f.write(struct.pack("<I", len(edges)))
-        f.write(np.array(edges, dtype=[("a", "<u4"), ("b", "<u4"), ("l", "<f4")]).tobytes())
+        f.write(np.array([e[:3] for e in edges], dtype=[("a", "<u4"), ("b", "<u4"), ("l", "<f4")]).tobytes())
+        f.write(np.array([e[3] for e in edges], dtype="i1").tobytes())   # oneway block
 
 
 def main():
@@ -268,10 +361,12 @@ def main():
           f"simplified from {total_raw} raw stations across "
           f"{len(data['segments'])} segment(s), {8 + len(map_points) * 8} bytes)")
 
-    nodes_cm, edges = build_route_graph(data["segments"])
+    station_dirs = station_oneway_dirs(data["segments"], json.loads(OSM_PATH.read_text()))
+    nodes_cm, edges = build_route_graph(data["segments"], station_dirs)
     graph_path = OUT_DIR / f"routegraph_{AREA_NAME}_test.bin"
     write_route_graph(graph_path, nodes_cm, edges)
-    print(f"wrote {graph_path} ({len(nodes_cm)} nodes, {len(edges)} edges)")
+    print(f"wrote {graph_path} ({len(nodes_cm)} nodes, {len(edges)} edges, "
+          f"{sum(1 for e in edges if e[3])} one-way)")
 
 
 if __name__ == "__main__":

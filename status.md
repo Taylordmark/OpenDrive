@@ -75,7 +75,8 @@ scale, built from open data, with a stylized "real places, storybook look".
 - **QA flags and gotchas:**
   - `-game` renders need `-log`. Without `-game`, `AODMainMenu::BeginPlay`
     never runs.
-  - `-odspawnx/y` needs `-odgo=N` or `-odpick`.
+  - `-odspawnx/y` needs `-odgo=N` or `-odpick`. The car faces along the
+    nearest road there (2026-10-06).
   - Scripted throttle needs both `-odrev=1` and `-odthr`. In PowerShell,
     quote it: `"-odthr=0.45"`.
   - `-odshot` causes its own hitch, so exclude those frames from hitch counts.
@@ -184,8 +185,18 @@ were decoupled from it on 2026-07-20.
     color background.
   - v3 (§7.37): ODG1 route graph (72,617 nodes), A* routing with reroute and
     arrival, world map, nav panel, fast travel via `TravelToTown()`.
-- **4.3:** live car/engine/drivetrain/tuning picker in the garage. Cosmetics
-  and persistence are still open.
+  - One-way (2026-10-06, compiled, not driven): `export_road_centerline_bin.py`
+    matches stations to directed OSM ways (`oneway` yes/1/true/-1, implied for
+    motorway/motorway_link/roundabouts) and appends an optional per-edge
+    direction block to ODG1; old files load as two-way. A* keeps both arcs but
+    a wrong-way arc costs ×20 (`WrongWayCostMult`), so graph gaps still route.
+    Rule (e) joins unlinked one-way dead ends to the nearest end within 100 m.
+    Summit: wrong-way on the 8 test routes 81 km → 0.2 km. All six area graphs
+    re-exported.
+- **4.3:** live car/engine/drivetrain/tuning picker in the garage. Picks
+  persist (2f0a03f): `OpenDrive.Car` (VehicleIdx, read by the pawn; EngineIdx,
+  DriveIdx, TunePreset) and `OpenDrive.Area`, saved on change, out-of-range
+  values fall back to stock. Cosmetics are still open.
 - **4.4** (§7.31): settings (11 rows, Off/TSR upscaler) and generated credits
   (30/30). Saved under `OpenDrive.Graphics` and `OpenDrive.Audio`.
 - **Area picker** (2026-10-05, not yet compiled or built). Garage Options tab

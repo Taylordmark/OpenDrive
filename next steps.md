@@ -104,7 +104,11 @@ Group these into a few drive sessions. Each line says what to judge.
     presets differ (§7.31);
   - the 25-row rebind panel, and gamepad capture on hardware (§7.32);
   - world map controls, false turn prompts at interchanges, reroute
-    thresholds, fast-travel landing (§7.37).
+    thresholds, fast-travel landing (§7.37);
+  - one-way routing: routes on divided highways and ramps should follow
+    the right carriageway (e.g. Frisco→Breckenridge via CO 9) (§7.37);
+  - garage picks (car, engine, drivetrain, tuning, area) survive a restart;
+  - `-odspawnx/y` spawns facing along the road.
 - **Art:**
   - the overall Crew 2 pass verdict;
   - the Super car's rear-wing read;
@@ -118,10 +122,6 @@ Group these into a few drive sessions. Each line says what to judge.
 
 ## 3. Gameplay and UX
 
-- **Garage persistence.** Car, engine, drivetrain and tuning choices don't
-  persist. Only Audio, Exhaust, Graphics, Input and Season are saved. Add
-  GConfig save/load in `AODMainMenu` and `AODTuningManager`, following the
-  `OpenDrive.Exhaust` pattern.
 - **4.3 cosmetics v1:** paint color and wraps. Acceptance: 4–6 cars, color
   choice and preset choice, all persisted.
 - **Stage 3 vehicle work:**
@@ -134,8 +134,10 @@ Group these into a few drive sessions. Each line says what to judge.
   - a standing-start countdown;
   - full input recording for ghosts (they store transforms only today).
 - **Navigation (§7.37):**
-  - honor one-way restrictions, since routes can currently go the wrong way
-    on divided highways and ramps;
+  - one-way leftovers: 11 sink / 7 source carriageway ends stay unlinked,
+    so a route can still take a short wrong-way stretch there (190 m on
+    Frisco→Breckenridge); the nearest-node start can snap onto the
+    opposite carriageway;
   - Blue River and Jefferson are off the main graph component;
   - nearest-node lookup is O(N), marked `ponytail:`.
 - **World game layer (§7.4):**
@@ -143,8 +145,6 @@ Group these into a few drive sessions. Each line says what to judge.
   - stage discovery (drive to a famous road to unlock its time trial);
   - a cache-management UI. This one is a release requirement.
 - **Night sky:** moon and stars. Optional "real-time accurate" sun.
-- **`AODMainMenu::StartAt()`** doesn't recompute yaw when `-odspawnx/y`
-  override the position (QA tooling).
 
 ## 4. World pipeline
 

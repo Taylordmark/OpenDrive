@@ -10,6 +10,8 @@ Dijkstra, runs the sanity checks, and writes a PNG + log.
 Mirror of AODRoadManager::FindRoutePath / RecomputeRoute (turn list) /
 UpdateRouteProgress in OpenDriveUE/Source/OpenDriveUE/ODRoadManager.cpp -
 keep in sync.
+
+Usage: python verify_route_graph.py [routegraph.bin]   (default: summit_county's)
 """
 import heapq
 import struct
@@ -38,16 +40,26 @@ def load_graph(path):
     o = 8 + n * 8
     e = struct.unpack_from("<I", b, o)[0]
     edges = np.frombuffer(b, [("a", "<u4"), ("b", "<u4"), ("l", "<f4")], e, o + 4)
-    assert len(b) == o + 4 + e * 12, "trailing/short bytes"
-    return nodes, edges
+    # optional oneway block (2026-10-06): E * int8, +1 a->b only, -1 b->a only
+    assert len(b) in (o + 4 + e * 12, o + 4 + e * 13), "trailing/short bytes"
+    dirs = (np.frombuffer(b, "i1", e, o + 4 + e * 12) if len(b) == o + 4 + e * 13
+            else np.zeros(e, dtype=np.int8))
+    return nodes, edges, dirs
 
 
-def build_csr(n, edges):
-    """Same CSR build as FODRouteGraph::Load (both directions per edge)."""
+# AODRoadManager.cpp WrongWayCostMult: a wrong-way arc costs this much more,
+# so a legal route always wins and a graph gap still routes (minimal wrong-way)
+WRONG_WAY_COST_MULT = 20.0
+
+
+def build_csr(n, edges, dirs):
+    """Same CSR build as AODRoadManager::LoadRouteGraph (both directions per
+    edge, so junction degree ignores oneway; the wrong-way arc costs more).
+    Entries are (node, cost, legal)."""
     adj = [[] for _ in range(n)]
-    for a, b, l in edges:
-        adj[a].append((int(b), float(l)))
-        adj[b].append((int(a), float(l)))
+    for (a, b, l), d in zip(edges, dirs):
+        adj[a].append((int(b), float(l) * (1.0 if d >= 0 else WRONG_WAY_COST_MULT), d >= 0))
+        adj[b].append((int(a), float(l) * (1.0 if d <= 0 else WRONG_WAY_COST_MULT), d <= 0))
     return adj
 
 
@@ -66,7 +78,7 @@ def find_path(nodes, adj, start, goal):
         if closed[u]:
             continue
         closed[u] = True
-        for v, l in adj[u]:
+        for v, l, _ in adj[u]:
             ng = g[u] + l
             if ng < g[v]:
                 g[v] = ng
@@ -163,13 +175,21 @@ def load_towns():
 def main():
     log = []
     say = lambda s: (print(s), log.append(s))
-    nodes, edges = load_graph(MASKS / f"routegraph_{AREA}_test.bin")
+    nodes, edges, dirs = load_graph(Path(sys.argv[1]) if len(sys.argv) > 1
+                                    else MASKS / f"routegraph_{AREA}_test.bin")
     n = len(nodes)
-    adj = build_csr(n, edges)
+    adj = build_csr(n, edges, dirs)
     deg = np.array([len(a) for a in adj])
     say(f"graph: {n} nodes, {len(edges)} edges, junction nodes (deg>=3): {(deg >= 3).sum()}, "
         f"dead ends (deg==1): {(deg == 1).sum()}, isolated: {(deg == 0).sum()}")
+    say(f"one-way edges: {(dirs != 0).sum()}")
     m = coo_matrix((edges["l"].astype(np.float64), (edges["a"], edges["b"])), shape=(n, n)).tocsr()
+    # directed, wrong-way-penalized copy for the A* cross-check
+    lw = edges["l"].astype(np.float64)
+    md = coo_matrix((np.concatenate([lw * np.where(dirs >= 0, 1.0, WRONG_WAY_COST_MULT),
+                                     lw * np.where(dirs <= 0, 1.0, WRONG_WAY_COST_MULT)]),
+                     (np.concatenate([edges["a"], edges["b"]]),
+                      np.concatenate([edges["b"], edges["a"]]))), shape=(n, n)).tocsr()
     ncomp, labels = connected_components(m, directed=False)
     sizes = np.bincount(labels)
     say(f"connected components: {ncomp}; largest holds {sizes.max()} nodes "
@@ -199,24 +219,29 @@ def main():
             say(f"FAIL {a} -> {b}: no path (components {labels[s]} vs {labels[t]})")
             ok_all = False
             continue
-        dj = dijkstra(m, directed=False, indices=s)[t]
+        dj = dijkstra(md, directed=True, indices=s)[t]
         straight = float(np.hypot(*(towns[a] - towns[b])))
         pts = nodes[path]
         # connected: every consecutive pair is an actual graph edge
-        connected = all(any(v == path[i + 1] for v, _ in adj[path[i]]) for i in range(len(path) - 1))
+        connected = all(any(v == path[i + 1] for v, _, _ in adj[path[i]]) for i in range(len(path) - 1))
+        # (cost, legal) of the arc A* took per step -> real length + wrong-way part
+        steps = [min((c, ok) for v, c, ok in adj[path[i]] if v == path[i + 1]) for i in range(len(path) - 1)]
+        wrong = sum(c / WRONG_WAY_COST_MULT for c, ok in steps if not ok)
+        real = sum(c for c, ok in steps if ok) + wrong
         poly_len = float(np.hypot(*np.diff(pts, axis=0).T).sum())
         end_s = float(np.hypot(*(pts[0] - towns[a])))
         end_t = float(np.hypot(*(pts[-1] - towns[b])))
         checks = {
             "connected": connected,
-            "A*==Dijkstra": abs(length - dj) < 1.0,   # cm
-            "len>=straight": length >= float(np.hypot(*(pts[0] - pts[-1]))),
-            "polyline<=len": poly_len <= length + 1.0,
+            "A*==Dijkstra": abs(length - dj) < 1.0,   # cm, penalized cost
+            "len>=straight": real >= float(np.hypot(*(pts[0] - pts[-1]))),
+            "polyline<=len": poly_len <= real + 1.0,
             "endpoints<=50m": end_s <= 5000 and end_t <= 5000,
         }
         ok = all(checks.values())
         ok_all &= ok
-        say(f"{'OK  ' if ok else 'FAIL'} {a} -> {b}: route {length / 1e5:.2f} km, "
+        length = real
+        say(f"{'OK  ' if ok else 'FAIL'} {a} -> {b}: route {length / 1e5:.2f} km (wrong-way {wrong / 100:.0f} m), "
             f"straight {straight / 1e5:.2f} km (ratio {length / max(straight, 1):.2f}), "
             f"{len(path)} nodes, {int((deg[path] >= 3).sum())} junction nodes, "
             f"end offsets {end_s / 100:.1f} m / {end_t / 100:.1f} m, dijkstra {dj / 1e5:.2f} km "

@@ -1266,7 +1266,21 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 	if (FParse::Value(FCommandLine::Get(), TEXT("odspawnx="), OdSpawnX)
 		&& FParse::Value(FCommandLine::Get(), TEXT("odspawny="), OdSpawnY))
 	{
-		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: odspawn override -> (%.0f,%.0f)"), OdSpawnX, OdSpawnY);
+		// face along the nearest road at the override point (the town/default
+		// yaw above belongs to somewhere else); XY stays exactly as given
+		double BestCm = TNumericLimits<double>::Max();
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+		{
+			FVector2D Snap;
+			float SnapYaw;
+			if (It->NearestRoadPoint(FVector2D(OdSpawnX, OdSpawnY), Snap, SnapYaw)
+				&& FVector2D::Distance(FVector2D(OdSpawnX, OdSpawnY), Snap) < BestCm)
+			{
+				BestCm = FVector2D::Distance(FVector2D(OdSpawnX, OdSpawnY), Snap);
+				Yaw = SnapYaw;
+			}
+		}
+		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: odspawn override -> (%.0f,%.0f) yaw %.0f"), OdSpawnX, OdSpawnY, Yaw);
 		Pawn->TeleportToSpawn(FVector(OdSpawnX, OdSpawnY, 0.0f), Yaw);
 	}
 
