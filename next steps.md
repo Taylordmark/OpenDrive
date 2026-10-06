@@ -91,6 +91,12 @@ Group these into a few drive sessions. Each line says what to judge.
   - Vantage: `-odspawnx=733226 -odspawny=-807394 -odgo=5`.
 - **Weather:**
   - cloud and overcast values, rain streaks (§7.40);
+  - on-lens rain/snow (2026-10-06): drops land and drift off the edges
+    faster with speed, flakes stick then melt to a smear, and snowfall no
+    longer twists when the car rolls/pitches. Judge size, count, drift pace
+    and the refraction look (`Weather|Lens` knobs, `RefractionIOR` on
+    `M_LensDrop`). Pick Rain/HeavyRain/Snow/Blizzard in the garage Weather
+    row, or console `od.Weather Snow` (`od.Weather Auto` to release).
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).
@@ -242,7 +248,6 @@ Group these into a few drive sessions. Each line says what to judge.
 - W2 gaps:
   - puddle mask, wet terrain and wet foliage;
   - the Dragon's road gets no wetness (it isn't an `AODRoadManager` mesh);
-  - rain streaks ignore car speed;
   - no separate dust hiss;
   - lightning has no bolt or cloud flash.
 - W4/W5 gaps:

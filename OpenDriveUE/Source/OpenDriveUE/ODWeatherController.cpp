@@ -1,9 +1,11 @@
 #include "ODWeatherController.h"
 
+#include "Camera/CameraComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -12,6 +14,7 @@
 #include "ODForestManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
+#include "ODVehiclePawn.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -117,6 +120,16 @@ namespace
 	constexpr float HURR_GUST = 0.3f;                   // wind boost at a full gust
 	constexpr float HURR_VIS_M[2] = { 3000.0f, 300.0f }; // visibility at envelope 0 .. 1
 	constexpr float HURR_GUST_VIS = 0.15f;              // x visibility at a full gust in a band
+
+	// ---- on-lens precipitation (TickLens; the tuning knobs are UPROPERTYs) ----
+	constexpr float LENS_DISTANCE_CM = 20.0f;    // quads sit this far in front of the camera (near plane is 10 cm)
+	constexpr float LENS_RATE_REF_MS = 20.0f;    // landing rate doubles at this camera speed
+	constexpr float LENS_SAG = 0.02f;            // water slides down, half-widths/s
+	constexpr float LENS_SNOW_GRIP = 0.15f;      // an unmelted flake moves at this fraction of the airflow
+	constexpr float LENS_MELT_SHRINK = 0.6f;     // smear radius / flake radius once melted
+	constexpr float LENS_FADE_IN_S = 0.08f;      // softens the landing pop
+	constexpr float LENS_FADE_OUT = 0.25f;       // fades over the last fraction of its life
+	constexpr float LENS_TELEPORT_MS = 150.0f;   // a faster camera "speed" is a teleport/respawn, not driving
 
 	/** Raised-cosine bump, 1 at D = 0, 0 beyond +-H. */
 	float Bump(float D, float H)
@@ -413,6 +426,7 @@ void AODWeatherController::Tick(float DeltaSeconds)
 			FMath::Lerp(HURR_VIS_M[0], HURR_VIS_M[1], E) * FMath::Lerp(1.0f, HURR_GUST_VIS, Gust), A);
 	}
 	TickTornado(DeltaSeconds);
+	TickLens(DeltaSeconds);
 
 	// Snow/sleet wet the road too (slush) - W3 decides grip per PrecipType.
 	Wetness = PrecipIntensity > 0.05f
@@ -622,6 +636,147 @@ void AODWeatherController::TickTornado(float DeltaSeconds)
 		const FVector Off(FMath::Cos(A) * OrbitM, FMath::Sin(A) * OrbitM, FMath::Lerp(2.0f, 80.0f, U2 * U2));
 		DebrisISM->UpdateInstanceTransform(j, FTransform(FRotator(FunnelSpin * 97.0f * U1, FunnelSpin * 131.0f * U2, 0.0f),
 			Off * 100.0f, FVector(FMath::Lerp(0.6f, 2.5f, U3))), false, j == DEBRIS_COUNT - 1, true);
+	}
+}
+
+void AODWeatherController::TickLens(float DeltaSeconds)
+{
+	// (Re)attach to the player's camera: first pawn, or a new one after a car swap.
+	APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (Player && (!LensCam.IsValid() || LensCam->GetOwner() != Player))
+	{
+		if (UCameraComponent* Cam = Player->FindComponentByClass<UCameraComponent>())
+		{
+			if (!LensISM)
+			{
+				UMaterialInterface* Mat = LoadObject<UMaterialInterface>(
+					nullptr, TEXT("/Game/OpenDrive/Materials/M_LensDrop.M_LensDrop"));
+				if (!Mat)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ODWeatherController: M_LensDrop missing (unreal/apply_lens_drop_material.py) - no on-lens drops"));
+					LensCam = Cam;   // don't retry every tick
+					return;
+				}
+				LensISM = NewObject<UInstancedStaticMeshComponent>(this);
+				LensISM->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
+				LensISM->SetMaterial(0, Mat);
+				LensISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				LensISM->SetCastShadow(false);
+				LensISM->SetAffectDynamicIndirectLighting(false);
+				LensISM->TranslucencySortPriority = 100;   // over the falling pool and other translucency
+				LensISM->SetNumCustomDataFloats(2);         // 0 = Kind (1 flake .. 0 water), 1 = Fade
+				LensISM->RegisterComponent();
+				TArray<FTransform> Xf;
+				Xf.Init(FTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector), FMath::Max(LensMaxDrops, 1));
+				LensISM->AddInstances(Xf, false);
+			}
+			LensISM->AttachToComponent(Cam, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			LensCam = Cam;
+			LensPrevCamLoc = Cam->GetComponentLocation();
+		}
+	}
+	UCameraComponent* Cam = LensCam.Get();
+	if (!Cam || !LensISM || LensISM->GetAttachParent() != Cam)
+	{
+		return;
+	}
+
+	// Camera speed from its own motion (the chase cam's, which is what the
+	// airflow over the "lens" follows); a jump is a teleport, not speed.
+	const FVector CamLoc = Cam->GetComponentLocation();
+	const float RawMs = FVector::Dist(CamLoc, LensPrevCamLoc) / 100.0f / FMath::Max(DeltaSeconds, 1.0e-3f);
+	LensPrevCamLoc = CamLoc;
+	if (RawMs < LENS_TELEPORT_MS)
+	{
+		LensSpeedMs = FMath::Lerp(LensSpeedMs, RawMs, 1.0f - FMath::Exp(-4.0f * DeltaSeconds));
+	}
+
+	int32 VpW = 16, VpH = 9;
+	if (const APlayerController* PC = Player ? Cast<APlayerController>(Player->GetController()) : nullptr)
+	{
+		PC->GetViewportSize(VpW, VpH);
+	}
+	const float HalfH = VpW > 0 && VpH > 0 ? (float)VpH / VpW : 9.0f / 16.0f;   // screen half-height, half-widths
+
+	// Landings: none in the garage showroom (indoors / menus).
+	const AODVehiclePawn* Car = Cast<AODVehiclePawn>(Player);
+	const int32 Pool = LensISM->GetInstanceCount();
+	if (PrecipIntensity > 0.02f && !(Car && Car->IsInShowroom()))
+	{
+		LensSpawnDebt += DeltaSeconds * LensDropsPerSecond * PrecipIntensity * (1.0f + LensSpeedMs / LENS_RATE_REF_MS);
+		for (; LensSpawnDebt >= 1.0f; LensSpawnDebt -= 1.0f)
+		{
+			if (LensDrops.Num() >= Pool)
+			{
+				continue;
+			}
+			FLensDrop& D = LensDrops.AddDefaulted_GetRef();
+			D.bSnow = FMath::FRand() < PrecipType;   // sleet = a mix
+			D.Kind = D.bSnow ? 1.0f : 0.0f;
+			D.Pos = FVector2D(FMath::FRandRange(-1.0f, 1.0f), FMath::FRandRange(-HalfH, HalfH));
+			D.Bias = FVector2D(FMath::FRandRange(-0.15f, 0.15f), FMath::FRandRange(-0.15f, 0.15f));
+			D.Radius = LensDropSize * FMath::FRandRange(0.5f, 1.4f);
+			D.Life = D.bSnow ? LensSnowHoldSeconds + LensMeltSeconds + 0.5f * LensDropLifeSeconds
+				: LensDropLifeSeconds * FMath::FRandRange(0.7f, 1.3f);
+		}
+	}
+	else
+	{
+		LensSpawnDebt = 0.0f;
+	}
+
+	// Motion: airflow pushes radially outward (faster with speed and with
+	// distance from center), crosswind pushes sideways, water sags. A flake
+	// clings until it melts, then rides the flow like water.
+	const FVector Right = Cam->GetRightVector();
+	const FVector2D Wind = WindAtMs(CamLoc);
+	const float WindX = (Wind.X * Right.X + Wind.Y * Right.Y) * LensWindDrift;
+	const float Drift = LensDriftPerMs * LensSpeedMs;
+	for (int32 i = LensDrops.Num() - 1; i >= 0; --i)
+	{
+		FLensDrop& D = LensDrops[i];
+		D.Age += DeltaSeconds;
+		if (D.bSnow)
+		{
+			D.Kind = 1.0f - FMath::Clamp((D.Age - LensSnowHoldSeconds) / FMath::Max(LensMeltSeconds, 0.01f), 0.0f, 1.0f);
+		}
+		const float Grip = FMath::Lerp(1.0f, LENS_SNOW_GRIP, D.Kind);
+		D.Pos += ((D.Pos + D.Bias) * Drift + FVector2D(WindX, -LENS_SAG * (1.0f - D.Kind))) * (Grip * DeltaSeconds);
+		if (D.Age >= D.Life || FMath::Abs(D.Pos.X) > 1.0f + D.Radius || FMath::Abs(D.Pos.Y) > HalfH + D.Radius)
+		{
+			LensDrops.RemoveAtSwap(i);
+		}
+	}
+
+	const bool bVisible = LensDrops.Num() > 0;
+	if (LensISM->IsVisible() != bVisible)
+	{
+		LensISM->SetVisibility(bVisible);
+	}
+	if (!bVisible)
+	{
+		return;
+	}
+
+	// Camera-local quads (X = view axis, Y = right, Z = up); the Plane faces
+	// +Z, pitched 90 so it faces back at the camera. Unused slots scale to 0.
+	const float HalfW = LENS_DISTANCE_CM * FMath::Tan(FMath::DegreesToRadians(Cam->FieldOfView * 0.5f));
+	const FQuat Facing = FRotator(90.0f, 0.0f, 0.0f).Quaternion();
+	for (int32 i = 0; i < Pool; ++i)
+	{
+		FTransform T(Facing, FVector::ZeroVector, FVector::ZeroVector);
+		if (i < LensDrops.Num())
+		{
+			const FLensDrop& D = LensDrops[i];
+			const float Fade = FMath::Min(D.Age / LENS_FADE_IN_S, 1.0f)
+				* FMath::Clamp((D.Life - D.Age) / (LENS_FADE_OUT * D.Life), 0.0f, 1.0f);
+			const float R = D.Radius * (D.bSnow ? FMath::Lerp(LENS_MELT_SHRINK, 1.0f, D.Kind) : 1.0f);
+			T.SetLocation(FVector(LENS_DISTANCE_CM, D.Pos.X * HalfW, D.Pos.Y * HalfW));
+			T.SetScale3D(FVector(2.0f * R * HalfW / 100.0f));   // Plane is 100 cm across
+			LensISM->SetCustomDataValue(i, 0, D.Kind, false);
+			LensISM->SetCustomDataValue(i, 1, Fade, false);
+		}
+		LensISM->UpdateInstanceTransform(i, T, false, i == Pool - 1, true);
 	}
 }
 

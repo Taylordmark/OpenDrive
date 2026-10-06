@@ -368,6 +368,7 @@ were decoupled from it on 2026-07-20.
   - Rain, snow, fog, clouds, lightning and road wetness (W2).
   - Grip and wind (W3).
   - Tornado (800 m visibility) and hurricane (W4/W5).
+  - (2026-10-06) Precip follows the camera, not the car: the falling pool was attached to the pawn root and twisted with roll/pitch; it is now a world-aligned box re-centered ahead of the camera with world-anchored flakes, and rain streaks stretch along their velocity relative to the camera. On-lens layer (`AODWeatherController::TickLens`, `M_LensDrop` from `unreal/apply_lens_drop_material.py`): drops/flakes land on the camera, drift outward with speed plus crosswind, flakes stick then melt into a water smear; knobs are the `Weather|Lens` UPROPERTYs.
 
 ### 7.43 Terrain shards / offline carve fix (2026-09-28, d9affa5)
 

@@ -5,6 +5,7 @@
 #include "ODWeatherController.generated.h"
 
 class AODForestManager;
+class UCameraComponent;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 
@@ -86,6 +87,45 @@ public:
 	/** Wetness 1 -> 0 time once precipitation stops - dries slowly. */
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float DrySeconds = 1200.0f;
+
+	// ---- on-lens precipitation (2026-10-06, TickLens): drops/flakes land on
+	// the player camera, airflow pushes them out toward the screen edges,
+	// flakes stick, then melt into a small water smear. Sizes/positions are in
+	// screen half-widths (1 = center to the left/right edge).
+
+	/** Landings per second at PrecipIntensity 1, parked; x (1 + speed / 20 m/s). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensDropsPerSecond = 5.0f;
+
+	/** Pool size (read once, when the layer is created). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	int32 LensMaxDrops = 40;
+
+	/** Mean drop radius, screen half-widths (each drop 0.5..1.4x). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensDropSize = 0.025f;
+
+	/** Outward airflow drift rate, 1/s per m/s of camera speed: a drop moves
+	 *  out at (distance from center) x this x speed, so it creeps near the
+	 *  center and speeds up toward the edge. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensDriftPerMs = 0.012f;
+
+	/** Sideways drift, half-widths/s per m/s of crosswind (wind across the view). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensWindDrift = 0.01f;
+
+	/** Water drop lifetime (each 0.7..1.3x) unless it drifts off-screen first. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensDropLifeSeconds = 5.0f;
+
+	/** A landed flake sits (barely moving) this long before it starts melting. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensSnowHoldSeconds = 1.2f;
+
+	/** Flake -> water smear melt time; the smear then lives half a water drop's life. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
+	float LensMeltSeconds = 2.5f;
 
 	// ---- published scalars (W2/W3 consumers read these) ----
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
@@ -189,6 +229,27 @@ private:
 	TObjectPtr<UInstancedStaticMeshComponent> DebrisISM;
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> FunnelMID;
+
+	// ---- on-lens precipitation: an ISM of /Engine/BasicShapes/Plane quads
+	// (M_LensDrop) attached to the player pawn's UCameraComponent, so it
+	// follows the view (crash shake included), never the car body.
+	struct FLensDrop
+	{
+		FVector2D Pos = FVector2D::ZeroVector;    // screen half-widths, +Y up
+		FVector2D Bias = FVector2D::ZeroVector;   // small outward-flow offset so center drops still move
+		float Radius = 0.0f, Age = 0.0f, Life = 0.0f;
+		float Kind = 0.0f;   // 1 flake .. 0 water (melting)
+		bool bSnow = false;
+	};
+	void TickLens(float DeltaSeconds);
+
+	TArray<FLensDrop> LensDrops;
+	UPROPERTY()
+	TObjectPtr<UInstancedStaticMeshComponent> LensISM;
+	TWeakObjectPtr<UCameraComponent> LensCam;
+	FVector LensPrevCamLoc = FVector::ZeroVector;
+	float LensSpeedMs = 0.0f;     // smoothed camera speed
+	float LensSpawnDebt = 0.0f;   // fractional landings carried between ticks
 
 	// ---- W5 hurricane: band envelope over the hold (HurricaneEnvelope) ----
 	float HurricaneAge = 0.0f, HurricaneLen = 900.0f;

@@ -1,5 +1,6 @@
 #include "ODSeasonController.h"
 
+#include "Camera/PlayerCameraManager.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
@@ -503,11 +504,14 @@ void AODSeasonController::EnsureSnowfallComponent()
 	SnowFxHism->SetCastShadow(false);
 	SnowFxHism->SetAffectDynamicIndirectLighting(false);
 	SnowFxHism->SetVisibility(false);
+	// World-aligned box (2026-10-06): UpdateSnowfallFX moves it, nothing rotates it.
+	SnowFxHism->SetUsingAbsoluteLocation(true);
+	SnowFxHism->SetUsingAbsoluteRotation(true);
 	SnowFxHism->RegisterComponent();
 
-	// A box of tiny flakes around wherever the effect is attached (the player
-	// pawn, once one exists - see UpdateSnowfallFX). Fixed pool, seeded once;
-	// only visibility + per-instance fall/drift motion change at runtime.
+	// A box of tiny flakes around the camera (see UpdateSnowfallFX). Fixed
+	// pool, seeded once; only visibility + per-instance fall/drift motion
+	// change at runtime.
 	//
 	// 2026-09-07 tuning note: the first pass used a 5 cm scale over a 28 m x
 	// 28 m x 18 m box (220 flakes) - technically animating (confirmed via a
@@ -555,48 +559,60 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		return;
 	}
 
-	// Attach to the player pawn once one exists (camera-attached bounds, per
-	// spec) - open-world levels spawn AODVehiclePawn asynchronously relative
-	// to this actor's own BeginPlay, so this is checked lazily rather than
-	// assumed available up front.
-	if (!bSnowFxAttached)
-	{
-		if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
-		{
-			SnowFxHism->AttachToComponent(Player->GetRootComponent(),
-				FAttachmentTransformRules::KeepWorldTransform);
-			SnowFxHism->SetRelativeLocation(FVector(0.0f, 0.0f, 300.0f));   // roughly windshield height and above
-			bSnowFxAttached = true;
-		}
-	}
-
+	// 2026-10-06: the pool is world-aligned and world-anchored, centered just
+	// ahead of the camera. It used to be attached to the pawn root, so its
+	// local frame (offsets, wrap axes) rolled/pitched with the car body and
+	// the whole snowfall twisted on banked/steep roads. Now flakes keep their
+	// world positions while the box re-centers (Shift), so fall stays
+	// world-down + wind and driving carries the camera through them.
+	const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	const AODWeatherController* Weather = WeatherCtl.Get();
 	const float Precip = Weather ? Weather->PrecipIntensity : 0.0f;
-	const bool bVisible = Precip > 0.02f;
+	const bool bVisible = Precip > 0.02f && CamMgr != nullptr;
 	if (SnowFxHism->IsVisible() != bVisible)
 	{
 		SnowFxHism->SetVisibility(bVisible);
 	}
 	if (!bVisible)
 	{
+		bSnowFxCentered = false;
 		return;
 	}
 
 	// Weather W2: snow keeps its 260 cm/s fall and drifts at 0.1x wind; rain
 	// falls ~900 cm/s and is pushed at 0.5x wind, drawn as a thin sphere
-	// stretched along its own (local-space - the pool rides the pawn) velocity.
+	// stretched along its velocity relative to the camera (2026-10-06: so at
+	// speed the streaks lengthen and rake toward the lens - next steps.md
+	// "rain streaks ignore car speed").
 	constexpr float SnowFallCmS = 260.0f;
 	constexpr float RainFallCmS = 900.0f;
 	constexpr double HalfHeightCm = 700.0;
 	constexpr double HalfExtentXYCm = 900.0;
+	constexpr float AheadCm = 600.0f;           // box center ahead of the camera (little falls behind it)
+	constexpr float StreakSeconds = 0.055f;     // streak length = relative speed x this (50 cm at a parked 9 m/s fall)
+	constexpr float StreakMaxCm = 250.0f;
+
+	const FVector CamLoc = CamMgr->GetCameraLocation();
+	const FVector Center = CamLoc + CamMgr->GetCameraRotation().Vector().GetSafeNormal2D() * AheadCm;
+	FVector Shift = Center - SnowFxCenter;
+	FVector CamVel = (CamLoc - SnowFxPrevCam) / FMath::Max(DeltaSeconds, 1.0e-3f);
+	if (!bSnowFxCentered || Shift.SizeSquared() > FMath::Square(HalfExtentXYCm))
+	{
+		Shift = CamVel = FVector::ZeroVector;   // first frame or a teleport: keep the pattern, just move the box
+	}
+	SnowFxCenter = Center;
+	SnowFxPrevCam = CamLoc;
+	bSnowFxCentered = true;
+	SnowFxHism->SetWorldLocation(Center);
 
 	const float WindCmS = (Weather ? Weather->WindSpeedMs : 0.0f) * 100.0f;
 	const float WindYaw = FMath::DegreesToRadians(Weather ? Weather->WindDirDeg : 0.0f);
 	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
-	const FTransform& CompXf = SnowFxHism->GetComponentTransform();
-	const FVector SnowVel = CompXf.InverseTransformVectorNoScale(WindDir * (0.1f * WindCmS) - FVector(0, 0, SnowFallCmS));
-	const FVector RainVel = CompXf.InverseTransformVectorNoScale(WindDir * (0.5f * WindCmS) - FVector(0, 0, RainFallCmS));
-	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainVel).ToQuat();
+	const FVector SnowVel = WindDir * (0.1f * WindCmS) - FVector(0, 0, SnowFallCmS);
+	const FVector RainVel = WindDir * (0.5f * WindCmS) - FVector(0, 0, RainFallCmS);
+	const FVector RainRel = RainVel - CamVel;
+	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainRel).ToQuat();
+	const float StreakCm = FMath::Clamp(RainRel.Size() * StreakSeconds, 50.0f, StreakMaxCm);
 	const float SnowType = Weather ? Weather->PrecipType : 1.0f;
 
 	const int32 Num = SnowFxLocalOffsets.Num();
@@ -610,7 +626,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 			SnowFxHism->SetCustomDataValue(i, 0, bSnow ? 1.0f : 0.0f, false);
 		}
 		FVector& Offset = SnowFxLocalOffsets[i];
-		Offset += (bSnow ? SnowVel : RainVel) * DeltaSeconds;
+		Offset += (bSnow ? SnowVel : RainVel) * DeltaSeconds - Shift;
 		Offset.X = FMath::Wrap(Offset.X, -HalfExtentXYCm, HalfExtentXYCm);
 		Offset.Y = FMath::Wrap(Offset.Y, -HalfExtentXYCm, HalfExtentXYCm);
 		Offset.Z = FMath::Wrap(Offset.Z, -HalfHeightCm, HalfHeightCm);
@@ -628,7 +644,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		else
 		{
 			T.SetRotation(RainRot);
-			T.SetScale3D(FVector(0.015f, 0.015f, 0.5f));   // ~1.5 cm x 50 cm streak
+			T.SetScale3D(FVector(0.015f, 0.015f, StreakCm / 100.0f));   // ~1.5 cm wide streak (Sphere is 100 cm)
 		}
 		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
 	}

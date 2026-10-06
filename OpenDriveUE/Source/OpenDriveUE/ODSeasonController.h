@@ -158,7 +158,9 @@ private:
 	TWeakObjectPtr<AODRoadManager> RoadMgr;   // Weather W2 road "Wetness"; absent on Tail of the Dragon
 
 	/** Simple runtime falling-snow effect (2026-09-07): a pool of tiny sphere
-	 *  instances, camera-attached, animated by hand in Tick - NOT Niagara.
+	 *  instances in a world-aligned box that follows the camera (2026-10-06 -
+	 *  it used to ride the pawn root and twist with the car's roll/pitch),
+	 *  animated by hand in Tick - NOT Niagara.
 	 *  Niagara-asset creation from python is finicky in UE 5.8 (per this
 	 *  task's own architecture note) and a from-scratch C++ Niagara system
 	 *  still needs an authored data asset to be useful; a plain HISM the
@@ -175,8 +177,10 @@ private:
 	UPROPERTY()
 	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> SnowFxHism;
 
-	TArray<FVector> SnowFxLocalOffsets;
+	TArray<FVector> SnowFxLocalOffsets;   // world-axis offsets from SnowFxCenter
 	TArray<float> PrecipFxSnowRoll;   // fixed [0,1) per instance: snow if < PrecipType
 	TArray<uint8> PrecipFxIsSnow;     // last custom-data value pushed per instance
-	bool bSnowFxAttached = false;
+	FVector SnowFxCenter = FVector::ZeroVector;   // box center last tick
+	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (streak relative velocity)
+	bool bSnowFxCentered = false;                 // false = next tick re-centers without shifting flakes
 };
