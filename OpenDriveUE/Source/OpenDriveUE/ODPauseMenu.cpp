@@ -320,7 +320,7 @@ void AODPauseMenu::Activate()
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
 			bOpen = false;                // hand the screen to the garage
-			Main->OpenGarage();           // keeps the game paused; "Drive"/esc resumes here
+			Main->OpenGarage();           // keeps the game paused; Back/esc resumes here
 		}
 	}
 	else if (Selected == 5)               // Settings
@@ -333,7 +333,7 @@ void AODPauseMenu::Activate()
 		EnsureCreditsMenu();
 		bCreditsOpen = true;
 	}
-	else if (Selected == 7)               // Main Menu (car/location front-end)
+	else if (Selected == 7)               // Main Menu (front-end Main screen)
 	{
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{

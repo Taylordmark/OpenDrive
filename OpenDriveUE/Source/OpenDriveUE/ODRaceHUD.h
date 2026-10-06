@@ -111,8 +111,8 @@ private:
 		float ZoomRadiusM, bool bCircular, const AODRoadManager* RoadMgr,
 		const FVector2D* CenterOverride = nullptr) const;   // zoomed view center (world map)
 
-	/** Front-end menu (AODMainMenu): the car-config panel, or the interactive
-	 *  town map. Takes over the whole screen when the menu is active - drawn
+	/** Front-end menu (AODMainMenu): the current screen's panel, the loading
+	 *  overlay, or the QA town map. Takes over the whole screen when the menu is active - drawn
 	 *  instead of the in-game HUD, not on top of it. */
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;

@@ -29,54 +29,45 @@ struct FODMenuSpot
 	TWeakObjectPtr<AODForestManager> Forest;
 };
 
-/** Which screen of the front-end the player is on. */
+/** Which stage of the front-end the player is on. */
 UENUM()
 enum class EODMenuStage : uint8
 {
-	CarConfig,   // pick car / engine / drivetrain / tuning (keyboard)
-	MapSelect,   // hover a town on the map, click to spawn there (mouse)
-	Loading,     // waiting on AODVehiclePawn::IsGroundSnapped() after a teleport
+	Menu,        // the menu screens (EODMenuScreen)
+	MapSelect,   // town-picker map; only the -odmenumap QA hook reaches it now
+	Loading,     // waiting on ground snap + tile streaming after a teleport
 	Playing,     // menu dismissed, normal driving
 };
 
+/** Screen within EODMenuStage::Menu. Settings/Credits are overlays (AODSettingsMenu/AODCreditsMenu). */
+enum class EODMenuScreen : uint8
+{
+	Main,     // Start, Garage, Settings, Credits, Quit - garage-room backdrop
+	Garage,   // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
+	Scene,    // Area, Time of Day, Weather, Season, Drive - always the picked area's vista
+};
+
 /**
- * Real front-end menu (2026-07-25) - the step up from AODPauseMenu's in-game
- * settings shell into an actual "start the game" flow. Two stages, drawn on
- * canvas by AODRaceHUD (same no-UMG pattern as the pause menu):
+ * Front-end menu, drawn on canvas by AODRaceHUD (no UMG). Sequential screens:
+ * Main -> Garage / Scene Select (Start) / Settings / Credits / Quit; Esc or
+ * Back returns to Main. The backdrop follows the SCREEN, never the row: Main
+ * and Garage show the car in the garage room (ShowroomLocationCm), Scene
+ * shows the selected area's preloaded vista (Spots, AODGameMode::SpawnVistaSet).
  *
- *   1. Car config - arrows pick Car / Engine / Drivetrain / Tuning, applied
- *      LIVE to the player pawn so the choice is real (static showroom preview,
- *      framed to the right of the menu text - see AODVehiclePawn::SetShowroom).
- *      Enter on "Drive" advances.
- *   2. Map select - the route map with clickable town nodes; hovering
- *      highlights the nearest town, a click spawns the car on the road there
- *      (reusing the pawn's proven PM_Asphalt ground-snap).
+ * Drive opens AreaLevels[AreaIdx] (OpenArea) carrying the car picks as URL
+ * options; that level's menu sees odengine= and skips straight to Loading ->
+ * Playing at its default spawn. Driving to the current level skips the reload.
+ * Picks (car, engine, drivetrain, tuning, area, exhaust, season, time,
+ * weather) persist in GameUserSettings.ini.
  *
- * Fresh-boot (OpenMenu()) deliberately does NOT pause the game (2026-07-28,
- * see OpenMenu()'s own comment for the full account) - APlayerCameraManager
- * doesn't tick while paused, so the showroom camera used to freeze at
- * whatever the very first, not-yet-positioned frame looked like ("I was still
- * inside/under the car") no matter how the underlying Camera/SpringArm was
- * configured. The frozen preview pawn can't drive off regardless
- * (SetSimulatePhysics(false) already guarantees that), so pausing was never
- * actually needed for that. OpenGarage() (mid-drive reopen) still pauses -
- * it's a proven-working case this fix doesn't touch. This actor ticks even
- * when paused for THAT path (garage mode). Reopenable mid-game from the pause
- * menu's "Main Menu" row (full return to car-config -> map pick) or its
- * "Garage" row (OpenGarage() - same car-config screen, live edits apply
- * exactly the same way, but "Drive" resumes in place instead of going to
- * map-select, since the car is already sitting on real road).
+ * Fresh boot (OpenMenu()) does not pause: APlayerCameraManager doesn't tick
+ * while paused and the showroom camera would freeze. The pause menu's
+ * "Garage" row calls OpenGarage(): the Garage screen only, paused, Back
+ * resumes in place. Its "Main Menu" row calls OpenMenu().
  *
- * Loading screen (2026-07-26): StartAt() used to teleport then immediately
- * unpause and hand control back, but a fresh teleport target can have zero
- * tiles loaded (AODRoadManager/AODTerrainManager only stream around the
- * PLAYER'S position, and nothing ticks while paused) - the player would see
- * the car hovering, uncontrollable, for as long as TrySnapToGround's own
- * timeout took. StartAt() now unpauses immediately (so streaming can
- * actually happen) but enters EODMenuStage::Loading first; Tick() polls
- * AODVehiclePawn::IsGroundSnapped() and only flips to Playing once the car
- * has actually settled onto real ground - the HUD draws a simple loading
- * overlay for that stretch instead of the raw (possibly airborne) scene.
+ * StartAt() teleports, unpauses (streaming only runs unpaused) and enters
+ * Loading; Tick() releases to Playing once the pawn is ground-snapped and
+ * every terrain/road manager has settled (debounced, with a failsafe).
  */
 UCLASS()
 class OPENDRIVEUE_API AODMainMenu : public AActor
@@ -106,20 +97,16 @@ public:
 	bool IsActive() const { return Stage != EODMenuStage::Playing; }
 	EODMenuStage GetStage() const { return Stage; }
 	bool IsGarageMode() const { return bGarageMode; }
-	// Car, Engine, Drivetrain, Tuning, Exhaust preset, Exhaust Loudness,
-	// Exhaust Rasp, Exhaust Muffler, Exhaust Pop, Input Device, Season, Time of
-	// Day, Weather, Area, Settings, Credits, Drive (5.2: exhaust preset row + 4
-	// slider rows, same value-cycling idiom as the rows above them; Settings/
-	// Credits added Arc 4.4, next steps.md SS4.4/SS7.31; Season SS7.38; Area
-	// 2026-10-05, Time of Day/Weather 2026-10-05 between Season and Area - see
-	// Adjust()/GetRow() in the .cpp).
-	int32 NumRows() const { return 17; }
+	/** Loading overlay: the Loading stage, or a Drive-launched level about to start. */
+	bool IsLoading() const { return Stage == EODMenuStage::Loading || bAutoStart; }
+	EODMenuScreen GetScreen() const { return Screen; }
 	/** True while the outdoor area vista (not the garage room) is on screen -
-	 *  the HUD moves the panel right and drops its dim (2026-10-05). */
+	 *  the HUD moves the panel right and drops its dim. Scene Select only. */
 	bool IsVistaShown() const { return ShownVista != INDEX_NONE; }
 	int32 GetSelected() const { return Selected; }
-	/** Car / Sound / Options tabs over the rows above; Drive is the footer. */
+	/** The current screen's tabs (global row ids, see GetRow()) and its footer row. */
 	TArrayView<const FODMenuTab> GetTabs() const;
+	int32 GetFooterRow() const;
 	int32 GetTab() const { return TabIdx; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
@@ -141,15 +128,12 @@ public:
 	void SetHoveredTown(int32 Index) { HoveredTownIdx = Index; }
 	int32 GetHoveredTown() const { return HoveredTownIdx; }
 
-	/** (Re)enter the menu at the car-config stage - called at launch and from
-	 *  the pause menu's "Main Menu" row. Full front-end: "Drive" goes to
-	 *  map-select, same as a fresh boot. */
+	/** (Re)enter the menu at the Main screen - at launch and from the pause
+	 *  menu's "Main Menu" row. */
 	void OpenMenu();
 
-	/** Enter car-config from the PAUSE menu's "Garage" row (2026-07-26) - same
-	 *  screen/live-apply as OpenMenu(), but the car is already on real road,
-	 *  so "Drive" (or Escape) resumes driving in place instead of going to
-	 *  map-select, and there's no re-teleport/loading screen involved. */
+	/** The Garage screen from the PAUSE menu's "Garage" row: the car is
+	 *  already on real road, so Back / Esc resumes driving in place. */
 	void OpenGarage();
 
 	/** World-map fast travel (SS7.37): the same teleport + Loading-screen path
@@ -172,26 +156,29 @@ private:
 	void PrevTab() { SwitchTab(-1); }   // Q / left shoulder
 	void NextTab() { SwitchTab(+1); }   // E / right shoulder
 	void SwitchTab(int32 Dir);
+	void SetScreen(EODMenuScreen NewScreen, int32 Row);   // Row = the row to select
 
 	// stage transitions
 	void EnterCarConfig();       // showroom + first live apply (once pawn ready)
 	void GoToMap();
-	void StartAt(int32 TownIdx, const class AODRoadManager* InRoad = nullptr); // teleport + enter Loading (-1 = current spot); null road = first found
-	void ResumeFromGarage();     // garage mode's "Drive"/Escape: no teleport, just unpause
+	void StartAt(int32 TownIdx, const class AODRoadManager* InRoad = nullptr); // teleport + enter Loading (-1 = level's default spawn); null road = first found
+	void ResumeFromGarage();     // pause-menu garage's Back/Escape: no teleport, just unpause
 
-	// Area row (2026-10-05): AreaLevels = every /Game/Areas level (AssetRegistry,
-	// build_openworld_test_level.py writes them) + TailOfTheDragon + the current
-	// level if it's neither (OpenWorldTest). The row only picks; "Drive" with
-	// AreaIdx != CurrentAreaIdx calls OpenArea() instead of map-select/resume.
+	// Area row: the /Game/Areas/OpenWorld_<area> levels (AssetRegistry) that
+	// also have a menu_spots.json entry (BeginPlay drops the rest). The row
+	// only picks; Drive with AreaIdx != CurrentAreaIdx calls OpenArea().
 	void FindAreaLevels();
 	void OpenArea();             // OpenLevel(AreaLevels[AreaIdx]) carrying the car picks as URL options
 	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_gv_west"
 	TArray<FString> AreaNames;   // readable, parallel to AreaLevels
 	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
 	int32 AreaIdx = 0;
-	int32 CurrentAreaIdx = 0;
-	// odtunepreset= from the travel URL, applied once by EnterCarConfig() (needs the pawn)
+	int32 CurrentAreaIdx = INDEX_NONE;   // this level's index in AreaLevels, if listed
+	// saved / odtunepreset= tuning preset, applied once by EnterCarConfig() (needs the pawn)
 	int32 CarriedTuneIdx = INDEX_NONE;
+	// this level was opened by Drive (travel URL has odengine=): skip the menu,
+	// straight to Loading -> Playing at the default spawn
+	bool bAutoStart = false;
 
 	// live application of the current selection
 	void ApplyEngine();
@@ -205,13 +192,12 @@ private:
 	void SetWeatherClimate(int32 Vista);     // the weather's climate -> Spots[Vista]'s (INDEX_NONE = home)
 	void ChangeCar(int32 Dir);
 
-	// persistence (Arc 5.2) - GConfig into GameUserSettings.ini, same
-	// mechanism/pattern as AODVehiclePawn::Save/LoadInputDeviceMode (no
-	// SaveGame object exists yet in this project; see that class's comment).
-	// Tuning/Engine/Drivetrain picks do NOT persist today - only Input
-	// Device and now Exhaust do; see ODMainMenu.cpp for the noted gap.
+	// persistence - GConfig into GameUserSettings.ini, same pattern as
+	// AODVehiclePawn::Save/LoadInputDeviceMode. SavePicks: car (read back by
+	// AODVehiclePawn::BeginPlay), engine, drivetrain, tuning preset, area.
 	void SaveExhaustConfig() const;
 	void LoadExhaustConfig();
+	void SavePicks() const;
 
 	AODVehiclePawn* FindPawn() const;
 	UODVehicleMovement* FindMovement() const;
@@ -235,7 +221,8 @@ private:
 	UPROPERTY()
 	TObjectPtr<AODCreditsMenu> CreditsMenu;
 
-	EODMenuStage Stage = EODMenuStage::CarConfig;
+	EODMenuStage Stage = EODMenuStage::Menu;
+	EODMenuScreen Screen = EODMenuScreen::Main;
 	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
 	int32 TabIdx = 0;
@@ -264,16 +251,15 @@ private:
 	int32 TimeIdx = 1;
 	int32 WeatherIdx = 0;
 
-	// Garage-menu vistas (2026-10-05): the car parked on a real road per area,
-	// live terrain behind it. Spots parallel AreaLevels; every area with a spot
-	// gets an offset copy of its terrain/road/forest/water/guardrail managers
+	// Scene Select vistas: the car parked on a real road per area, live
+	// terrain behind it. Spots parallel AreaLevels; every area gets an offset
+	// copy of its terrain/road/forest/water/guardrail managers
 	// (AODGameMode::SpawnVistaSet), all preloaded at menu entry so the Area row
-	// switches instantly. Shown on the Season/Time/Weather/Area rows; every
-	// other row keeps the garage room.
+	// switches instantly.
 	void LoadMenuSpots();
 	void SpawnVistas();
 	void DestroyVistas();
-	void UpdateScene();          // per Tick in CarConfig: garage room <-> AreaIdx's vista
+	void UpdateScene();          // per Tick in Menu: garage room, or AreaIdx's vista on the Scene screen
 	FVector VistaCarWorld(int32 Area) const;
 	TArray<FODMenuSpot> Spots;
 	UPROPERTY()
@@ -281,18 +267,12 @@ private:
 	bool bVistasSpawned = false;
 	int32 ShownVista = INDEX_NONE;
 	FTransform GarageCamXf;      // EnterCarConfig's garage framing, restored on the way back
-	// Drive at a spot: set by Activate() (same area) or the odspawnx/y/yaw travel
-	// options (OpenArea() to another area -> auto-start there); StartAt() consumes it.
-	bool bPendingSpot = false;
-	FVector2D PendingSpot = FVector2D::ZeroVector;
-	float PendingSpotYaw = 0.0f;
 
 	bool bEntered = false;   // EnterCarConfig() has run (pawn was ready)
 
 	// the pawn's real spawn point, captured once before the first (non-
-	// garage) EnterCarConfig() moves it to the showroom void - StartAt()'s
-	// "no town picked" fallback needs this instead of the pawn's CURRENT
-	// location, which by then is the showroom, not anywhere on the real map.
+	// garage) EnterCarConfig() moves it to the showroom void - StartAt(-1)
+	// needs this instead of the pawn's CURRENT location (the showroom).
 	FVector CapturedSpawnLoc = FVector::ZeroVector;
 	float CapturedSpawnYaw = 0.0f;
 	bool bCapturedSpawn = false;

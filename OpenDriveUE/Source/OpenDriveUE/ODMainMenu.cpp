@@ -13,6 +13,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/App.h"
 #include "Misc/CommandLine.h"
@@ -181,15 +182,23 @@ constexpr double VistaCamBackCm = 700.0;
 constexpr double VistaCamSideCm = 250.0;
 constexpr double VistaCamHeightCm = 150.0;     // above the road surface
 constexpr double VistaCamPitchDeg = -4.0;
-// rows that show the vista instead of the garage room: Season, Time, Weather, Area
-constexpr int32 FirstVistaRow = 10;
-constexpr int32 LastVistaRow = 13;
 
-const FODMenuTab MenuTabs[] = {
-	{TEXT("CAR"), 0, 4},       // Car, Engine, Drivetrain, Tuning
-	{TEXT("SOUND"), 4, 5},     // Exhaust preset + its 4 sliders
-	{TEXT("OPTIONS"), 9, 7},   // Input Device, Season, Time of Day, Weather, Area, Settings, Credits
+// Row ids: one global GetRow()/Adjust() switch; each screen's tabs show a slice.
+enum ERow : int32
+{
+	RowCar, RowEngine, RowDrivetrain, RowTuning,                   // Garage: CAR
+	RowExhaust, RowLoudness, RowRasp, RowMuffler, RowPop,          // Garage: SOUND
+	RowArea, RowTime, RowWeather, RowSeason, RowDrive,             // Scene
+	RowStart, RowGarage, RowSettings, RowCredits,                  // Main
+	RowBack, RowQuit,                                              // footers
 };
+const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowStart, 4}};   // footer Quit
+const FODMenuTab GarageTabs[] = {{TEXT("CAR"), RowCar, 4}, {TEXT("SOUND"), RowExhaust, 5}};   // footer Back
+const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 5}};   // footer Back
+
+// same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
+const TCHAR* CarConfigSection = TEXT("OpenDrive.Car");
+const TCHAR* AreaConfigSection = TEXT("OpenDrive.Area");
 
 template <typename T>
 T* FindActor(UWorld* World)
@@ -223,12 +232,37 @@ void AODMainMenu::BeginPlay()
 	WeatherIdx = FMath::Clamp(WeatherIdx, 0, (int32)UE_ARRAY_COUNT(WeatherNames) - 1);
 	FindAreaLevels();
 	LoadMenuSpots();
-	// car picks carried across a garage Area switch (2026-10-05, see OpenArea());
-	// the car itself rides odvehidx= into AODVehiclePawn::BeginPlay
+	// Scene Select lists only areas with a menu spot (a vista to show)
+	for (int32 i = Spots.Num() - 1; i >= 0; --i)
+	{
+		if (!Spots[i].bValid)
+		{
+			AreaLevels.RemoveAt(i);
+			AreaNames.RemoveAt(i);
+			AreaKeys.RemoveAt(i);
+			Spots.RemoveAt(i);
+		}
+	}
+	CurrentAreaIdx = AreaLevels.IndexOfByKey(UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName()));
+	FString SavedArea;
+	GConfig->GetString(AreaConfigSection, TEXT("Level"), SavedArea, GGameUserSettingsIni);
+	AreaIdx = FMath::Max(0, AreaLevels.IndexOfByKey(SavedArea));   // missing/unlisted -> first area
+
+	// saved car picks (factory default when missing or out of range); the car
+	// itself is restored by AODVehiclePawn::BeginPlay
+	GConfig->GetInt(CarConfigSection, TEXT("EngineIdx"), EngineIdx, GGameUserSettingsIni);
+	EngineIdx = EngineIdx >= 0 && EngineIdx < (int32)UE_ARRAY_COUNT(Engines) ? EngineIdx : 0;
+	GConfig->GetInt(CarConfigSection, TEXT("DriveIdx"), DriveIdx, GGameUserSettingsIni);
+	DriveIdx = DriveIdx >= 0 && DriveIdx < (int32)UE_ARRAY_COUNT(Layouts) ? DriveIdx : 0;
+	GConfig->GetInt(CarConfigSection, TEXT("TunePreset"), CarriedTuneIdx, GGameUserSettingsIni);   // validated in EnterCarConfig
+
+	// picks carried by Drive's OpenArea() (override the saved ones; odvehidx=
+	// is read by AODVehiclePawn::BeginPlay). odengine= marks a Drive launch.
 	const FURL& Url = GetWorld()->URL;
 	if (const TCHAR* V = Url.GetOption(TEXT("odengine="), nullptr))
 	{
 		EngineIdx = FMath::Clamp(FCString::Atoi(V), 0, (int32)UE_ARRAY_COUNT(Engines) - 1);
+		bAutoStart = true;
 	}
 	if (const TCHAR* V = Url.GetOption(TEXT("oddrive="), nullptr))
 	{
@@ -237,18 +271,6 @@ void AODMainMenu::BeginPlay()
 	if (const TCHAR* V = Url.GetOption(TEXT("odtunepreset="), nullptr))
 	{
 		CarriedTuneIdx = FCString::Atoi(V);
-	}
-	// Drive from another area's menu (2026-10-05): start straight at its spot
-	const TCHAR* SpotX = Url.GetOption(TEXT("odspawnx="), nullptr);
-	const TCHAR* SpotY = Url.GetOption(TEXT("odspawny="), nullptr);
-	if (SpotX && SpotY)
-	{
-		bPendingSpot = true;
-		PendingSpot = FVector2D(FCString::Atod(SpotX), FCString::Atod(SpotY));
-		if (const TCHAR* V = Url.GetOption(TEXT("odspawnyaw="), nullptr))
-		{
-			PendingSpotYaw = FCString::Atof(V);
-		}
 	}
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
@@ -315,7 +337,7 @@ void AODMainMenu::BeginPlay()
 		FTSTicker::GetCoreTicker().AddTicker(
 			FTickerDelegate::CreateWeakLambda(this, [this](float)
 			{
-				if (Stage == EODMenuStage::CarConfig)
+				if (Stage == EODMenuStage::Menu)
 				{
 					GoToMap();
 					UE_LOG(LogTemp, Display, TEXT("ODMainMenu: test-open map"));
@@ -380,40 +402,24 @@ void AODMainMenu::BeginPlay()
 
 void AODMainMenu::OpenMenu()
 {
-	Stage = EODMenuStage::CarConfig;
+	Stage = EODMenuStage::Menu;
 	bGarageMode = false;
-	Selected = 0;
-	TabIdx = 0;
-	AreaIdx = CurrentAreaIdx;   // a pending Area pick never outlives the screen it was made on
+	SetScreen(EODMenuScreen::Main, RowStart);
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
-	// Deliberately NOT pausing here (2026-07-28, unlike OpenGarage() below) -
-	// see this class's declaration comment for the full account, but the
-	// short version: pausing broke the showroom camera in a way that took
-	// several rounds of fixes (spring arm lag/collision/arm-length, a full
-	// rewrite bypassing the arm, then the camera manager's own tick) to even
-	// properly diagnose, because APlayerCameraManager's cached view simply
-	// stops updating the instant the world pauses - it froze at whatever the
-	// very first, not-yet-positioned frame looked like and never moved again
-	// for the rest of the menu, regardless of what the underlying Camera/
-	// SpringArm state actually was. The ONLY reason this menu paused at all
-	// was so the frozen preview pawn couldn't drive off - already guaranteed
-	// on its own by PlaceInShowroom's SetSimulatePhysics(false) (a
-	// non-simulating body ignores input-driven forces entirely), so pausing
-	// was never actually load-bearing for that goal. OpenGarage() still
-	// pauses because it opens MID-DRIVE, where the camera is already
-	// correctly positioned from live gameplay before the freeze - a working
-	// case this fix doesn't need to touch.
+	// Deliberately NOT pausing here (unlike OpenGarage() below): the camera
+	// manager's cached view stops updating while paused, freezing the
+	// showroom camera at its first, unpositioned frame. The preview pawn
+	// can't drive off anyway (PlaceInShowroom disables physics). OpenGarage()
+	// pauses because it opens mid-drive, with the camera already placed.
 	SetCursorVisible(true);
 }
 
 void AODMainMenu::OpenGarage()
 {
-	Stage = EODMenuStage::CarConfig;
+	Stage = EODMenuStage::Menu;
 	bGarageMode = true;
-	Selected = 0;
-	TabIdx = 0;
-	AreaIdx = CurrentAreaIdx;
+	SetScreen(EODMenuScreen::Garage, RowCar);
 	bEntered = false;   // re-sync the displayed engine/drivetrain with reality
 	UGameplayStatics::SetGamePaused(this, true);
 	// 2026-08-27 fix: this call was missing entirely, so the pause menu's
@@ -522,7 +528,7 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		}
 		return;
 	}
-	if (Stage != EODMenuStage::CarConfig)
+	if (Stage != EODMenuStage::Menu)
 	{
 		return;
 	}
@@ -530,9 +536,10 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	{
 		EnterCarConfig();
 	}
-	if (bEntered && bPendingSpot && !bGarageMode)
+	if (bEntered && bAutoStart && !bGarageMode)
 	{
-		StartAt(-1);   // arrived via an Area switch's Drive: straight to the spot
+		bAutoStart = false;
+		StartAt(-1);   // opened by Drive: straight to the default spawn
 		return;
 	}
 	UpdateScene();
@@ -594,17 +601,15 @@ void AODMainMenu::EnterCarConfig()
 		Garage->PlaceAt(Pawn->GetActorLocation(), ShowroomYawDeg, GroundOffset);
 		Garage->SetActive(true);
 	}
-	// sync the displayed engine/drivetrain with reality (leave tuning at stock
-	// until the player picks one, same as the pause menu); exhaust reapplies
-	// the persisted/current values every entry since the synth is recreated
-	// per-car (AODVehicleAudio::EnsureSynths) and wouldn't otherwise remember.
-	if (CarriedTuneIdx != INDEX_NONE)
+	// sync the displayed engine/drivetrain with reality (tuning stays stock
+	// unless a preset was saved/carried); exhaust reapplies every entry since
+	// the synth is recreated per-car (AODVehicleAudio::EnsureSynths).
+	if (CarriedTuneIdx >= 0 && CarriedTuneIdx < NumPresets())
 	{
-		// one-shot: the tuning pick carried in by an Area switch (2026-10-05)
-		TuneIdx = CarriedTuneIdx;
-		CarriedTuneIdx = INDEX_NONE;
+		TuneIdx = CarriedTuneIdx;   // one-shot: saved or odtunepreset= pick
 		ApplyTuning();
 	}
+	CarriedTuneIdx = INDEX_NONE;
 	ApplyEngine();
 	ApplyDrivetrain();
 	ApplyExhaust();
@@ -626,7 +631,7 @@ void AODMainMenu::EnterCarConfig()
 			GarageCamXf = Cam->GetComponentTransform();
 		}
 		ShownVista = INDEX_NONE;
-		if (!bPendingSpot)
+		if (!bAutoStart)
 		{
 			SpawnVistas();
 		}
@@ -648,9 +653,9 @@ void AODMainMenu::Up()
 		if (CreditsMenu) { CreditsMenu->Scroll(-1); }
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig)
+	if (Stage == EODMenuStage::Menu)
 	{
-		Selected = ODMenuTabs::Step(MenuTabs[TabIdx], NumRows() - 1, Selected, -1);
+		Selected = ODMenuTabs::Step(GetTabs()[TabIdx], GetFooterRow(), Selected, -1);
 	}
 }
 
@@ -666,9 +671,9 @@ void AODMainMenu::Down()
 		if (CreditsMenu) { CreditsMenu->Scroll(+1); }
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig)
+	if (Stage == EODMenuStage::Menu)
 	{
-		Selected = ODMenuTabs::Step(MenuTabs[TabIdx], NumRows() - 1, Selected, +1);
+		Selected = ODMenuTabs::Step(GetTabs()[TabIdx], GetFooterRow(), Selected, +1);
 	}
 }
 
@@ -679,17 +684,33 @@ void AODMainMenu::SwitchTab(int32 Dir)
 		if (SettingsMenu) { SettingsMenu->SwitchTab(Dir); }
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig && !bCreditsOpen)
+	if (const int32 N = GetTabs().Num(); Stage == EODMenuStage::Menu && !bCreditsOpen && N > 1)
 	{
-		const int32 N = UE_ARRAY_COUNT(MenuTabs);
 		TabIdx = (TabIdx + Dir + N) % N;
-		Selected = MenuTabs[TabIdx].First;
+		Selected = GetTabs()[TabIdx].First;
 	}
 }
 
 TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 {
-	return MenuTabs;
+	switch (Screen)
+	{
+	case EODMenuScreen::Garage: return GarageTabs;
+	case EODMenuScreen::Scene: return SceneTabs;
+	default: return MainTabs;
+	}
+}
+
+int32 AODMainMenu::GetFooterRow() const
+{
+	return Screen == EODMenuScreen::Main ? RowQuit : RowBack;
+}
+
+void AODMainMenu::SetScreen(EODMenuScreen NewScreen, int32 Row)
+{
+	Screen = NewScreen;
+	TabIdx = 0;
+	Selected = Row;
 }
 
 void AODMainMenu::Left()
@@ -699,7 +720,7 @@ void AODMainMenu::Left()
 		Adjust(-1);
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig)
+	if (Stage == EODMenuStage::Menu)
 	{
 		Adjust(-1);
 	}
@@ -712,7 +733,7 @@ void AODMainMenu::Right()
 		Adjust(+1);
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig)
+	if (Stage == EODMenuStage::Menu)
 	{
 		Adjust(+1);
 	}
@@ -752,44 +773,38 @@ void AODMainMenu::Activate()
 		bCreditsOpen = false;   // no rows to activate - Enter also just backs out
 		return;
 	}
-	if (Stage == EODMenuStage::CarConfig)
+	if (Stage == EODMenuStage::Menu)
 	{
-		if (Selected == NumRows() - 1)          // "Drive" / "Resume Driving" row
+		switch (Selected)
 		{
-			if (AreaIdx != CurrentAreaIdx)
+		case RowStart: SetScreen(EODMenuScreen::Scene, RowArea); break;
+		case RowGarage: SetScreen(EODMenuScreen::Garage, RowCar); break;
+		case RowSettings:
+			EnsureSettingsMenu();
+			bSettingsOpen = true;
+			break;
+		case RowCredits:
+			EnsureCreditsMenu();
+			bCreditsOpen = true;
+			break;
+		case RowQuit:
+			UKismetSystemLibrary::QuitGame(this, UGameplayStatics::GetPlayerController(this, 0),
+				EQuitPreference::Quit, false);
+			break;
+		case RowBack: Back(); break;
+		case RowDrive:
+			if (AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx)
 			{
-				OpenArea();             // Area row changed: leaving the garage loads it
-			}
-			else if (bGarageMode)
-			{
-				ResumeFromGarage();
-			}
-			else if (Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid)
-			{
-				// this area's menu spot (2026-10-05): drive from where the vista showed it
-				bPendingSpot = true;
-				PendingSpot = FVector2D(Spots[AreaIdx].CarCm.X, Spots[AreaIdx].CarCm.Y);
-				PendingSpotYaw = Spots[AreaIdx].CarYawDeg;
-				StartAt(-1);
+				OpenArea();   // that level's menu auto-starts (bAutoStart)
 			}
 			else
 			{
-				GoToMap();
+				StartAt(-1);  // already on this area (or none listed): default spawn, no reload
 			}
-		}
-		else if (Selected == NumRows() - 3)     // Settings
-		{
-			EnsureSettingsMenu();
-			bSettingsOpen = true;
-		}
-		else if (Selected == NumRows() - 2)     // Credits
-		{
-			EnsureCreditsMenu();
-			bCreditsOpen = true;
-		}
-		else
-		{
-			Adjust(+1);             // Enter cycles a value row, like the pause menu
+			break;
+		default:
+			Adjust(+1);   // Enter cycles a value row, like the pause menu
+			break;
 		}
 	}
 	else if (Stage == EODMenuStage::MapSelect)
@@ -824,14 +839,18 @@ void AODMainMenu::Back()
 	}
 	if (Stage == EODMenuStage::MapSelect)
 	{
-		Stage = EODMenuStage::CarConfig;   // back to the car screen
-		Selected = NumRows() - 1;
+		Stage = EODMenuStage::Menu;
+		SetScreen(EODMenuScreen::Scene, RowDrive);
 	}
-	else if (Stage == EODMenuStage::CarConfig && bGarageMode)
+	else if (Stage == EODMenuStage::Menu && bGarageMode)
 	{
-		ResumeFromGarage();   // Escape also exits the garage back to driving
+		ResumeFromGarage();   // the pause menu's garage: Back resumes driving
 	}
-	// CarConfig, non-garage: no-op (you commit by driving, there's nothing to back out to)
+	else if (Stage == EODMenuStage::Menu && Screen != EODMenuScreen::Main)
+	{
+		SetScreen(EODMenuScreen::Main, Screen == EODMenuScreen::Garage ? RowGarage : RowStart);
+	}
+	// Main screen: nothing to back out to
 }
 
 void AODMainMenu::OnClick()
@@ -859,25 +878,29 @@ void AODMainMenu::Adjust(int32 Dir)
 	}
 	switch (Selected)
 	{
-	case 0:
+	case RowCar:
 		ChangeCar(Dir);
+		SavePicks();
 		break;
-	case 1:
+	case RowEngine:
 		EngineIdx = (EngineIdx + Dir + UE_ARRAY_COUNT(Engines)) % UE_ARRAY_COUNT(Engines);
 		ApplyEngine();
+		SavePicks();
 		break;
-	case 2:
+	case RowDrivetrain:
 		DriveIdx = (DriveIdx + Dir + UE_ARRAY_COUNT(Layouts)) % UE_ARRAY_COUNT(Layouts);
 		ApplyDrivetrain();
+		SavePicks();
 		break;
-	case 3:
+	case RowTuning:
 		if (const int32 N = NumPresets(); N > 0)
 		{
 			TuneIdx = (TuneIdx + Dir + N) % N;
 			ApplyTuning();
+			SavePicks();
 		}
 		break;
-	case 4:
+	case RowExhaust:
 		// Exhaust preset row (Arc 5.2): cycles Stock/Sport/Open, same idiom
 		// as Engine/Drivetrain/Tuning above - picking a preset seeds ALL four
 		// slider fields below from it (a fresh baseline), then persists.
@@ -889,42 +912,30 @@ void AODMainMenu::Adjust(int32 Dir)
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case 5:
+	case RowLoudness:
 		// Exhaust Loudness slider - individually adjustable beyond the preset
 		// baseline (5.2 spec), bounds matching UODEngineSynth's own ClampMin/Max.
 		ExhaustLoudness = FMath::Clamp(ExhaustLoudness + Dir * ExhaustLoudnessStep, 0.0f, 1.0f);
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case 6:
+	case RowRasp:
 		ExhaustRasp = FMath::Clamp(ExhaustRasp + Dir * ExhaustRaspStep, 0.0f, 1.0f);
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case 7:
+	case RowMuffler:
 		ExhaustMufflerCutoff = FMath::Clamp(ExhaustMufflerCutoff + Dir * ExhaustMufflerStep, 200.0f, 8000.0f);
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case 8:
+	case RowPop:
 		// Exhaust Pop slider - lift-off pop/burble probability (5.2's new param).
 		ExhaustPop = FMath::Clamp(ExhaustPop + Dir * ExhaustPopStep, 0.0f, 1.0f);
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case 9:
-		// Input Device row (2026-08-27): Auto/Keyboard/Gamepad/Wheel, cycling
-		// the same way the other value rows do. Persisted on the pawn itself
-		// (SetInputDeviceMode writes it to GameUserSettings.ini) rather than
-		// mirrored here, since the pawn is what actually needs it every Tick.
-		if (AODVehiclePawn* Pawn = FindPawn())
-		{
-			constexpr int32 NumModes = static_cast<int32>(EODInputDevice::Wheel) + 1;
-			const int32 Next = (static_cast<int32>(Pawn->GetInputDeviceMode()) + Dir + NumModes) % NumModes;
-			Pawn->SetInputDeviceMode(static_cast<EODInputDevice>(Next));
-		}
-		break;
-	case 10:
+	case RowSeason:
 		// Season row (SS7.38): Auto/Summer/Fall/Winter/Spring, applied live and
 		// persisted the same GConfig way as the exhaust rows.
 		SeasonIdx = (SeasonIdx + Dir + UE_ARRAY_COUNT(SeasonNames)) % UE_ARRAY_COUNT(SeasonNames);
@@ -932,13 +943,13 @@ void AODMainMenu::Adjust(int32 Dir)
 		GConfig->SetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
-	case 11:
+	case RowTime:
 		TimeIdx = (TimeIdx + Dir + UE_ARRAY_COUNT(TimeOfDayPresets)) % UE_ARRAY_COUNT(TimeOfDayPresets);
 		ApplyTimeOfDay();
 		GConfig->SetInt(TimeConfigSection, TEXT("TimeIdx"), TimeIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
-	case 12:
+	case RowWeather:
 		// only states the active climate can produce (2026-10-05); Auto always can
 		do
 		{
@@ -948,13 +959,13 @@ void AODMainMenu::Adjust(int32 Dir)
 		GConfig->SetInt(WeatherConfigSection, TEXT("WeatherIdx"), WeatherIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
-	case 13:
-		// Area row (2026-10-05): picks only - nothing loads until "Drive"
-		// (Activate()), so cycling past an area doesn't reload the world; the
-		// vista (UpdateScene) swaps to the picked area's preloaded copy
+	case RowArea:
+		// picks only - nothing loads until Drive; the vista (UpdateScene)
+		// swaps to the picked area's preloaded copy
 		if (const int32 N = AreaLevels.Num(); N > 0)
 		{
 			AreaIdx = (AreaIdx + Dir + N) % N;
+			SavePicks();
 		}
 		break;
 	default:
@@ -1105,8 +1116,8 @@ void AODMainMenu::SetWeatherClimate(int32 Vista)
 	Weather->SetVistaClimate(bVista ? &Spots[Vista].Climate : nullptr,
 		bVista ? Spots[Vista].Forest.Get() : nullptr, bVista ? FVector2D(Spots[Vista].CarCm) : FVector2D::ZeroVector);
 	// Auto re-rolls in the new climate; a vista also drops a forced state its
-	// area never produces. Home keeps it: the Drive row shows the garage room,
-	// and the pick may be for the area about to load (its level re-checks).
+	// area never produces. Home keeps it: the pick is for the area about to
+	// load (its level re-checks).
 	if (WeatherIdx == 0 || (bVista && !WeatherPossible(WeatherIdx)))
 	{
 		ApplyWeather();
@@ -1122,10 +1133,6 @@ void AODMainMenu::SaveExhaustConfig() const
 {
 	// GConfig into GameUserSettings.ini - same mechanism as AODVehiclePawn::
 	// SaveInputDeviceMode (no SaveGame object exists yet in this project).
-	// Engine/Drivetrain/Tuning picks do NOT persist today (session-only,
-	// like the input-device row's comment on the pawn side notes for itself)
-	// - this is deliberately scoped to exhaust only per the 5.2 task, not a
-	// general persistence pass; noted as a gap for the others.
 	GConfig->SetInt(ExhaustConfigSection, TEXT("PresetIdx"), ExhaustPresetIdx, GGameUserSettingsIni);
 	GConfig->SetFloat(ExhaustConfigSection, TEXT("Loudness"), ExhaustLoudness, GGameUserSettingsIni);
 	GConfig->SetFloat(ExhaustConfigSection, TEXT("Rasp"), ExhaustRasp, GGameUserSettingsIni);
@@ -1158,6 +1165,23 @@ void AODMainMenu::LoadExhaustConfig()
 	ExhaustRasp = FMath::Clamp(ExhaustRasp, 0.0f, 1.0f);
 	ExhaustMufflerCutoff = FMath::Clamp(ExhaustMufflerCutoff, 200.0f, 8000.0f);
 	ExhaustPop = FMath::Clamp(ExhaustPop, 0.0f, 1.0f);
+}
+
+void AODMainMenu::SavePicks() const
+{
+	if (const AODVehiclePawn* Pawn = FindPawn())
+	{
+		GConfig->SetInt(CarConfigSection, TEXT("VehicleIdx"), Pawn->GetVehicleIndex(), GGameUserSettingsIni);
+	}
+	GConfig->SetInt(CarConfigSection, TEXT("EngineIdx"), EngineIdx, GGameUserSettingsIni);
+	GConfig->SetInt(CarConfigSection, TEXT("DriveIdx"), DriveIdx, GGameUserSettingsIni);
+	const AODTuningManager* Tuning = FindActor<AODTuningManager>(GetWorld());
+	GConfig->SetInt(CarConfigSection, TEXT("TunePreset"), Tuning ? Tuning->GetPresetIndex() : INDEX_NONE, GGameUserSettingsIni);
+	if (AreaLevels.IsValidIndex(AreaIdx))
+	{
+		GConfig->SetString(AreaConfigSection, TEXT("Level"), *AreaLevels[AreaIdx], GGameUserSettingsIni);
+	}
+	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
 void AODMainMenu::ChangeCar(int32 Dir)
@@ -1208,14 +1232,6 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 			Yaw = SnapYaw;
 			bHaveTarget = true;
 		}
-	}
-	if (bPendingSpot)
-	{
-		// menu spot (2026-10-05) - same TeleportToSpawn ground snap + loading gate
-		bPendingSpot = false;
-		Target = PendingSpot;
-		Yaw = PendingSpotYaw;
-		bHaveTarget = true;
 	}
 
 	Pawn->SetShowroom(false);
@@ -1311,36 +1327,18 @@ void AODMainMenu::FindAreaLevels()
 	AR.GetAssets(Filter, Found);
 	for (const FAssetData& A : Found)
 	{
-		AreaLevels.Add(A.PackageName.ToString());
+		if (A.AssetName.ToString().StartsWith(TEXT("OpenWorld_")))
+		{
+			AreaLevels.Add(A.PackageName.ToString());
+		}
 	}
 	AreaLevels.Sort();
-	AreaLevels.Add(TEXT("/Game/TailOfTheDragon"));
-	// the level we're on is always listed, so the row starts on it (adds
-	// OpenWorldTest, which lives outside /Game/Areas)
-	const FString Current = UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName());
-	CurrentAreaIdx = AreaLevels.AddUnique(Current);
-	AreaIdx = CurrentAreaIdx;
-
 	for (const FString& Level : AreaLevels)
 	{
-		// "/Game/Areas/OpenWorld_summit_county" -> "Summit County"
+		// "/Game/Areas/OpenWorld_summit_county" -> key "summit_county", name "Summit County"
 		FString Key = FPackageName::GetShortName(Level);
 		Key.RemoveFromStart(TEXT("OpenWorld_"));
-		FString Name = FName::NameToDisplayString(Key, false);
-		if (Level == Current && !Level.StartsWith(TEXT("/Game/Areas/")))
-		{
-			// OpenWorldTest: its area is only in the road manager's prefix
-			// (same derivation as AODGameMode's HomeArea)
-			if (const AODRoadManager* Road = FindActor<AODRoadManager>(GetWorld()))
-			{
-				FString Area = Road->RoadTilePrefix;
-				Area.RemoveFromStart(TEXT("road_"));
-				Area.RemoveFromEnd(TEXT("_test"));
-				Name = FString::Printf(TEXT("%s (%s)"), *FName::NameToDisplayString(Area, false), *Name);
-				Key = Area;
-			}
-		}
-		AreaNames.Add(Name);
+		AreaNames.Add(FName::NameToDisplayString(Key, false));
 		AreaKeys.Add(Key);
 	}
 }
@@ -1351,12 +1349,12 @@ void AODMainMenu::OpenArea()
 	{
 		return;
 	}
-	// OpenLevel resets every actor, so the session-only car picks ride the
-	// travel URL (2026-10-05) and are read back in BeginPlay (this class) and
-	// AODVehiclePawn::BeginPlay (odvehidx=). Exhaust/Season/Input Device are
-	// already in GameUserSettings.ini and need nothing here.
-	// ponytail: URL options, not a GameInstance - add one if more state
-	// (route, time of day) ever needs to survive a level switch.
+	// OpenLevel resets every actor. Every pick is already saved to
+	// GameUserSettings.ini on change (SavePicks, Season/Time/Weather/Exhaust);
+	// the car picks also ride the travel URL, read back in BeginPlay (this
+	// class; odengine= also triggers bAutoStart) and AODVehiclePawn::BeginPlay
+	// (odvehidx=). The new level starts at its default spawn.
+	SavePicks();
 	FString Options = FString::Printf(TEXT("odengine=%d?oddrive=%d"), EngineIdx, DriveIdx);
 	if (const AODVehiclePawn* Pawn = FindPawn())
 	{
@@ -1367,13 +1365,6 @@ void AODMainMenu::OpenArea()
 	{
 		Options += FString::Printf(TEXT("?odtunepreset=%d"), Tuning->GetPresetIndex());
 	}
-	if (Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid)
-	{
-		// start the car at the picked area's menu spot (2026-10-05) - read back
-		// in BeginPlay, consumed by StartAt() once the pawn is ready
-		Options += FString::Printf(TEXT("?odspawnx=%.0f?odspawny=%.0f?odspawnyaw=%.1f"),
-			Spots[AreaIdx].CarCm.X, Spots[AreaIdx].CarCm.Y, Spots[AreaIdx].CarYawDeg);
-	}
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Area -> %s (%s)"), *AreaLevels[AreaIdx], *Options);
 	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
 }
@@ -1383,8 +1374,8 @@ void AODMainMenu::OpenArea()
 void AODMainMenu::LoadMenuSpots()
 {
 	// {"<area>": {"car_cm": [x, y, z], "car_yaw_deg", "view_yaw_deg", "source"}}
-	// (pipeline/build_menu_spots.py). Missing file/area = that area keeps the
-	// garage room on every row and Drive goes to map-select as before.
+	// (pipeline/build_menu_spots.py). An area without a spot is dropped from
+	// the Area row by BeginPlay.
 	Spots.Reset();
 	Spots.SetNum(AreaLevels.Num());
 	FString Text;
@@ -1513,8 +1504,7 @@ void AODMainMenu::UpdateScene()
 	{
 		return;
 	}
-	const bool bVistaRow = Selected >= FirstVistaRow && Selected <= LastVistaRow;
-	const int32 Want = bVistaRow && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
+	const int32 Want = Screen == EODMenuScreen::Scene && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
 		? AreaIdx : INDEX_NONE;
 	if (Want == ShownVista)
 	{
@@ -1615,7 +1605,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
 	switch (Row)
 	{
-	case 0:
+	case RowCar:
 	{
 		OutLabel = TEXT("Car");
 		OutValue = TEXT("Coupe");
@@ -1629,7 +1619,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		}
 		break;
 	}
-	case 1:
+	case RowEngine:
 		OutLabel = TEXT("Engine");
 		OutValue = Engines[EngineIdx].Name;
 		if (EngineIdx == 0)
@@ -1640,7 +1630,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 				*Voice.Left(Voice.Find(TEXT(" "))));
 		}
 		break;
-	case 2:
+	case RowDrivetrain:
 		OutLabel = TEXT("Drivetrain");
 		OutValue = Layouts[DriveIdx].Name;
 		if (DriveIdx == 0)
@@ -1652,7 +1642,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 				: L == EODDriveLayout::AWD ? TEXT("AWD") : TEXT("RWD"));
 		}
 		break;
-	case 3:
+	case RowTuning:
 		OutLabel = TEXT("Tuning");
 		OutValue = TEXT("(stock)");
 		if (const AODTuningManager* Tuning = FindActor<AODTuningManager>(GetWorld());
@@ -1661,71 +1651,68 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 			OutValue = Tuning->CurrentPresetName;
 		}
 		break;
-	case 4:
+	case RowExhaust:
 		OutLabel = TEXT("Exhaust");
 		OutValue = ExhaustPresets[ExhaustPresetIdx].Name;
 		break;
-	case 5:
+	case RowLoudness:
 		OutLabel = TEXT("Loudness");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustLoudness * 100.0f));
 		break;
-	case 6:
+	case RowRasp:
 		OutLabel = TEXT("Rasp");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustRasp * 100.0f));
 		break;
-	case 7:
+	case RowMuffler:
 		OutLabel = TEXT("Muffler");
 		OutValue = FString::Printf(TEXT("%.0f Hz"), ExhaustMufflerCutoff);
 		break;
-	case 8:
+	case RowPop:
 		OutLabel = TEXT("Pop");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustPop * 100.0f));
 		break;
-	case 9:
-	{
-		OutLabel = TEXT("Input Device");
-		OutValue = TEXT("Auto");
-		if (const AODVehiclePawn* Pawn = FindPawn())
-		{
-			const EODInputDevice Mode = Pawn->GetInputDeviceMode();
-			OutValue = AODVehiclePawn::InputDeviceModeToString(Mode);
-			if (Mode == EODInputDevice::Auto)
-			{
-				// show what Auto has actually resolved to, so the row reads
-				// as live feedback ("Auto (Gamepad)") instead of a static name
-				OutValue += FString::Printf(TEXT(" (%s)"),
-					*AODVehiclePawn::InputDeviceModeToString(Pawn->GetActiveInputDevice()));
-			}
-		}
-		break;
-	}
-	case 10:
+	case RowSeason:
 		OutLabel = TEXT("Season");
 		OutValue = SeasonNames[SeasonIdx];
 		break;
-	case 11:
+	case RowTime:
 		OutLabel = TEXT("Time of Day");
 		OutValue = TimeOfDayPresets[TimeIdx].Name;
 		break;
-	case 12:
+	case RowWeather:
 		OutLabel = TEXT("Weather");
 		OutValue = WeatherNames[WeatherIdx];
 		break;
-	case 13:
+	case RowArea:
 		OutLabel = TEXT("Area");
 		OutValue = AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : FString();
 		break;
-	case 14:
+	case RowDrive:
+		OutLabel = TEXT("Drive");
+		OutValue.Empty();
+		break;
+	case RowStart:
+		OutLabel = TEXT("Start");
+		OutValue.Empty();
+		break;
+	case RowGarage:
+		OutLabel = TEXT("Garage");
+		OutValue.Empty();
+		break;
+	case RowSettings:
 		OutLabel = TEXT("Settings");
 		OutValue.Empty();
 		break;
-	case 15:
+	case RowCredits:
 		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
-	case 16:
-		OutLabel = AreaIdx != CurrentAreaIdx ? TEXT("Load Area  →")
-			: bGarageMode ? TEXT("Resume Driving") : TEXT("Drive  →");
+	case RowBack:
+		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Back");
+		OutValue.Empty();
+		break;
+	case RowQuit:
+		OutLabel = TEXT("Quit");
 		OutValue.Empty();
 		break;
 	default:

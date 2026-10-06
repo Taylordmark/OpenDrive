@@ -474,7 +474,9 @@ void AODVehiclePawn::BeginPlay()
 	// generator pass). Unlike -odveh=T's single next-car cycle, this picks
 	// an absolute index immediately so a batch of -odshot runs can each grab
 	// one car without chaining cycle counts.
+	// last car picked in the menu's Garage (AODMainMenu::SavePicks); invalid -> stays 0
 	int32 VehIdx = -1;
+	GConfig->GetInt(TEXT("OpenDrive.Car"), TEXT("VehicleIdx"), VehIdx, GGameUserSettingsIni);
 	FParse::Value(FCommandLine::Get(), TEXT("odvehidx="), VehIdx);
 	// same index as a travel-URL option (2026-10-05): the garage's Area row
 	// carries the picked car across OpenLevel this way (AODMainMenu::OpenArea)

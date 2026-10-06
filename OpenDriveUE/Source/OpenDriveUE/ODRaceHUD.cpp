@@ -495,9 +495,9 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	}
 	UFont* Font = GEngine->GetLargeFont();
 
-	// garage-menu vista (2026-10-05): no full-screen dim over the outdoor view,
-	// and the panel moves to the right so the car (left of centre) stays clear
-	const bool bVista = Menu->GetStage() == EODMenuStage::CarConfig && Menu->IsVistaShown();
+	// Scene Select's vista: no full-screen dim over the outdoor view, and the
+	// panel moves to the right so the car (left of centre) stays clear
+	const bool bVista = Menu->GetStage() == EODMenuStage::Menu && Menu->IsVistaShown();
 	if (!bVista)
 	{
 		FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
@@ -518,7 +518,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	// (2026-08-27, spawn-loading-screen task) - fully opaque so the player
 	// never sees the car airborne/popping in, or the world visibly filling in
 	// around it, while a fresh area's road/terrain tiles are still streaming.
-	if (Menu->GetStage() == EODMenuStage::Loading)
+	if (Menu->IsLoading())
 	{
 		FCanvasTileItem Black(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
 			FLinearColor(0, 0, 0, 1.0f));
@@ -551,19 +551,22 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		return;
 	}
 
-	// ---- car config: tabbed panel on the left, the showroom car behind ----
-	if (Menu->GetStage() == EODMenuStage::CarConfig)
+	// ---- menu screens: tabbed panel on the left (right over a vista) ----
+	if (Menu->GetStage() == EODMenuStage::Menu)
 	{
-		const bool bGarage = Menu->IsGarageMode();
+		const EODMenuScreen Screen = Menu->GetScreen();
 		const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
 		const float H = TabbedPanelHeight(Tabs);
 		DrawTabbedPanel(bVista ? Canvas->SizeX - 70.0f - 640.0f : 70.0f,
 			FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), 640.0f,
-			bGarage ? TEXT("GARAGE") : TEXT("SELECT YOUR CAR"),
-			Tabs, Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
+			Screen == EODMenuScreen::Garage ? TEXT("GARAGE")
+				: Screen == EODMenuScreen::Scene ? TEXT("SELECT SCENE") : TEXT("MAIN MENU"),
+			Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
-			bGarage ? TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  resume")
-				: TEXT("Q/E  tabs     ↑↓  select     ←→  change     Enter  confirm"));
+			Screen == EODMenuScreen::Main ? TEXT("↑↓  select     Enter  confirm")
+				: Screen == EODMenuScreen::Scene ? TEXT("↑↓  select     ←→  change     Enter  confirm     Esc  back")
+				: Menu->IsGarageMode() ? TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  resume")
+				: TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  back"));
 		return;
 	}
 
@@ -838,14 +841,18 @@ void AODRaceHUD::DrawTabbedPanel(float X, float Y, float W, const TCHAR* Title,
 
 	Text(Title, X + Pad, Y + 44.0f, 30.0f, FLinearColor(0.8f, 0.92f, 1.0f), true);
 
-	// tab bar: equal segments, Q/E cues at the ends, accent underline on the active tab
+	// tab bar: equal segments, Q/E cues at the ends, accent underline on the
+	// active tab; none for a single-tab screen
 	const float BarY = Y + 104.0f;
 	const float BarX0 = X + Pad + 28.0f, BarX1 = X + W - Pad - 28.0f;
 	const float SegW = (BarX1 - BarX0) / FMath::Max(1, Tabs.Num());
-	Text(TEXT("Q"), X + Pad + 4.0f, BarY, 15.0f, DimCol, true, true);
-	Text(TEXT("E"), X + W - Pad - 4.0f, BarY, 15.0f, DimCol, true, true);
-	Rect(BarX0, BarY + 20.0f, BarX1 - BarX0, 1.0f, FLinearColor(1, 1, 1, 0.12f));
-	for (int32 i = 0; i < Tabs.Num(); ++i)
+	if (Tabs.Num() > 1)
+	{
+		Text(TEXT("Q"), X + Pad + 4.0f, BarY, 15.0f, DimCol, true, true);
+		Text(TEXT("E"), X + W - Pad - 4.0f, BarY, 15.0f, DimCol, true, true);
+		Rect(BarX0, BarY + 20.0f, BarX1 - BarX0, 1.0f, FLinearColor(1, 1, 1, 0.12f));
+	}
+	for (int32 i = 0; Tabs.Num() > 1 && i < Tabs.Num(); ++i)
 	{
 		const bool bActive = i == ActiveTab;
 		const float SX = BarX0 + SegW * i;

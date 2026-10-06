@@ -13,10 +13,9 @@ class AODCreditsMenu;
  * In-game pause menu (ESC / P). Deliberately minimal (2026-07-25, Taylor's
  * call): the two driver assists - Traction Control and ABS - are the only
  * settings changed directly here. Everything that defines the car itself
- * (car, engine, drivetrain, tuning) still lives in AODMainMenu's car-config
- * screen; the "Garage" row (2026-07-26) opens that screen in place
- * (AODMainMenu::OpenGarage()) instead of requiring a full trip through
- * "Main Menu" -> map-select just to change the car mid-drive. Rows are
+ * (car, engine, drivetrain, tuning) still lives in AODMainMenu's Garage
+ * screen; the "Garage" row opens that screen in place
+ * (AODMainMenu::OpenGarage()) without leaving the drive. Rows are
  * Resume, World Map (SS7.37 - hands the screen to AODRaceHUD's world map),
  * Traction, ABS, Garage, Settings, Credits, Main Menu (back to the
  * front-end), Quit. Drawn on canvas by ODRaceHUD; arrows navigate/change,
