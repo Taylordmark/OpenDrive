@@ -221,6 +221,10 @@ Density comes from real volumes and real daily patterns, not a setting.
 - Race (D3): the race manager turns traffic off on a stage.
 - There's no density setting (D4). The only knob is a hidden
   `-odtraffic=0` QA flag.
+- **Snowplows (Taylor, 2026-10-06, for fun, later):** in snow, a few agents
+  become plows on main roads. They drive slower and clear the road snow
+  depth behind them (throwing it onto the side berms). This needs road snow
+  stored per road chunk, not as one global value.
 
 - **Checks:**
   - `tests/test_idm.py`: stop behind a stopped leader with no overlap, and

@@ -7,6 +7,7 @@
 #include "ODRoadManager.generated.h"
 
 class UDynamicMeshComponent;
+class UPrimitiveComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
@@ -135,6 +136,10 @@ public:
 
 	/** Shared road-chunk MID (Weather W2 wetness), null if M_Road failed to load. */
 	UMaterialInstanceDynamic* GetRoadMID() const;
+
+	/** Road snow depth (cm) on Comp if it's one of this class's chunks
+	 *  (Custom Primitive Data 0, see TickSnow), else Fallback. */
+	static float ChunkSnowCm(const UPrimitiveComponent* Comp, float Fallback);
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin" (ODR2 format).
@@ -529,4 +534,12 @@ private:
 
 	TArray<FPlaceLabel> PlaceLabels;
 	double LastLabelUpdateTime = 0.0;
+
+	/** Snow accumulation (2026-10-06): ~2 Hz, each chunk's CPD depth +=
+	 *  AODWeatherController's road/roadside rate (reset to ambient when QA
+	 *  forces a depth). Per chunk so a future plow can clear one. */
+	void TickSnow();
+	TWeakObjectPtr<class AODWeatherController> SnowWeather;
+	double LastSnowTime = 0.0;
+	int32 SnowSerialSeen = 0;
 };

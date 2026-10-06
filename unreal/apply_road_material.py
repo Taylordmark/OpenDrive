@@ -120,6 +120,24 @@ WearMaxFade = 0.6               # markings never fade past 40% of full brightnes
 # road_moisture roughness term (sec 2.2) with a live one.
 WetDarken = 0.55                # albedo multiplier at Wetness 1 (wet asphalt reads much darker)
 WetRoughness = 0.12             # roughness at Wetness 1 (water film = sky reflections)
+# Snow (2026-10-06): per-chunk depth in Custom Primitive Data (AODRoadManager::
+# TickSnow) - "SnowDepth" (index 0, road cm) and "SideSnowDepth" (index 1,
+# roadside cm). Both 0 = the exact pre-snow graph output, incl. the WPO.
+SnowSlushFullCm = 2.0           # wet -> grey slush over the first 2 cm
+SnowCoverFullCm = 10.0          # ... -> fully white by 10 cm
+SlushColor = (0.42, 0.43, 0.45)
+SlushOpacity = 0.7
+SnowColor = (0.90, 0.92, 0.95)
+SlushRoughness = 0.25
+SnowRoughness = 0.8
+TrackOffsetM = 0.8              # tire tracks +-0.8 m from each lane's center
+TrackHalfWidthM = 0.3
+TrackCover = 0.45               # white cover kept inside a track (packed/slushy ruts)
+# Berms: WPO moves the wrap-lip verts (UV2 = outward XY unit vector, written
+# by ODRoadManager's CreateChunkMeshComponent; zero on every other vert) out
+# by BermOutPerCm x depth and up from their 0.6 m drop to the bank top.
+BermOutPerCm = 1.5
+BermLipDropCm = 60.0            # road_mesh_common.WRAP_LIP_DROP_M
 
 
 def log(msg):
@@ -472,17 +490,55 @@ final_paint_mask = g.mul(g.mul(paint_mask, wear_visibility), not_in_junction)
 paint_rough = g.const(0.35)   # paint reads smoother/glossier than worn asphalt
 
 dry_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
-final_normal = base_normal   # markings are flat paint, not a separate normal layer
 dry_rough = g.lerp(base_rough, paint_rough, final_paint_mask)
 
 # ---------------------------------------------------------------- weather wetness (W2)
 wetness = g.scalar_param("Wetness", 0.0)
-final_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(WetDarken), wetness))
-final_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
+wet_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(WetDarken), wetness))
+wet_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
+
+
+# ---------------------------------------------------------------- snow (per-chunk depth, CPD)
+def cpd_param(name, index):
+    n = g.scalar_param(name, 0.0)
+    n.set_editor_property("use_custom_primitive_data", True)
+    n.set_editor_property("primitive_data_index", index)
+    return n
+
+
+snow_d = cpd_param("SnowDepth", 0)
+side_d = cpd_param("SideSnowDepth", 1)
+slush_t = g.clamp01(g.mul(snow_d, g.const(1.0 / SnowSlushFullCm)))
+cover_raw = g.clamp01(g.mul(snow_d, g.const(1.0 / SnowCoverFullCm)))
+# tire tracks: |offset from this lane's center| near TrackOffsetM, pavement only
+d_lane_center = g.absv(g.mul(g.sub(frac_t, g.const(0.5)), lane_width))
+track = g.mul(g.mul(g.band(g.absv(g.sub(d_lane_center, g.const(TrackOffsetM))), TrackHalfWidthM), has_data),
+              g.sub(g.const(1.0), shoulder_t))
+snow_cover = g.mul(cover_raw, g.sub(g.const(1.0), g.mul(track, g.const(1.0 - TrackCover))))
+# berm faces (any vert with a UV2 direction) whiten with the roadside depth
+uv2 = g.tex_coord(2)
+berm_w = g.mul(g.clamp01(g.mul(g.dotp(uv2, uv2), g.const(64.0))),
+               g.clamp01(g.mul(side_d, g.const(1.0 / 5.0))))
+snow_white = g.maxv(snow_cover, berm_w)
+
+slushy_albedo = g.lerp(wet_albedo, g.const3(*SlushColor), g.mul(slush_t, g.const(SlushOpacity)))
+final_albedo = g.lerp(slushy_albedo, g.const3(*SnowColor), snow_white)
+final_rough = g.lerp(g.lerp(wet_rough, g.const(SlushRoughness), slush_t), g.const(SnowRoughness), snow_white)
+final_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), snow_white)
+
+# berm WPO: lip out by depth*BermOutPerCm, up from -BermLipDropCm to +depth
+# (eased in over the first 10 cm so a dusting doesn't yank the lip up)
+berm_xy = g.mul(uv2, g.mul(side_d, g.const(BermOutPerCm)))
+berm_z = g.mul(g.mul(g.clamp01(g.dotp(uv2, uv2)), g.add(side_d, g.const(BermLipDropCm))),
+               g.clamp01(g.mul(side_d, g.const(0.1))))
+berm_wpo = g.node(unreal.MaterialExpressionAppendVector)
+g._req(MEL.connect_material_expressions(berm_xy, "", berm_wpo, "A"), "Append.A(bermXY)")
+g._req(MEL.connect_material_expressions(berm_z, "", berm_wpo, "B"), "Append.B(bermZ)")
 
 MEL.connect_material_property(final_albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
 MEL.connect_material_property(final_normal, "", unreal.MaterialProperty.MP_NORMAL)
 MEL.connect_material_property(final_rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+MEL.connect_material_property(berm_wpo, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
 
 MEL.recompile_material(mat)
 unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
@@ -498,6 +554,7 @@ for prop_name, prop_enum in (
     ("BaseColor", unreal.MaterialProperty.MP_BASE_COLOR),
     ("Normal", unreal.MaterialProperty.MP_NORMAL),
     ("Roughness", unreal.MaterialProperty.MP_ROUGHNESS),
+    ("WorldPositionOffset", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET),
 ):
     node = MEL.get_material_property_input_node(reloaded, prop_enum)
     if node is None:
@@ -513,4 +570,4 @@ if not all_ok:
 
 log(f"built + saved {MAT_NAME} - asphalt sets={list(TILE_M.keys())}, "
     f"fallback half-width={RoadHalfWidthFallbackM}m, Wetness param (darken {WetDarken}, "
-    f"rough {WetRoughness})")
+    f"rough {WetRoughness}), SnowDepth/SideSnowDepth CPD params + berm WPO")

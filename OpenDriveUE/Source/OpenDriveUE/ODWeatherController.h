@@ -88,6 +88,42 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float DrySeconds = 1200.0f;
 
+	// ---- snow accumulation (2026-10-06, TickSnow; pipeline/check_snow_depth.py
+	// mirrors the formula). Ambient depths below are the uncleared value; each
+	// road chunk integrates RoadSnowRateCmS/SideSnowRateCmS on its own
+	// (AODRoadManager::TickSnow) so a future plow can clear chunks.
+
+	/** Multiplies every snow time constant's speed (2 = twice as fast). -odsnowrate=N. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float SnowTimeScale = 1.0f;
+
+	/** Warm road melts snow on contact this long at full snowfall and -2 C
+	 *  before any builds (longer when lighter/warmer, shorter when colder). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float SnowContactMeltSeconds = 90.0f;
+
+	/** Road build rate at snowfall 1 (blizzard): 30 cm in ~8.6 min. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float RoadSnowCmPerMin = 3.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float RoadSnowCapCm = 30.0f;
+
+	/** Roadside builds this many times faster (no contact melt, drifting). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float SideSnowMult = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float SideSnowCapCm = 90.0f;
+
+	/** Melt once snow stops, at -2 C (faster warmer, slower colder). */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float SnowMeltCmPerMin = 0.5f;
+
+	/** Extra melt under rain intensity 1. */
+	UPROPERTY(EditAnywhere, Category = "Weather|Snow")
+	float RainMeltCmPerMin = 4.0f;
+
 	// ---- on-lens precipitation (2026-10-06, TickLens): drops/flakes land on
 	// the player camera, airflow pushes them out toward the screen edges,
 	// flakes stick, then melt into a small water smear. Sizes/positions are in
@@ -152,6 +188,32 @@ public:
 	/** Surface wetness: accumulates under precipitation, dries slowly. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float Wetness = 0.0f;
+
+	/** Air temperature from the last roll (month temp + lapse), C. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float AirTempC = -2.0f;
+
+	/** 0 warm road (melts snow on contact) .. 1 chilled (snow sticks). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float RoadChill = 0.0f;
+
+	/** Ambient (unplowed) snow depth on the road / beside it, cm. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float RoadSnowCm = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float SideSnowCm = 0.0f;
+
+	/** This tick's depth change rates, cm/s - road chunks integrate these. */
+	float RoadSnowRateCmS = 0.0f;
+	float SideSnowRateCmS = 0.0f;
+
+	/** Bumped when depth is forced; chunks then reset to the ambient depth. */
+	int32 SnowDepthSerial = 0;
+
+	/** QA: force and hold road snow depth (roadside scales to its cap);
+	 *  negative releases the hold. -odsnowdepth=cm, "od.Weather Depth <cm|Auto>". */
+	void SetSnowDepth(float Cm);
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float CloudCover = 0.1f;
@@ -242,6 +304,8 @@ private:
 		bool bSnow = false;
 	};
 	void TickLens(float DeltaSeconds);
+	void TickSnow(float DeltaSeconds);
+	bool bSnowHeld = false;
 
 	TArray<FLensDrop> LensDrops;
 	UPROPERTY()

@@ -50,6 +50,7 @@ struct FODWheel
 	bool bInContact = false;
 	FVector ContactPoint = FVector::ZeroVector;   // world
 	TWeakObjectPtr<UPhysicalMaterial> Surface;
+	TWeakObjectPtr<UPrimitiveComponent> Ground;   // hit component (road chunk snow depth)
 	float SpringLen = 20.0f;      // current strut length, cm
 	float FzSm = 0.0f;            // smoothed vertical load, kg cm/s^2
 	float Omega = 0.0f;           // wheel spin, rad/s (+ = forward)

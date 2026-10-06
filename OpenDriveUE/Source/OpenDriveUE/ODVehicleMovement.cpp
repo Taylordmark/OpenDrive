@@ -1,6 +1,7 @@
 #include "ODVehicleMovement.h"
 
 #include "ODVehicleDef.h"
+#include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODWeatherController.h"
 #include "Components/PrimitiveComponent.h"
@@ -18,7 +19,8 @@ namespace
 	// every blend is continuous (max of continuous terms, no snapping):
 	//   wet   : any water on the road                      -> 0.80
 	//   slush : sleet (PrecipType 0.5 peak of a triangle)   -> 0.60
-	//   snow  : wet road under snow, or on snow-covered ground -> 0.45
+	//   snow  : wet road on snow-covered ground (season)   -> 0.45
+	//   road snow depth (any wetness): 2 cm slush -> 0.60, 8+ cm packed -> 0.45
 	//   ice   : wet road on frozen ground (FreezeBlend), rain/sleet
 	//           rather than dry snow (fades out PrecipType 0.5 -> 1) -> 0.30
 	// Tread relief: rally/offroad tires (OffRoadGrip 0.9/1.0 vs street 0.6)
@@ -29,21 +31,31 @@ namespace
 	constexpr float SNOW_LOSS = 0.55f;
 	constexpr float ICE_LOSS = 0.70f;
 	constexpr float TREAD_RELIEF = 0.40f;
+	// Road snow depth (2026-10-06, AODRoadManager chunk depth): slush builds
+	// over the first SLUSH_FULL_CM, packed snow from SNOW_START_CM to
+	// SNOW_FULL_CM - on the road itself, wet or not. Falling snow alone no
+	// longer counts as snow (the road melts it on contact - it's just wet).
+	constexpr float SLUSH_FULL_CM = 2.0f;
+	constexpr float SNOW_START_CM = 2.0f;
+	constexpr float SNOW_FULL_CM = 8.0f;
+	constexpr float SNOW_CRR_PER_CM = 0.002f;   // rolling drag coeff per cm of road snow
 	constexpr float TREAD_OFFROAD_LO = 0.6f;   // street OffRoadGrip = no relief
 	constexpr float TREAD_OFFROAD_HI = 1.0f;   // offroad OffRoadGrip = full relief
 
 	float WeatherGrip(float Wetness, float PrecipType, float SnowCover,
-		float FreezeBlend, float OffRoadGrip)
+		float FreezeBlend, float OffRoadGrip, float SnowDepthCm)
 	{
 		const float W = FMath::Clamp(Wetness, 0.0f, 1.0f);
 		const float T = FMath::Clamp(PrecipType, 0.0f, 1.0f);
 		const float Slush = 1.0f - FMath::Abs(2.0f * T - 1.0f);
-		const float Snow = FMath::Max(T, FMath::Clamp(SnowCover, 0.0f, 1.0f));
+		const float Snow = FMath::Clamp(SnowCover, 0.0f, 1.0f);
 		const float Ice = FMath::Clamp(FreezeBlend, 0.0f, 1.0f)
 			* FMath::Clamp(2.0f * (1.0f - T), 0.0f, 1.0f);
-		const float Loss = W * FMath::Max(
+		const float Loss = FMath::Max(W * FMath::Max(
 			FMath::Max(WET_LOSS, SLUSH_LOSS * Slush),
-			FMath::Max(SNOW_LOSS * Snow, ICE_LOSS * Ice));
+			FMath::Max(SNOW_LOSS * Snow, ICE_LOSS * Ice)),
+			FMath::Max(SLUSH_LOSS * FMath::Clamp(SnowDepthCm / SLUSH_FULL_CM, 0.0f, 1.0f),
+				SNOW_LOSS * FMath::Clamp((SnowDepthCm - SNOW_START_CM) / (SNOW_FULL_CM - SNOW_START_CM), 0.0f, 1.0f)));
 		const float Tread = FMath::Clamp((OffRoadGrip - TREAD_OFFROAD_LO)
 			/ (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO), 0.0f, 1.0f);
 		return 1.0f - Loss * (1.0f - TREAD_RELIEF * Tread);
@@ -415,6 +427,7 @@ void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
 			W.bInContact = true;
 			W.ContactPoint = Hit.ImpactPoint;
 			W.Surface = Hit.PhysMaterial;
+			W.Ground = Hit.GetComponent();
 			// tire load: smoothed spring force - REAL weight transfer, no
 			// analytic estimate (that was a workaround for Chaos hiding the
 			// constraint-side forces)
@@ -461,6 +474,7 @@ void UODVehicleMovement::PrimeSuspension()
 			W.bInContact = true;
 			W.ContactPoint = Hit.ImpactPoint;
 			W.Surface = Hit.PhysMaterial;
+			W.Ground = Hit.GetComponent();
 			// prime the smoothed load to the STATIC spring force this length
 			// implies, not 0 - starting FzSm at 0 would itself read as a
 			// momentary wheel-lift to anything sampling it before the first
@@ -1142,9 +1156,32 @@ void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
 		return;
 	}
 	const AODSeasonController* Season = SeasonCtl.Get();
+	// road snow under the tires: the contact chunk's own depth (a future plow
+	// clears chunks), else the ambient depth (non-chunk roads, e.g. the Dragon)
+	float SnowCm = 0.0f;
+	int32 Contacts = 0;
+	for (const FODWheel& W : Wheels)
+	{
+		if (W.bInContact)
+		{
+			SnowCm += AODRoadManager::ChunkSnowCm(W.Ground.Get(), Wx->RoadSnowCm);
+			++Contacts;
+		}
+	}
+	SnowCm = Contacts ? SnowCm / Contacts : 0.0f;
 	WeatherGripMult = WeatherGrip(Wx->Wetness, Wx->PrecipType,
 		Season ? Season->SnowCover : 0.0f, Season ? Season->FreezeBlend : 0.0f,
-		OffRoadGrip);
+		OffRoadGrip, SnowCm);
+
+	// deep snow: a little rolling drag against the motion (faded in over the
+	// first 1 m/s so it can't jitter a parked car), per wheel on the ground
+	const FVector Vel = Body->GetPhysicsLinearVelocity();
+	const float SpeedCmS = Vel.Size();
+	if (SnowCm > 0.0f && SpeedCmS > 1.0f)
+	{
+		Body->AddForce(-Vel / SpeedCmS * SNOW_CRR_PER_CM * SnowCm * Body->GetMass() * 980.0f
+			* FMath::Min(SpeedCmS / 100.0f, 1.0f) * Contacts / FMath::Max(Wheels.Num(), 1));
+	}
 
 	// crosswind: the wind component across the car, quadratic, at the COM.
 	// WindAtMs includes the W4 tornado vortex near the funnel (sec 7.42).

@@ -97,6 +97,14 @@ Group these into a few drive sessions. Each line says what to judge.
     and the refraction look (`Weather|Lens` knobs, `RefractionIOR` on
     `M_LensDrop`). Pick Rain/HeavyRain/Snow/Blizzard in the garage Weather
     row, or console `od.Weather Snow` (`od.Weather Auto` to release).
+  - snow accumulation (2026-10-06): `od.Weather Blizzard`, then watch the
+    road stay wet ~1.5 min before it whitens, with darker tire tracks per
+    lane and berms rising at both edges (should stop at junctions). Jump
+    straight to depth with `-odsnowdepth=30` or `od.Weather Depth 5/15/30`
+    (`Auto` releases); `-odsnowrate=10` speeds the curve. Judge the
+    slush/white colors, track spacing, the berm shape and lighting (WPO
+    keeps the lip's old normal), terrain/foliage whitening, and how grip
+    (slush 0.60, packed 0.45) and the deep-snow drag feel.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).

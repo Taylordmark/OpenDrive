@@ -9,6 +9,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODForestManager.h"
@@ -217,7 +218,8 @@ namespace
 	FAutoConsoleCommandWithWorldAndArgs GODWeatherCmd(
 		TEXT("od.Weather"),
 		TEXT("od.Weather <Clear|Overcast|Rain|HeavyRain|Sleet|Snow|Blizzard|Fog|DustStorm|Thunderstorm|"
-		     "Tornado|Hurricane|Auto> - QA: force and hold a weather state; Auto resumes the random walk"),
+		     "Tornado|Hurricane|Auto> - QA: force and hold a weather state; Auto resumes the random walk. "
+		     "od.Weather Depth <cm|Auto> forces/releases road snow depth"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			AODWeatherController* Weather = FindWeather(World);
@@ -228,9 +230,17 @@ namespace
 			}
 			if (Args.Num() == 0)
 			{
-				UE_LOG(LogTemp, Display, TEXT("od.Weather: %s precip=%.2f type=%.2f wind=%.1f m/s vis=%.0f m wet=%.2f"),
+				UE_LOG(LogTemp, Display, TEXT("od.Weather: %s precip=%.2f type=%.2f wind=%.1f m/s vis=%.0f m wet=%.2f ")
+					TEXT("air=%.1f C chill=%.2f snow road=%.1f cm side=%.1f cm"),
 					*StateName(Weather->State), Weather->PrecipIntensity, Weather->PrecipType,
-					Weather->WindSpeedMs, Weather->VisibilityM, Weather->Wetness);
+					Weather->WindSpeedMs, Weather->VisibilityM, Weather->Wetness,
+					Weather->AirTempC, Weather->RoadChill, Weather->RoadSnowCm, Weather->SideSnowCm);
+				return;
+			}
+			if (Args[0].Equals(TEXT("Depth"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+			{
+				Weather->SetSnowDepth(Args[1].Equals(TEXT("Auto"), ESearchCase::IgnoreCase)
+					? -1.0f : FCString::Atof(*Args[1]));
 				return;
 			}
 			if (!Weather->ForceState(Args[0]))
@@ -254,6 +264,13 @@ void AODWeatherController::BeginPlay()
 	// Starting weather is where the session begins, not a transition.
 	From = To;
 	RampT = 1.0f;
+
+	FParse::Value(FCommandLine::Get(), TEXT("odsnowrate="), SnowTimeScale);
+	float DepthCm = -1.0f;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odsnowdepth="), DepthCm))
+	{
+		SetSnowDepth(DepthCm);
+	}
 }
 
 void AODWeatherController::LoadClimate()
@@ -432,6 +449,52 @@ void AODWeatherController::Tick(float DeltaSeconds)
 	Wetness = PrecipIntensity > 0.05f
 		? FMath::Min(Wetness + DeltaSeconds * PrecipIntensity / WetUpSeconds, 1.0f)
 		: FMath::Max(Wetness - DeltaSeconds / DrySeconds, 0.0f);
+	TickSnow(DeltaSeconds);
+}
+
+namespace
+{
+	/** 1 at -2 C, more when colder - speeds contact chill, slows melt. */
+	float SnowCold(float TempC, float Lo) { return FMath::Clamp(1.0f - (TempC + 2.0f) / 8.0f, Lo, 1.5f); }
+}
+
+void AODWeatherController::TickSnow(float DeltaSeconds)
+{
+	if (bSnowHeld)
+	{
+		RoadSnowRateCmS = SideSnowRateCmS = 0.0f;
+		return;
+	}
+	const float K = SnowTimeScale;
+	const float Snow = PrecipIntensity * PrecipType;
+	const float Rain = PrecipIntensity * (1.0f - PrecipType);
+	const bool bSnowing = Snow > 0.05f;
+	// While snowing the air is at or below ~0 C, whatever the last roll's
+	// month temp said (a forced Blizzard in July still sticks).
+	const float ChillCold = SnowCold(FMath::Min(AirTempC, 0.0f), 0.75f);
+	RoadChill = bSnowing
+		? FMath::Min(RoadChill + DeltaSeconds * K * Snow * ChillCold / SnowContactMeltSeconds, 1.0f)
+		: FMath::Max(RoadChill - DeltaSeconds * K / SnowContactMeltSeconds, 0.0f);
+	const float Build = Snow * RoadSnowCmPerMin;
+	const float Melt = (bSnowing ? 0.0f : SnowMeltCmPerMin / SnowCold(AirTempC, 0.25f)) + Rain * RainMeltCmPerMin;
+	RoadSnowRateCmS = K * ((RoadChill >= 1.0f ? Build : 0.0f) - Melt) / 60.0f;
+	SideSnowRateCmS = K * (Build * SideSnowMult - Melt) / 60.0f;
+	RoadSnowCm = FMath::Clamp(RoadSnowCm + RoadSnowRateCmS * DeltaSeconds, 0.0f, RoadSnowCapCm);
+	SideSnowCm = FMath::Clamp(SideSnowCm + SideSnowRateCmS * DeltaSeconds, 0.0f, SideSnowCapCm);
+}
+
+void AODWeatherController::SetSnowDepth(float Cm)
+{
+	bSnowHeld = Cm >= 0.0f;
+	if (bSnowHeld)
+	{
+		RoadSnowCm = FMath::Min(Cm, RoadSnowCapCm);
+		SideSnowCm = FMath::Min(RoadSnowCm * SideSnowCapCm / FMath::Max(RoadSnowCapCm, 1.0f), SideSnowCapCm);
+		RoadChill = 1.0f;
+		++SnowDepthSerial;
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODWeatherController: QA snow depth %s (road %.1f cm, side %.1f cm)"),
+		bSnowHeld ? TEXT("held") : TEXT("released"), RoadSnowCm, SideSnowCm);
 }
 
 void AODWeatherController::Roll()
@@ -446,6 +509,7 @@ void AODWeatherController::Roll()
 	float W[NumStates];
 	float T = 0.0f, P = 0.0f;
 	StateWeights(Climate, Month, ElevDeltaM, Mult, State, W, T, P);
+	AirTempC = T;
 
 	float Total = 0.0f;
 	for (float V : W) { Total += V; }

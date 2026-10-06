@@ -390,6 +390,11 @@ void AODSeasonController::PushParamsToMIDs()
 	{
 		return;
 	}
+	// Fresh weather snow (2026-10-06) on top of the season snow line: the
+	// roadside depth reaches full ground/foliage cover at 15 cm. Grip keeps
+	// reading the season SnowCover member (road depth has its own term).
+	const AODWeatherController* Wx = WeatherCtl.Get();
+	const float Cover = FMath::Max(SnowCover, Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f);
 	for (TActorIterator<AODTerrainManager> It(World); It; ++It)
 	{
 		AODTerrainManager* Terrain = *It;
@@ -408,8 +413,8 @@ void AODSeasonController::PushParamsToMIDs()
 			{
 				RefZ = Player->GetActorLocation().Z;
 			}
-			const float Low = SnowLineLowForCover(SnowCover, RefZ);
-			const float High = SnowLineHighForCover(SnowCover);
+			const float Low = SnowLineLowForCover(Cover, RefZ);
+			const float High = SnowLineHighForCover(Cover);
 			if (FParse::Param(FCommandLine::Get(), TEXT("odtrace")) && !bLoggedSnowDebugOnce)
 			{
 				bLoggedSnowDebugOnce = true;
@@ -440,7 +445,7 @@ void AODSeasonController::PushParamsToMIDs()
 		AODForestManager* Forest = *It;
 		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
 		{
-			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
 			// FallBlend is deliberately NOT pushed here (2026-09 deciduous-arc
 			// follow-up): this MID is the Conifer/evergreen species batch
 			// (see ConiferSpeciesIndex in ODForestManager.cpp), and
@@ -460,13 +465,13 @@ void AODSeasonController::PushParamsToMIDs()
 		// never receives LeafDrop, so evergreen canopies can't dissolve.
 		if (UMaterialInstanceDynamic* DeciduousFoliageMID = Forest->GetDeciduousFoliageMID())
 		{
-			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("LeafDrop"), LeafDrop);
 		}
 		if (UMaterialInstanceDynamic* DeciduousBarkMID = Forest->GetDeciduousBarkMID())
 		{
-			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
 		}
 	}
 	// Weather W2 (sec 7.40): wet road = darker + glossier (unreal/

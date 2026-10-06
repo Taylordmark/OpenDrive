@@ -5,6 +5,7 @@
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Containers/StringConv.h"
+#include "EngineUtils.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
@@ -14,6 +15,7 @@
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "ODWeatherController.h"
 
 using namespace UE::Geometry;
 
@@ -1091,12 +1093,12 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	{
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
-		FDynamicMeshUVOverlay* UV1 = nullptr;
-		if (bHasV3)
-		{
-			Mesh.Attributes()->SetNumUVLayers(2);
-			UV1 = Mesh.Attributes()->GetUVLayer(1);
-		}
+		// Always 3 layers (2026-10-06): M_Road reads TexCoord[1]/[2] and must
+		// see zeros on a non-V3 chunk, not a clamped-to-UV0 read. UV2 = snow
+		// berm direction, see BermDir below.
+		Mesh.Attributes()->SetNumUVLayers(3);
+		FDynamicMeshUVOverlay* UV1 = Mesh.Attributes()->GetUVLayer(1);
+		FDynamicMeshUVOverlay* UV2 = Mesh.Attributes()->GetUVLayer(2);
 		FDynamicMeshColorOverlay* Colors = nullptr;
 		if (bHasV3)
 		{
@@ -1106,7 +1108,8 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 
 		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
 		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
-		TArray<int32> Uv1Ids; if (UV1) { Uv1Ids.SetNumUninitialized(VCount); }
+		TArray<int32> Uv1Ids; Uv1Ids.SetNumUninitialized(VCount);
+		TArray<int32> Uv2Ids; Uv2Ids.SetNumUninitialized(VCount);
 		TArray<int32> ColorIds; if (Colors) { ColorIds.SetNumUninitialized(VCount); }
 
 		for (uint32 v = 0; v < VCount; ++v)
@@ -1138,13 +1141,43 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			UvIds[v] = UV->AppendElement(
 				FVector2f(Chunk.Uvs[v * 2 + 0], Chunk.Uvs[v * 2 + 1]));
 		}
-		if (UV1)
+		if (bHasV3)
 		{
 			for (uint32 v = 0; v < VCount; ++v)
 			{
 				Uv1Ids[v] = UV1->AppendElement(
 					FVector2f(Chunk.Uv1[v * 2 + 0], Chunk.Uv1[v * 2 + 1]));
 			}
+		}
+		else
+		{
+			Uv1Ids.Init(UV1->AppendElement(FVector2f::ZeroVector), VCount);
+		}
+		// Snow berms (2026-10-06): M_Road's WPO lifts each wrap-lip vert
+		// (columns 1/4, 0.5 m out / 0.6 m below the pavement edge) up and
+		// out along this outward XY unit vector by the roadside snow depth -
+		// a bank rides the existing ribbon, no extra geometry or collision.
+		// Zero elsewhere; faded by the pave vert's junction suppress so
+		// banks stop at junctions. The drop/reach check skips junction-pad
+		// verts merged after the ribbon, which don't follow the 7 columns.
+		// Component-local XY = world XY (no actor/chunk rotation).
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			FVector2f BermDir = FVector2f::ZeroVector;
+			const uint32 Col = v % 7;
+			const uint32 P = Col == 1 ? v + 1 : v - 1;   // its pave-L / pave-R
+			if (bHasV3 && (Col == 1 || Col == 4) && P < VCount)
+			{
+				const FVector2f Out(Chunk.Verts[v * 3] - Chunk.Verts[P * 3],
+				                    Chunk.Verts[v * 3 + 1] - Chunk.Verts[P * 3 + 1]);
+				const float Drop = Chunk.Verts[P * 3 + 2] - Chunk.Verts[v * 3 + 2];
+				const float Reach = Out.Size();
+				if (Drop > 30.0f && Drop < 90.0f && Reach > 25.0f && Reach < 80.0f)
+				{
+					BermDir = Out / Reach * (1.0f - FMath::Clamp(Chunk.Uv1[P * 2 + 1], 0.0f, 1.0f));
+				}
+			}
+			Uv2Ids[v] = UV2->AppendElement(BermDir);
 		}
 		if (Colors)
 		{
@@ -1170,10 +1203,8 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 			if (Tid >= 0)
 			{
 				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
-				if (UV1)
-				{
-					UV1->SetTriangle(Tid, FIndex3i(Uv1Ids[I0], Uv1Ids[I1], Uv1Ids[I2]));
-				}
+				UV1->SetTriangle(Tid, FIndex3i(Uv1Ids[I0], Uv1Ids[I1], Uv1Ids[I2]));
+				UV2->SetTriangle(Tid, FIndex3i(Uv2Ids[I0], Uv2Ids[I1], Uv2Ids[I2]));
 				if (Colors)
 				{
 					Colors->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
@@ -1203,6 +1234,13 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 		Comp->SetMaterial(0, ChunkMat);
 	}
 	TMaterial = Lap(Clock);
+
+	// per-chunk snow depth (Custom Primitive Data 0 road / 1 roadside cm,
+	// M_Road's SnowDepth/SideSnowDepth) starts at the ambient depth - see TickSnow
+	if (const AODWeatherController* Wx = SnowWeather.Get())
+	{
+		Comp->SetCustomPrimitiveDataVector2(0, FVector2D(Wx->RoadSnowCm, Wx->SideSnowCm));
+	}
 
 	Comp->RegisterComponent();
 	TRegister = Lap(Clock);
@@ -1465,6 +1503,7 @@ void AODRoadManager::Tick(float DeltaSeconds)
 	{
 		UpdateRouteProgress(FVector2D(Loc));
 	}
+	TickSnow();
 
 	// 2026-08-26 diagnostic: log the tracked junction-pad component's live
 	// state every ~2s, plus a trace fired right here (independent of
@@ -1585,4 +1624,58 @@ void AODRoadManager::Tick(float DeltaSeconds)
 		bSeamDone = true;
 		RunSeamCheck();
 	}
+}
+
+void AODRoadManager::TickSnow()
+{
+	if (!SnowWeather.IsValid())
+	{
+		for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It) { SnowWeather = *It; break; }
+	}
+	const AODWeatherController* Wx = SnowWeather.Get();
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (!Wx || Now - LastSnowTime < 0.5)
+	{
+		return;
+	}
+	const float Dt = LastSnowTime > 0.0 ? (float)(Now - LastSnowTime) : 0.0f;
+	LastSnowTime = Now;
+	const bool bReset = Wx->SnowDepthSerial != SnowSerialSeen;
+	SnowSerialSeen = Wx->SnowDepthSerial;
+	if (!bReset && Wx->RoadSnowRateCmS == 0.0f && Wx->SideSnowRateCmS == 0.0f)
+	{
+		return;
+	}
+	// ponytail: depth lives on the component, so a chunk that streams out and
+	// back in restarts at the ambient depth - plowed state needs a per-chunk
+	// map keyed by tile+index once plows exist (PLAN-REALISM.md sec 3e).
+	for (auto& Pair : Tiles)
+	{
+		for (UDynamicMeshComponent* Comp : Pair.Value.Chunks)
+		{
+			if (!Comp)
+			{
+				continue;
+			}
+			const TArray<float>& D = Comp->GetCustomPrimitiveData().Data;
+			const float Road = bReset ? Wx->RoadSnowCm : FMath::Clamp(
+				(D.Num() > 0 ? D[0] : 0.0f) + Wx->RoadSnowRateCmS * Dt, 0.0f, Wx->RoadSnowCapCm);
+			const float Side = bReset ? Wx->SideSnowCm : FMath::Clamp(
+				(D.Num() > 1 ? D[1] : 0.0f) + Wx->SideSnowRateCmS * Dt, 0.0f, Wx->SideSnowCapCm);
+			if (D.Num() < 2 || Road != D[0] || Side != D[1])
+			{
+				Comp->SetCustomPrimitiveDataVector2(0, FVector2D(Road, Side));
+			}
+		}
+	}
+}
+
+float AODRoadManager::ChunkSnowCm(const UPrimitiveComponent* Comp, float Fallback)
+{
+	if (Comp && Comp->GetOwner() && Comp->GetOwner()->IsA<AODRoadManager>())
+	{
+		const TArray<float>& D = Comp->GetCustomPrimitiveData().Data;
+		return D.Num() > 0 ? D[0] : 0.0f;
+	}
+	return Fallback;
 }
