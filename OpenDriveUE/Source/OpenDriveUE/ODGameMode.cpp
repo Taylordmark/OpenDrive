@@ -12,6 +12,7 @@
 #include "ODBuildingManager.h"
 #include "ODEmbankmentManager.h"
 #include "ODForestManager.h"
+#include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
 #include "ODRoadManager.h"
@@ -98,7 +99,7 @@ void AODGameMode::FreezeStreaming(bool bFreeze)
 			&& (A->IsA<AODTerrainManager>() || A->IsA<AODRoadManager>() || A->IsA<AODBuildingManager>()
 				|| A->IsA<AODWallManager>() || A->IsA<AODBarrierManager>() || A->IsA<AODForestManager>()
 				|| A->IsA<AODWaterManager>() || A->IsA<AODParkingManager>() || A->IsA<AODGuardrailManager>()
-				|| A->IsA<AODEmbankmentManager>() || A->IsA<AODBridgeManager>()))
+				|| A->IsA<AODEmbankmentManager>() || A->IsA<AODBridgeManager>() || A->IsA<AODFurnitureManager>()))
 		{
 			A->SetActorTickEnabled(!bFreeze);
 		}
@@ -121,7 +122,7 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 	// with the same properties unreal/build_openworld_test_level.py bakes.
 	const bool bHome = !Vista && (Area == HomeArea);
 	// Menu vista copy (2026-10-05): only the families with a vista mode
-	// (FODVistaRegion) - terrain, road, forest, water, guardrail.
+	// (FODVistaRegion) - terrain, road, forest, water, guardrail, furniture.
 	// ponytail: no buildings/walls/barriers/parking/embankments/bridges in
 	// vistas; each needs its Tick filtered and (buildings) its ground trace
 	// offset like the forest's. Add per class if a vista looks bare.
@@ -139,7 +140,7 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 	{
 		if (Vista && Cls != AODTerrainManager::StaticClass() && Cls != AODRoadManager::StaticClass()
 			&& Cls != AODForestManager::StaticClass() && Cls != AODWaterManager::StaticClass()
-			&& Cls != AODGuardrailManager::StaticClass())
+			&& Cls != AODGuardrailManager::StaticClass() && Cls != AODFurnitureManager::StaticClass())
 		{
 			return nullptr;
 		}
@@ -266,6 +267,17 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 			Guardrail->Vista = *Vista;
 		}
 		Finish(Guardrail);
+	}
+	// Roadside furniture (PLAN-REALISM Phase 1, 2026-10-06): same tile grid
+	// and vista mode as the guardrails, spawned wherever they are.
+	if (AODFurnitureManager* Furniture = Cast<AODFurnitureManager>(Begin(AODFurnitureManager::StaticClass(), false)))
+	{
+		Furniture->FurnitureTilePrefix = FString::Printf(TEXT("furniture_%s_test"), *Area);
+		if (Vista)
+		{
+			Furniture->Vista = *Vista;
+		}
+		Finish(Furniture);
 	}
 	if (AODEmbankmentManager* Embankment = Cast<AODEmbankmentManager>(Begin(AODEmbankmentManager::StaticClass(), false)))
 	{

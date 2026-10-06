@@ -81,6 +81,10 @@ Writes  data/road_tiles/<AREA_NAME>_test/road_stations.json
          "layer": [...],      # int per station (OSM layer= tag, 0 untagged) -
                                # vertical-ordering hint for
                                # detect_elevation_conflicts() later.
+         "maxspeed": [...],   # int km/h per station (OSM maxspeed= tag,
+                               # "35 mph" -> 56; 0 untagged) - speed-limit
+                               # signs (build_road_furniture.py) and Phase 3
+                               # traffic. Absent in pre-2026-10-06 files.
          "east_m": [...], "north_m": [...], "s_m": [...],
          "elev_m": [...],  # grade-CONFORMING absolute DEM elevation (rides
                              # the real ground; only deviates via cut/bridge/
@@ -475,7 +479,7 @@ def is_oneway_way(tags):
 
 
 def way_tag_meta(tags):
-    """(lanes, surface, layer) triple for a way (2026-09-06, AUDIT § 7 item
+    """(lanes, surface, layer, maxspeed) tuple for a way (2026-09-06, AUDIT § 7 item
     6 / "OSM road tags"). The raw osm.json has always carried full way tags
     (Overpass `out body`) - they were just dropped here. Now threaded through
     per-station like road_name/is_bridge so downstream consumers can use
@@ -490,7 +494,9 @@ def way_tag_meta(tags):
               future unpaved grip/visual variant pass.
       layer   int, 0 = untagged/ground level - OSM's vertical-ordering hint,
               for feeding detect_elevation_conflicts() something better than
-              pure geometry later."""
+              pure geometry later.
+      maxspeed int km/h, 0 = untagged or non-numeric ("none", "signals",
+              "US:urban"). "35 mph" -> 56 (2026-10-06, PLAN-REALISM Phase 1)."""
     raw_lanes = str(tags.get("lanes") or "")
     m = re.match(r"\s*(\d+)", raw_lanes)
     lanes = int(m.group(1)) if m else 0
@@ -498,7 +504,9 @@ def way_tag_meta(tags):
         layer = int(str(tags.get("layer") or "0").strip())
     except ValueError:
         layer = 0
-    return lanes, (tags.get("surface") or ""), layer
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*(mph)?", str(tags.get("maxspeed") or ""))
+    maxspeed = round(float(m.group(1)) * (1.609344 if m.group(2) else 1.0)) if m else 0
+    return lanes, (tags.get("surface") or ""), layer, maxspeed
 
 
 def merge_way_chains(ways):
@@ -517,7 +525,7 @@ def merge_way_chains(ways):
     way's OSM highway= class (highway_class()) - used to pick per-class
     grade/grade-change limits, not thrown away even though it isn't
     rendered directly - the 7th carries each node's source way's
-    (lanes, surface, layer) triple (way_tag_meta()) - all parallel to the
+    (lanes, surface, layer, maxspeed) tuple (way_tag_meta()) - all parallel to the
     first.
 
     ALSO returns `degree` (2026-09-04, Arc 7.17 junction-unification fix -
@@ -707,6 +715,7 @@ def main():
         lanes_s = [int(meta[j][0]) for j in nearest_orig]
         surface_s = [meta[j][1] for j in nearest_orig]
         layer_s = [int(meta[j][2]) for j in nearest_orig]
+        maxspeed_s = [int(meta[j][3]) for j in nearest_orig]
 
         raw_ground = dem_sample_sparse(dem_tiles, lat_s, lon_s)
         # 2026-07-29: two independent guards against corrupt Terrarium DEM
@@ -799,6 +808,7 @@ def main():
             "is_oneway_s": is_oneway_s,
             "highway_s": highway_s,
             "lanes_s": lanes_s, "surface_s": surface_s, "layer_s": layer_s,
+            "maxspeed_s": maxspeed_s,
             "e": e, "n": n, "s": s, "h": h,
             "max_grade_s": max_grade_s, "max_grade_delta_s": max_grade_delta_s,
             "node_start": chain_nodes[0], "node_end": chain_nodes[-1], "node_s": node_s,
@@ -1087,6 +1097,7 @@ def main():
             "lanes": seg["lanes_s"],
             "surface": seg["surface_s"],
             "layer": seg["layer_s"],
+            "maxspeed": seg["maxspeed_s"],
             "east_m": [round(float(v), 2) for v in seg["e"]],
             "north_m": [round(float(v), 2) for v in seg["n"]],
             "s_m": [round(float(v), 2) for v in seg["s"]],

@@ -50,6 +50,10 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "DayNight")
 	float TimeOfDay = 10.0f;
 
+	/** Last headlight state Tick applied (sun below HeadlightElevation) - 
+	 *  AODFurnitureManager lights its street lamps with it. */
+	bool bHeadlightsOn = false;
+
 private:
 	void UpdateHeadlights(bool bOn);
 

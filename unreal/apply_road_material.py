@@ -76,6 +76,12 @@ gotchas (Power's "Exp" pin, VertexColor's "" RGB(A) output, Clamp/Abs/Floor/
 Frac/Sine's unnamed primary pin) unreal/apply_ground_material.py established
 - see that file's own docstring for the full gotcha list this one inherits.
 
+Unpaved variants (2026-10-06, PLAN-REALISM Phase 2):
+unreal/apply_unpaved_road_materials.py re-runs this file with SURFACE =
+"gravel"/"dirt" injected (runpy init_globals) to build M_Road_Gravel /
+M_Road_Dirt - the same graph (Wetness, SnowDepth/SideSnowDepth CPD, tracks,
+berm WPO) with an unpaved base texture everywhere and no lane markings.
+
 Run unreal/import_road_textures.py FIRST (imports the PBR sets as Texture2D
 assets this script loads by path) - this script raises if any layer's
 textures are missing.
@@ -87,8 +93,12 @@ UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
 import unreal
 
 MAT_DIR = "/Game/OpenDrive/Materials"
-MAT_NAME = "M_Road"
+SURFACE = globals().get("SURFACE", "paved")   # see "Unpaved variants" above
+MAT_NAME = {"paved": "M_Road", "gravel": "M_Road_Gravel", "dirt": "M_Road_Dirt"}[SURFACE]
 ROAD_TEX_DIR = "/Game/OpenDrive/Textures/Road"
+# unpaved base: (texture dir, asset_id, tile METERS)
+UNPAVED_BASE = {"gravel": (ROAD_TEX_DIR, "Gravel023", 1.4),
+                "dirt": ("/Game/OpenDrive/Textures/Ground", "Ground037", 2.0)}
 
 # (asset_id, world-space tile size METERS - v0/meterPos are already in real
 # meters, unlike the ground material's cm world-position tiling).
@@ -120,6 +130,10 @@ WearMaxFade = 0.6               # markings never fade past 40% of full brightnes
 # road_moisture roughness term (sec 2.2) with a live one.
 WetDarken = 0.55                # albedo multiplier at Wetness 1 (wet asphalt reads much darker)
 WetRoughness = 0.12             # roughness at Wetness 1 (water film = sky reflections)
+if SURFACE == "gravel":
+    WetDarken, WetRoughness = 0.6, 0.4    # stones darken, little film
+elif SURFACE == "dirt":
+    WetDarken, WetRoughness = 0.5, 0.25   # mud: dark, satin sheen
 # Snow (2026-10-06): per-chunk depth in Custom Primitive Data (AODRoadManager::
 # TickSnow) - "SnowDepth" (index 0, road cm) and "SideSnowDepth" (index 1,
 # roadside cm). Both 0 = the exact pre-snow graph output, incl. the WPO.
@@ -151,8 +165,8 @@ MEL = unreal.MaterialEditingLibrary
 tools = unreal.AssetToolsHelpers.get_asset_tools()
 
 
-def load_asphalt(asset_id):
-    base = f"{ROAD_TEX_DIR}/{asset_id}"
+def load_asphalt(asset_id, tex_dir=ROAD_TEX_DIR):
+    base = f"{tex_dir}/{asset_id}"
     albedo = unreal.load_asset(f"{base}/T_{asset_id}_A")
     normal = unreal.load_asset(f"{base}/T_{asset_id}_N")
     rough = unreal.load_asset(f"{base}/T_{asset_id}_R")
@@ -432,6 +446,15 @@ base_albedo = g.lerp(asphalt_albedo, gravel_albedo, shoulder_t, b_out="RGB")
 base_normal = g.lerp(asphalt_normal, gravel_normal, shoulder_t, b_out="RGB")
 base_rough = g.lerp(asphalt_rough, gravel_rough, shoulder_t)
 
+if SURFACE != "paved":   # unpaved: one base texture across pavement + shoulder
+    tex_dir, unpaved_id, unpaved_tile_m = UNPAVED_BASE[SURFACE]
+    tex_unpaved = load_asphalt(unpaved_id, tex_dir)
+    uv_unpaved = uv_for(unpaved_tile_m)
+    base_albedo = g.mask(g.sample(tex_unpaved["albedo"], uv_unpaved), r=True, gg=True, b=True, a_out="RGB")
+    base_normal = g.mask(g.sample(tex_unpaved["normal"], uv_unpaved, is_normal=True),
+                         r=True, gg=True, b=True, a_out="RGB")
+    base_rough = g.mask(g.sample(tex_unpaved["rough"], uv_unpaved), r=True)
+
 # ---------------------------------------------------------------- lane markings
 abs_meter_pos = g.absv(meter_pos)
 
@@ -487,6 +510,8 @@ wear_noise = g.lerp(hash1(noise_i), hash1(g.add(noise_i, g.const(1.0))), noise_f
 wear_visibility = g.sub(g.const(1.0), g.mul(wear_noise, wear_scalar_param))
 
 final_paint_mask = g.mul(g.mul(paint_mask, wear_visibility), not_in_junction)
+if SURFACE != "paved":
+    final_paint_mask = g.const(0.0)   # no lane markings on gravel/dirt
 paint_rough = g.const(0.35)   # paint reads smoother/glossier than worn asphalt
 
 dry_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
@@ -565,7 +590,7 @@ for prop_name, prop_enum in (
     log(f"  MP_{prop_name}: driven by {node.get_class().get_name()} own_inputs={inputs}")
 if not all_ok:
     raise RuntimeError(
-        "M_Road: one or more base material property pins failed to connect - "
+        f"{MAT_NAME}: one or more base material property pins failed to connect - "
         "see the post-save verification log above")
 
 log(f"built + saved {MAT_NAME} - asphalt sets={list(TILE_M.keys())}, "

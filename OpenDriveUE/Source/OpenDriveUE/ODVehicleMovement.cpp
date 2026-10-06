@@ -60,6 +60,15 @@ namespace
 			/ (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO), 0.0f, 1.0f);
 		return 1.0f - Loss * (1.0f - TREAD_RELIEF * Tread);
 	}
+
+	// Unpaved roads (PLAN-REALISM Phase 2): mud, an extra Wetness-scaled loss
+	// on top of WeatherGrip, with the same tread relief. Also MIRRORED.
+	float MudGrip(float Wetness, float OffRoadGrip, float WetLoss)
+	{
+		const float Tread = FMath::Clamp((OffRoadGrip - TREAD_OFFROAD_LO)
+			/ (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO), 0.0f, 1.0f);
+		return 1.0f - FMath::Clamp(Wetness, 0.0f, 1.0f) * WetLoss * (1.0f - TREAD_RELIEF * Tread);
+	}
 }
 
 UODVehicleMovement::UODVehicleMovement()
@@ -859,11 +868,22 @@ float UODVehicleMovement::SurfaceGrip(const UPhysicalMaterial* Mat) const
 	// this just stops branching physics on them.
 	// The two tiers are the garage setup's (rally/offroad tires keep far
 	// more of their grip off the tarmac than street/drag tires do).
-	// Weather (W3) only touches the on-road tier - off-road is already the
+	// Weather (W3) only touches the road tiers - off-road is already the
 	// "that was a mistake" grip.
-	if (Mat && Mat->GetName().Contains(TEXT("Asphalt")))
+	// Unpaved roads (2026-10-06, D2) are a third tier: still the road, so
+	// weather applies, plus mud (GravelWetLoss/DirtWetLoss).
+	const FString Name = Mat ? Mat->GetName() : FString();
+	if (Name.Contains(TEXT("Asphalt")))
 	{
 		return OnRoadGrip * WeatherGripMult;   // on-road
+	}
+	if (Name.Contains(TEXT("Gravel")))
+	{
+		return FMath::Max(OnRoadGrip * GravelGrip, OffRoadGrip) * GravelWeatherMult;
+	}
+	if (Name.Contains(TEXT("DirtRoad")))
+	{
+		return FMath::Max(OnRoadGrip * DirtGrip, OffRoadGrip) * DirtWeatherMult;
 	}
 	return OffRoadGrip;   // off-road (any surface that isn't the road)
 }
@@ -1152,7 +1172,7 @@ void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
 	const AODWeatherController* Wx = WeatherCtl.Get();
 	if (!Wx)
 	{
-		WeatherGripMult = 1.0f;   // no weather (garage, bare levels): dry road
+		WeatherGripMult = GravelWeatherMult = DirtWeatherMult = 1.0f;   // no weather (garage, bare levels): dry road
 		return;
 	}
 	const AODSeasonController* Season = SeasonCtl.Get();
@@ -1172,6 +1192,8 @@ void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
 	WeatherGripMult = WeatherGrip(Wx->Wetness, Wx->PrecipType,
 		Season ? Season->SnowCover : 0.0f, Season ? Season->FreezeBlend : 0.0f,
 		OffRoadGrip, SnowCm);
+	GravelWeatherMult = WeatherGripMult * MudGrip(Wx->Wetness, OffRoadGrip, GravelWetLoss);
+	DirtWeatherMult = WeatherGripMult * MudGrip(Wx->Wetness, OffRoadGrip, DirtWetLoss);
 
 	// deep snow: a little rolling drag against the motion (faded in over the
 	// first 1 m/s so it can't jitter a parked car), per wheel on the ground

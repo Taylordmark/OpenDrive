@@ -48,20 +48,36 @@ MAX_BANK_RAD = 0.14          # ~8.0 deg superelevation cap (was 0.09/~5.2 deg -
 BANK_GAIN = 9.55             # bank = min(cap, gain * |curvature 1/m|)
 CHUNK_STATIONS = 150         # stations per road mesh chunk (~750 m)
 
-# Dirt/gravel roads (2026-09-30): OSM surface= values that get the gravel
-# road material (M_Road_Gravel, PM_Dirt grip/audio) instead of asphalt.
-# Untagged ("") stays paved. Chunks split wherever this flips, so a surface
-# run shorter than MIN_SURFACE_RUN_STATIONS is absorbed into its neighbor
-# rather than spawning a sliver chunk for one oddly-tagged OSM way.
-UNPAVED_SURFACE_TAGS = {"dirt", "gravel", "unpaved", "ground", "compacted",
-                        "grass", "sand", "earth", "mud", "fine_gravel", "pebblestone"}
+# Unpaved roads (2026-09-30; three classes 2026-10-06, PLAN-REALISM Phase 2):
+# OSM surface= -> SURFACE_PAVED / SURFACE_GRAVEL (M_Road_Gravel + PM_Gravel) /
+# SURFACE_DIRT (M_Road_Dirt + PM_DirtRoad). Untagged ("") is paved, except
+# on UNPAVED_DEFAULT_HIGHWAY classes, which default to gravel. Chunks split
+# wherever the class flips, so a run shorter than MIN_SURFACE_RUN_STATIONS
+# is absorbed into its neighbor rather than spawning a sliver chunk for one
+# oddly-tagged OSM way.
+SURFACE_PAVED, SURFACE_GRAVEL, SURFACE_DIRT = 0, 1, 2
+SURFACE_CLASS_NAMES = ("paved", "gravel", "dirt")
+GRAVEL_SURFACE_TAGS = {"gravel", "fine_gravel", "compacted", "unpaved", "pebblestone"}
+DIRT_SURFACE_TAGS = {"dirt", "ground", "earth", "mud", "sand", "grass"}
+UNPAVED_DEFAULT_HIGHWAY = {"track"}   # untagged track-like ways
 MIN_SURFACE_RUN_STATIONS = 20   # 100 m at STATION_SPACING
 
 
-def unpaved_stations(surfaces, min_run=MIN_SURFACE_RUN_STATIONS):
-    """Per-station bool (surface= tag unpaved), short runs absorbed into the
-    preceding run (or the following one, for a short leading run)."""
-    flags = [s in UNPAVED_SURFACE_TAGS for s in surfaces]
+def surface_class(surface, highway=None):
+    """SURFACE_* class for one OSM surface= value (+ highway= for untagged)."""
+    if surface in GRAVEL_SURFACE_TAGS:
+        return SURFACE_GRAVEL
+    if surface in DIRT_SURFACE_TAGS:
+        return SURFACE_DIRT
+    return SURFACE_GRAVEL if not surface and highway in UNPAVED_DEFAULT_HIGHWAY else SURFACE_PAVED
+
+
+def unpaved_stations(surfaces, highway_classes=None, min_run=MIN_SURFACE_RUN_STATIONS):
+    """Per-station SURFACE_* class (0 = paved, so truthy = unpaved), short
+    runs absorbed into the preceding run (or the following one, for a short
+    leading run)."""
+    flags = [surface_class(s, highway_classes[i] if highway_classes else None)
+             for i, s in enumerate(surfaces)]
     out = list(flags)
     n, i = len(flags), 0
     while i < n:
@@ -780,8 +796,9 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     format change is needed. Skirt width (skirt_extra) stays constant
     beyond whichever pavement edge applies.
 
-    `is_unpaved` (optional per-station bool, see unpaved_stations()) cuts
-    chunks at every surface change and sets each chunk's "unpaved" flag.
+    `is_unpaved` (optional per-station SURFACE_* class, see
+    unpaved_stations()) cuts chunks at every surface change and sets each
+    chunk's "unpaved" field to that class (0 paved / 1 gravel / 2 dirt).
 
     `bank_scale` (optional per-station 0..1) multiplies the superelevation -
     experimental_junction_pads fades it to 0 into each junction pad.
@@ -879,7 +896,7 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
             "uv1": [round(v, 4) for uv in uv1 for v in uv],
             "triangles": [i for t in tris for i in t],
             "oneway": oneway,
-            "unpaved": bool(is_unpaved[c0]) if is_unpaved is not None else False,
+            "unpaved": int(is_unpaved[c0]) if is_unpaved is not None else SURFACE_PAVED,
             "road_class_id": road_class_id,
             "road_class": road_class_name,
             "lane_count": lane_count,

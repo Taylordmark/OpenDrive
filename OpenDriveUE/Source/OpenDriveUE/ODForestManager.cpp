@@ -1655,9 +1655,10 @@ bool AODForestManager::RaycastRuntimeGround(double WorldX, double WorldY,
 	// never plant a tree on pavement (road meshes, including fused junction
 	// pads - see ODRoadManager.cpp's bridge_pad_to_host comments - carry
 	// PM_Asphalt through the shared RoadMat material; dirt/gravel road
-	// chunks carry PM_Gravel through RoadMatGravel)
+	// chunks carry PM_Gravel / PM_DirtRoad through RoadMatGravel / RoadMatDirt)
 	if (const UPhysicalMaterial* Pm = Hit.PhysMaterial.Get();
-		Pm && (Pm->GetName().Contains(TEXT("Asphalt")) || Pm->GetName().Contains(TEXT("Gravel"))))
+		Pm && (Pm->GetName().Contains(TEXT("Asphalt")) || Pm->GetName().Contains(TEXT("Gravel"))
+			|| Pm->GetName().Contains(TEXT("DirtRoad"))))
 	{
 		++PhysMatRejectCount;
 		MaybeLogGroundSummary();

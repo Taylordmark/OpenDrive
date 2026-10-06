@@ -142,6 +142,11 @@ STAGES = [
     # constraint against barrier/buildings.
     ("build_road_guardrails.py", "build road_guardrails.json (road-vs-terrain drop detection)"),
     ("export_road_guardrails_bin.py", "export guardrail tiles -> Content/OpenDrive/Masks/guardrail_*.bin"),
+    # FURNITURE (2026-10-06, PLAN-REALISM Phase 1): needs stations, osm.json's
+    # furniture nodes, osm_buildings.json (town lamps), road_guardrails.json
+    # (no delineators along a rail) and the terrain tiles (prop bases).
+    ("build_road_furniture.py", "build road_furniture.json (signals, signs, chevrons, lights, delineators)"),
+    ("export_road_furniture_bin.py", "export furniture tiles -> Content/OpenDrive/Masks/furniture_*.bin"),
     # EMBANKMENTS (2026-09-07): reuses road_stations.json's own in_junction_box
     # field (Arc 7.18) plus the same DEM-probe drop detection guardrails use -
     # sits right after guardrails for the same "needs terrain's sample_dem

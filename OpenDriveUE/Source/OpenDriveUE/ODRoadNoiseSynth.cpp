@@ -7,8 +7,9 @@ UODRoadNoiseSynth::UODRoadNoiseSynth(const FObjectInitializer& ObjectInitializer
 }
 
 void UODRoadNoiseSynth::SetRoadState(float Speed01, float SurfaceCutoffHz,
-                                     bool bGrounded)
+                                     bool bGrounded, float Crunch01)
 {
+	TargetCrunch.store(FMath::Clamp(Crunch01, 0.0f, 1.0f));
 	TargetSpeed.store(FMath::Clamp(Speed01, 0.0f, 1.0f));
 	TargetCutoff.store(SurfaceCutoffHz);
 	TargetGrounded.store(bGrounded ? 1.0f : 0.0f);
@@ -33,6 +34,7 @@ int32 UODRoadNoiseSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 	SmSpeed += (TargetSpeed.load() - SmSpeed) * Slew;
 	SmCutoff += (TargetCutoff.load() - SmCutoff) * Slew;
 	SmGrounded += (TargetGrounded.load() - SmGrounded) * Slew;
+	SmCrunch += (TargetCrunch.load() - SmCrunch) * Slew;
 
 	if (const float Imp = PendingImpact.exchange(0.0f); Imp > 0.0f)
 	{
@@ -49,6 +51,13 @@ int32 UODRoadNoiseSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 	const float TireGain = SmSpeed * SmGrounded * 0.5f;
 	const float WindGain = SmSpeed * SmSpeed * 0.4f;
 	const float ImpactDecay = FMath::Exp(-6.0f / SampleRateHz);   // ~170 ms
+	// gravel crunch: Poisson stone ticks (rate ~ speed), each a ~4 ms burst of
+	// high-passed noise - reads as crunch, where the tire bed alone is a hum
+	const float CrunchP = CrunchRateHz * SmSpeed * SmGrounded / SampleRateHz;
+	const float CrunchGainNow = CrunchGain * SmCrunch * FMath::Sqrt(SmSpeed);
+	const float CrunchDecay = FMath::Exp(-250.0f / SampleRateHz);
+	const float CrunchHpCoeff = FMath::Clamp(
+		1.0f - FMath::Exp(-2.0f * PI * 1500.0f / SampleRateHz), 0.0f, 0.99f);
 
 	for (int32 i = 0; i < NumSamples; ++i)
 	{
@@ -73,7 +82,21 @@ int32 UODRoadNoiseSynth::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 			ImpactEnv *= ImpactDecay;
 		}
 
-		OutAudio[i] = (TireLp * TireGain + Wind * WindGain + Impact) * Volume * VolumeScale;
+		float Crunch = 0.0f;
+		if (CrunchGainNow > 0.0001f)
+		{
+			NoiseSeed = NoiseSeed * 1664525u + 1013904223u;
+			const float U = (NoiseSeed >> 8) / 16777216.0f;   // [0,1)
+			if (U < CrunchP)
+			{
+				CrunchEnv = 0.4f + U / FMath::Max(CrunchP, 1e-6f) * 0.6f;   // random tick size
+			}
+			CrunchLp += (White - CrunchLp) * CrunchHpCoeff;
+			Crunch = (White - CrunchLp) * CrunchEnv * CrunchGainNow;
+			CrunchEnv *= CrunchDecay;
+		}
+
+		OutAudio[i] = (TireLp * TireGain + Wind * WindGain + Impact + Crunch) * Volume * VolumeScale;
 	}
 	return NumSamples;
 }

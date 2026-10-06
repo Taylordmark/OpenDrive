@@ -67,7 +67,8 @@ void AODDayNightController::Tick(float DeltaSeconds)
 			MoonComp->SetIntensity(Elevation < 0.0f ? MoonIntensity : 0.0f);
 		}
 	}
-	UpdateHeadlights(Elevation < HeadlightElevation);
+	bHeadlightsOn = Elevation < HeadlightElevation;
+	UpdateHeadlights(bHeadlightsOn);
 }
 
 void AODDayNightController::UpdateHeadlights(bool bOn)

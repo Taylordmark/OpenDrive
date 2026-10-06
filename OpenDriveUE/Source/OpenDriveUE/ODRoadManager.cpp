@@ -61,9 +61,15 @@ AODRoadManager::AODRoadManager()
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
 
-UMaterialInstanceDynamic* AODRoadManager::GetRoadMID() const
+void AODRoadManager::SetWetness(float Wetness)
 {
-	return Cast<UMaterialInstanceDynamic>(RoadMat);
+	for (UMaterialInterface* Mat : { RoadMat.Get(), RoadMatGravel.Get(), RoadMatDirt.Get() })
+	{
+		if (UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mat))
+		{
+			Mid->SetScalarParameterValue(TEXT("Wetness"), Wetness);
+		}
+	}
 }
 
 void AODRoadManager::BeginPlay()
@@ -82,6 +88,17 @@ void AODRoadManager::BeginPlay()
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay"));
 	RoadMatGravel = LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Gravel.M_Road_Gravel"));
+	RoadMatDirt = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Dirt.M_Road_Dirt"));
+	// unpaved roads get their own shared MIDs so SetWetness reaches them too
+	if (RoadMatGravel)
+	{
+		RoadMatGravel = UMaterialInstanceDynamic::Create(RoadMatGravel, this);
+	}
+	if (RoadMatDirt)
+	{
+		RoadMatDirt = UMaterialInstanceDynamic::Create(RoadMatDirt, this);
+	}
 	LoadCenterline();
 	LoadRouteGraph();
 	LoadMapCenterline();
@@ -799,7 +816,7 @@ bool AODRoadManager::ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& O
 		}
 		const uint32 VCount = ReadU32LE(Cur); Cur += 4;
 		const uint32 TCount = ReadU32LE(Cur); Cur += 4;
-		const uint8 Flags = *Cur; Cur += 1;   // bit0 oneway, bit1 unpaved
+		const uint8 Flags = *Cur; Cur += 1;   // bit0 oneway, bits1-2 surface class
 		const uint8 RoadClassId = *Cur; Cur += 1;
 		const uint8 LaneCount = *Cur; Cur += 1;
 		// xyz(12) + uv0(8) + uv1(8) per vertex, i0/i1/i2(12) per tri
@@ -817,7 +834,7 @@ bool AODRoadManager::ParseRoadTileFileV3(const FString& Path, FParsedRoadTile& O
 
 		FParsedChunk& Chunk = Out.Chunks.AddDefaulted_GetRef();
 		Chunk.bOneway = (Flags & 1) != 0;
-		Chunk.bUnpaved = (Flags & 2) != 0;
+		Chunk.SurfaceClass = (Flags >> 1) & 3;
 		Chunk.RoadClassId = RoadClassId;
 		Chunk.LaneCount = LaneCount;
 		Chunk.bHasV3Data = true;
@@ -1222,12 +1239,13 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	// (unreal/apply_road_physmat.py still assigns it a physical material) but
 	// is no longer selected here; falls back to RoadMatOneWay only if RoadMat
 	// itself failed to load, rather than rendering nothing.
-	// Dirt/gravel chunks (2026-09-30) get RoadMatGravel when it exists; a
-	// missing asset just falls back to asphalt.
+	// Gravel/dirt chunks (2026-10-06) get RoadMatGravel/RoadMatDirt when it
+	// exists; a missing asset just falls back to asphalt.
 	UMaterialInterface* ChunkMat = RoadMat ? RoadMat : RoadMatOneWay;
-	if (Chunk.bUnpaved && RoadMatGravel)
+	if (UMaterialInterface* Unpaved = Chunk.SurfaceClass == 1 ? RoadMatGravel.Get()
+		: Chunk.SurfaceClass == 2 ? RoadMatDirt.Get() : nullptr)
 	{
-		ChunkMat = RoadMatGravel;
+		ChunkMat = Unpaved;
 	}
 	if (ChunkMat)
 	{

@@ -6,7 +6,7 @@ Usage:  python fetch_osm_network.py
 
 Outputs to  data/raw/<AREA_NAME>_test/ :
     osm.json    raw Overpass response (ways + nodes for every drivable road
-                in the bbox) - same element shape fetch_data.py already
+                in the bbox, plus the roadside furniture nodes below) - same element shape fetch_data.py already
                 produces, so build_road_network.py's parsing matches
                 build_stage.py's build_centerline().
 """
@@ -32,6 +32,8 @@ HIGHWAY_CLASS_REGEX = (
     "|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"
 )
 
+FURNITURE_NODE_REGEX = "^(traffic_signals|stop|give_way|crossing|street_lamp)$"
+
 HEADERS = {"User-Agent": "OpenDrive-stage-pipeline/0.1 (taylordmark@gmail.com)"}
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / f"{AREA_NAME}_test"
@@ -49,10 +51,17 @@ def fetch_osm_network():
     # 90s (tuned for the rural Skagit loop) times out on a bbox containing a
     # real city's full street grid (Oahu/Honolulu, 2026-07-27) - bumped same
     # as fetch_osm_buildings.py's equivalent change.
+    # Roadside furniture nodes (2026-10-06, PLAN-REALISM Phase 1): signals,
+    # stops, crossings and level crossings mostly sit ON road ways and came
+    # in through the recursion already; street lamps (and stop signs mapped
+    # beside the road) are standalone, so ask for them by tag too. Same call,
+    # so one cached response (§7.50). build_road_furniture.py reads them.
     query = f"""
     [out:json][timeout:180];
     way["highway"~"{HIGHWAY_CLASS_REGEX}"]{ref_clause}({s},{w},{n_},{e});
-    (._;>;);
+    (._;>;
+     node["highway"~"{FURNITURE_NODE_REGEX}"]({s},{w},{n_},{e});
+     node["railway"="level_crossing"]({s},{w},{n_},{e}););
     out body;
     """
     print(f"Querying Overpass for drivable roads in {AREA_NAME} bbox "

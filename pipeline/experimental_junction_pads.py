@@ -3615,7 +3615,7 @@ def main():
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_run = highway_full[lo:hi] if highway_full else None
             lanes_run = lanes_full[lo:hi] if lanes_full else None
-            unpaved_run = unpaved_stations(surface_full[lo:hi]) if surface_full else None
+            unpaved_run = unpaved_stations(surface_full[lo:hi], highway_run) if surface_full else None
             jsup_run = jsup_full[lo:hi]
             bank_run = bank_full[lo:hi]
             # Same per-station width build_road_network.py bakes into

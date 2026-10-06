@@ -165,7 +165,7 @@ def main():
             is_oneway = is_oneway_full[lo:hi] if is_oneway_full else None
             highway_classes = highway_full[lo:hi] if highway_full else None
             osm_lanes = lanes_full[lo:hi] if lanes_full else None
-            is_unpaved = unpaved_stations(surface_full[lo:hi]) if surface_full else None
+            is_unpaved = unpaved_stations(surface_full[lo:hi], highway_classes) if surface_full else None
             # Real per-road width from lanes= tags (class-table fallback for
             # untagged ways) - see road_mesh_common.half_width_for_stations().
             half_width_s = (half_width_for_stations(highway_classes, is_oneway, osm_lanes)

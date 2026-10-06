@@ -7,7 +7,8 @@
 /**
  * Surface + wind + impact noise voice (Arc 5.1): filtered noise whose color
  * follows the contact surface (asphalt hiss, dirt/grass rumble), wind rising
- * with speed^2, and exponentially decaying impact thumps from collisions.
+ * with speed^2, exponentially decaying impact thumps from collisions, and
+ * a gravel crunch (random stone ticks, rate ~ speed) on unpaved roads.
  */
 UCLASS(ClassGroup = Audio, meta = (BlueprintSpawnableComponent))
 class OPENDRIVEUE_API UODRoadNoiseSynth : public USynthComponent
@@ -17,13 +18,22 @@ class OPENDRIVEUE_API UODRoadNoiseSynth : public USynthComponent
 public:
 	UODRoadNoiseSynth(const FObjectInitializer& ObjectInitializer);
 
-	/** Speed01: fraction of ~top speed. SurfaceCutoffHz colors the tire bed. */
-	void SetRoadState(float Speed01, float SurfaceCutoffHz, bool bGrounded);
+	/** Speed01: fraction of ~top speed. SurfaceCutoffHz colors the tire bed.
+	 *  Crunch01: gravel crunch layer level (PM_Gravel 1, PM_DirtRoad less). */
+	void SetRoadState(float Speed01, float SurfaceCutoffHz, bool bGrounded,
+		float Crunch01 = 0.0f);
 
 	void TriggerImpact(float Intensity01);
 
 	UPROPERTY(EditAnywhere, Category = "Road", meta = (ClampMin = 0, ClampMax = 1))
 	float Volume = 0.55f;
+
+	/** Gravel crunch: stone ticks per second at Speed01 = 1, and their level. */
+	UPROPERTY(EditAnywhere, Category = "Road", meta = (ClampMin = 0))
+	float CrunchRateHz = 900.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Road", meta = (ClampMin = 0, ClampMax = 2))
+	float CrunchGain = 0.6f;
 
 	/** Master*Vehicle volume from the settings shell (Arc 4.4) - multiplied
 	 *  in alongside Volume above at OnGenerateAudio()'s single output write,
@@ -41,10 +51,12 @@ private:
 	std::atomic<float> TargetSpeed{0.0f};
 	std::atomic<float> TargetCutoff{3000.0f};
 	std::atomic<float> TargetGrounded{1.0f};
+	std::atomic<float> TargetCrunch{0.0f};
 	std::atomic<float> PendingImpact{0.0f};
 
 	float SampleRateHz = 48000.0f;
-	float SmSpeed = 0.0f, SmCutoff = 3000.0f, SmGrounded = 1.0f;
+	float SmSpeed = 0.0f, SmCutoff = 3000.0f, SmGrounded = 1.0f, SmCrunch = 0.0f;
+	float CrunchEnv = 0.0f, CrunchLp = 0.0f;
 	float TireLp = 0.0f, WindLp = 0.0f, ImpactLp = 0.0f;
 	float ImpactEnv = 0.0f;
 	float ImpactPhase = 0.0f;

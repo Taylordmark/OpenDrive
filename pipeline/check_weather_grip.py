@@ -1,7 +1,8 @@
 """Offline check for the Weather W3 grip multiplier (next steps.md sec 7.41).
 
-Mirrors WeatherGrip() in OpenDriveUE/Source/OpenDriveUE/ODVehicleMovement.cpp
-- same constant names; change both. Run: python pipeline/check_weather_grip.py
+Mirrors WeatherGrip()/MudGrip() and SurfaceGrip()'s unpaved tier in
+OpenDriveUE/Source/OpenDriveUE/ODVehicleMovement.cpp - same constant names;
+change both. Run: python pipeline/check_weather_grip.py
 """
 
 # MIRRORED from ODVehicleMovement.cpp (anonymous namespace)
@@ -18,6 +19,12 @@ SNOW_FULL_CM = 8.0
 
 # garage OffRoadGrip per preset (unreal/apply_tuning_presets.py)
 STREET, RALLY, OFFROAD, DRAG = 0.6, 0.9, 1.0, 0.45
+# ... and OnRoadGrip
+ON_ROAD = {STREET: 1.0, RALLY: 0.95, OFFROAD: 0.90, DRAG: 1.0}
+
+# UODVehicleMovement unpaved-tier knob defaults (PLAN-REALISM Phase 2)
+GRAVEL_GRIP, DIRT_GRIP = 0.80, 0.70
+GRAVEL_WET_LOSS, DIRT_WET_LOSS = 0.10, 0.25
 
 
 def clamp01(x):
@@ -34,6 +41,24 @@ def weather_grip(wetness, precip_type, snow_cover, freeze, off_road_grip, depth_
                SNOW_LOSS * clamp01((depth_cm - SNOW_START_CM) / (SNOW_FULL_CM - SNOW_START_CM)))
     tread = clamp01((off_road_grip - TREAD_OFFROAD_LO) / (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO))
     return 1.0 - loss * (1.0 - TREAD_RELIEF * tread)
+
+
+def mud_grip(wetness, off_road_grip, wet_loss):
+    tread = clamp01((off_road_grip - TREAD_OFFROAD_LO) / (TREAD_OFFROAD_HI - TREAD_OFFROAD_LO))
+    return 1.0 - clamp01(wetness) * wet_loss * (1.0 - TREAD_RELIEF * tread)
+
+
+def surface_grip(surface, off_road_grip, wetness=0.0):
+    """SurfaceGrip() for 'asphalt'/'gravel'/'dirt'/'off' in plain rain."""
+    wx = weather_grip(wetness, 0.0, 0.0, 0.0, off_road_grip)
+    on = ON_ROAD[off_road_grip]
+    if surface == "asphalt":
+        return on * wx
+    if surface == "gravel":
+        return max(on * GRAVEL_GRIP, off_road_grip) * wx * mud_grip(wetness, off_road_grip, GRAVEL_WET_LOSS)
+    if surface == "dirt":
+        return max(on * DIRT_GRIP, off_road_grip) * wx * mud_grip(wetness, off_road_grip, DIRT_WET_LOSS)
+    return off_road_grip
 
 
 CASES = {  # name: (wetness, precip_type, snow_cover, freeze[, road snow cm]), expected street grip
@@ -79,3 +104,20 @@ if __name__ == "__main__":
     gd = [weather_grip(1.0, 1.0, 0.0, 0.0, STREET, d / 10) for d in range(301)]
     assert all(b <= a + 1e-9 and a - b < 0.03 for a, b in zip(gd, gd[1:]))
     print("weather grip ok")
+
+    # unpaved tier: street tires asphalt > gravel > dirt > off-road when dry;
+    # rain costs unpaved more than asphalt (mud), dirt the most
+    print(f"\n{'surface grip':22s} {'street':>7s} {'rally':>7s} {'offroad':>7s} {'drag':>7s}")
+    for w in (0.0, 1.0):
+        for s in ("asphalt", "gravel", "dirt", "off"):
+            g = [surface_grip(s, tire, w) for tire in (STREET, RALLY, OFFROAD, DRAG)]
+            print(f"{s + (' wet' if w else ' dry'):22s} " + " ".join(f"{x:7.3f}" for x in g))
+    assert abs(surface_grip("gravel", STREET) - 0.80) < 1e-6
+    assert abs(surface_grip("dirt", STREET) - 0.70) < 1e-6
+    for tire in (STREET, RALLY, OFFROAD, DRAG):
+        dry = {s: surface_grip(s, tire) for s in ("asphalt", "gravel", "dirt")}
+        wet = {s: surface_grip(s, tire, 1.0) for s in ("asphalt", "gravel", "dirt")}
+        assert dry["gravel"] >= dry["dirt"] >= tire          # never below the verge, dry
+        assert wet["asphalt"] / dry["asphalt"] > wet["gravel"] / dry["gravel"] > wet["dirt"] / dry["dirt"]
+    assert surface_grip("asphalt", STREET) > surface_grip("gravel", STREET) > surface_grip("dirt", STREET) > STREET
+    print("unpaved grip ok")

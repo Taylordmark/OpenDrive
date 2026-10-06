@@ -123,6 +123,7 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 
 	// surface color from the first grounded wheel's contact material
 	float Cutoff = 3200.0f;                 // asphalt hiss default
+	float Crunch = 0.0f;                    // gravel crunch layer (unpaved roads)
 	bool bGrounded = false;
 	for (int32 i = 0; i < Move->NumWheels(); ++i)
 	{
@@ -136,6 +137,8 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 		if (Name.Contains(TEXT("Dirt")) || Name.Contains(TEXT("Gravel")))
 		{
 			Cutoff = 900.0f;                // gravel rumble
+			Crunch = Name.Contains(TEXT("Gravel")) ? 1.0f
+				: Name.Contains(TEXT("DirtRoad")) ? 0.35f : 0.0f;   // road physmats only
 		}
 		else if (Name.Contains(TEXT("Grass")))
 		{
@@ -148,7 +151,7 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 	// (e.g. the pause-menu "Garage" round trip mid-brake) - force silence
 	// while parked instead of trusting it.
 	const float Speed01 = bParked ? 0.0f : FMath::Abs(Move->GetForwardSpeed()) / TopSpeed;
-	Road->SetRoadState(Speed01, Cutoff, bParked ? false : bGrounded);
+	Road->SetRoadState(Speed01, Cutoff, bParked ? false : bGrounded, Crunch);
 
 	// diagnostic heartbeat (audio bring-up, 2026-07-15)
 	static double LastLog = 0.0;

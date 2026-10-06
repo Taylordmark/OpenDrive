@@ -478,12 +478,8 @@ void AODSeasonController::PushParamsToMIDs()
 	// apply_road_material.py's "Wetness" param, 0 = the dry baseline).
 	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{
-		AODRoadManager* Road = *It;
-		if (UMaterialInstanceDynamic* RoadMID = Road->GetRoadMID())
-		{
-			const AODWeatherController* Weather = WeatherCtl.Get();
-			RoadMID->SetScalarParameterValue(TEXT("Wetness"), Weather ? Weather->Wetness : 0.0f);
-		}
+		const AODWeatherController* Weather = WeatherCtl.Get();
+		It->SetWetness(Weather ? Weather->Wetness : 0.0f);
 	}
 }
 

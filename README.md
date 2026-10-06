@@ -119,8 +119,9 @@ target) → `apply_forest_manager.py` → `strip_ground_bushes.py` →
 `pipeline/make_car_mesh.py` + `apply_vehicle_pawn.py` (placeholder car +
 ODGameMode) → `apply_road_physmat.py` (asphalt physmat on M_Road — the
 suspension raycasts read the *render* material's physmat) →
-`apply_gravel_road_material.py` (M_Road_Gravel + PM_Gravel for dirt/gravel
-road chunks) → `apply_lens_drop_material.py` (M_LensDrop for rain/snow
+`apply_unpaved_road_materials.py` (M_Road_Gravel + PM_Gravel, M_Road_Dirt +
+PM_DirtRoad for unpaved road chunks; km per class per area:
+`python pipeline/checks/surface_km.py`) → `apply_lens_drop_material.py` (M_LensDrop for rain/snow
 landing on the camera lens) →
 `pipeline/export_centerline_bin.py` (real road centerline for the mini-map,
 reads the already-built `road_mesh.json` — no network calls).
@@ -166,6 +167,17 @@ See the script's own docstring for the full stage list and why each stage
 sits where it does; see `AUDIT-RELIABILITY.md` §3.3 for why hand-listing a
 subset of these steps (the old version of this section) was itself the
 mechanism producing mixed-generation bakes.
+
+Roadside furniture (PLAN-REALISM Phase 1) rides in the same run:
+`build_road_furniture.py` → `export_road_furniture_bin.py` (ODF1 tiles for
+`AODFurnitureManager`). Re-run those two after the manual
+`experimental_junction_pads.py` step, since props sit on the pad-snapped road.
+Gate: `python pipeline/verify_furniture_fit.py` (no prop in a lane, bases on
+terrain/edge, control poles ≤ 15 m from their OSM node, per-type counts) and
+`python pipeline/tests/test_furniture_place.py`. The meshes are a one-off:
+`python pipeline/make_furniture_meshes.py`, then headless
+`unreal\import_furniture_meshes.py` (→ `/Game/OpenDrive/Furniture`,
+`M_Furniture` + `MI_Furn_*`).
 
 `verify_terrain_fit.py` is the gate to run before ever loading the level —
 it checks a fresh in-memory rebuild of the terrain mesh against

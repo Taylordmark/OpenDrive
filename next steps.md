@@ -136,6 +136,23 @@ Group these into a few drive sessions. Each line says what to judge.
   `-odcrashtrace` and send one log: every hit should end in an
   `ODCrashTrace: SUMMARY ... PASS`, and the `HIT` lines' `solver=` vs `pre=`
   speeds say whether depenetration was the spike.
+- **Unpaved roads** (PLAN-REALISM.md Phase 2, code in, never driven; after
+  the combined rebuild): a gravel road in Summit (e.g. Boreas Pass Rd),
+  dry and in rain (`od.Weather Rain`). Judge whether the grip step feels
+  fair (street: gravel 0.80, dirt 0.70, wet 0.58/0.42; knobs
+  `GravelGrip`/`DirtGrip`/`GravelWetLoss`/`DirtWetLoss`), whether the
+  crunch sells it (`CrunchRateHz`/`CrunchGain`), and the gravel/dirt look
+  wet and under snow. Note: wet dirt grips less than the verge (off-road
+  ignores weather by design).
+- **Roadside furniture** (PLAN-REALISM.md Phase 1, code in, never driven;
+  after the combined rebuild): a town (Frisco Main St, the CO 9 × Main St
+  signals, Breck) by day and at night (`-odhour=21`), plus one rural pass
+  (Swan Mtn / Boreas). Judge whether the signs, signals and lights read as
+  stylized and the density is right; that chevrons point into the curve (a
+  mirror bug would show here first); that poles collide and delineators
+  don't; and that lamps glow when the headlights come on. The log line
+  `ODFurnitureManager: tiles=... props=... lamps=on/off` confirms
+  streaming. Speed signs carry no digits yet.
 
 ## 3. Gameplay and UX
 
@@ -199,9 +216,8 @@ Group these into a few drive sessions. Each line says what to judge.
   - Industrial/Port;
   - Suburban Sprawl.
 - **OSM tag consumers.** `lanes`, `surface` and `layer` ship per station, and
-  lanes already drive the width. Still to verify or build:
-  - `surface` → unpaved grip and visual variants;
-  - `layer` → `detect_elevation_conflicts()`.
+  lanes already drive the width and surface the unpaved tier (2026-10-06).
+  Still to build: `layer` → `detect_elevation_conflicts()`.
 - **Retaining walls, Phase 2:** cross-chain and different-name conflicts
   (freeway ramps and interchanges) are excluded from the carve and get no
   wall.
@@ -237,9 +253,6 @@ Group these into a few drive sessions. Each line says what to judge.
     scrub oak (no canopy snow today);
   - give `tree_scrub_oak` branches (`build_aspen(..., with_branches=True)`)
     or leave it out of the deciduous arc.
-- **Roadside furniture (§7.8):**
-  - cheap tier: OSM `traffic_signals`/`stop` nodes;
-  - heuristic tier: signs, street lights.
 - **Sidewalks, and `highway=service` driveways.** Service ways are excluded
   by `HIGHWAY_CLASS_REGEX` (perf risk).
 - **Parking stripes** use a world-axis period instead of each lot's own

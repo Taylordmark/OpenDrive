@@ -381,6 +381,23 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Setup")
 	float OffRoadGrip = 0.6f;
 
+	/** Unpaved-road tier (PLAN-REALISM D2): fraction of OnRoadGrip on
+	 *  PM_Gravel / PM_DirtRoad chunks, never below OffRoadGrip (rally tires
+	 *  shouldn't grip worse on a gravel road than on the verge). */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float GravelGrip = 0.80f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float DirtGrip = 0.70f;
+
+	/** Extra grip loss at Wetness 1 on unpaved roads (mud), on top of the
+	 *  asphalt weather loss; tread relief applies as for WeatherGrip. */
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float GravelWetLoss = 0.10f;
+
+	UPROPERTY(EditAnywhere, Category = "Setup")
+	float DirtWetLoss = 0.25f;
+
 	/** Added to PeakSlipAngleDeg: wider peak = softer, catchable limit. */
 	UPROPERTY(EditAnywhere, Category = "Setup")
 	float SlipAngleAddDeg = 0.0f;
@@ -570,6 +587,8 @@ private:
 	TWeakObjectPtr<AODSeasonController> SeasonCtl;
 	double LastWeatherSearch = -10.0;
 	float WeatherGripMult = 1.0f;    // on-road tier multiplier, this tick
+	float GravelWeatherMult = 1.0f;  // ... x gravel mud loss
+	float DirtWeatherMult = 1.0f;    // ... x dirt mud loss
 
 	// trace fields (-odtrace)
 	float TraceSlip = 0.0f;

@@ -28,9 +28,10 @@ struct FParsedChunk
 	// pipeline/build_road_stations.py's is_oneway_way()).
 	bool bOneway = false;
 
-	// ODR3 flags bit1 (2026-09-30): OSM surface= dirt/gravel/etc. -
-	// CreateChunkMeshComponent uses RoadMatGravel (PM_Dirt grip/audio).
-	bool bUnpaved = false;
+	// ODR3 flags bits1-2 (2026-10-06, PLAN-REALISM Phase 2): OSM surface=
+	// class, 0 paved / 1 gravel / 2 dirt - CreateChunkMeshComponent picks
+	// RoadMatGravel / RoadMatDirt (PM_Gravel / PM_DirtRoad grip and audio).
+	uint8 SurfaceClass = 0;
 
 	// ODR3 (2026-09-03, Phase 2a road-visual overhaul - see
 	// pipeline/export_road_mesh_bin_v2.py's docstring for the wire format).
@@ -134,8 +135,8 @@ public:
 	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet. */
 	FODVistaRegion Vista;
 
-	/** Shared road-chunk MID (Weather W2 wetness), null if M_Road failed to load. */
-	UMaterialInstanceDynamic* GetRoadMID() const;
+	/** Weather W2: push "Wetness" to the shared road MIDs (paved, gravel, dirt). */
+	void SetWetness(float Wetness);
 
 	/** Road snow depth (cm) on Comp if it's one of this class's chunks
 	 *  (Custom Primitive Data 0, see TickSnow), else Fallback. */
@@ -496,9 +497,12 @@ private:
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatOneWay;
 
-	// dirt/gravel road (FParsedChunk::bUnpaved) - unreal/apply_gravel_road_material.py
+	// unpaved roads (FParsedChunk::SurfaceClass 1/2) - unreal/apply_unpaved_road_materials.py
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatGravel;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RoadMatDirt;
 
 	// skirt-bottom world positions sampled every 10th station as tiles
 	// load, for -odseam

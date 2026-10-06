@@ -60,41 +60,15 @@ The car should stop or glance off, never launch.
 
 ## Phase 1 — Roadside furniture (medium, pipeline + one manager)
 
-Most of the "empty world" feel goes away without any AI. Phase 3 also uses
-the signal and stop data to control junctions.
+Steps 1–6 built 2026-10-06 (see `status.md`). They need the combined
+`rebuild_area.py` run (and a furniture re-run after the manual
+`experimental_junction_pads.py` step) before the drive check below.
+Phase 3 can read junction control from `road_furniture.json`'s `controls`
+list (one entry per signal/stop/give-way node, with its approaches).
 
-1. **Fetch.** Add a node query to `fetch_osm_network.py` (same Overpass
-   call, cached per §7.50): `highway=traffic_signals|stop|give_way|crossing|street_lamp`
-   and `railway=level_crossing`. Also keep `maxspeed` on ways in the station
-   metadata (it rides next to `lanes`/`surface`/`layer` in `way_tag_meta`).
-2. **Place (`build_road_furniture.py`).**
-   - *OSM tier:* snap each node to its nearest station. A signal/stop gets a
-     pole on the right edge facing traffic on every approach (each approach
-     direction comes from the station heading and `oneway`). A stop also
-     gets a stop bar (a lane-marking flag in ODR3, like `junction_suppress`).
-   - *Heuristic tier:*
-     - speed-limit signs where `maxspeed` changes, else at segment starts
-       from the class default;
-     - curve chevrons where the station curvature crosses a threshold
-       (radius < 150 m at the class speed);
-     - street lights every ~35 m on both sides inside settlements
-       (`classify_settlements.py`), and on highway ramps;
-     - delineator posts on rural roads where there's no guardrail.
-   - Offsets use `half_width_for_stations` + the bank (as guardrails do), so
-     props sit on the banked edge, not in the lane.
-3. **Export** `ODF1` per tile: type id + transform, with a generation_id
-   header like the other sidecars.
-4. **Runtime** `AODFurnitureManager`: one HISM per prop type, tiled
-   streaming copied from `AODGuardrailManager`. Simple box collision on
-   poles. Street lights turn emissive with the headlights (sun < 8°). Join
-   the multi-set streaming (`SpawnAreaSet`).
-5. **Meshes:** `make_furniture_meshes.py` makes procedural low-poly signs,
-   poles, lamps and chevrons, like `make_rock_meshes.py`.
-6. **Checks:** a `verify_furniture_fit.py` gate checks no prop is inside a
-   lane, every prop base is within 0.2 m of terrain/edge, and signals sit at
-   ≤ 15 m from their node. Plus `tests/test_furniture_place.py` for the
-   approach-direction and curvature rules.
-7. **After that (Phase 1b):** sidewalks in settlements (a curb strip from the
+What's left:
+
+1. **Phase 1b:** sidewalks in settlements (a curb strip from the
    road edge, part of the road mesh) and `highway=service` driveway stubs,
    limited to the first 30 m off the road for perf.
 
@@ -105,25 +79,8 @@ Do the signs and lights read as stylized, and is the density right?
 
 ## Phase 2 — Unpaved road surfaces (small)
 
-`surface` already ships per station (`build_road_stations.py:79`) and nothing
-uses it.
-
-1. Map `surface` to three classes: paved / gravel (`gravel`, `fine_gravel`,
-   `compacted`, `unpaved`) / dirt (`dirt`, `ground`, `earth`, `mud`, `sand`).
-   Untagged `track`-like classes default to gravel, everything else to paved.
-2. `build_road_network.py`: split chunks on a class change, like the
-   `oneway` chunk flag, and write the class in the chunk header.
-   `AODRoadManager` picks `M_Road_Gravel` / `M_Road_Dirt`, with no lane
-   markings and their own physmats `PM_Gravel` / `PM_Dirt`.
-3. `SurfaceGrip`: add the third tier (D2), with gravel 0.80 and dirt 0.70 of
-   on-road grip as starting values, tuned in the drive check. Weather wetness lowers unpaved
-   grip more than asphalt (mud).
-4. `UODRoadNoiseSynth`: a gravel crunch layer keyed on the same physmat.
-5. **Check:** print a per-area count of km per class, plus a test of the tag
-   → class mapping.
-
-**Drive check:** a gravel road in Summit dry and in rain. Does the grip step
-feel fair, and does the sound sell it?
+Built 2026-10-06 (see `status.md`). What's left is the drive check in
+`next steps.md` §2, which needs the combined `rebuild_area.py` run first.
 
 ---
 

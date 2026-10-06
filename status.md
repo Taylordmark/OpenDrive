@@ -148,6 +148,34 @@ scale, built from open data, with a stylized "real places, storybook look".
   spin cap) with the road synth's impact thump and a camera shake;
   suspension rays ignore surfaces steeper than 60°; tire forces are zeroed
   below two wheel contacts. Hook `-odcrashtrace`.
+- **Unpaved road surfaces** (2026-10-06, PLAN-REALISM.md Phase 2, compiled,
+  not driven; needs the combined rebuild): `surface=` maps to
+  paved/gravel/dirt (`road_mesh_common.surface_class`, untagged `track` →
+  gravel). Chunks split on a class change, ODR3 flags bits1-2 carry it, and
+  2026-09-30 tiles' bit1 reads as gravel. `M_Road_Gravel` / `M_Road_Dirt` are
+  M_Road's own graph (Wetness, snow CPD, berm WPO) with no markings, built by
+  `unreal/apply_unpaved_road_materials.py` with physmats `PM_Gravel` /
+  `PM_DirtRoad` (not `PM_Dirt`, which is the Dragon landscape's off-road).
+  Grip's third tier: `GravelGrip` 0.80 / `DirtGrip` 0.70 × OnRoadGrip
+  (never below OffRoadGrip), plus mud `GravelWetLoss` 0.10 / `DirtWetLoss`
+  0.25 at full wetness. The road synth adds a gravel crunch
+  (`CrunchRateHz`, `CrunchGain`). Checks: `pipeline/checks/surface_km.py`,
+  `pipeline/tests/test_unpaved_chunks.py`, `pipeline/check_weather_grip.py`.
+- **Roadside furniture** (2026-10-06, PLAN-REALISM.md Phase 1 steps 1–6,
+  compiled, not driven; needs the combined rebuild): `fetch_osm_network.py`
+  also pulls signal/stop/give-way/crossing/street-lamp/level-crossing nodes,
+  and stations carry `maxspeed`. `build_road_furniture.py` places OSM-tier
+  poles (one per approach, right edge, facing traffic, plus flat stop-bar
+  props) and heuristic speed signs, curve chevrons (R < 150 m at the posted
+  speed, rural classes), street lights (~35 m, towns and ramps) and
+  delineators (rural, no guardrail) on the banked edge. It writes a
+  `controls` list for Phase 3. `export_road_furniture_bin.py` writes ODF1
+  tiles. `AODFurnitureManager` streams them like the guardrails, with one HISM
+  per type, a hidden box-collision HISM for poles, and lamps that glow with
+  `AODDayNightController::bHeadlightsOn`. Meshes come from
+  `make_furniture_meshes.py` and `unreal/import_furniture_meshes.py`. Summit
+  has 27,823 props. Checks: `pipeline/verify_furniture_fit.py`,
+  `pipeline/tests/test_furniture_place.py`.
 
 ## Arc 2 — Atmosphere ✅
 
