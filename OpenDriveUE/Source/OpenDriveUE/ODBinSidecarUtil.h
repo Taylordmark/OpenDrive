@@ -224,6 +224,27 @@ struct FStationSpatialHash
 	}
 };
 
+/** Shoulder strip / grass ring (2026-10-07): the next station of i's own run
+ *  (stations are written in run order at 5 m spacing, so a > 7.5 m jump to
+ *  i+1 is a run break), or i itself for a run's last station. */
+inline int32 NextRunStation(const TArray<FRoadStation>& S, int32 i)
+{
+	return (i + 1 < S.Num()
+		&& FMath::Square(S[i + 1].X - S[i].X) + FMath::Square(S[i + 1].Y - S[i].Y) < FMath::Square(750.0f))
+		? i + 1 : i;
+}
+
+/** Distance (cm) from P to the PAVEMENT EDGE of the A->B station segment
+ *  (half-width lerped along it), 0 on the pavement. */
+inline float SegmentEdgeDistCm(const FRoadStation& A, const FRoadStation& B, double Px, double Py)
+{
+	const double Abx = B.X - A.X, Aby = B.Y - A.Y;
+	const double L2 = Abx * Abx + Aby * Aby;
+	const double T = L2 > 0.0 ? FMath::Clamp(((Px - A.X) * Abx + (Py - A.Y) * Aby) / L2, 0.0, 1.0) : 0.0;
+	const double Dx = Px - (A.X + Abx * T), Dy = Py - (A.Y + Aby * T);
+	return FMath::Max(0.0f, (float)FMath::Sqrt(Dx * Dx + Dy * Dy) - FMath::Lerp(A.HalfWidthCm, B.HalfWidthCm, (float)T));
+}
+
 /** PINNED format (roadstations_{area}.bin): "ODS2" magic (the "ODS1" prefix
  *  was reused from ODWallManager's walls_*.bin magic bytes - harmless, the
  *  two are never read by the same code path, callers key entirely off

@@ -8,6 +8,7 @@
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
+#include "Engine/Texture2D.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -1709,6 +1710,7 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	{
 		return;
 	}
+	UpdateRoadDistTex(Loc);
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 
@@ -1821,6 +1823,98 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 			PendingCoarseTiles.Num() + PendingNearTiles.Num(), PendingTileBuilds.Num(),
 			MissingCoarseTiles.Num() + MissingNearTiles.Num());
 	}
+}
+
+TArray<FColor> AODTerrainManager::BuildRoadDistTexels(const FStationSpatialHash& Hash, const FVector2D& Center)
+{
+	constexpr int32 N = RoadDistTexels;
+	const double X0 = Center.X - 0.5 * N * RoadDistTexelCm;   // texel (0,0)'s corner
+	const double Y0 = Center.Y - 0.5 * N * RoadDistTexelCm;
+	const double Span = N * RoadDistTexelCm;
+	TArray<float> Dist;
+	Dist.Init(RoadDistRangeCm, N * N);
+
+	TArray<int32> Cand;
+	const float Pad = RoadDistRangeCm + 1500.0f;   // + widest half-width + one station step
+	Hash.QueryBox(X0 - Pad, Y0 - Pad, X0 + Span + Pad, Y0 + Span + Pad, Cand);
+	const TArray<FRoadStation>& S = Hash.Stations;
+	for (const int32 i : Cand)
+	{
+		const FRoadStation& A = S[i];
+		const FRoadStation& B = S[NextRunStation(S, i)];
+		const float Reach = FMath::Max(A.HalfWidthCm, B.HalfWidthCm) + RoadDistRangeCm;
+		const int32 Ix0 = FMath::Max(0, FMath::FloorToInt((FMath::Min(A.X, B.X) - Reach - X0) / RoadDistTexelCm));
+		const int32 Ix1 = FMath::Min(N - 1, FMath::FloorToInt((FMath::Max(A.X, B.X) + Reach - X0) / RoadDistTexelCm));
+		const int32 Iy0 = FMath::Max(0, FMath::FloorToInt((FMath::Min(A.Y, B.Y) - Reach - Y0) / RoadDistTexelCm));
+		const int32 Iy1 = FMath::Min(N - 1, FMath::FloorToInt((FMath::Max(A.Y, B.Y) + Reach - Y0) / RoadDistTexelCm));
+		for (int32 iy = Iy0; iy <= Iy1; ++iy)
+		{
+			const double Py = Y0 + (iy + 0.5) * RoadDistTexelCm;
+			for (int32 ix = Ix0; ix <= Ix1; ++ix)
+			{
+				float& D = Dist[iy * N + ix];
+				D = FMath::Min(D, SegmentEdgeDistCm(A, B, X0 + (ix + 0.5) * RoadDistTexelCm, Py));
+			}
+		}
+	}
+
+	// linear -> sRGB once per byte step instead of a pow per texel
+	uint8 Lut[1025];
+	for (int32 k = 0; k <= 1024; ++k)
+	{
+		Lut[k] = FLinearColor(k / 1024.0f, 0.0f, 0.0f).ToFColor(true).R;
+	}
+	TArray<FColor> Out;
+	Out.SetNumUninitialized(N * N);
+	for (int32 k = 0; k < N * N; ++k)
+	{
+		const int32 iy = k / N, ix = k % N;
+		// border ring reads "no road" so the clamp-addressed sampler does too past the coverage
+		const bool bBorder = ix == 0 || iy == 0 || ix == N - 1 || iy == N - 1;
+		const uint8 V = bBorder ? 255 : Lut[FMath::RoundToInt(Dist[k] / RoadDistRangeCm * 1024.0f)];
+		Out[k] = FColor(V, V, V, 255);
+	}
+	return Out;
+}
+
+void AODTerrainManager::UpdateRoadDistTex(const FVector& Loc)
+{
+	if (!TerrainMID || !StationHash.IsValid())
+	{
+		return;
+	}
+	if (RoadDistJob.IsValid())
+	{
+		if (!RoadDistJob.IsReady())
+		{
+			return;
+		}
+		constexpr int32 N = RoadDistTexels;
+		// fresh texture per publish, filled at creation: no in-place update to race the render thread
+		TArray<FColor> Texels = RoadDistJob.Consume();
+		RoadDistTex = UTexture2D::CreateTransient(N, N, PF_B8G8R8A8, NAME_None,
+			TConstArrayView64<uint8>((const uint8*)Texels.GetData(), (int64)N * N * sizeof(FColor)));
+		RoadDistTex->SRGB = true;
+		RoadDistTex->AddressX = TA_Clamp;
+		RoadDistTex->AddressY = TA_Clamp;
+		RoadDistTex->UpdateResource();   // render-thread init, queued ahead of the origin change below
+		TerrainMID->SetTextureParameterValue(TEXT("RoadDistTex"), RoadDistTex);
+		RoadDistCenter = RoadDistJobCenter;
+		// tile components sit at actor-relative positions (menu vista copies are offset).
+		// Double param: a float origin lost world-minus-origin to LWC precision.
+		const FVector Off = GetActorLocation();
+		TerrainMID->SetDoubleVectorParameterValue(TEXT("RoadDistOrigin"),
+			FVector4(RoadDistCenter.X + Off.X, RoadDistCenter.Y + Off.Y, 0.0, 0.0));
+		RoadDistJob.Reset();
+	}
+	if (FVector2D::Distance(FVector2D(Loc.X, Loc.Y), RoadDistCenter) < RoadDistRecenterCm)
+	{
+		return;
+	}
+	// texel-grid snap: a recenter never shifts the field sub-texel
+	RoadDistJobCenter = FVector2D(FMath::GridSnap(Loc.X, (double)RoadDistTexelCm), FMath::GridSnap(Loc.Y, (double)RoadDistTexelCm));
+	RoadDistJob = Async(EAsyncExecution::ThreadPool,
+		[Hash = StationHash, C = RoadDistJobCenter]() { return BuildRoadDistTexels(*Hash, C); });
 }
 
 bool AODTerrainManager::IsInitialStreamingSettled(const FVector& AroundPos) const

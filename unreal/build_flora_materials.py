@@ -23,6 +23,7 @@ UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
 """
 
+import sys
 from pathlib import Path
 
 import unreal
@@ -537,6 +538,27 @@ opacity_after_drop = _mul(m_fol, ts, _sub(m_fol, _const(m_fol, 1.0), drop_amount
 # geometry make_tree_meshes.py's add_deciduous_branches() gives tree_blob
 # underneath (branches share the bark material, always rendered).
 must_connect_property(opacity_after_drop, "", unreal.MaterialProperty.MP_OPACITY_MASK)
+
+# ------------------------------------------------ grass-tuft root shade (2026-10-07)
+# Tufts don't cast shadows (ODForestManager BuildGrassCell), so darken each
+# blade toward its root instead. Keyed off the grass_blade atlas cell's UVs -
+# only grass_tuft samples that cell, so every tree/bush is untouched. Height
+# metrics are out (see the snow notes above); UV v runs root->tip on a card.
+# UE flips OBJ v on import: UE v = 1 - obj v.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pipeline"))
+from flora_common import cell_uv_rect
+GRASS_ROOT_SHADE = 0.5      # brightness at the root
+GRASS_SHADE_FRAC = 0.5      # fraction of the card height the gradient spans
+gu0, gu1, gv0, gv1 = cell_uv_rect("grass_blade")
+g_root_v, g_card_v = 1.0 - gv0, gv1 - gv0
+uv0 = MEL.create_material_expression(m_fol, unreal.MaterialExpressionTextureCoordinate, -900, 1700)
+uv_u, uv_v = _mask(m_fol, uv0, r=True), _mask(m_fol, uv0, gg=True)
+in_cell = _mul(m_fol, _clamp01(m_fol, _mul(m_fol, _sub(m_fol, uv_u, _const(m_fol, gu0 - 0.01)), _const(m_fol, 1000.0))),
+               _clamp01(m_fol, _mul(m_fol, _sub(m_fol, uv_v, _const(m_fol, 1.0 - gv1 - 0.01)), _const(m_fol, 1000.0))))
+up = _clamp01(m_fol, _div(m_fol, _sub(m_fol, _const(m_fol, g_root_v), uv_v), _const(m_fol, g_card_v * GRASS_SHADE_FRAC)))
+shade = _lerp(m_fol, _const(m_fol, 1.0), _lerp(m_fol, _const(m_fol, GRASS_ROOT_SHADE), _const(m_fol, 1.0), up), in_cell)
+must_connect_property(_mul(m_fol, snowed_base_color, shade), "", unreal.MaterialProperty.MP_BASE_COLOR)
+must_connect_property(_mul(m_fol, snowed_subsurface, shade), "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
 
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage", only_if_is_dirty=False)

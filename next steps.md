@@ -191,6 +191,17 @@ gravel crunch, and the snow/wet grip feel.
   don't; and that lamps glow when the headlights come on. The log line
   `ODFurnitureManager: tiles=... props=... lamps=on/off` confirms
   streaming. Speed signs carry no digits yet.
+- **Ground detail** (2026-10-07, seen in parked screenshots only): drive Summit rural (Swan Mtn, Boreas) and a town street.
+  - Grass ring: tufts should fill out to ~60 m without visible pop-in at the
+    edge, stay 3.5 m clear of the pavement, and skip pads, bridges and
+    lakes. Judge density per biome (`GrassPerSqM`, `GrassBiomeScale`) and
+    frame time (`bEnableGrass` off to compare).
+  - Ground patches: dry-straw and bare-dirt patches should break up the
+    meadow without looking like camo (`PATCH_*` in
+    `apply_ground_material.py`).
+  - Shoulder: a gravel band along every road edge, wider and narrower
+    along the road, with no seam or jump as the car drives (the texture
+    re-centers every 32 m) and no band on cliffs.
 
 ## 3. Gameplay and UX
 

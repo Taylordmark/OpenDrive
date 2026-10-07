@@ -217,6 +217,25 @@ public:
 	 *  candidate only gets RockFlatChance's acceptance odds - flat ground
 	 *  still gets occasional scattered boulders, just far fewer than a
 	 *  hillside. */
+	/** Near-car grass carpet (2026-10-07): grass_tuft on a traced 2 m
+	 *  lattice in GrassCellCm cells out to GrassRadiusCm - a lattice square
+	 *  only grows grass when all 4 corners hit terrain, so road, pads,
+	 *  bridges, buildings and parking stay bare. Per-biome scale in
+	 *  GrassBiomeScale (ODForestManager.cpp). */
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	bool bEnableGrass = true;
+
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	float GrassPerSqM = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	float GrassRadiusCm = 6000.0f;
+
+	/** Bare gap past the pavement edge: the shoulder strip's widest band
+	 *  (SHOULDER_MAX_M + edge jitter in apply_ground_material.py). */
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	float GrassShoulderClearCm = 350.0f;
+
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
 	float RockSlopeMinRatio = 0.04f;
 
@@ -492,6 +511,13 @@ private:
 	 *  player (built first, in ring order) would each get permanently
 	 *  committed near-empty, since a committed tile is never revisited. */
 	bool BuildTile(const FIntPoint& Key, const AActor* Player);
+	bool BuildGrassCell(const FIntPoint& Key, const AActor* Player);
+	void UpdateGrass(const FVector& Loc, const AActor* Player);
+	static constexpr float GrassCellCm = 1600.0f;
+	static constexpr int32 GrassLatticeN = 8;   // 2 m squares per cell side
+	static constexpr int32 GrassCellsPerTick = 2;
+	TMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GrassCells;   // null = built, nothing to grow
+	TMap<FIntPoint, double> GrassFirstTry;
 	void ReleaseTile(const FIntPoint& Key);
 	void UpdateCollision(const FVector& PlayerLoc);
 

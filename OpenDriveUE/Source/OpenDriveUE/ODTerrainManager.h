@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
+#include "Async/Future.h"
 #include "Templates/SharedPointer.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 #include "ODTerrainManager.generated.h"
@@ -11,6 +12,7 @@
 class UDynamicMeshComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UTexture2D;
 
 /** One parsed terrain tile - plain data, safe to build off the game thread
  *  (no UObject/component touched). Mirrors the ODT1 sidecar payload layout
@@ -524,6 +526,25 @@ private:
 	// RequestTileLoad's carve step is a no-op in that case (terrain still
 	// streams, just uncarved beyond whatever the offline bake already did).
 	TSharedPtr<FStationSpatialHash, ESPMode::ThreadSafe> StationHash;
+
+	// Shoulder strip (2026-10-07): pavement-edge distance field around the
+	// car, RoadDistTexels^2 at RoadDistTexelCm, rebuilt on the thread pool
+	// whenever the car drifts RoadDistRecenterCm from its center and pushed
+	// into TerrainMID as RoadDistTex/RoadDistOrigin - M_GroundStylized draws
+	// the gravel band from it (apply_ground_material.py SHOULDER_*). Linear
+	// distance / RoadDistRangeCm, sRGB-encoded so the sampler hands the
+	// material the linear value back (ROAD_DIST_RANGE_M there).
+	static constexpr int32 RoadDistTexels = 1024;
+	static constexpr float RoadDistTexelCm = 50.0f;      // 512 m coverage
+	static constexpr float RoadDistRangeCm = 1600.0f;
+	static constexpr float RoadDistRecenterCm = 3200.0f;
+	UPROPERTY()
+	TObjectPtr<UTexture2D> RoadDistTex;
+	FVector2D RoadDistCenter = FVector2D(1e12, 1e12);
+	FVector2D RoadDistJobCenter = FVector2D::ZeroVector;
+	TFuture<TArray<FColor>> RoadDistJob;
+	void UpdateRoadDistTex(const FVector& Loc);
+	static TArray<FColor> BuildRoadDistTexels(const FStationSpatialHash& Hash, const FVector2D& Center);
 
 	// Runtime ground tint (2026-08-26): loaded once in BeginPlay from
 	// biome_{area}_test.bin, never mutated again - shared (thread-safe,

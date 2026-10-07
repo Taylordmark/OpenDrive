@@ -514,6 +514,35 @@ veg_albedo = g.lerp(veg_albedo, dirt["albedo"], dirt_amount, b_out="RGB")
 veg_normal = g.lerp(veg_normal, dirt["normal"], dirt_amount, b_out="RGB")
 veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), dirt_amount)
 
+# ---- medium-scale patches (2026-10-07): every variation above is >= 120 m,
+# so within a few hundred metres of the car the meadow read as one flat
+# colour. 7 m + 23 m octaves pick dry-straw patches and smaller bare-dirt
+# spots. pipeline/checks/check_ground_patches.py mirrors this math offline.
+PATCH_FINE_SCALE_CM = 700.0
+PATCH_COARSE_SCALE_CM = 2300.0
+PATCH_COARSE_WEIGHT = 0.6
+PATCH_CONTRAST = 1.8
+PATCH_DRY_LO = 0.50
+PATCH_DRY_HI = 0.72
+PATCH_DRY_MUL = (1.18, 1.02, 0.70)      # straw: warmer, less green
+PATCH_BARE_LO = 0.80
+PATCH_BARE_HI = 0.92
+PATCH_BARE_MAX = 0.75
+PATCH_BARE_MUL = (0.80, 0.72, 0.60)     # darker brown than the 120 m trail dirt
+patch_fine = value_noise(
+    wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / PATCH_FINE_SCALE_CM))), seed_offset=(23.0, 41.0))
+patch_coarse = value_noise(
+    wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / PATCH_COARSE_SCALE_CM))), seed_offset=(59.0, 11.0))
+patch = g.lerp(patch_fine, patch_coarse, g.const(PATCH_COARSE_WEIGHT))
+patch = g.add(g.mul(g.sub(patch, g.const(0.5)), g.const(PATCH_CONTRAST)), g.const(0.5))
+dry_t = g.clamp01(g.div(g.sub(patch, g.const(PATCH_DRY_LO)), g.const(PATCH_DRY_HI - PATCH_DRY_LO)))
+veg_albedo = g.lerp(veg_albedo, g.mul(veg_albedo, g.const3(*PATCH_DRY_MUL)), dry_t)
+bare_t = g.mul(g.clamp01(g.div(g.sub(patch, g.const(PATCH_BARE_LO)), g.const(PATCH_BARE_HI - PATCH_BARE_LO))),
+               g.const(PATCH_BARE_MAX))
+veg_albedo = g.lerp(veg_albedo, g.mul(dirt["albedo"], g.const3(*PATCH_BARE_MUL), a_out="RGB"), bare_t)
+veg_normal = g.lerp(veg_normal, dirt["normal"], bare_t, b_out="RGB")
+veg_rough = g.lerp(veg_rough, rough_scalar(dirt["rough"]), bare_t)
+
 veg_albedo = g.lerp(veg_albedo, spring_green_color, spring_green_amount, b_out="")
 
 # ---- V3 (2026-09-25, next steps.md §7.36): flat-layer macro variation +
@@ -581,6 +610,53 @@ base_albedo = g.lerp(steep_albedo, veg_albedo, flat_w)
 base_normal = g.lerp(steep_normal, veg_normal, flat_w)
 base_rough = g.lerp(steep_rough, veg_rough, flat_w)
 
+# ---------------------------------------------------------------- road shoulder (2026-10-07)
+# Gravel/dirt band along every pavement edge. AODTerrainManager rebuilds a
+# 512 m distance-to-pavement-edge texture around the car (RoadDistTex,
+# R = edge distance / ROAD_DIST_RANGE_M, sRGB-encoded so the sampler hands
+# back the linear value) and sets RoadDistOrigin = its centre. The origin is a
+# DOUBLE vector param: a float one lost the world-minus-origin subtraction to
+# LWC precision and the lookup landed far off the field. Default white
+# texture = every pixel "far" - no band.
+ROAD_DIST_RANGE_M = 16.0          # == AODTerrainManager::RoadDistRangeCm / 100
+ROAD_DIST_COVERAGE_CM = 51200.0   # == RoadDistTexels * RoadDistTexelCm
+SHOULDER_MIN_M = 1.5
+SHOULDER_MAX_M = 3.0
+SHOULDER_JITTER_M = 0.5           # max + jitter = 3.5 m == AODForestManager::GrassShoulderClearCm
+SHOULDER_SOFT_M = 0.35
+SHOULDER_GRAVEL_TILE_CM = 300.0
+SHOULDER_TINT = (0.85, 0.78, 0.66)
+SHOULDER_EDGE_FADE_CM = 8000.0    # fade out over the texture's last 80 m
+white_tex = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
+if white_tex is None:
+    raise RuntimeError("/Engine/EngineResources/WhiteSquareTexture missing - pick another default for RoadDistTex")
+rd_origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="RoadDistOrigin")
+rd_cov = g.const(ROAD_DIST_COVERAGE_CM)
+rd_rel = g.div(g.sub(world_xy, g.mask(rd_origin, r=True, gg=True)), rd_cov)
+rd_tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name="RoadDistTex", texture=white_tex)
+rd_uv = g.add(rd_rel, g.const2(0.5, 0.5))
+g._req(any(MEL.connect_material_expressions(rd_uv, "", rd_tex, pin) for pin in ("UVs", "Coordinates")),
+       "RoadDistTex UV")
+road_d = g.mul(g.mask(rd_tex, r=True, a_out="RGB"), g.const(ROAD_DIST_RANGE_M))
+rd_abs = g.absv(rd_rel)
+rd_edge = g.clamp01(g.mul(g.sub(g.const(0.5), g.binop(unreal.MaterialExpressionMax, g.mask(rd_abs, r=True),
+                                                      g.mask(rd_abs, gg=True))),
+                          g.div(rd_cov, g.const(SHOULDER_EDGE_FADE_CM))))
+sh_wide = value_noise(wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / 4000.0))), seed_offset=(37.0, 83.0))
+sh_fine = value_noise(wrap_lattice_uv(g.mul(world_xy, g.const(1.0 / 150.0))), seed_offset=(5.0, 67.0))
+sh_width = g.add(g.lerp(g.const(SHOULDER_MIN_M), g.const(SHOULDER_MAX_M), sh_wide),
+                 g.mul(g.sub(sh_fine, g.const(0.5)), g.const(2.0 * SHOULDER_JITTER_M)))
+sh_mask = g.clamp01(g.div(g.sub(g.add(sh_width, g.const(SHOULDER_SOFT_M)), road_d), g.const(2.0 * SHOULDER_SOFT_M)))
+sh_mask = g.mul(g.mul(sh_mask, rd_edge), g.clamp01(g.mul(flat_w, g.const(2.0))))
+sh_uv = make_uv(SHOULDER_GRAVEL_TILE_CM)
+sh_gravel = g.sample(TEXTURES["scree"]["albedo"], sh_uv)
+sh_albedo = g.lerp(g.mul(sh_gravel, g.const3(*SHOULDER_TINT), a_out="RGB"),
+                   g.mul(dirt["albedo"], g.const(0.9), a_out="RGB"),
+                   g.clamp01(g.mul(g.sub(sh_fine, g.const(0.3)), g.const(2.5))))
+base_albedo = g.lerp(base_albedo, sh_albedo, sh_mask)
+base_normal = g.lerp(base_normal, g.sample(TEXTURES["scree"]["normal"], sh_uv, is_normal=True), sh_mask, b_out="RGB")
+base_rough = g.lerp(base_rough, g.const(0.9), sh_mask)
+
 # ---------------------------------------------------------------- sand/beach blend (kept verbatim, see module docstring)
 sea_level = g.scalar_param("SeaLevelZCm", SEA_LEVEL_Z_CM)
 height_above_sea = g.sub(world_z, sea_level)
@@ -641,10 +717,18 @@ for prop_name, prop_enum in (
         continue
     inputs = MEL.get_inputs_for_material_expression(reloaded, node)
     log(f"  MP_{prop_name}: driven by {node.get_class().get_name()} own_inputs={inputs}")
+tex_params = [str(n) for n in MEL.get_texture_parameter_names(reloaded)]
+# double-vector params aren't in get_vector_parameter_names; look for the node
+has_origin = any(isinstance(e, unreal.MaterialExpressionDoubleVectorParameter)
+                 and str(e.get_editor_property("parameter_name")) == "RoadDistOrigin"
+                 for e in MEL.get_material_expressions(reloaded))
+log(f"  texture params={tex_params} RoadDistOrigin double param={has_origin}")
+if "RoadDistTex" not in tex_params or not has_origin:
+    all_ok = False
 if not all_ok:
     raise RuntimeError(
-        "M_GroundStylized: one or more base material property pins failed to "
-        "connect - see the post-save verification log above")
+        "M_GroundStylized: a base material property pin failed to connect or "
+        "the RoadDist params are missing - see the post-save verification log above")
 
 log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"treeline={TREELINE_LOW_M:.0f}-{TREELINE_HIGH_M:.0f}m ({TREELINE_LOW_CM:.0f}-{TREELINE_HIGH_CM:.0f}cm), "
@@ -652,4 +736,6 @@ log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"layers={list(LAYERS.keys())}, triplanar=rock, "
     f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen], "
     f"v3_macro={MACRO_FINE_SCALE_CM / 100:.0f}m/{MACRO_COARSE_SCALE_CM / 100:.0f}m, "
+    f"patches={PATCH_FINE_SCALE_CM / 100:.0f}m/{PATCH_COARSE_SCALE_CM / 100:.0f}m, "
+    f"shoulder={SHOULDER_MIN_M}-{SHOULDER_MAX_M}m+-{SHOULDER_JITTER_M}, "
     f"v3_far={FAR_START_CM / 100:.0f}-{FAR_END_CM / 100:.0f}m darken={FAR_DARKEN} sat+={FAR_SAT_BOOST}")

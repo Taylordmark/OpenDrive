@@ -183,6 +183,28 @@ scale, built from open data, with a stylized "real places, storybook look".
     A pole the pad also slid sideways off the road keeps its base on the
     terrain (18 on SF), and a stop bar left off the pavement is dropped
     (24 on SF).
+- **Ground detail near the car** (2026-10-07, from the Street View
+  side-by-sides; seen in-game at 4 Summit spawns, not driven):
+  - Grass ring: `AODForestManager::UpdateGrass` fills 16 m cells within
+    `GrassRadiusCm` (60 m), 2 per tick, nearest first, with `ScrubMesh`
+    tufts on a 2 m trace lattice. It plants only on terrain/landscape hits
+    outside lakes, at `GrassPerSqM` × a per-biome scale × (1 − forest/2),
+    thinned by slope, and keeps `GrassShoulderClearCm` (3.5 m) off every
+    pavement edge. No collision or shadow; instead `M_Foliage` darkens the
+    grass_blade atlas cell toward the root (50% at the base, full by half
+    height), which leaves trees and bushes untouched.
+  - Ground patches: `M_GroundStylized` adds 7 m / 23 m noise for dry-straw
+    patches (~35%) and bare-dirt spots (~10%).
+  - Shoulder: `AODTerrainManager` rebuilds a 512 m, 50 cm/texel
+    distance-to-pavement-edge texture off-thread whenever the car moves
+    32 m (`RoadDistTex` / `RoadDistOrigin` on the terrain MID). The material
+    paints a 1.5–3 m (±0.5 m) gravel/dirt band from it on flat ground.
+    Ground under bridge decks reads as shoulder too.
+    `RoadDistOrigin` is a double vector param: as a float, world-minus-origin
+    lost LWC precision and the lookup missed the texture (no band anywhere).
+    Each publish creates a fresh texture filled at creation.
+  - Check: `pipeline/checks/check_ground_patches.py` (patch coverage,
+    shoulder vs grass clear zone, texture precision 3 cm within 4 m).
 
 ## Arc 2 — Atmosphere ✅
 

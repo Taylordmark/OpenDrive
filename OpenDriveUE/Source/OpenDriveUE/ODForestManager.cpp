@@ -15,6 +15,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODBinSidecarUtil.h"
+#include "ODTerrainManager.h"
 #include "ODVehiclePawn.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UnrealClient.h"
@@ -118,6 +119,17 @@ const FBiomeRecipe BiomeRecipeTable[] = {
 };
 static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::RockyFoothill + 1,
 	"BiomeRecipeTable must have one entry per EODBiome value, in enum order");
+
+/** Grass ring density per EODBiome (2026-10-07), x GrassPerSqM - open
+ *  grass/meadow full, forest floors and dry/rocky ground thinner. */
+const float GrassBiomeScale[] = {
+	/* DeciduousForest */ 0.8f, /* EvergreenForest */ 0.6f, /* Chaparral */ 0.35f, /* DesertScrub */ 0.15f,
+	/* PlainsGrassland */ 1.0f, /* Wetland */ 1.0f, /* AlpineBare */ 0.4f, /* ArcticTundra */ 0.6f,
+	/* Farmland */ 0.9f, /* Savanna */ 0.9f, /* Rainforest */ 0.7f, /* CoastalDune */ 0.3f,
+	/* CanyonBadlands */ 0.1f, /* RockyFoothill */ 0.55f,
+};
+static_assert(UE_ARRAY_COUNT(GrassBiomeScale) == (uint8)EODBiome::RockyFoothill + 1,
+	"GrassBiomeScale must have one entry per EODBiome value, in enum order");
 
 // ---- Terrain variety V2/V5 (2026-09-25, next steps.md sec 7.35) ----
 // V5 elevation banding WITHIN EvergreenForest (recipe interpolation, no new
@@ -2186,6 +2198,180 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	return true;
 }
 
+bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player)
+{
+	constexpr int32 N = GrassLatticeN;
+	constexpr double Step = GrassCellCm / N;
+	const double X0 = Key.X * (double)GrassCellCm, Y0 = Key.Y * (double)GrassCellCm;
+
+	// corner lattice: a corner is good only on real terrain (not road/pad/
+	// bridge/building/parking/trunk capsule) and outside lakes
+	float Z[N + 1][N + 1];
+	bool bGood[N + 1][N + 1];
+	int32 Misses = 0;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+	if (Player)
+	{
+		Params.AddIgnoredActor(Player);
+	}
+	for (int32 iy = 0; iy <= N; ++iy)
+	{
+		for (int32 ix = 0; ix <= N; ++ix)
+		{
+			const double X = X0 + ix * Step, Y = Y0 + iy * Step;
+			FHitResult Hit;
+			bGood[iy][ix] = false;
+			if (!GetWorld()->LineTraceSingleByChannel(Hit, FVector(X, Y, PlayerZHint + GroundTraceMarginCm),
+					FVector(X, Y, PlayerZHint - GroundTraceMarginCm), ECC_WorldStatic, Params))
+			{
+				++Misses;   // collision not streamed in here yet
+				continue;
+			}
+			if (FMath::Abs(Hit.ImpactPoint.Z - PlayerZHint) > GroundSanityMaxDeltaCm)
+			{
+				// fell through terrain whose collision is still cooking onto the
+				// floor plane far below - retry, same deferral as BuildTile's trees
+				++Misses;
+				continue;
+			}
+			const AActor* HitActor = Hit.GetActor();
+			bGood[iy][ix] = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>())
+				&& !(bUseWaterExclusion && IsInsideLake(X, Y));
+			Z[iy][ix] = Hit.ImpactPoint.Z;
+		}
+	}
+	if (Misses > 0)
+	{
+		// same retry-then-commit-anyway gate as BuildTile's deferral
+		const double Now = GetWorld()->GetTimeSeconds();
+		if (Now - GrassFirstTry.FindOrAdd(Key, Now) < TileBuildGiveUpAfterSec)
+		{
+			return false;
+		}
+	}
+	GrassFirstTry.Remove(Key);
+
+	FBiomeRecipe Recipe;
+	float ForestW;
+	EODBiome Biome;
+	BlendAt(X0 + GrassCellCm * 0.5, Y0 + GrassCellCm * 0.5, Recipe, ForestW, Biome);
+	if (ForestW < 0.0f)
+	{
+		ForestW = ForestWeightAt(X0 + GrassCellCm * 0.5, Y0 + GrassCellCm * 0.5);
+	}
+	const float PerSquare = GrassPerSqM * GroundCoverDensityScale * GrassBiomeScale[(uint8)Biome]
+		* (1.0f - 0.5f * ForestW) * FMath::Square(Step / 100.0);
+
+	TArray<int32> Stations;
+	if (bUseStationExclusion)
+	{
+		const float Pad = GrassShoulderClearCm + 1500.0f;   // + widest half-width + one station step
+		RoadStationHash.QueryBox(X0 - Pad, Y0 - Pad, X0 + GrassCellCm + Pad, Y0 + GrassCellCm + Pad, Stations);
+	}
+
+	FRandomStream Rng(HashCombine(GetTypeHash(Key), (uint32)RandomSeed ^ 0x67A55u));
+	TArray<FTransform> Xf;
+	for (int32 sy = 0; sy < N; ++sy)
+	{
+		for (int32 sx = 0; sx < N; ++sx)
+		{
+			if (!(bGood[sy][sx] && bGood[sy][sx + 1] && bGood[sy + 1][sx] && bGood[sy + 1][sx + 1]))
+			{
+				continue;
+			}
+			const float Z00 = Z[sy][sx], Z10 = Z[sy][sx + 1], Z01 = Z[sy + 1][sx], Z11 = Z[sy + 1][sx + 1];
+			const float Slope = FVector2f((Z10 + Z11 - Z00 - Z01) * 0.5f, (Z01 + Z11 - Z00 - Z10) * 0.5f).Size() / Step;
+			const float Expected = PerSquare * FMath::Clamp(1.4f - Slope, 0.0f, 1.0f);   // thins past ~22 deg, none past ~55
+			const int32 Count = FMath::FloorToInt(Expected) + (Rng.FRand() < FMath::Frac(Expected) ? 1 : 0);
+			for (int32 c = 0; c < Count; ++c)
+			{
+				const float U = Rng.FRand(), V = Rng.FRand();
+				const float Yaw = Rng.FRand() * 360.0f;
+				const float Scale = 0.7f + Rng.FRand() * 0.9f;
+				const double X = X0 + (sx + U) * Step, Y = Y0 + (sy + V) * Step;
+				bool bOnShoulder = false;
+				for (const int32 i : Stations)
+				{
+					const TArray<FRoadStation>& S = RoadStationHash.Stations;
+					if (SegmentEdgeDistCm(S[i], S[NextRunStation(S, i)], X, Y) < GrassShoulderClearCm)
+					{
+						bOnShoulder = true;
+						break;
+					}
+				}
+				if (bOnShoulder)
+				{
+					continue;
+				}
+				const float Zb = FMath::Lerp(FMath::Lerp(Z00, Z10, U), FMath::Lerp(Z01, Z11, U), V);
+				Xf.Emplace(FRotator(0.0f, Yaw, 0.0f),
+					FVector(X, Y, Zb - ScrubMeshBaseOffsetCm * Scale - 3.0f),   // 3 cm sink hides the card bases
+					FVector(Scale));
+			}
+		}
+	}
+
+	UHierarchicalInstancedStaticMeshComponent* Hism = nullptr;
+	if (Xf.Num() > 0 && ScrubMesh)
+	{
+		Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+		Hism->SetupAttachment(RootComponent);
+		Hism->SetStaticMesh(ScrubMesh);
+		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Hism->SetCullDistances(GrassRadiusCm * 0.7f, GrassRadiusCm);
+		Hism->SetCastShadow(false);
+		Hism->SetAffectDynamicIndirectLighting(false);
+		Hism->RegisterComponent();
+		Hism->AddInstances(Xf, false, /*bWorldSpace*/false);
+	}
+	GrassCells.Add(Key, Hism);
+	return true;
+}
+
+void AODForestManager::UpdateGrass(const FVector& Loc, const AActor* Player)
+{
+	const FIntPoint Center(FMath::FloorToInt(Loc.X / GrassCellCm), FMath::FloorToInt(Loc.Y / GrassCellCm));
+	const int32 Reach = FMath::CeilToInt(GrassRadiusCm / GrassCellCm);
+
+	// missing cells inside the radius, nearest first
+	TArray<TPair<double, FIntPoint>> Want;
+	for (int32 dy = -Reach; dy <= Reach; ++dy)
+	{
+		for (int32 dx = -Reach; dx <= Reach; ++dx)
+		{
+			const FIntPoint Key = Center + FIntPoint(dx, dy);
+			if (GrassCells.Contains(Key))
+			{
+				continue;
+			}
+			const double D2 = FVector2D::DistSquared(FVector2D(Loc.X, Loc.Y),
+				FVector2D((Key.X + 0.5) * GrassCellCm, (Key.Y + 0.5) * GrassCellCm));
+			if (D2 <= FMath::Square(GrassRadiusCm + GrassCellCm * 0.71))
+			{
+				Want.Emplace(D2, Key);
+			}
+		}
+	}
+	Want.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B) { return A.Key < B.Key; });
+	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick); ++i)
+	{
+		BuildGrassCell(Want[i].Value, Player);
+	}
+
+	for (auto It = GrassCells.CreateIterator(); It; ++It)
+	{
+		if (FMath::Max(FMath::Abs(It.Key().X - Center.X), FMath::Abs(It.Key().Y - Center.Y)) > Reach + 1)
+		{
+			if (It.Value())
+			{
+				It.Value()->DestroyComponent();
+			}
+			It.RemoveCurrent();
+		}
+	}
+}
+
 void AODForestManager::ReleaseTile(const FIntPoint& Key)
 {
 	if (FTile* Tile = Tiles.Find(Key))
@@ -2366,6 +2552,10 @@ void AODForestManager::Tick(float DeltaSeconds)
 		return;
 	}
 	UpdateCollision(Loc);
+	if (bEnableGrass && bEnableGroundCover)
+	{
+		UpdateGrass(Loc, Player);
+	}
 
 	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot.
 	// ShotAt/bShotParsed/bShotDone are instance members (see ODForestManager.h)
