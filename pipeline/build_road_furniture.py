@@ -517,6 +517,10 @@ def main():
           + ", ".join(f"{TYPES[t]} {c}" for t, c in sorted(Counter(P[far, 0].astype(int)).items())))
     keep = ~inside & ~far
     P, poles = P[keep], poles[keep]
+    # the push moved OSM-tier poles off the edge they were seated on; re-read
+    # it where they now stand (Summit: a pad-skewed road left one 0.22 m off)
+    osm = np.isfinite(P[:, 9])
+    P[osm, 6] = [surface_z(x, y) for x, y in P[osm, 1:3]]
     pe, pn, edge_z = P[:, 1], P[:, 2], P[:, 6]
     terr = np.full(len(P), np.nan)
     terr[poles] = terrain_abs_m(pe[poles], pn[poles])

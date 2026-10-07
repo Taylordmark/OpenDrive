@@ -760,8 +760,9 @@ run since before §7.49, so 1,276 junctions had no pad.
   - **Lowered an inch** (`PAD_LOWER_M` 2.5 cm, Taylor's call): the pad sits
     1.5 cm under the road where they overlap, so the road wins the z-fight.
   - SF edge (pad − road): junction pads median −0.015 m, 99th pct +0.17 m,
-    1.1% over 0.15 m; fill discs 99th pct +0.06 m. All gates PASS. Only
-    sf_russian_hill is rebuilt.
+    1.1% over 0.15 m; fill discs 99th pct +0.06 m. All gates PASS.
+  - Summit rebuilt too: 32,152 pad vertices conformed onto a ribbon. Road,
+    terrain and furniture gates PASS. Other areas still have the old pads.
   - Tests: `test_pad_apron.py`, `test_flatten_to_pad_rims.py`.
 
 ### Large world
