@@ -264,16 +264,20 @@ def main():
     #  node_e, node_n (control poles: their node, shipped frame), free (base on terrain)]
     props = []
 
-    def put(kind, i, d_side, extra, face_d, sy=1.0, along=0.0, yaw=None, node=(np.nan, np.nan)):
+    def put(kind, i, d_side, extra, face_d, sy=1.0, along=0.0, yaw=None, node=(np.nan, np.nan), at=None):
         """A prop at station i, `d_side` (+1 right / -1 left of station
         order) at pavement edge + extra, facing travel direction face_d's
-        oncoming traffic (+X local = -face_d * tangent)."""
+        oncoming traffic (+X local = -face_d * tangent). `at` = (east,
+        north) overrides the station's shipped position; the edge z is then
+        the shipped surface there."""
+        x, y = at if at is not None else (east[i], north[i])
         o = d_side * (hw[i] + extra)
-        pe = east[i] + tn[i] * o + te[i] * along
-        pn = north[i] - te[i] * o + tn[i] * along
+        pe = x + tn[i] * o + te[i] * along
+        pn = y - te[i] * o + tn[i] * along
         if yaw is None:
             yaw = yaw_deg(-face_d * te[i], -face_d * tn[i])
-        props.append([T[kind], pe, pn, np.nan, yaw, sy, road_z[i] + bank[i] * d_side * hw[i],
+        edge_z = surface_z(pe, pn) if at is not None else road_z[i] + bank[i] * d_side * hw[i]
+        props.append([T[kind], pe, pn, np.nan, yaw, sy, edge_z,
                       d_side * tn[i], -d_side * te[i], *node, 0])
 
     # ---------------------------------------------------------- OSM tier
@@ -293,6 +297,14 @@ def main():
     jxy = np.c_[to_local(jll[:, 0], jll[:, 1])]
     jtree = cKDTree(jxy)
     otree = cKDTree(np.c_[e0, n0])          # matching uses the ORIGINAL positions
+    stree = cKDTree(np.c_[east, north])
+
+    def surface_z(px, py):
+        """Shipped banked road surface at (px, py), clamped to the pavement
+        edge, from the nearest shipped station (verify_furniture_fit's test)."""
+        k = stree.query((px, py))[1]
+        off = (px - east[k]) * tn[k] - (py - north[k]) * te[k]
+        return road_z[k] + bank[k] * min(max(off, -hw[k]), hw[k])
 
     def kind_of(tags):
         if tags.get("railway") == "level_crossing":
@@ -347,8 +359,6 @@ def main():
             target, back = (jxy[jj], 0) if dj < JUNCTION_SEARCH_M else (p, 1)
         else:
             target, back = p, 1
-        k0 = otree.query(p)[1]        # the node rides along with a pad XY snap
-        p_ship = (p[0] + east[k0] - e0[k0], p[1] + north[k0] - n0[k0])
         sign = {"traffic_signals": "signal", "stop": "stop", "give_way": "yield",
                 "crossing": "ped_crossing", "level_crossing": "rail_crossbuck"}[kind]
         appr = []
@@ -363,21 +373,30 @@ def main():
                 dirs = fwd if tags["direction"] == "forward" else -fwd
             for d, j in approach_dirs(xy, k - a, dirs, target, nb):
                 i = a + j
+                # the ORIGINAL station: a pad snap slides approach stations ~10 m
+                # along the road, toward the node, so the setback (counted in
+                # original stations) lands inside the crossing arm; z from the
+                # shipped surface there (surface_z)
+                x0, y0 = e0[i], n0[i]
+                dz, kz = stree.query((x0, y0))
                 appr.append([int(s), int(j), int(d)])
                 # one pole per approach: a divided road's two signal nodes
                 # (one per carriageway crossing) both reach the same approach
-                if any(t == sign and math.hypot(x - east[i], y - north[i]) < SIGN_DEDUPE_M
+                if any(t == sign and math.hypot(x - x0, y - y0) < SIGN_DEDUPE_M
                        and fx * te[i] * d + fy * tn[i] * d > 0.7 for t, x, y, fx, fy in osm_signs):
                     continue
-                osm_signs.append((sign, east[i], north[i], te[i] * d, tn[i] * d))
-                put(sign, i, d, POLE_OFF_M, d, along=d * along, node=p_ship)
+                osm_signs.append((sign, x0, y0, te[i] * d, tn[i] * d))
+                put(sign, i, d, POLE_OFF_M, d, along=d * along, node=p, at=(x0, y0))
+                # ponytail: where the pad also slid the road sideways (skewed
+                # arms) the pole stands off it - base on terrain; snapping it to
+                # the shipped edge is option B (next steps.md)
+                props[-1][-1] = int(dz > hw[kz] + 3.0)
                 if sign in ("signal", "stop"):
                     # stripe across the travel lane(s), on the road surface
                     w = 2 * hw[i] if ow[i] else hw[i]
                     o = 0.0 if ow[i] else d * hw[i] / 2
-                    props.append([T["stop_bar"], east[i] + tn[i] * o + te[i] * d * along,
-                                  north[i] - te[i] * o + tn[i] * d * along,
-                                  road_z[i] + bank[i] * o + 0.01, yaw_deg(d * te[i], d * tn[i]), w, np.nan,
+                    bx, by = x0 + tn[i] * o + te[i] * d * along, y0 - te[i] * o + tn[i] * d * along
+                    props.append([T["stop_bar"], bx, by, surface_z(bx, by) + 0.01, yaw_deg(d * te[i], d * tn[i]), w, np.nan,
                                   0.0, 0.0, np.nan, np.nan, 0])
         if not appr:
             osm_skipped[f"{kind} (no approach reaches it)"] += 1
@@ -486,7 +505,10 @@ def main():
         k = np.where(inside)[0]
         P[k, 1:3] += PUSH_OUT_M * P[k, 7:9]
         inside[k] = in_pavement(pav, P[k, 1], P[k, 2], P[k, 6])
-    print(f"dropped {int(inside.sum())} prop(s) inside a pavement: "
+    # ... and a stop bar the same pad slide put off the road surface
+    bars = P[:, 0] == T["stop_bar"]
+    inside |= bars & ~in_pavement(pav, P[:, 1], P[:, 2], P[:, 3], clear=0.0)
+    print(f"dropped {int(inside.sum())} prop(s) inside a pavement / bar off it: "
           + ", ".join(f"{TYPES[t]} {c}" for t, c in sorted(Counter(P[inside, 0].astype(int)).items())))
     # an OSM-tier pole pushed or set back past CONTROL_MAX_M from its node no
     # longer reads as that node's (verify_furniture_fit's node gate)

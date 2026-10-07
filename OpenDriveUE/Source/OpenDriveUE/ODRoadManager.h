@@ -377,7 +377,9 @@ private:
 	void BuildTownNodes();
 	void UpdateCurrentLabels(const FVector& PlayerLoc);
 	void LoadRouteGraph();
-	int32 NearestRouteNode(const FVector2D& Q) const;
+	/** Nearest route node; with a Heading, the nearest one with a legal arc
+	 *  leaving along it (within StartSnapSlackCm of the nearest) - route start. */
+	int32 NearestRouteNode(const FVector2D& Q, const FVector2D& Heading = FVector2D::ZeroVector) const;
 	bool FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes) const;
 	bool RecomputeRoute(const FVector2D& From);
 	void UpdateRouteProgress(const FVector2D& PlayerXY);
@@ -387,6 +389,7 @@ private:
 	TArray<int32> RouteAdjStart;   // RouteNodes.Num()+1
 	TArray<int32> RouteAdjNode;
 	TArray<float> RouteAdjLen;     // A* cost, cm (wrong-way arcs x WrongWayCostMult)
+	TBitArray<> RouteAdjWrongWay;  // arc runs against a one-way edge
 
 	TArray<FVector2D> RoutePts;
 	TArray<float> RouteCum;        // arc length (cm) from RoutePts[0]

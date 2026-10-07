@@ -179,6 +179,30 @@ terrain/edge, control poles ≤ 15 m from their OSM node, per-type counts) and
 `unreal\import_furniture_meshes.py` (→ `/Game/OpenDrive/Furniture`,
 `M_Furniture` + `MI_Furn_*`).
 
+Route / lane graph (PLAN-REALISM 3a): `export_road_centerline_bin.py` writes
+`routegraph_<area>_test.bin` (ODG1), which nav reads now and traffic will
+read later. It reads the pad-patched shipped stations and
+`road_furniture.json` `controls`, so **re-run it after
+`experimental_junction_pads.py` and `build_road_furniture.py`**:
+`python pipeline/export_road_centerline_bin.py`. The order is pads, then
+furniture, then this export. Layout (the full spec is the script's
+docstring):
+
+- `'ODG1'`, `u32 N`, `N × (f32 x_cm, f32 y_cm)`;
+- `u32 E`, `E × (u32 a, u32 b, f32 len_cm)`;
+- the one-way block: `E × i8`;
+- the optional lane block:
+  - `N × f32 z_cm`;
+  - `N × u8` control: 0 none, 1 signal, 2 stop, 3 give way, 4 priority;
+  - `E × u8` class: bits 0–2 class id, 8 ramp, 16 no pavement;
+  - `E × u8` lanes per direction;
+  - `E × u8` km/h;
+  - `E × u8` yield: bit 0 means a→b stops at a, bit 1 means b→a stops at b.
+
+Files ending after the edges or after the one-way block still load. The gate
+is `python pipeline/checks/verify_route_graph.py` (it must print ALL CHECKS
+PASSED); also run `python pipeline/tests/test_route_graph_lanes.py`.
+
 `verify_terrain_fit.py` is the gate to run before ever loading the level —
 it checks a fresh in-memory rebuild of the terrain mesh against
 `road_stations.json`, not the pre-bake elevation grid. **It does not read the

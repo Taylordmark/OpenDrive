@@ -18,7 +18,7 @@ elev = 1000.0 + 0.1 * s
 regraded = elev.copy()
 pad = {"xy": (100.0, 0.0), "radius_m": 20.0, "elev": 1010.0, "shape": "circle"}
 seg_ids = np.zeros(len(s), dtype=int)
-n_in, n_blend, w = flatten_to_pad_rims([pad], s, seg_ids, {0: (0, len(s) - 1)},
+n_in, n_blend, w, _g = flatten_to_pad_rims([pad], s, seg_ids, {0: (0, len(s) - 1)},
                                     np.zeros(len(s), dtype=bool), east, north, regraded)
 
 inside = np.abs(s - 100.0) <= 20.0
@@ -83,9 +83,9 @@ assert np.max(np.abs(rg5[out] - el3[out])) < 0.1, np.max(np.abs(rg5[out] - el3[o
 ch = build_pad_chunk_ellipse("t", (100.0, 0.0, 15.0, 15.0, 0.0), mp["elev"], 0.0,
                              plane=mp["plane"], z_fn=lambda x, y: pad_plane_z(mp, x, y))
 v = np.asarray(ch["vertices"]).reshape(-1, 3)
-assert len(v) == 1 + 4 * 28 and len(ch["triangles"]) == 3 * 28 * (1 + 2 * 3)
+assert len(v) == 1 + 5 * 28 and len(ch["triangles"]) == 3 * 28 * (1 + 2 * 4)   # 4 rings + apron
 assert len(ch["uv1"]) == 2 * len(v) and len(ch["uvs"]) == 2 * len(v)
-rim = np.argmax(v[:, 0])   # +x rim vertex (UE cm): on the road, not the 12% plane
+rim = np.argmax(v[:ch["ring_start"], 0])   # +x rim vertex (not the apron) (UE cm): on the road, not the 12% plane
 assert abs(v[rim, 2] - v[0, 2] - (el3[e3 == 115.0][0] - 1025.0) * 100.0) < 10.0
 # a station the weld snap slid 2.5 m along a 20% road reads the original
 # surface where it now sits, not its old elev (2026-10-02, SF rim 0.5 m off)
@@ -93,4 +93,16 @@ e6 = np.arange(0.0, 50.0, 5.0); z6 = 100.0 + 0.2 * e6
 q6 = e6.copy(); q6[3] = 17.5
 o6 = surface_at_snapped({0: (0, len(e6) - 1)}, e6, np.zeros_like(e6), z6, q6, np.zeros_like(e6))
 assert abs(o6[3] - 103.5) < 1e-9 and np.array_equal(np.delete(o6, 3), np.delete(z6, 3))
+# twist (2026-10-06, SF): a road running east into a pad tilted 8% up to the
+# north leaves the rim with the pad's cross-slope (right of travel = south =
+# 8% lower), not level, and is back on its own bank past TRANSITION_LEN_M
+from road_mesh_common import bank_slopes
+side = dict(pad, plane=(0.0, 0.08))
+flat = np.full(len(s), 1000.0)
+_n, _b, w5, g5 = flatten_to_pad_rims([side], s, seg_ids, {0: (0, len(s) - 1)},
+                                     np.zeros(len(s), dtype=bool), east, north, flat.copy())
+slope, _rx, _ry = bank_slopes(east, north, bank_scale=np.c_[1.0 - w5, w5[:, None] * g5])
+assert np.allclose(slope[inside], -0.08, atol=1e-6), slope[inside]
+assert abs(slope[s == 125.0][0] + 0.08 * w5[s == 125.0][0]) < 1e-6
+assert np.allclose(slope[far], 0.0)
 print("ok")

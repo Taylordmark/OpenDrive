@@ -171,6 +171,10 @@ constexpr float ArriveCm = 3000.0f;
 // one-way (2026-10-06): a wrong-way arc costs this much more, so a legal route
 // always wins and a graph gap still routes (shortest wrong-way stretch)
 constexpr float WrongWayCostMult = 20.0f;
+// route start (PLAN-REALISM 3a): the nearest node the car can legally drive
+// on from along its heading, if it's at most this much further than the
+// nearest node (the opposite carriageway of a divided road is ~10-25 m off)
+constexpr double StartSnapSlackCm = 3000.0;
 }
 
 void AODRoadManager::LoadRouteGraph()
@@ -192,7 +196,11 @@ void AODRoadManager::LoadRouteGraph()
 	const int64 E = Bin.Num() >= EOff + 4 ? ReadU32LE(Bin.GetData() + EOff) : -1;
 	// optional trailing one-way block (2026-10-06): E * int8, +1 = a->b only,
 	// -1 = b->a only, 0 = both. Older files end at the edges: all two-way.
-	const bool bHasOneway = Bin.Num() == EOff + 4 + E * 13;
+	// The lane block after it (PLAN-REALISM 3a: node Z / junction control,
+	// edge class / lanes / km/h / yield - export_road_centerline_bin.py
+	// docstring) is for traffic; nav only needs the one-way block.
+	const bool bHasLanes = Bin.Num() == EOff + 4 + E * 17 + N * 5;
+	const bool bHasOneway = bHasLanes || Bin.Num() == EOff + 4 + E * 13;
 	if (N <= 0 || E < 0 || (Bin.Num() != EOff + 4 + E * 12 && !bHasOneway))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODRoadManager: %s truncated/corrupt"), *BinPath);
@@ -226,6 +234,7 @@ void AODRoadManager::LoadRouteGraph()
 	}
 	RouteAdjNode.SetNumUninitialized(E * 2);
 	RouteAdjLen.SetNumUninitialized(E * 2);
+	RouteAdjWrongWay.Init(false, E * 2);
 	TArray<int32> Fill(RouteAdjStart.GetData(), N);
 	const int8* Oneway = bHasOneway ? reinterpret_cast<const int8*>(EP + E * 12) : nullptr;
 	for (int64 e = 0; e < E; ++e)
@@ -235,19 +244,22 @@ void AODRoadManager::LoadRouteGraph()
 		const int8 Dir = Oneway ? Oneway[e] : 0;
 		// both arcs stay (junction degree for turn prompts ignores one-way);
 		// the wrong-way one just costs WrongWayCostMult x
+		RouteAdjWrongWay[Fill[A]] = Dir < 0;
 		RouteAdjNode[Fill[A]] = B; RouteAdjLen[Fill[A]++] = Dir < 0 ? L * WrongWayCostMult : L;
+		RouteAdjWrongWay[Fill[B]] = Dir > 0;
 		RouteAdjNode[Fill[B]] = A; RouteAdjLen[Fill[B]++] = Dir > 0 ? L * WrongWayCostMult : L;
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges (one-way %s) from %s"),
-		N, E, bHasOneway ? TEXT("yes") : TEXT("no, old file"), *BinPath);
+	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges (one-way %s, lanes %s) from %s"),
+		N, E, bHasOneway ? TEXT("yes") : TEXT("no, old file"), bHasLanes ? TEXT("yes") : TEXT("no"), *BinPath);
 }
 
-int32 AODRoadManager::NearestRouteNode(const FVector2D& Q) const
+int32 AODRoadManager::NearestRouteNode(const FVector2D& Q, const FVector2D& Heading) const
 {
 	// ponytail: brute-force O(N) (~290k nodes on summit_county) - only runs on
 	// a route pick or a >=2 s-throttled reroute; grid-bucket it if it shows up
-	int32 Best = INDEX_NONE;
-	double BestD2 = TNumericLimits<double>::Max();
+	int32 Best = INDEX_NONE, BestFwd = INDEX_NONE;
+	double BestD2 = TNumericLimits<double>::Max(), BestFwdD2 = BestD2;
+	const bool bHeading = !Heading.IsNearlyZero();
 	for (int32 i = 0; i < RouteNodes.Num(); ++i)
 	{
 		const double D2 = FVector2D::DistSquared(RouteNodes[i], Q);
@@ -256,8 +268,21 @@ int32 AODRoadManager::NearestRouteNode(const FVector2D& Q) const
 			BestD2 = D2;
 			Best = i;
 		}
+		if (bHeading && D2 < BestFwdD2)
+		{
+			// a legal arc leaving along the heading: not the opposite carriageway
+			for (int32 k = RouteAdjStart[i]; k < RouteAdjStart[i + 1]; ++k)
+			{
+				if (!RouteAdjWrongWay[k] && FVector2D::DotProduct(RouteNodes[RouteAdjNode[k]] - RouteNodes[i], Heading) > 0.0)
+				{
+					BestFwdD2 = D2;
+					BestFwd = i;
+					break;
+				}
+			}
+		}
 	}
-	return Best;
+	return BestFwd != INDEX_NONE && FMath::Sqrt(BestFwdD2) <= FMath::Sqrt(BestD2) + StartSnapSlackCm ? BestFwd : Best;
 }
 
 bool AODRoadManager::SnapToRouteGraph(const FVector2D& Query, FVector2D& OutPoint) const
@@ -273,8 +298,8 @@ bool AODRoadManager::SnapToRouteGraph(const FVector2D& Query, FVector2D& OutPoin
 
 bool AODRoadManager::FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes) const
 {
-	// A*, Euclidean heuristic (admissible: along-road edges are arc length,
-	// link edges are straight-line). Lazy-deletion binary heap.
+	// A*, Euclidean heuristic (admissible: edge lengths are 3D chords between
+	// the nodes, >= their 2D distance). Lazy-deletion binary heap.
 	const int32 N = RouteNodes.Num();
 	TArray<double> G;
 	G.Init(TNumericLimits<double>::Max(), N);
@@ -328,7 +353,11 @@ bool AODRoadManager::FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes
 
 bool AODRoadManager::RecomputeRoute(const FVector2D& From)
 {
-	const int32 S = NearestRouteNode(From), T = NearestRouteNode(RouteDest);
+	// start on a node the car can drive on from along its heading (on a divided
+	// road the plain nearest node can be the other carriageway -> a U-turn route)
+	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	const FVector2D Heading = Player ? FVector2D(Player->GetActorForwardVector()).GetSafeNormal() : FVector2D::ZeroVector;
+	const int32 S = NearestRouteNode(From, Heading), T = NearestRouteNode(RouteDest);
 	TArray<int32> Path;
 	if (S == INDEX_NONE || T == INDEX_NONE || !FindRoutePath(S, T, Path) || Path.Num() < 2)
 	{

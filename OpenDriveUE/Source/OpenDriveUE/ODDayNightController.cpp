@@ -25,6 +25,13 @@ void AODDayNightController::BeginPlay()
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{
 		Sun = *It;
+		// the moon below keeps priority 0; an equal pair puts an engine
+		// "Multiple directional lights are competing" warning on screen
+		if (UDirectionalLightComponent* SunComp = Cast<UDirectionalLightComponent>(Sun->GetLightComponent()))
+		{
+			SunComp->ForwardShadingPriority = 1;
+			SunComp->MarkRenderStateDirty();   // the proxy copied 0 at registration
+		}
 		break;
 	}
 

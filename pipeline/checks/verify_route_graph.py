@@ -40,11 +40,20 @@ def load_graph(path):
     o = 8 + n * 8
     e = struct.unpack_from("<I", b, o)[0]
     edges = np.frombuffer(b, [("a", "<u4"), ("b", "<u4"), ("l", "<f4")], e, o + 4)
-    # optional oneway block (2026-10-06): E * int8, +1 a->b only, -1 b->a only
-    assert len(b) in (o + 4 + e * 12, o + 4 + e * 13), "trailing/short bytes"
-    dirs = (np.frombuffer(b, "i1", e, o + 4 + e * 12) if len(b) == o + 4 + e * 13
+    # optional oneway block (2026-10-06): E * int8, +1 a->b only, -1 b->a only;
+    # then the optional lane block (PLAN-REALISM 3a, export_road_centerline_bin
+    # docstring) -> lane dict, None for older files
+    assert len(b) in (o + 4 + e * 12, o + 4 + e * 13, o + 4 + e * 17 + n * 5), "trailing/short bytes"
+    dirs = (np.frombuffer(b, "i1", e, o + 4 + e * 12) if len(b) > o + 4 + e * 12
             else np.zeros(e, dtype=np.int8))
-    return nodes, edges, dirs
+    lane = None
+    if len(b) == o + 4 + e * 17 + n * 5:
+        p = o + 4 + e * 13
+        lane = {"z": np.frombuffer(b, "<f4", n, p).astype(np.float64),
+                "control": np.frombuffer(b, "u1", n, p + n * 4)}
+        for k, key in enumerate(("cls", "lanes", "kmh", "yield")):
+            lane[key] = np.frombuffer(b, "u1", e, p + n * 5 + k * e)
+    return nodes, edges, dirs, lane
 
 
 # AODRoadManager.cpp WrongWayCostMult: a wrong-way arc costs this much more,
@@ -141,6 +150,126 @@ def nearest(nodes, p):
     return int(np.argmin(((nodes - p) ** 2).sum(axis=1)))
 
 
+START_SNAP_SLACK_CM = 3000.0   # ODRoadManager.cpp StartSnapSlackCm
+
+
+def leads_along(nodes, adj, i, heading):
+    return any(ok and (nodes[v] - nodes[i]) @ heading > 0 for v, _, ok in adj[i])
+
+
+def nearest_heading(nodes, adj, p, heading):
+    """Mirror of AODRoadManager::NearestRouteNode with a heading (the route
+    start): the nearest node with a legal arc leaving along the heading,
+    unless that's > START_SNAP_SLACK_CM further than the plain nearest."""
+    d = np.sqrt(((nodes - p) ** 2).sum(axis=1))
+    best = int(np.argmin(d))
+    near = np.flatnonzero(d <= d[best] + START_SNAP_SLACK_CM)
+    for i in near[np.argsort(d[near])]:
+        if leads_along(nodes, adj, i, heading):
+            return int(i)
+    return best
+
+
+# export_road_centerline_bin.py lane block bits / control codes
+CLS_RAMP, CLS_NO_PAVEMENT = 8, 16
+CONTROL_NAMES = ["-", "signal", "stop", "give way", "priority"]
+
+
+def lane_checks(nodes, edges, dirs, lane, adj, labels, paths, say):
+    """PLAN-REALISM 3a directed lane graph checks -> all passed."""
+    import json
+    from scipy.spatial import cKDTree
+    sys.path.insert(0, str(ROOT / "pipeline"))
+    from build_road_stations import junction_node_degree
+    from test_areas import BBOX_SNWE, local_rect, to_local
+    n = len(nodes)
+    a, b, L = edges["a"].astype(int), edges["b"].astype(int), edges["l"] / 100.0
+    e0, n0, e1, n1 = local_rect(BBOX_SNWE)
+    east, north = nodes[:, 0] / 100.0, -nodes[:, 1] / 100.0
+    outside = (east < e0) | (east > e1) | (north < n0) | (north > n1)
+    ok = True
+    # attributes
+    cls = lane["cls"] & 7
+    good = bool(np.isfinite(lane["z"]).all() and (lane["lanes"] >= 1).all() and (lane["kmh"] > 0).all()
+                and (lane["control"] <= 4).all())
+    ok &= good
+    dz = np.abs(lane["z"][a] - lane["z"][b]) / 100.0
+    ctl = np.bincount(lane["control"], minlength=5)
+    say(f"{'OK  ' if good else 'FAIL'} lane block: z finite, lanes 1..{lane['lanes'].max()}, "
+        f"{lane['kmh'].min()}..{lane['kmh'].max()} km/h; edge |dz| p99 {np.percentile(dz, 99):.2f} m "
+        f"max {dz.max():.1f} m; {(lane['cls'] & CLS_NO_PAVEMENT > 0).sum()} no-pavement (dropped "
+        f"connector) edges; junction nodes "
+        + ", ".join(f"{c} {k}" for c, k in zip(CONTROL_NAMES[1:], ctl[1:]))
+        + f"; {(lane['yield'] > 0).sum()} edges with a yield bit")
+    # successor / predecessor: every legal arc continues and is entered
+    # somewhere, except at a real dead end: outside the area bbox, or an OSM
+    # way end no other fetched way shares (a ramp into an unfetched lot)
+    src, dst = np.r_[a[dirs >= 0], b[dirs <= 0]], np.r_[b[dirs >= 0], a[dirs <= 0]]
+    outdeg, indeg = np.bincount(src, minlength=n), np.bincount(dst, minlength=n)
+    osm = json.loads((ROOT / "data" / "raw" / f"{AREA}_test" / "osm.json").read_text())
+    ll = {e["id"]: (e["lon"], e["lat"]) for e in osm["elements"] if e["type"] == "node"}
+    jd = junction_node_degree([w for w in osm["elements"] if w["type"] == "way"])
+    ends = np.array([ll[i] for i, d in jd.items() if d == 1 and i in ll])
+    ends = cKDTree(np.c_[to_local(ends[:, 0], ends[:, 1])])
+    cand = np.flatnonzero(((outdeg == 0) | (indeg == 0)) & (outdeg + indeg > 0) & ~outside)
+    bad = cand[ends.query(np.c_[east[cand], north[cand]])[0] > 12.0] if len(cand) else cand
+    ok &= len(bad) == 0
+    say(f"{'OK  ' if len(bad) == 0 else 'FAIL'} every directed edge has a successor and a predecessor: "
+        f"{((outdeg == 0) & (indeg > 0)).sum()} sinks / {((indeg == 0) & (outdeg > 0)).sum()} sources, "
+        f"all at an OSM dead end or outside the bbox ({len(bad)} not: "
+        f"{[tuple(int(c) for c in nodes[i] / 100) for i in bad[:6]]})")
+    # ramps: the ramp's own edges (node ids = station ids, so b == a + 1) are
+    # one-way, no head-to-head / tail-to-tail inside one. A two-way link edge
+    # is a <=4 m lateral hop where a ramp tapers into / out of the motorway
+    # (same flow both sides: a lane change, not wrong-way)
+    ramp = (lane["cls"] & CLS_RAMP > 0) & (cls == 0)
+    two_way = int((ramp & (dirs == 0) & (b == a + 1)).sum())
+    flow = np.zeros(n, dtype=int)     # +1 per ramp edge pointing in, -1 per one pointing out
+    np.add.at(flow, b, np.where(ramp, dirs, 0))
+    np.add.at(flow, a, -np.where(ramp, dirs, 0))
+    rdeg = np.bincount(np.r_[a[ramp], b[ramp]], minlength=n)
+    deg = np.bincount(np.r_[a, b], minlength=n)
+    clash = int(((rdeg == 2) & (deg == 2) & (np.abs(flow) == 2)).sum())
+    ramp_ok = two_way == 0 and clash == 0
+    ok &= ramp_ok
+    say(f"{'OK  ' if ramp_ok else 'FAIL'} motorway ramps: {ramp.sum()} edges, {two_way} of the ramps' "
+        f"own two-way, {clash} head-to-head/tail-to-tail nodes ({(ramp & (dirs == 0)).sum()} two-way "
+        f"lateral taper links)")
+    # coverage: main component vs all km, and vs the km left after pieces that
+    # reach outside the bbox (they join via roads that weren't fetched)
+    km = np.bincount(labels[a], weights=L) / 1000.0
+    main_c = int(np.argmax(km))
+    leaves = np.zeros(len(km), dtype=bool)
+    leaves[labels[outside]] = True
+    leaves[main_c] = False
+    pct = 100.0 * km[main_c] / (km.sum() - km[leaves].sum())
+    ok &= pct >= 98.0
+    say(f"{'OK  ' if pct >= 98.0 else 'FAIL'} main component {km[main_c]:.1f} km = "
+        f"{100 * km[main_c] / km.sum():.2f}% of {km.sum():.1f} km; {pct:.2f}% (>= 98%) leaving out "
+        f"{leaves.sum()} piece(s), {km[leaves].sum():.1f} km, that reach outside the area bbox")
+    # route start snap: a car on a one-way carriageway up to 8 m off its
+    # centreline must start on a node it can legally drive on from
+    rng = np.random.default_rng(7)
+    fails_plain = fails_head = tried = 0
+    for path in paths:
+        for k in rng.choice(len(path) - 1, size=min(40, len(path) - 1), replace=False):
+            u, v = path[k], path[k + 1]
+            legal = [ok_ for w, _, ok_ in adj[u] if w == v]
+            back = [ok_ for w, _, ok_ in adj[v] if w == u]
+            if not (legal and legal[0]) or (back and back[0]):
+                continue    # only legally driven arcs of one-way edges
+            h = (nodes[v] - nodes[u]) / max(np.hypot(*(nodes[v] - nodes[u])), 1e-9)
+            p = nodes[u] + np.array([-h[1], h[0]]) * rng.uniform(-800.0, 800.0)
+            tried += 1
+            fails_plain += not leads_along(nodes, adj, nearest(nodes, p), h)
+            fails_head += not leads_along(nodes, adj, nearest_heading(nodes, adj, p, h), h)
+    ok &= fails_head == 0
+    say(f"{'OK  ' if fails_head == 0 else 'FAIL'} route start snap on one-way roads ({tried} points "
+        f"<= 8 m off the centreline): heading-aware {fails_head} wrong-direction starts "
+        f"(plain nearest node: {fails_plain})")
+    return ok
+
+
 def load_points(path, magic):
     b = path.read_bytes()
     assert b[:4] == magic
@@ -175,8 +304,8 @@ def load_towns():
 def main():
     log = []
     say = lambda s: (print(s), log.append(s))
-    nodes, edges, dirs = load_graph(Path(sys.argv[1]) if len(sys.argv) > 1
-                                    else MASKS / f"routegraph_{AREA}_test.bin")
+    nodes, edges, dirs, lane = load_graph(Path(sys.argv[1]) if len(sys.argv) > 1
+                                          else MASKS / f"routegraph_{AREA}_test.bin")
     n = len(nodes)
     adj = build_csr(n, edges, dirs)
     deg = np.array([len(a) for a in adj])
@@ -212,6 +341,11 @@ def main():
     ok_all = True
     routes = []
     sim_pair = None
+    total_wrong = ramp_wrong = 0.0
+    ramp_e = set()
+    if lane is not None:
+        rm = (lane["cls"] & CLS_RAMP > 0) & (lane["cls"] & 7 == 0)
+        ramp_e = {(int(x), int(y)) for x, y in zip(edges["a"][rm], edges["b"][rm])}
     for a, b in pairs:
         s, t = nearest(nodes, towns[a]), nearest(nodes, towns[b])
         path, length = find_path(nodes, adj, s, t)
@@ -227,6 +361,9 @@ def main():
         # (cost, legal) of the arc A* took per step -> real length + wrong-way part
         steps = [min((c, ok) for v, c, ok in adj[path[i]] if v == path[i + 1]) for i in range(len(path) - 1)]
         wrong = sum(c / WRONG_WAY_COST_MULT for c, ok in steps if not ok)
+        total_wrong += wrong
+        ramp_wrong += sum(c / WRONG_WAY_COST_MULT for (c, ok), u, v in zip(steps, path, path[1:])
+                          if not ok and ((u, v) in ramp_e or (v, u) in ramp_e))
         real = sum(c for c, ok in steps if ok) + wrong
         poly_len = float(np.hypot(*np.diff(pts, axis=0).T).sum())
         end_s = float(np.hypot(*(pts[0] - towns[a])))
@@ -251,7 +388,7 @@ def main():
         say(f"     {len(turns)} turns: " + ", ".join(
             f"{'R' if t[1] > 0 else 'L'}{abs(t[1]):.0f}@{t[0] / 1e5:.2f}km" for t in turns[:12])
             + (" ..." if len(turns) > 12 else ""))
-        routes.append((a, b, pts))
+        routes.append((a, b, pts, path))
         if (a, b) == ("Frisco", "Breckenridge"):
             sim_pair = (path, pts, cum, turns)
 
@@ -290,11 +427,19 @@ def main():
             f"(> {OFF_ROUTE_CM / 100:.0f} m -> reroute) -> new route {new_len / 1e5 if new_len else float('nan'):.2f} km "
             f"to the same destination")
 
+    say(f"wrong-way on the test routes: {total_wrong / 1e5:.3f} km total, "
+        f"{ramp_wrong / 100:.0f} m on motorway ramps")
+    if lane is None:
+        say("no lane block (pre PLAN-REALISM 3a file): lane graph checks skipped")
+    else:
+        ok_all &= ramp_wrong == 0
+        ok_all &= lane_checks(nodes, edges, dirs, lane, adj, labels, [r[3] for r in routes], say)
+
     fig, ax = plt.subplots(figsize=(14, 14))
     mc = load_points(MASKS / f"centerline_map_{AREA}_test.bin", b"ODM1")
     ax.plot(mc[:, 0] / 1e5, -mc[:, 1] / 1e5, color="#9aa7b8", lw=0.5)
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(routes), 1)))
-    for (a, b, pts), c in zip(routes, colors):
+    for (a, b, pts, _), c in zip(routes, colors):
         ax.plot(pts[:, 0] / 1e5, -pts[:, 1] / 1e5, color=c, lw=2.5, label=f"{a} -> {b}")
     for name, p in towns.items():
         ax.plot(p[0] / 1e5, -p[1] / 1e5, "ko", ms=3)

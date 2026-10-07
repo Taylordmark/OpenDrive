@@ -734,7 +734,15 @@ def bank_slopes(e, n, spacing=STATION_SPACING, max_bank_rad=MAX_BANK_RAD,
     bank = np.clip(-bank_gain * curv, -max_bank_rad, max_bank_rad)
     slope = np.tan(gaussian1d(bank, BANK_SMOOTH_SIGMA_M))
     if bank_scale is not None:
-        slope = slope * np.asarray(bank_scale, dtype=np.float64)
+        bs = np.asarray(bank_scale, dtype=np.float64)
+        if bs.ndim == 2:
+            # (scale, dz/deast, dz/dnorth): the junction-pad fade also twists
+            # the cross-section onto the pad's own slope across the road (a
+            # level approach met a tilted pad high on one side, low on the
+            # other); right of travel in east/north is (-ty, -tx)
+            slope = slope * bs[:, 0] - bs[:, 1] * ty - bs[:, 2] * tx
+        else:
+            slope = slope * bs
     return slope, -ty, tx
 
 
@@ -801,7 +809,8 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     chunk's "unpaved" field to that class (0 paved / 1 gravel / 2 dirt).
 
     `bank_scale` (optional per-station 0..1) multiplies the superelevation -
-    experimental_junction_pads fades it to 0 into each junction pad.
+    experimental_junction_pads fades it to 0 into each junction pad. An
+    (n, 3) array adds a target surface gradient, see bank_slopes.
 
     Returns (chunks, cx, cy, cz) where chunks matches road_mesh.json's
     {"name","vertices","uvs","uv1","triangles","oneway","unpaved","road_class_id",

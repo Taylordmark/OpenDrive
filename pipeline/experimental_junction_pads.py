@@ -91,7 +91,7 @@ from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks,
                                half_width_for_stations, road_ue_z_m,
-                               sample_mesh_height, unpaved_stations)
+                               sample_mesh_height, sample_mesh_heights, unpaved_stations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -159,6 +159,27 @@ PAD_SIDES = 20
 # below). 24-32 was the requested tessellation density for that to read
 # smooth at low-poly scale; 28 splits the difference.
 ELLIPSE_SIDES = 28
+# Pad apron (2026-10-06, Taylor: "the pad extends past the road leaving a rim
+# at the edge of the pad that you can fall off of"). Terrain sits under every
+# pad a median 0.45 m (p90 0.9 m) - carve drop + pavement-ceiling margin +
+# martini error - which the ribbons hide with their WRAP lip; the bare pad
+# ended in a floating edge. One more ring this far out and down ramps off the
+# edge (~22 deg) and dives under the carved terrain.
+PAD_APRON_OUT_M = 2.5
+PAD_APRON_DROP_M = 1.0
+# Pad conform (2026-10-06, Taylor: "pad should, at the edge, be at exactly the
+# same height as the road" - hitting a pad launched the car). The ribbon runs
+# ~4 m under the pad edge (PAD_RIM_TUCK_M + PAD_OVERLAP_MARGIN_M), but the pad
+# was drawn on its fitted plane, a median 2 cm / p90 17 cm / max >1 m off the
+# road there. conform_pad_to_ribbons sets every pad vertex over a ribbon's
+# pavement to that pavement, the rest fade from the nearest such residual
+# back to the plane.
+PAD_ROAD_GAP_M = 0.01         # pad sits this far over the road it conforms to (z-fight)...
+PAD_LOWER_M = 0.025           # ...then the whole pad drops an inch (Taylor, 2026-10-06 drive:
+                              # "maybe lower the pad by like 1 inch") - net 1.5 cm under the road
+PAD_CONFORM_MAX_DZ_M = 1.5    # a ribbon further than this off the plane is another level
+PAD_CONFORM_FADE_M = 6.0      # uncovered vertices' residual fades to 0 over this distance
+FILL_RADIUS_M = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M   # proximity fill disc radius
 
 # Separate from crossing detection entirely: a whole cluster of residential
 # streets (Lake Hughes subdivision) were digitized as ISOLATED OSM ways whose
@@ -180,13 +201,111 @@ ENDPOINT_SNAP_MAX_M = 35.0
 # every patched tile turned gravel roads back into asphalt.
 
 
+def ribbon_top_triangles(chunks):
+    """(positions (N,3) cm, triangles (M,3)) of the ribbons' near-flat
+    triangles - pavement and underside, not the steep wrap lips. Sampled
+    topmost (sample_mesh_heights), the underside never wins."""
+    pos, tris, base = [], [], 0
+    for c in chunks:
+        v = np.asarray(c["vertices"], dtype=np.float64).reshape(-1, 3)
+        t = np.asarray(c["triangles"], dtype=np.int64).reshape(-1, 3)
+        pos.append(v)
+        tris.append(t + base)
+        base += len(v)
+    if not base:
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64)
+    pos, tris = np.concatenate(pos), np.concatenate(tris)
+    a, b, c = pos[tris[:, 0]], pos[tris[:, 1]], pos[tris[:, 2]]
+    n = np.cross(b - a, c - a)
+    flat = np.abs(n[:, 2]) > 1e-9
+    grade = np.hypot(n[:, 0], n[:, 1]) / np.where(flat, np.abs(n[:, 2]), 1.0)
+    return pos, tris[flat & (grade < 0.6)]
+
+
+def conform_pad_to_ribbons(pad, rib_pos, rib_tris):
+    """See PAD_ROAD_GAP_M's comment. Moves pad (a _build_pad_fan chunk)
+    vertices in place, apron ring following its top ring; returns how many
+    vertices sit on a ribbon."""
+    V = np.asarray(pad["vertices"], dtype=np.float64).reshape(-1, 3)
+    rs = pad["ring_start"]
+    sides = len(V) - rs
+    top = V[:rs]
+    lo, hi = top[:, :2].min(0), top[:, :2].max(0)
+    tb = rib_pos[rib_tris]
+    near = ((tb[:, :, 0].max(1) >= lo[0]) & (tb[:, :, 0].min(1) <= hi[0])
+            & (tb[:, :, 1].max(1) >= lo[1]) & (tb[:, :, 1].min(1) <= hi[1]))
+    if not near.any():
+        _lower_pad(pad, V)
+        return 0
+    res = sample_mesh_heights(rib_pos, rib_tris[near], top[:, 0], top[:, 1])         + PAD_ROAD_GAP_M * 100.0 - top[:, 2]
+    cov = np.isfinite(res) & (np.abs(res) < PAD_CONFORM_MAX_DZ_M * 100.0)
+    if not cov.any():
+        _lower_pad(pad, V)
+        return 0
+    d = np.hypot(top[:, None, 0] - top[None, cov, 0], top[:, None, 1] - top[None, cov, 1])
+    w = 1.0 / np.maximum(d, 100.0) ** 2
+    fade = np.clip(1.0 - d.min(1) / (PAD_CONFORM_FADE_M * 100.0), 0.0, 1.0)
+    top[:, 2] += np.where(cov, np.nan_to_num(res), (w * res[cov]).sum(1) / w.sum(1) * fade)
+    V[rs:, 2] = V[rs - sides:rs, 2] - PAD_APRON_DROP_M * 100.0
+    _lower_pad(pad, V)
+    return int(cov.sum())
+
+
+def _lower_pad(pad, V):
+    V[:, 2] -= PAD_LOWER_M * 100.0
+    pad["vertices"] = [round(v, 1) for v in V.ravel()]
+
+
+def conform_disc_to_roads(pad, tree, east, north, z, seg_ids, gi):
+    """Fill disc vertices onto the roads under them, blended by inverse
+    distance to each road's centerline (2026-10-06). Where two roads run within a road
+    width, both ribbons are omitted and each gets a chain of discs at its OWN
+    height - two such roads 1 m apart stacked their discs into a 1 m edge.
+    Every disc there now draws the same continuous surface, so overlapping
+    discs agree. Roads more than JUNCTION_MAX_ELEV_DIFF_M off station gi
+    (another level) are ignored."""
+    V = np.asarray(pad["vertices"], dtype=np.float64).reshape(-1, 3)
+    rs = pad["ring_start"]
+    sides = len(V) - rs
+    ve, vn = V[:rs, 0] / 100.0, -V[:rs, 1] / 100.0
+    reach = FILL_RADIUS_M + PAD_APRON_OUT_M + 2.0 * ROAD_HALF_WIDTH
+    idx = np.array(sorted(tree.query_ball_point((east[gi], north[gi]), reach)), dtype=int)
+    idx = idx[np.abs(z[idx] - z[gi]) <= JUNCTION_MAX_ELEV_DIFF_M]
+    num, den = np.zeros(rs), np.zeros(rs)
+    for sid in np.unique(seg_ids[idx]):
+        k = idx[seg_ids[idx] == sid]
+        for run in np.split(k, np.flatnonzero(np.diff(k) != 1) + 1):
+            if len(run) == 1:
+                d2 = (ve - east[run[0]]) ** 2 + (vn - north[run[0]]) ** 2
+                zk = np.full(rs, z[run[0]])
+            else:
+                ax, ay, az = east[run[:-1]], north[run[:-1]], z[run[:-1]]
+                bx, by, bz = east[run[1:]] - ax, north[run[1:]] - ay, z[run[1:]] - az
+                u = np.clip(((ve[:, None] - ax) * bx + (vn[:, None] - ay) * by)
+                            / np.maximum(bx * bx + by * by, 1e-9), 0.0, 1.0)
+                dd = (ax + u * bx - ve[:, None]) ** 2 + (ay + u * by - vn[:, None]) ** 2
+                q = dd.argmin(1)
+                d2 = dd[np.arange(rs), q]
+                zk = az[q] + u[np.arange(rs), q] * bz[q]
+            # 1/d to each centerline: a straight ramp between two parallel
+            # roads, which every disc's flat triangles reproduce exactly
+            w = 1.0 / (np.sqrt(d2) + 0.05)
+            num += w * zk
+            den += w
+    if not den.any():
+        return
+    V[:rs, 2] = road_ue_z_m(num / den, ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
+    V[rs:, 2] = V[rs - sides:rs, 2] - PAD_APRON_DROP_M * 100.0
+    pad["vertices"] = [round(v, 1) for v in V.ravel()]
+
+
 def chunk_centroid(chunk):
     verts = chunk["vertices"]
     n = len(verts) // 3
     return sum(verts[0::3]) / n, sum(verts[1::3]) / n
 
 
-def bridge_pad_to_host(host, guest_base, guest_vcount):
+def bridge_pad_to_host(host, guest_base, guest_vcount, ring_start=1):
     """Connect the guest pad's outer ring to whichever of the host's OWN
     vertices sit closest to it, using real shared triangle indices - so the
     merged mesh is topologically ONE connected piece instead of two islands
@@ -225,7 +344,9 @@ def bridge_pad_to_host(host, guest_base, guest_vcount):
     hv = host["vertices"]
     hx = [hv[i * 3] for i in range(host_vcount)]
     hy = [hv[i * 3 + 1] for i in range(host_vcount)]
-    ring_local = list(range(1, guest_vcount))   # skip the fan hub (local index 0)
+    # the outermost ring only (its edges have one use; inner ring edges
+    # already have two). ring_start=1 is the whole ring of a plain fan.
+    ring_local = list(range(ring_start, guest_vcount))
     gx = [hv[(guest_base + i) * 3] for i in ring_local]
     gy = [hv[(guest_base + i) * 3 + 1] for i in ring_local]
 
@@ -301,7 +422,7 @@ def merge_chunk_into(host, guest):
     # (build_road_chunks ribbons and _build_pad_fan pads alike).
     host["uv1"].extend(guest["uv1"])
     host["triangles"].extend(idx + base for idx in guest["triangles"])
-    bridge_pad_to_host(host, base, guest_vcount)
+    bridge_pad_to_host(host, base, guest_vcount, guest.get("ring_start", 1))
 
 
 def nearest_chunk(chunks, xy_m):
@@ -1177,8 +1298,10 @@ def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north
     original elevations, so a tilted pad meets the real road rather than the
     flat plateau earlier junction blends left; it hands back to `regraded`
     as the pull fades, so the walk's far end stays continuous. Mutates
-    `regraded`; returns (n_inside, n_blended, w) - w is each station's pull,
-    1 inside a pad fading to 0 at TRANSITION_LEN_M past the rim."""
+    `regraded`; returns (n_inside, n_blended, w, g) - w is each station's pull,
+    1 inside a pad fading to 0 at TRANSITION_LEN_M past the rim; g (n, 2) the
+    pad surface gradient (dz/deast, dz/dnorth) the cross-section twists onto
+    (inside: at the station; approach: at its rim, pulls averaged as z is)."""
     from scipy.spatial import cKDTree
     tree = cKDTree(np.c_[east, north])
     w_best = np.zeros(len(regraded))
@@ -1186,6 +1309,8 @@ def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north
     sw = np.zeros(len(regraded))     # approach pulls' sum / weighted plane-z sum
     swz = np.zeros(len(regraded))
     inside = np.zeros(len(regraded), dtype=bool)
+    g_best = np.zeros((len(regraded), 2))
+    swg = np.zeros((len(regraded), 2))
     base = regraded if base is None else base
     for j in junctions:
         r = max([j["radius_m"], *(j["ellipse"][2:4] if "ellipse" in j else [])])
@@ -1196,6 +1321,7 @@ def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north
         zc = np.array([pad_plane_z(j, east[i], north[i]) for i in cand])
         inside[cand] = True
         w_best[cand], z_best[cand] = 1.0, zc
+        g_best[cand] = [pad_surface_grad(j, east[i], north[i]) for i in cand]
         # each contiguous inside run, walked outward both ways along its road
         brk = np.flatnonzero((np.diff(cand) != 1) | (seg_ids[cand[1:]] != seg_ids[cand[:-1]]))
         for a, b in zip(np.r_[0, brk + 1], np.r_[brk, len(cand) - 1]):
@@ -1210,6 +1336,7 @@ def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north
                 k = edge + step
                 o = k if lo <= k <= hi and not structural[k] else edge
                 off = pad_plane_z(j, east[o], north[o]) - base[o]
+                g_rim = np.array(pad_surface_grad(j, east[edge], north[edge]))
                 while lo <= k <= hi and not structural[k]:
                     d = abs(s_m[k] - s_m[edge])
                     if d > TRANSITION_LEN_M:
@@ -1224,11 +1351,19 @@ def flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural, east, north
                         wt = w / (1.0 - w + 0.01)
                         sw[k] += wt
                         swz[k] += wt * (base[k] + off)
+                        swg[k] += wt * g_rim
                     k += step
     out = ~inside & (sw > 0)
     z_best[out] = swz[out] / sw[out]
+    g_best[out] = swg[out] / sw[out][:, None]
     regraded[:] = w_best * z_best + (1.0 - w_best) * (w_best * base + (1.0 - w_best) * regraded)
-    return int(inside.sum()), int(((w_best > 0) & ~inside).sum()), w_best
+    return int(inside.sum()), int(((w_best > 0) & ~inside).sum()), w_best, g_best
+
+
+def pad_surface_grad(j, x, y, h=0.5):
+    """(dz/deast, dz/dnorth) of pad_plane_z at (x, y), molded pads included."""
+    return ((pad_plane_z(j, x + h, y) - pad_plane_z(j, x - h, y)) / (2.0 * h),
+            (pad_plane_z(j, x, y + h) - pad_plane_z(j, x, y - h)) / (2.0 * h))
 
 
 def _segments_intersect(p1, p2, p3, p4):
@@ -1879,8 +2014,11 @@ def build_fill_disc(name, xy, elev_m, radius_m, gi, seg_ids, east, north, z):
     dx, dy = east[b] - east[a], north[b] - north[a]
     d2 = dx * dx + dy * dy
     dz = (z[b] - z[a]) / d2 if d2 > 0.01 else 0.0
+    gx, gy = dz * dx, dz * dy
+    # rings (via z_fn) so conform_disc_to_roads has vertices to shape
     return build_pad_chunk_ellipse(name, (*xy, radius_m, radius_m, 0.0), elev_m, 0.0,
-                                   sides=PAD_SIDES, plane=(dz * dx, dz * dy))
+                                   sides=PAD_SIDES, plane=(gx, gy),
+                                   z_fn=lambda x, y: elev_m + gx * (x - xy[0]) + gy * (y - xy[1]))
 
 
 def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
@@ -1897,6 +2035,13 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
             for q in range(rings) for vx, vy in ring]
     if z_fn is not None:
         ring_z_m = [z_fn(vx, vy) for vx, vy in ring]
+    if ring_z_m is None:
+        ring_z_m = [z_m] * len(ring)
+    # apron ring (PAD_APRON_*), radially out from the hub
+    for (vx, vy), vz in zip(ring[-sides:], ring_z_m[-sides:]):
+        r = max(math.hypot(vx - cx, vy - cy), 1e-6)
+        ring.append((vx + (vx - cx) / r * PAD_APRON_OUT_M, vy + (vy - cy) / r * PAD_APRON_OUT_M))
+        ring_z_m.append(vz - PAD_APRON_DROP_M)
     verts = [cx * 100.0, -cy * 100.0, z_m * 100.0]
 
     # UV0 (2026-09-07, Taylor: "junctions definitely still do not look
@@ -1934,7 +2079,7 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
     # for the confirmed cause (disconnected islands) and its fix (bridge
     # triangles).
     for vi, (vx, vy) in enumerate(ring):
-        vz_m = ring_z_m[vi] if ring_z_m is not None else z_m
+        vz_m = ring_z_m[vi]
         verts.extend([vx * 100.0, -vy * 100.0, vz_m * 100.0])
         uvs.extend(_pad_uv(vx, vy))
     # CONFIRMED ROOT CAUSE (2026-08-26): this fan must wind (0,a,b), not
@@ -1960,7 +2105,7 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
     for k in range(sides):
         a, b = 1 + k, 1 + (k + 1) % sides
         tris.extend([0, a, b])
-    for q in range(rings - 1):   # quad strips between rings, same winding sense
+    for q in range(rings):   # quad strips between rings (last: the apron), same winding sense
         i0, o0 = 1 + q * sides, 1 + (q + 1) * sides
         for k in range(sides):
             k1 = (k + 1) % sides
@@ -1974,7 +2119,8 @@ def _build_pad_fan(name, hub_xy, z_m, ring, ring_z_m=None, z_fn=None, rings=1):
     uv1 = [ROAD_HALF_WIDTH, 0.0] * (1 + len(ring))
     return {"name": name, "vertices": [round(v, 1) for v in verts],
             "uvs": [round(v, 4) for v in uvs], "uv1": uv1, "triangles": tris,
-            "oneway": False, "road_class_id": 6, "lane_count": 2}
+            "oneway": False, "road_class_id": 6, "lane_count": 2,
+            "ring_start": 1 + rings * sides}
 
 
 def _pad_draw_radius(j):
@@ -3486,7 +3632,6 @@ def main():
         return False
 
     fill_pads = []   # small discs patching proximity-only overlap, outside any pad circle
-    FILL_RADIUS_M = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
 
     # One smooth pad per intersection (2026-09-07, Taylor: "there are
     # clearly several overlapping junctions" in the top-down tile
@@ -3550,7 +3695,7 @@ def main():
     # their road, and their own original elev there met the molded pad
     # (built on the original surface) 0.5 m off at the rim
     base_here = surface_at_snapped(bounds, east, north, elev, regraded_east, regraded_north)
-    n_in, n_blend, pad_w = flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural,
+    n_in, n_blend, pad_w, pad_g = flatten_to_pad_rims(junctions, s_m, seg_ids, bounds, structural,
                                                regraded_east, regraded_north, regraded,
                                                base=base_here)
     print(f"rim-flatten: {n_in} station(s) inside a pad set to its surface, "
@@ -3574,10 +3719,12 @@ def main():
 
     # after pad-swallow (2026-10-01): carving before it left every grown
     # pad's new lobes without rim anchors - terrain up to 4.4 m proud
-    carve_and_patch(1.0 - pad_w)
+    # bank_slopes' (n, 3) form: fade the bank AND twist onto the pad's slope
+    bank = np.c_[1.0 - pad_w, pad_w[:, None] * pad_g]
+    carve_and_patch(bank)
     # verify_road_fit checks banked edges against this same faded bank
     SIDECAR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    np.savez(BANK_SCALE_PATH, scale=1.0 - pad_w, gen=read_station_sidecar(SIDECAR_PATH)[0])
+    np.savez(BANK_SCALE_PATH, scale=bank, gen=read_station_sidecar(SIDECAR_PATH)[0])
 
     all_chunks = list(connector_chunks)
     total_km = 0.0
@@ -3605,7 +3752,7 @@ def main():
         # superelevation fades out over the same ramp the grade blends onto
         # the pad (2026-10-02): a full 8 deg bank met a pad's plane with a
         # ~1.3 m outer-edge lip; real roads drop the bank into an intersection
-        bank_full = 1.0 - pad_w[goff:goff + len(s_full)]
+        bank_full = bank[goff:goff + len(s_full)]
         runs = list(split_excluding_tunnels(is_tunnel))
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
@@ -3794,9 +3941,15 @@ def main():
     # (merge_chunk_into) instead of appending it as its own standalone chunk -
     # see that function's docstring. Was: all_chunks.append(build_pad_chunk(...)).
     n_merged, n_standalone = 0, 0
+    rib_pos, rib_tris = ribbon_top_triangles(all_chunks)   # before any pad merges in
+    n_conformed = 0
+    from scipy.spatial import cKDTree
+    rg_tree = cKDTree(np.c_[regraded_east, regraded_north])
     for name, xy, elev_m, gi in fill_pads:
         pad = build_fill_disc(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M, gi, seg_ids,
                               regraded_east, regraded_north, regraded)
+        conform_disc_to_roads(pad, rg_tree, regraded_east, regraded_north, regraded, seg_ids, gi)
+        n_conformed += conform_pad_to_ribbons(pad, rib_pos, rib_tris)
         host = nearest_chunk(all_chunks, xy)
         if host is not None:
             merge_chunk_into(host, pad)
@@ -3806,7 +3959,9 @@ def main():
             n_standalone += 1
 
     for k, j in enumerate(junctions):
-        z_fn = (lambda x, y, j=j: pad_plane_z(j, x, y)) if "mold" in j else None
+        # every pad gets rings (not just molded ones) so conform_pad_to_ribbons
+        # has vertices out where the ribbons tuck under it
+        z_fn = lambda x, y, j=j: pad_plane_z(j, x, y)
         if j.get("shape") == "ellipse":
             pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}", j["ellipse"],
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
@@ -3816,6 +3971,7 @@ def main():
                                            (*j["xy"], j["radius_m"], j["radius_m"], 0.0),
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
                                            plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn)
+        n_conformed += conform_pad_to_ribbons(pad, rib_pos, rib_tris)
         host = nearest_chunk(all_chunks, j["xy"])
         if host is not None:
             merge_chunk_into(host, pad)
@@ -3889,7 +4045,8 @@ def main():
           f"({len(junctions)} junction pad(s) + {len(fill_pads)} fill pad(s) "
           f"+ {n_gate_fills} gate-coverage fill(s), "
           f"{n_merged} fused into a host ribbon chunk, {n_standalone} standalone) -> "
-          f"{len(written)} tile(s), {n_stale} stale tile(s) removed")
+          f"{len(written)} tile(s), {n_stale} stale tile(s) removed; "
+          f"{n_conformed} pad vertex(es) conformed onto a ribbon")
 
 
 if __name__ == "__main__":

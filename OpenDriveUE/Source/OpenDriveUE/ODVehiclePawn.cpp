@@ -351,7 +351,7 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 	// the centerline data is XY-only, so RoadPoint.Z carries no useful height,
 	// and the road corridor in these areas sits well under this ceiling.
 	// 6 km, was 1 km (2026-10-05, large world): California's frame is sea-level
-	// datum with 4.4 km peaks; TrySnapToGround's trace reaches 6.1 km down.
+	// datum with 4.4 km peaks; TrySnapToGround's trace reaches 10 km down.
 	Body->SetSimulatePhysics(false);
 	SetActorLocation(FVector(RoadPoint.X, RoadPoint.Y, 600000.0f),
 		false, nullptr, ETeleportType::TeleportPhysics);
@@ -549,7 +549,7 @@ void AODVehiclePawn::TrySnapToGround()
 	const FVector Loc = GetActorLocation();
 	FHitResult Hit;
 	const FVector Start(Loc.X, Loc.Y, Loc.Z + 10000.0f);     // 100 m above current
-	const FVector End(Loc.X, Loc.Y, Loc.Z - 610000.0f);      // 6.1 km below - covers TeleportToSpawn's 6 km lift (2026-10-05)
+	const FVector End(Loc.X, Loc.Y, Loc.Z - 1000000.0f);     // 10 km: TeleportToSpawn lifts to +6 km and Summit ground sits ~-0.7 km (world Z = elev - datum), so 6.1 km fell short
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	Params.bReturnPhysicalMaterial = true;
@@ -603,7 +603,7 @@ void AODVehiclePawn::TrySnapToGround()
 				const FVector2D Offset(FMath::Cos(AngRad) * Rings[RingIdx],
 					FMath::Sin(AngRad) * Rings[RingIdx]);
 				const FVector ProbeStart(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z + 10000.0f);
-				const FVector ProbeEnd(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z - 610000.0f);
+				const FVector ProbeEnd(Loc.X + Offset.X, Loc.Y + Offset.Y, Loc.Z - 1000000.0f);
 				FHitResult ProbeHit;
 				if (GetWorld()->LineTraceSingleByChannel(ProbeHit, ProbeStart, ProbeEnd,
 						ECC_Visibility, Params)
@@ -1332,6 +1332,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	{
 		SetVAt = -1.0f;   // once
 		Body->SetPhysicsLinearVelocity(GetActorForwardVector() * SetVCmS);
+		CrashPreVel = Body->GetPhysicsLinearVelocity();   // not a "velocity jump" for -odcrashtrace
 		UE_LOG(LogTemp, Display,
 			TEXT("ODVehiclePawn SCRIPTDRIVE: velocity hard-set to %.0f cm/s"),
 			SetVCmS);

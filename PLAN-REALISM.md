@@ -87,18 +87,10 @@ Built 2026-10-06 (see `status.md`). What's left is the drive check in
 ## Phase 3 — Ambient traffic (large)
 
 ### 3a. Directed lane graph (pipeline)
-- Extend `build_route_graph` in `export_road_centerline_bin.py`, or add a
-  new `ODN1` sidecar, with directed edges: `oneway`, lane count, speed
-  (`maxspeed` or class default), and a polyline with Z from the shipped
-  road surface.
-- The same directed data fixes the nav one-way bug (`next steps.md` §3).
-  Point A* at it so the two can't drift apart.
-- Junction control per node: signal / stop / give-way from Phase 1, else
-  priority by highway class.
-- **Check:** extend `pipeline/checks/verify_route_graph.py` to check that
-  every directed edge has a successor (or is a real dead end), there are no
-  wrong-way edges on ramps, and the main component covers ≥ 98% of the km
-  (this also covers the Blue River/Jefferson split).
+Built 2026-10-06 (see `status.md`): the ODG1 lane block in
+`export_road_centerline_bin.py`, read by nav. What's left is the drive check
+in `next steps.md` §2. 3c has to merge the 5 m station edges into lane
+polylines between junctions; the file has no polyline of its own.
 
 ### 3b. Traffic demand (pipeline, D4)
 Density comes from real volumes and real daily patterns, not a setting.
@@ -118,7 +110,7 @@ Density comes from real volumes and real daily patterns, not a setting.
   peak direction set by the side of the edge facing the city centre.
 - **Per directed edge, store:** AADT, direction split, the urban/rural
   profile id and capacity (lanes × ~1,900 veh/h/lane on freeways, less on
-  arterials). Put it in the `ODN1` sidecar.
+  arterials). Put it next to 3a's ODG1 lane block.
 - **Check:** a test that I-5 near a city at 17:30 on a weekday has demand
   above capacity (so it jams) and is free-flowing at 03:00. A per-area plot
   of demand / capacity by hour goes in `scratchpad/`.

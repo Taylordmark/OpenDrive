@@ -299,7 +299,13 @@ v = g.mask(uv, gg=True)
 
 vtint = g.vertex_color()   # "" is the RGB output on this UE version
 variant_r = g.mask(vtint, r=True)
-seed_g = g.mask(vtint, gg=True)
+# snapped back to its exact 8-bit value: the rasterizer's barycentric blend of
+# a constant is off by ~1 ulp in about half the pixels, and the lit hash's x43758
+# turns that into per-pixel lit/unlit speckle that crawls with TAA jitter (the
+# lit-window flicker, 2026-10-06; check: scratchpad window_hash_sim.py idea -
+# 3% of wall pixels flipped as built, 0% snapped)
+seed_g = g.mul(g.floorv(g.add(g.mul(g.mask(vtint, gg=True), g.const(255.0)), g.const(0.5))),
+               g.const(1.0 / 255.0))
 flat_roof_b = g.mask(vtint, b=True)   # 0 or 1 per building, see docstring
 
 normal_ws = g.world_normal()

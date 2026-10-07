@@ -176,6 +176,13 @@ scale, built from open data, with a stylized "real places, storybook look".
   `make_furniture_meshes.py` and `unreal/import_furniture_meshes.py`. Summit
   has 27,823 props. Checks: `pipeline/verify_furniture_fit.py`,
   `pipeline/tests/test_furniture_place.py`.
+  - Control poles and stop bars at pads (2026-10-06, SF, Taylor: "the poles
+    look great"). A pad's weld snap slides approach stations ~10 m toward
+    the node, so poles landed inside the crossing. They now stand at the
+    ORIGINAL station, with z from the shipped surface there (`surface_z`).
+    A pole the pad also slid sideways off the road keeps its base on the
+    terrain (18 on SF), and a stop bar left off the pavement is dropped
+    (24 on SF).
 
 ## Arc 2 — Atmosphere ✅
 
@@ -227,6 +234,32 @@ were decoupled from it on 2026-07-20.
     Summit), so the route line follows the road. Pause-menu "Mini-Map" row:
     North / Travel (heading-up, view shifted ahead of the car, red north tick
     on the bezel), saved under `OpenDrive.HUD`.
+  - Directed lane graph (2026-10-06, PLAN-REALISM.md Phase 3a, compiled, not
+    driven): ODG1 gains an optional lane block (README, "Route / lane graph") with
+    node Z from the pad-patched shipped surface, junction control (OSM
+    signal/stop/give-way from `road_furniture.json` `controls`, else class
+    priority) and per-edge class/ramp, lanes, km/h and yield bits. Edge
+    length is now the 3D chord between shipped nodes. `osm_topology()` adds
+    back the chains `build_road_stations` dropped (<100 m), plus a link at
+    every OSM node two kept roads share. One-way cleanup: end stations take
+    the run's direction, and ≤3-station blips on untagged ways are dropped.
+    Link edges flow out of sink ends. Nav starts on the nearest node with a
+    legal arc along the car's heading (`StartSnapSlackCm` 30 m), so it no
+    longer starts on the opposite carriageway. Summit: 0 m wrong-way on the
+    8 test routes (Frisco→Breck was 190 m); the main component holds 97.0%
+    of km, or 99.1% without pieces that leave the bbox; Blue River is joined.
+    Checks: `pipeline/checks/verify_route_graph.py`,
+    `pipeline/tests/test_route_graph_lanes.py`.
+  - Re-exported far_gasquet, near_gasquet, gv_east, gv_west and
+    sf_russian_hill with the lane block. Their stations have no `maxspeed`,
+    so they use class-default speeds. Their old OSM fetches have no signal or
+    stop nodes, so they have 0 OSM controls and class priority applies.
+    Main component: 98.7–100%.
+  - sf_russian_hill rebuilt from a fresh fetch (validation), with all gates
+    passing. The lane block now carries 123 OSM controls: 79 signal nodes,
+    71 stop nodes, 78 yield edges. 37 OSM approaches found no junction.
+    `rebuild_area.py` now runs the lane-graph export after furniture; it
+    used to run before and shipped 0 controls.
 - **4.3:** live car/engine/drivetrain/tuning picker in the garage. Picks
   persist (2f0a03f): `OpenDrive.Car` (VehicleIdx, read by the pawn; EngineIdx,
   DriveIdx, TunePreset) and `OpenDrive.Area`, saved on change, out-of-range
@@ -289,6 +322,11 @@ were decoupled from it on 2026-07-20.
   - Merged per tile via `AppendBuildingsToTileMesh`, with collision only
     near the road corridor (`IsNearRoadCorridor`).
   - Procedural facade windows, six CC0 sets, and heights from the level tag.
+  - Lit-window flicker fixed (2026-10-06). `M_BuildingFacade` snaps the
+    vertex-color seed back to its 8-bit value before the lit hash. As
+    interpolated, it was a few ulp off in about half the pixels, and the
+    hash's ×43758 turned that into lit/unlit speckle that crawled with TAA
+    jitter.
   - Ground height is set at runtime, not in the bake:
     `ComputeBuildingZOffset` traces every base corner and plants the lowest
     hit minus 5 cm, retrying until collision streams in. The baked base Z
@@ -703,6 +741,28 @@ run since before §7.49, so 1,276 junctions had no pad.
   - Lip gaps over 0.3 m (far_gasquet): 8.0% → 2.5%.
   - All gates PASS on far_gasquet, near_gasquet and Summit.
   - Tests: `test_bank_slopes.py`, `test_pavement_ceiling.py` (banked case).
+- **Pad edges at road level** (2026-10-06, SF drives). Hitting a pad's rim
+  launched the car: pads stood up to ~0.5 m over the road they overlap, and
+  ended in a bare edge.
+  - **Twist.** The bank fade into a pad also turns the cross-section onto
+    the pad's slope across the road (`bank_slopes` takes an (n, 3)
+    `bank_scale`), so a level approach no longer meets a tilted pad high on
+    one side and low on the other.
+  - **Apron.** Every pad (junction and fill disc) gets an outer ring
+    `PAD_APRON_OUT_M` 2.5 m out and `PAD_APRON_DROP_M` 1 m down, so its edge
+    tucks under the terrain instead of standing as a ledge. Host bridges
+    attach to the apron ring only (`ring_start`), so the mesh stays manifold.
+  - **Conform.** `conform_pad_to_ribbons` drops every pad vertex over a
+    ribbon's pavement onto it (`sample_mesh_heights`), and fades the
+    residual out over `PAD_CONFORM_FADE_M` 6 m. Fill discs first blend their
+    roads by inverse distance to each centreline
+    (`conform_disc_to_roads`), so two discs over parallel roads agree.
+  - **Lowered an inch** (`PAD_LOWER_M` 2.5 cm, Taylor's call): the pad sits
+    1.5 cm under the road where they overlap, so the road wins the z-fight.
+  - SF edge (pad − road): junction pads median −0.015 m, 99th pct +0.17 m,
+    1.1% over 0.15 m; fill discs 99th pct +0.06 m. All gates PASS. Only
+    sf_russian_hill is rebuilt.
+  - Tests: `test_pad_apron.py`, `test_flatten_to_pad_rims.py`.
 
 ### Large world
 

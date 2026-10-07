@@ -43,6 +43,16 @@ water/coast, tunnels, wet weather) is phased in
   - 9 road ends are less paved than before the pads, e.g. (-27544, 11341).
   - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
     the ribbon leaves the molded rim up to 0.68 m high on steep downhill arms.
+  - The pad apron/conform/lower pass (status.md "Pad edges at road level")
+    has only run on SF. Other areas still have the old lipped pads until
+    the pads script is rerun.
+  - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road
+    (a stacked crossing, see bridges below); (16, 274) 0.92 m and
+    (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at
+    (65, −133).
+  - Poles option B: 18 SF poles stand off the road where a pad slid it
+    sideways, and 24 stop bars are dropped. Walk each back toward its node
+    until it clears the shipped pavement.
 - **Re-check the downstream systems against the new elevations:**
   - `WALL_MIN_GRADE` and the conflict detection (§7.12);
   - the Frisco North 6th Ave dead-end float, 1–2 m (§7.14);
@@ -58,6 +68,28 @@ water/coast, tunnels, wet weather) is phased in
 ## 2. Taylor's live checks (offline gates pass; nothing below has been seen in-game)
 
 Group these into a few drive sessions. Each line says what to judge.
+
+**Scripted session, 2026-10-06** (Frisco and a Summit gravel road, logs and
+window captures only, so no feel or sound):
+- Crash runs:
+  - 17 mph into a wall: PASS (solver 256 → out 72);
+  - 43 mph into a building: stopped dead (solver 708 → out 189), no launch;
+  - 88 mph clipped a pole box: glanced off at 2974 cm/s;
+  - 11 mph into a pole: stuck, PASS.
+- Furniture poles collide.
+- Gravel reads PM_Gravel, with 0.4–0.9 wheel slip at 30% throttle.
+- Blizzard at 30 cm: white road with tire ruts, roadside snow, snowy trees,
+  flakes on the lens. Flakes are sparse and large; judge whether that's right.
+- Night rain: lamp heads and windows glow, headlights on, rain streaks and
+  lens drops. Lamps light no pool on the road (emissive only).
+
+Fixed in that session:
+- spawn trace too short on Summit, car floated at 6 km;
+- night "multiple directional lights" warning, sun now has priority 1;
+- a scripted `-odsetv` opened a crash window and caused a false FAIL.
+
+Still needs a driver: crash thump/shake, guardrail hits, the grip step and
+gravel crunch, and the snow/wet grip feel.
 
 - **Vehicle:**
   - the assist stack plus gearbox/ABS. This gates the stage-3 preset retune;
@@ -121,6 +153,12 @@ Group these into a few drive sessions. Each line says what to judge.
     thresholds, fast-travel landing (§7.37);
   - one-way routing: routes on divided highways and ramps should follow
     the right carriageway (e.g. Frisco→Breckenridge via CO 9) (§7.37);
+  - lane graph start snap (PLAN-REALISM 3a, never driven): on I-70 or
+    CO 9's divided stretch, pick a destination behind you. The route should
+    start on your own carriageway and turn at the next exit, with no U-turn
+    across the median. Also check Blue River routing (it's joined now) and
+    that a pick has no hitch. The log should read `route graph ... (one-way
+    yes, lanes yes)`;
   - garage picks (car, engine, drivetrain, tuning, area) survive a restart;
   - `-odspawnx/y` spawns facing along the road.
   - mini-map: roads and the route line up through hairpins; the Travel
@@ -168,11 +206,16 @@ Group these into a few drive sessions. Each line says what to judge.
   - a standing-start countdown;
   - full input recording for ghosts (they store transforms only today).
 - **Navigation (§7.37):**
-  - one-way leftovers: 11 sink / 7 source carriageway ends stay unlinked,
-    so a route can still take a short wrong-way stretch there (190 m on
-    Frisco→Breckenridge); the nearest-node start can snap onto the
-    opposite carriageway;
-  - Blue River and Jefferson are off the main graph component;
+  - one-way leftovers (after PLAN-REALISM 3a): 5 sink / 6 source ends are
+    left, all ramps into rest areas or lots that weren't fetched (their OSM
+    way has no other fetched way at its end), plus Post Blvd outside the
+    bbox;
+  - Jefferson is still off the main component. Its piece joins via US 285
+    outside the bbox; the fix is a wider fetch. 29.6 km of bbox-leaving
+    pieces and a few track-only islands stay off it too;
+  - the ~300 dropped short connectors are in the graph without pavement.
+    The root fix is a lower `MIN_SEGMENT_STATIONS`, which needs a full
+    rebuild;
   - nearest-node lookup is O(N), marked `ponytail:`.
 - **World game layer (§7.4):**
   - free-roam ↔ stage entry flow;
@@ -195,6 +238,15 @@ Group these into a few drive sessions. Each line says what to judge.
   - Also: coarse terrain tiles sit ~9 m below roads in the corridor
     (`verify_road_fit` coarse poke median −5.9 m on Summit).
   - Far-corner sky still to check in a drive.
+- **Junction poles vs pads, option B (2026-10-06).** `build_road_furniture`
+  now places control poles and stop bars on the ORIGINAL station line
+  (option A): pads slide approach stations ~10 m along the road, which put
+  them inside the crossing arm (sf_russian_hill: signals 33 → 51, stops
+  52 → 84). Where a pad also slid the road sideways (skewed arms, bends)
+  18 poles stand 3+ m off the road on terrain and 24 stop bars are dropped
+  as off the pavement. Option B: walk back from the node along the approach
+  until the spot clears the shipped pavement, so the pole sits at the pad's
+  real edge.
 - **Multi-zone `test_areas.py` refactor (overdue).** Turn the module
   constants (`AREA_NAME`, `BBOX_SNWE`, `ORIGIN_HEIGHT_M`) into a table keyed
   by zone, and make every script take the zone as an argument. Required
