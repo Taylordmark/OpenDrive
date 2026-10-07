@@ -172,8 +172,10 @@ def _pad_outline_xy(pad, sides=64):
     --dump-pads JSON (drawn-size: fitted ellipse grown by the same
     PAD_OVERLAP_MARGIN_M the bake itself draws with; plain circle of
     radius_m + margin when no ellipse was fitted)."""
-    from experimental_junction_pads import PAD_OVERLAP_MARGIN_M, _ellipse_polygon
-    if pad.get("ellipse"):
+    from experimental_junction_pads import PAD_OVERLAP_MARGIN_M, _ellipse_polygon, _pad_center, _profile_ring
+    if pad.get("profile"):   # road-shaped pad (junction_pads_final.json)
+        pts = _profile_ring(_pad_center(pad), pad["profile"])
+    elif pad.get("ellipse"):
         pts = _ellipse_polygon(tuple(pad["ellipse"]), PAD_OVERLAP_MARGIN_M, sides=sides)
     else:
         cx, cy = pad["xy"]

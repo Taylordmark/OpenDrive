@@ -46,6 +46,8 @@ water/coast, tunnels, wet weather) is phased in
   - The pad apron/conform/lower pass (status.md "Pad edges at road level")
     has run on SF and Summit (2026-10-06). Other areas still have the old
     lipped pads until the pads script is rerun.
+  - Road-shaped pads (2026-10-07) are baked on Summit only. SF, the
+    Gasquet pair and gv_west/east keep full ellipses until rerun.
   - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road
     (a stacked crossing, see bridges below); (16, 274) 0.92 m and
     (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at
@@ -202,6 +204,12 @@ gravel crunch, and the snow/wet grip feel.
   - Shoulder: a gravel band along every road edge, wider and narrower
     along the road, with no seam or jump as the car drives (the texture
     re-centers every 32 m) and no band on cliffs.
+- **Road-shaped junction pads** (2026-10-07, Summit; checked in plots
+  only): drive through T, Y and 4-way junctions in Frisco/Silverthorne.
+  The pad should follow the road arms with rounded 8 m corners, and grass
+  should show between the arms. Watch for lips or steps where a pad edge
+  now crosses terrain, and for pad patches where the snap moved a road
+  (the pad also covers the road's pre-snap line).
 
 ## 3. Gameplay and UX
 

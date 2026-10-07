@@ -153,6 +153,11 @@ PAD_MIN_ANGLE_DEG = 20.0           # floor for the sin() in the radius formula
                                     # so a near-parallel crossing doesn't blow
                                     # the pad radius up toward infinity
 PAD_SIDES = 20
+# road-shaped pads (2026-10-07, Taylor: a T gets a half-disc, a Y pinches
+# between its arms, a cross is a plus) - see pad_profile()
+PAD_CORNER_M = 8.0            # curb-return radius rounding the corner between two arms
+PAD_ROAD_EDGE_M = 0.3         # pad reaches this far past each road's pavement edge
+PAD_PROFILE_N = 64            # rim samples (angles) of a road-shaped pad
 # 2026-08-27/28, Taylor correction: a merged pad's footprint must read as
 # ONE smooth oval, not a convex-hull-of-circles polygon with visible
 # corners/lobes (see _fit_ellipse_to_circles/build_pad_chunk_ellipse
@@ -1972,7 +1977,7 @@ def build_pad_chunk_hull(name, hull_members, elev_m, margin, sides=PAD_SIDES):
 
 
 def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
-                             plane=(0.0, 0.0), z_fn=None):
+                             plane=(0.0, 0.0), z_fn=None, profile=None):
     """Like build_pad_chunk, but the ring is the fitted-ellipse boundary
     _ellipse_polygon() computes for a merged pad (see
     _fit_ellipse_to_circles/merge_overlapping_pads) instead of a plain
@@ -1987,9 +1992,10 @@ def build_pad_chunk_ellipse(name, ellipse, elev_m, margin, sides=ELLIPSE_SIDES,
 
     `z_fn(x, y)` (molded pads, 2026-10-02) is the pad surface elevation at
     any point; the pad is then drawn as PAD_MOLD_RINGS concentric rings so
-    it can curve."""
+    it can curve. `profile` = the pad's road-shaped rim (pad_profile), which
+    replaces the ellipse ring."""
     cx, cy, _a0, _b0, _theta = ellipse
-    ring = _ellipse_polygon(ellipse, margin, sides)
+    ring = _profile_ring((cx, cy), profile) if profile else _ellipse_polygon(ellipse, margin, sides)
     if z_fn is not None:
         return _build_pad_fan(name, (cx, cy), road_ue_z_m(z_fn(cx, cy), ROAD_LIFT, ORIGIN_HEIGHT_M),
                               ring, z_fn=lambda x, y: road_ue_z_m(z_fn(x, y), ROAD_LIFT,
@@ -2401,6 +2407,101 @@ def _point_in_ellipse(px, py, ellipse, margin):
     return (du * du) / (a * a) + (dv * dv) / (b * b) <= 1.0
 
 
+def _pad_center(j):
+    return tuple(j["ellipse"][:2]) if j.get("shape") == "ellipse" else tuple(j["xy"])
+
+
+def _profile_ring(center, profile):
+    """A road-shaped pad's drawn rim: profile[k] meters out at angle
+    2*pi*k/len(profile) from center. CCW, like _ellipse_polygon."""
+    cx, cy = center
+    n = len(profile)
+    return [(cx + r * math.cos(2.0 * math.pi * k / n), cy + r * math.sin(2.0 * math.pi * k / n))
+            for k, r in enumerate(profile)]
+
+
+def _profile_r(center, profile, px, py):
+    """The road-shaped rim's radius toward (px, py), linear between samples."""
+    n = len(profile)
+    t = (math.atan2(py - center[1], px - center[0]) % (2.0 * math.pi)) / (2.0 * math.pi) * n
+    k = int(t) % n
+    f = t - int(t)
+    return profile[k] * (1.0 - f) + profile[(k + 1) % n] * f
+
+
+def pad_profile(center, old_ring, roads, corner_m=PAD_CORNER_M, n=PAD_PROFILE_N):
+    """Road-shaped rim for one pad (2026-10-07): the union of its roads'
+    pavement strips (each polyline in `roads` = [(x, y, half_width), ...],
+    buffered PAD_ROAD_EDGE_M past its edge), the corners between arms rounded
+    by a corner_m curb return (morphological closing), clipped to the old
+    drawn outline `old_ring` - so a pad only ever shrinks, and keeps its old
+    reach along each arm where the ribbons tuck under it. Returns n radii
+    from center (farthest boundary hit per ray), or None when the shape
+    doesn't contain the center (no profile - keep the old outline)."""
+    from shapely import LineString, Point, Polygon, union_all
+    strips = []
+    for pl in roads:
+        for (x0, y0, w0), (x1, y1, w1) in zip(pl[:-1], pl[1:]):
+            strips.append(LineString([(x0, y0), (x1, y1)]).buffer(
+                0.5 * (w0 + w1) + PAD_ROAD_EDGE_M, quad_segs=8))
+    if not strips:
+        return None
+    old = Polygon(old_ring)
+    shape = union_all(strips).buffer(corner_m, quad_segs=16).buffer(-corner_m, quad_segs=16)
+    shape = shape.intersection(old)
+    cx, cy = center
+    if shape.is_empty or not shape.contains(Point(cx, cy)):
+        return None
+    far = 2.0 * max(math.hypot(x - cx, y - cy) for x, y in old_ring) + 1.0
+    edge = shape.boundary
+    prof = []
+    for k in range(n):
+        t = 2.0 * math.pi * k / n
+        hit = edge.intersection(LineString([(cx, cy), (cx + far * math.cos(t), cy + far * math.sin(t))]))
+        pts = [hit] if hit.geom_type == "Point" else list(getattr(hit, "geoms", []))
+        prof.append(max((math.hypot(q.x - cx, q.y - cy) for q in pts if q.geom_type == "Point"),
+                        default=0.0))
+    return prof if min(prof) > 0.0 else None
+
+
+def shape_pads_to_roads(junctions, east, north, elev, structural, half_w, seg_ids, orig_en=None):
+    """pad_profile() for every pad, from every at-grade, non-structural
+    station within reach plus its same-segment neighbours (a sparse arm's
+    next station can sit well outside; any road, not just members - whatever
+    pavement the old outline covered stays covered). `orig_en` = the
+    pre-snap (east, north): their strips join the shape too, so original
+    coordinates the old pad covered stay under it instead of each getting a
+    gate-coverage fill disc (519 vs 148 without). Returns pads reshaped."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.c_[east, north])
+    n = 0
+    for j in junctions:
+        j.pop("profile", None)
+        if j.get("shape") == "ellipse":
+            ell = tuple(j["ellipse"])
+        else:
+            ell = (*j["xy"], j["radius_m"], j["radius_m"], 0.0)
+        old_ring = _ellipse_polygon(ell, PAD_OVERLAP_MARGIN_M, sides=96)
+        center = ell[:2]
+        reach = max(ell[2], ell[3]) + PAD_OVERLAP_MARGIN_M
+        near = tree.query_ball_point(center, reach + PAD_CORNER_M + 10.0)
+        cand = {k for i in near for k in (i - 1, i, i + 1) if 0 <= k < len(east) and seg_ids[k] == seg_ids[i]}
+        idx = np.array(sorted(i for i in cand if not structural[i]
+                              and abs(elev[i] - pad_plane_z(j, east[i], north[i])) <= JUNCTION_MAX_ELEV_DIFF_M),
+                       dtype=int)
+        if len(idx) < 2:
+            continue
+        runs = np.split(idx, np.flatnonzero((np.diff(idx) != 1) | (np.diff(seg_ids[idx]) != 0)) + 1)
+        roads = [[(float(e[i]), float(nn[i]), float(half_w[i])) for i in r]
+                 for e, nn in [(east, north)] + ([orig_en] if orig_en is not None else [])
+                 for r in runs if len(r) >= 2]
+        prof = pad_profile(center, old_ring, roads)
+        if prof is not None:
+            j["profile"] = prof
+            n += 1
+    return n
+
+
 def point_in_pad(px, py, j, margin=PAD_OVERLAP_MARGIN_M):
     """True if (px, py) (pipeline-frame meters) falls inside junction j's
     footprint - a plain circle for an ordinary junction, or the fitted
@@ -2411,7 +2512,12 @@ def point_in_pad(px, py, j, margin=PAD_OVERLAP_MARGIN_M):
     drawn pad"); pass margin=0 for the smaller bare-radius keep-out test
     the ribbon-omission code uses (which deliberately stays a bit inside
     the drawn pad edge, not flush with it - see PAD_OVERLAP_MARGIN_M's own
-    docstring)."""
+    docstring). A road-shaped pad (pad_profile, drawn size) grows/shrinks
+    its rim radially by the same margin offset."""
+    if j.get("profile"):
+        c = _pad_center(j)
+        return math.hypot(px - c[0], py - c[1]) <= (_profile_r(c, j["profile"], px, py)
+                                                     + margin - PAD_OVERLAP_MARGIN_M)
     if j.get("shape") == "ellipse":
         return _point_in_ellipse(px, py, j["ellipse"], margin)
     r = j["radius_m"] + margin
@@ -2858,7 +2964,9 @@ def _pad_rim_points(j, spacing_m=PAD_RIM_SPACING_M):
     fans out for a merged one (via the same _ellipse_polygon() helper),
     resampled to ~spacing_m apart so a long boundary run gets intermediate
     points, not just the tessellation vertices."""
-    if j.get("shape") == "ellipse":
+    if j.get("profile"):
+        poly = _profile_ring(_pad_center(j), j["profile"])
+    elif j.get("shape") == "ellipse":
         poly = _ellipse_polygon(j["ellipse"], PAD_OVERLAP_MARGIN_M, sides=64)
     else:
         cx, cy = j["xy"]
@@ -3501,7 +3609,7 @@ def main():
             } for j in junctions], indent=1))
             print(f"--dump-pads: wrote {len(junctions)} proposed pad footprint(s) -> {out} "
                   f"(no tiles/sidecar touched, exiting before bake)")
-            return
+            return True   # dry run - __main__ skips prune/forest
 
     # write regraded elevation/XY back into per-segment lists for build_road_chunks
     off = 0
@@ -3690,6 +3798,28 @@ def main():
           f"{n_swallowed} adjacent fill disc(s)")
     n_tilt = fit_pad_tilts(junctions, east, north, elev, structural)
     print(f"pad-tilt: {n_tilt} pad(s) tilted onto their roads' grade")
+    half_w = np.concatenate([
+        half_width_for_stations(seg["highway_class"], seg.get("oneway"), seg.get("lanes"))
+        if seg.get("highway_class") else np.full(len(seg["east_m"]), ROAD_HALF_WIDTH)
+        for seg in raw["segments"]])
+    n_shaped = shape_pads_to_roads(junctions, regraded_east, regraded_north, regraded,
+                                   structural, half_w, seg_ids, (east, north))
+    print(f"pad-shape: {n_shaped} pad(s) shaped to their roads")
+    for arg in sys.argv:
+        if arg.startswith("--preview-pads="):
+            # final pad shapes + nearby centerlines for plot review; nothing on disk touched
+            out = Path(arg[len("--preview-pads="):])
+            out.write_text(json.dumps({
+                "pads": [{"center": list(_pad_center(j)),
+                          "ellipse": [float(v) for v in j["ellipse"]] if j.get("shape") == "ellipse"
+                          else [*map(float, j["xy"]), float(j["radius_m"]), float(j["radius_m"]), 0.0],
+                          "profile": j.get("profile"), "n_roads": int(j["n_roads"])}
+                         for j in junctions],
+                "east": regraded_east.round(2).tolist(), "north": regraded_north.round(2).tolist(),
+                "seg": seg_ids.tolist(), "half_w": half_w.round(2).tolist(),
+                "structural": structural.tolist()}))
+            print(f"--preview-pads: wrote {len(junctions)} pad(s) -> {out} (exiting before bake)")
+            return True   # dry run - __main__ skips prune/forest
     # the rim blend's base is the ORIGINAL road surface where each station
     # now sits (2026-10-02): the weld snap slides stations up to ~11 m along
     # their road, and their own original elev there met the molded pad
@@ -3715,6 +3845,7 @@ def main():
         "shape": j.get("shape", "circle"), "merged": bool(j.get("merged")),
         "merged2": bool(j.get("merged2")),
         "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
+        "profile": j.get("profile"),
     } for j in junctions], indent=1))
 
     # after pad-swallow (2026-10-01): carving before it left every grown
@@ -3965,12 +4096,14 @@ def main():
         if j.get("shape") == "ellipse":
             pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}", j["ellipse"],
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
-                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn)
+                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn,
+                                           profile=j.get("profile"))
         else:   # a circle is an ellipse with equal axes - and can tilt too
             pad = build_pad_chunk_ellipse(f"junctionpad_{k:04d}",
                                            (*j["xy"], j["radius_m"], j["radius_m"], 0.0),
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
-                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn)
+                                           plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn,
+                                           profile=j.get("profile"))
         n_conformed += conform_pad_to_ribbons(pad, rib_pos, rib_tris)
         host = nearest_chunk(all_chunks, j["xy"])
         if host is not None:
@@ -4050,7 +4183,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if main():   # --dump-pads / --preview-pads: nothing baked
+        sys.exit(0)
     # this run re-writes road tiles and re-carves terrain in the halo too
     # (2026-10-05, step 3) - keep only the owned ones
     prune_unowned_tiles.main()

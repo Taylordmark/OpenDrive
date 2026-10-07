@@ -205,6 +205,25 @@ scale, built from open data, with a stylized "real places, storybook look".
     Each publish creates a fresh texture filled at creation.
   - Check: `pipeline/checks/check_ground_patches.py` (patch coverage,
     shoulder vs grass clear zone, texture precision 3 cm within 4 m).
+- **Road-shaped junction pads** (2026-10-07, Summit rebaked; plots only,
+  not seen in-game). A pad is no longer a full ellipse. It is the union of
+  its roads' pavement (+0.3 m), corners rounded by an 8 m curb return
+  (`PAD_CORNER_M`), clipped to the old ellipse. A T gets a flat open side,
+  a Y pinches between its arms, a cross is a plus.
+  - `shape_pads_to_roads` stores a 64-radius polar `profile` per pad.
+    `point_in_pad`, the drawn ring, the rim anchors (terrain carve, sidecar)
+    and `junction_pads_final.json` all use it.
+  - Strips come from both snapped and pre-snap station positions, so the
+    original coordinates stay under the pad. Snapped-only pads needed 519
+    gate-coverage fill discs (blobs) instead of 148; now 145.
+  - Summit: 1872/1872 pads shaped, median 65% of the old area kept.
+    `verify_road_fit` (mean dev 0.14 m, 0 pokes) and `verify_terrain_fit`
+    PASS. `diagnose_junctions` (worst baked step 0.80 m, 5 sites over 0.3 m):
+    none come from the reshape. 3 lie outside every pad, 1 is inside both
+    old and new, 1 is a station-profile step.
+  - `--preview-pads=<json>` is a dry run for plot review. It and
+    `--dump-pads` now skip the prune/forest steps.
+  - Test: `pipeline/tests/test_pad_profile.py`.
 
 ## Arc 2 — Atmosphere ✅
 
