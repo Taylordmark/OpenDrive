@@ -179,8 +179,7 @@ def _shipped_stations(east, north, elev):
     (up to ~25 m) and patches the roadstations sidecar in place over a
     backup of the original - so a backup entry matching the original x/y
     has, at the same index in the live sidecar, the shipped position."""
-    from scipy.spatial import cKDTree
-    from experimental_junction_pads import read_station_sidecar, SIDECAR_BACKUP_DIR, SIDECAR_PATH
+    from experimental_junction_pads import match_sidecar, read_station_sidecar, SIDECAR_BACKUP_DIR, SIDECAR_PATH
     z = elev + ROAD_LIFT
     backup = SIDECAR_BACKUP_DIR / SIDECAR_PATH.name
     if not backup.exists():
@@ -189,8 +188,8 @@ def _shipped_stations(east, north, elev):
     g, sx, sy, sz, _h = read_station_sidecar(SIDECAR_PATH)
     if bg != g:                          # previous bake's backup, sidecar unpatched
         return east, north, z
-    d, j = cKDTree(np.c_[ox, oy]).query(np.c_[east * 100.0, -north * 100.0])
-    m = d < 5.0
+    j = match_sidecar(ox, oy, east * 100.0, -north * 100.0)   # same one-to-one match the patch made
+    m = j >= 0
     east, north = east.copy(), north.copy()
     east[m], north[m], z[m] = sx[j[m]] / 100.0, -sy[j[m]] / 100.0, sz[j[m]] / 100.0 + ORIGIN_HEIGHT_M
     return east, north, z

@@ -326,12 +326,16 @@ def road_class_grade_arrays(highway_classes):
     return mg, md
 
 
-def gaussian1d(arr, sigma):
+def gaussian1d(arr, sigma, pin_ends=False):
+    """pin_ends: odd-reflect padding - the end values stay put and a straight
+    run stays straight (edge padding pulls an end ~0.45 sigma inward)."""
     r = max(1, int(3 * sigma))
     x = np.arange(-r, r + 1)
     k = np.exp(-0.5 * (x / sigma) ** 2)
     k /= k.sum()
-    return np.convolve(np.pad(arr, r, mode="edge"), k, mode="valid")
+    pad = (np.pad(arr, r, mode="reflect", reflect_type="odd") if pin_ends and len(arr) > 1
+           else np.pad(arr, r, mode="edge"))
+    return np.convolve(pad, k, mode="valid")
 
 
 def median1d(arr, win):
@@ -343,14 +347,25 @@ def median1d(arr, win):
 def resample_stations(east, north, spacing=STATION_SPACING):
     """Resample an east/north polyline (m) to even arc-length spacing, then
     Gaussian-smooth laterally (breaks polyline corners, preserves hairpins).
-    Returns (s, e, n): station distances (m) + smoothed east/north (m)."""
+    Returns (s, e, n): station distances (m) + smoothed east/north (m).
+
+    The last station sits ON the polyline's end (final step 0.5-1.5 x
+    spacing) and smoothing pins both ends (2026-10-08: arange dropped up to
+    one spacing and edge-padded smoothing pulled each end ~2.2 m in, so
+    every road stopped 2-7 m short of its OSM end and 19 closed Summit
+    loops shipped a 3-9 m unpaved seam, e.g. (7733, 5442))."""
     d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(east), np.diff(north)))])
     total_len = d[-1]
     s = np.arange(0, total_len, spacing)
+    if len(s) > 1 and total_len - s[-1] < 0.5 * spacing:
+        s = s[:-1]
+    s = np.append(s, total_len)
     e = np.interp(s, d, east)
     n = np.interp(s, d, north)
-    e = gaussian1d(e, 1.2)
-    n = gaussian1d(n, 1.2)
+    # ponytail: a closed loop's seam is pinned, not wrapped - both ends meet
+    # at the shared node, with a slight heading kink there
+    e = gaussian1d(e, 1.2, pin_ends=True)
+    n = gaussian1d(n, 1.2, pin_ends=True)
     return s, e, n
 
 

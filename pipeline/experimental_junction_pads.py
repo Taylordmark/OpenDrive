@@ -3154,6 +3154,25 @@ def read_station_sidecar(path):
             flat[2::stride].copy(), hw)
 
 
+def match_sidecar(key_x, key_y, px_cm, py_cm):
+    """Sidecar entry index for each point (-1: none within
+    SIDECAR_MATCH_EPS_CM), one-to-one in point order, nearest then lowest
+    index first. Two road ends meeting at one node share an XY exactly
+    (2026-10-08, resample_stations pins the ends) - a plain nearest match
+    gives both the same entry and the other one never gets patched."""
+    from scipy.spatial import cKDTree
+    d, j = cKDTree(np.c_[key_x, key_y]).query(np.c_[px_cm, py_cm], k=4,
+                                               distance_upper_bound=SIDECAR_MATCH_EPS_CM)
+    out = np.where(np.isfinite(d[:, 0]), j[:, 0], -1)
+    multi = np.isfinite(d[:, 1])                   # usually a handful of coincident ends
+    used = set(out[~multi & (out >= 0)].tolist())  # single-candidate points keep theirs
+    multi = np.nonzero(multi)[0]
+    for i in multi:
+        out[i] = next((int(c) for _dd, c in sorted(zip(d[i], j[i])) if np.isfinite(_dd) and c not in used), -1)
+        used.add(out[i])
+    return out
+
+
 def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_east, new_north):
     """Mirrors this script's road-tile patching (write_tile() over the
     backed-up originals) for the OTHER on-disk artifact the runtime terrain
@@ -3197,55 +3216,18 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_ea
         print(f"reusing existing sidecar backup baseline at {backup_path}")
 
     gen_id, sc_x, sc_y, sc_z, sc_hw = read_station_sidecar(backup_path)
-    key_x, key_y = sc_x.copy(), sc_y.copy()   # match on the ORIGINAL x/y; sc_x/sc_y get moved below
+    # every station is matched (not just the regraded ones) so the one-to-one
+    # assignment is the same one verify_road_fit's match_sidecar() call makes
+    j = match_sidecar(sc_x, sc_y, orig_east * 100.0, -orig_north * 100.0)
+    idxs = np.nonzero(regraded_mask & (j >= 0))[0]
+    si = j[idxs]
+    sc_z[si] = road_ue_z_m(new_elev[idxs], ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
+    sc_x[si], sc_y[si] = new_east[idxs] * 100.0, -new_north[idxs] * 100.0
 
-    idxs = np.nonzero(regraded_mask)[0]
-    px_cm = orig_east[idxs] * 100.0
-    py_cm = -orig_north[idxs] * 100.0
-    pz_cm = road_ue_z_m(new_elev[idxs], ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
-    nx_cm = new_east[idxs] * 100.0
-    ny_cm = -new_north[idxs] * 100.0
-
-    # Same bucket-by-cell pattern used everywhere else in this file (e.g.
-    # find_crossings/find_dangling_endpoints) - N=~29k sidecar stations is
-    # cheap to bucket once, then each of the (typically few hundred)
-    # regraded stations only checks its own cell's handful of candidates
-    # instead of an O(N*M) brute-force scan.
-    cell = max(SIDECAR_MATCH_EPS_CM * 4.0, STATION_SPACING * 100.0)
-    buckets = defaultdict(list)
-    for si in range(len(sc_x)):
-        buckets[(int(key_x[si] // cell), int(key_y[si] // cell))].append(si)
-
-    eps2 = SIDECAR_MATCH_EPS_CM ** 2
-    matched = 0
-    ambiguous = 0
-    for k in range(len(idxs)):
-        bx, by = int(px_cm[k] // cell), int(py_cm[k] // cell)
-        best_si, best_d2 = -1, eps2
-        hits = 0
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for si in buckets.get((bx + dx, by + dy), ()):
-                    d2 = (key_x[si] - px_cm[k]) ** 2 + (key_y[si] - py_cm[k]) ** 2
-                    if d2 <= eps2:
-                        hits += 1
-                        if d2 < best_d2:
-                            best_d2, best_si = d2, si
-        if best_si < 0:
-            continue   # this regraded station has no sidecar entry (e.g. it
-                       # fell inside a tunnel run, which write_station_sidecar
-                       # excludes but this script's flat station arrays don't)
-        if hits > 1:
-            ambiguous += 1   # still patches the single closest match below
-        sc_z[best_si] = pz_cm[k]
-        sc_x[best_si], sc_y[best_si] = nx_cm[k], ny_cm[k]
-        matched += 1
-
-    unmatched = len(idxs) - matched
-    print(f"sidecar patch: {matched}/{len(idxs)} regraded station(s) matched "
+    unmatched = int(np.sum(regraded_mask)) - len(idxs)
+    print(f"sidecar patch: {len(idxs)}/{int(np.sum(regraded_mask))} regraded station(s) matched "
           f"to a sidecar entry within {SIDECAR_MATCH_EPS_CM:.0f}cm"
-          + (f", {unmatched} unmatched (likely tunnel-excluded)" if unmatched else "")
-          + (f", {ambiguous} had >1 candidate within epsilon (closest used)" if ambiguous else ""))
+          + (f", {unmatched} unmatched (likely tunnel-excluded)" if unmatched else ""))
 
     write_station_sidecar(SIDECAR_PATH, [(sc_x, sc_y, sc_z, sc_hw)], pack_generation_id(gen_id))
     print(f"rewrote station sidecar ({len(sc_x)} station(s), unchanged count) -> {SIDECAR_PATH}")
