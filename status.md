@@ -221,6 +221,11 @@ scale, built from open data, with a stylized "real places, storybook look".
     PASS. `diagnose_junctions` (worst baked step 0.80 m, 5 sites over 0.3 m):
     none come from the reshape. 3 lie outside every pad, 1 is inside both
     old and new, 1 is a station-profile step.
+  - Rebaked everywhere pads ship (2026-10-07): SF 55, near/far Gasquet
+    27 each, gv_west 3624, gv_east 1824 pads shaped. `verify_road_fit`
+    PASSES on SF and Gasquet with 0 gate fills. gv_west/east still FAIL
+    the same way as before (cut-line misses, see Streaming below). None of
+    their missing stations lies inside a pad, old or new.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

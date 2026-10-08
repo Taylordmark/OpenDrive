@@ -46,8 +46,6 @@ water/coast, tunnels, wet weather) is phased in
   - The pad apron/conform/lower pass (status.md "Pad edges at road level")
     has run on SF and Summit (2026-10-06). Other areas still have the old
     lipped pads until the pads script is rerun.
-  - Road-shaped pads (2026-10-07) are baked on Summit only. SF, the
-    Gasquet pair and gv_west/east keep full ellipses until rerun.
   - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road
     (a stacked crossing, see bridges below); (16, 274) 0.92 m and
     (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at
