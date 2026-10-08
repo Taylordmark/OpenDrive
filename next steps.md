@@ -29,10 +29,9 @@ water/coast, tunnels, wet weather) is phased in
 - **Road float after the §7.48 ceiling.** 11,699 near-tile stations float
   more than 0.7 m (3,291 over 2 m). This is the price of 0 buried stations.
   If it shows in drive-tests, the next step is the 513 near grid (3.9 m cells).
-- **Junction-flatten steps.** About 45 steps of 2–3 m sit near segment ends.
-  They predate §7.47. Re-measure them after §7.49, which added 1,276
-  junctions.
 - **Junction pad leftovers** (§7.51):
+  - Copper Circle (seg1386) ends in a 1.6 m lip at (1447, −2650): its end
+    pad sits at 2980.25 m, a pad 25 m north at 2982.0 m overlaps it.
   - 108 pads still sit more than 1 m off their road's grade (worst 4.3 m at
     (24639, 17570)).
   - About 10% of pads are pinned at the 12% tilt cap

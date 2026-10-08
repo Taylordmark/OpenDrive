@@ -226,6 +226,12 @@ scale, built from open data, with a stylized "real places, storybook look".
     PASSES on SF and Gasquet with 0 gate fills. gv_west/east still FAIL
     the same way as before (cut-line misses, see Streaming below). None of
     their missing stations lies inside a pad, old or new.
+  - Along-road steps, re-measured on Summit (2026-10-08): the top baked
+    surface sampled at each shipped station, consecutive stations of one
+    segment, structures excluded. Steps over 1.5 m: 47 (§7.47) → 6, none
+    over 2 m (were ~45 at 2–3 m near segment ends). Dense sampling shows 5
+    are smooth 20–31% ramps (worst 2 cm jump); 1 is a real lip, Copper
+    Circle (in `next steps.md`).
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.
