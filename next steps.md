@@ -32,8 +32,6 @@ water/coast, tunnels, wet weather) is phased in
   Example: US 6's west edge near Tennis Club Rd shows −0.2 to +1.5 m of
   skirt along its length (worst at (17088, 9005)).
 - **Junction pad leftovers** (§7.51):
-  - Copper Circle (seg1386) ends in a 1.6 m lip at (1447, −2650): its end
-    pad sits at 2980.25 m, a pad 25 m north at 2982.0 m overlaps it.
   - 108 pads still sit more than 1 m off their road's grade (worst 4.3 m at
     (24639, 17570)).
   - About 10% of pads are pinned at the 12% tilt cap
@@ -41,9 +39,6 @@ water/coast, tunnels, wet weather) is phased in
   - 9 road ends are less paved than before the pads, e.g. (-27544, 11341).
   - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
     the ribbon leaves the molded rim up to 0.68 m high on steep downhill arms.
-  - The pad apron/conform/lower pass (status.md "Pad edges at road level")
-    has run on SF and Summit (2026-10-06). Other areas still have the old
-    lipped pads until the pads script is rerun.
   - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road
     (a stacked crossing, see bridges below); (16, 274) 0.92 m and
     (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at

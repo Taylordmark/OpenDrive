@@ -245,6 +245,13 @@ scale, built from open data, with a stylized "real places, storybook look".
     51 → 62, ped crossings 54 → 61, bars 138 → 161). Summit: 556 → 455,
     76 → 62, bars 34 → 2. `verify_furniture_fit` PASSES on both (bars
     now checked against the baked road surface).
+  - Connector spurs from the final grade (2026-10-08): a spur was built
+    before the rim flatten re-pinned its ends, and two dangling ends that
+    snapped to each other got two spurs. Copper Circle (seg1386) ended in a
+    1.6 m lip at (1447, -2650) under a spur left flat at the far road's
+    height. Spurs are now rebuilt after the flatten, one per mutual pair.
+    Summit steps over 1.5 m: 6 -> 5 (the 5 are smooth ramps). Summit and SF
+    gates all PASS.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

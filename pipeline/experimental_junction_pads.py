@@ -3452,15 +3452,16 @@ def main():
     snaps = find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds, junctions)
     print(f"found {len(snaps)} dangling endpoint(s) within {ENDPOINT_SNAP_MAX_M:.0f}m "
           f"of another road - welding with a connector spur")
-    connector_chunks = []
-    # (east, north, road elev m) along each spur, for the terrain re-carve -
-    # a spur is a 2-station ribbon no real station sits under, so without
-    # these the hillside it crosses stays uncarved and buries it (2026-10-01:
-    # up to 4.4 m at (-27544,11341))
-    spur_anchors = []
+    spurs = []   # (gi, tgi, dist) - geometry from the FINAL grade, spur_geometry()
     half_t = int(round(TRANSITION_LEN_M / STATION_SPACING)) + 1
-    for k, sp in enumerate(snaps):
+    for sp in snaps:
         gi, seg, tgi, tseg = sp["gi"], sp["seg"], sp["target_gi"], sp["target_seg"]
+        # two dangling ends snapping to each other: one spur, not a second
+        # one on top that blends the first's end to a different height
+        # (2026-10-08: 1.6 m lip at Copper Circle's end, (1447, -2650))
+        if any(g == tgi and t == gi for g, t, _d in spurs):
+            continue
+        spurs.append((gi, tgi, sp["dist"]))
         grade_a = local_grade(elev, *bounds[seg], gi)
         grade_b = local_grade(elev, *bounds[tseg], tgi)
         # the weld pad sits ON the target road, so it takes the target's
@@ -3482,17 +3483,6 @@ def main():
             weight = 1.0 - (3.0 * t * t - 2.0 * t * t * t)
             regraded[kk] = elev[kk] * (1.0 - weight) + pin_elev * weight
 
-        z_ab = road_ue_z_m(np.array([regraded[gi], pin_elev]), ROAD_LIFT, ORIGIN_HEIGHT_M)
-        chunks, _cx, _cy, _cz = build_road_chunks(
-            np.array([0.0, sp["dist"]]), np.array([east[gi], east[tgi]]),
-            np.array([north[gi], north[tgi]]), z_ab,
-            name_prefix=f"connector_{k:04d}", spacing=STATION_SPACING,
-            skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP)
-        connector_chunks.extend(chunks)
-        for t_ in np.linspace(0.0, 1.0, max(int(sp["dist"] / (STATION_SPACING / 2)), 1) + 1):
-            spur_anchors.append((east[gi] + t_ * (east[tgi] - east[gi]),
-                                 north[gi] + t_ * (north[tgi] - north[gi]),
-                                 regraded[gi] + t_ * (pin_elev - regraded[gi])))
         conn_r = ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M
         junctions.append({"xy": (east[tgi], north[tgi]), "elev": pin_elev,
                            "radius_m": conn_r,
@@ -3508,6 +3498,31 @@ def main():
                            "reps": {}, "snap_xy": (east[tgi], north[tgi]),
                            "flat_seg": tseg, "flat_grade": min(grade_a, grade_b),
                            "n_roads": 2, "segs": {seg, tseg}, "shape": "circle"})
+
+    def spur_geometry():
+        """(chunks, anchors) of every spur, straight between its two ends'
+        CURRENT regraded heights. Rebuilt after the rim flatten: built here,
+        a later pass moving either end left the spur at the old height.
+        anchors are (east, north, road elev m) along each spur for the
+        terrain re-carve - a spur is a 2-station ribbon no real station sits
+        under, so without them the hillside it crosses buries it (2026-10-01:
+        up to 4.4 m at (-27544,11341))."""
+        chunks, anchors = [], []
+        for k, (gi, tgi, dist) in enumerate(spurs):
+            za, zb = float(regraded[gi]), float(regraded[tgi])
+            ch, _cx, _cy, _cz = build_road_chunks(
+                np.array([0.0, dist]), np.array([east[gi], east[tgi]]),
+                np.array([north[gi], north[tgi]]),
+                road_ue_z_m(np.array([za, zb]), ROAD_LIFT, ORIGIN_HEIGHT_M),
+                name_prefix=f"connector_{k:04d}", spacing=STATION_SPACING,
+                skirt_extra=SKIRT_EXTRA, skirt_drop=SKIRT_DROP)
+            chunks.extend(ch)
+            for t_ in np.linspace(0.0, 1.0, max(int(dist / (STATION_SPACING / 2)), 1) + 1):
+                anchors.append((east[gi] + t_ * (east[tgi] - east[gi]),
+                                north[gi] + t_ * (north[tgi] - north[gi]), za + t_ * (zb - za)))
+        return chunks, anchors
+
+    connector_chunks, spur_anchors = spur_geometry()
 
     # FINAL overlap resolution: now that every pad exists (crossing pads,
     # corridor-split runs, connector welds), fuse any whose drawn footprints
@@ -3853,6 +3868,7 @@ def main():
                                                base=base_here)
     print(f"rim-flatten: {n_in} station(s) inside a pad set to its surface, "
           f"{n_blend} approach station(s) re-blended from the rim")
+    connector_chunks, spur_anchors = spur_geometry()
     off = 0
     for seg in raw["segments"]:
         cnt = len(seg["east_m"])
