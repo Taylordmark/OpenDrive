@@ -41,6 +41,9 @@ filenames:
  10b. export_road_mesh_bin_v2.py -> MasksV2/roadv3_*.bin (needs road_mesh.json;
      ODR3 extended format - AODRoadManager PREFERS these over the ODR2 tiles
      when present, so skipping this stage ships a stale road generation)
+ 10c. experimental_junction_pads.py --fresh-baseline -> patches road, ODR3
+     and terrain tiles + the station sidecar at junctions (furniture,
+     centerline and menu spots read the patched sidecar)
  11. export_road_centerline_bin.py -> centerline_*.bin, centerline_map_*.bin (runs after furniture since 2026-10-06: the routegraph reads its controls)
      (needs road_stations.json)
  12. build_road_barrier.py    -> road_barrier.json (needs road_stations.json;
@@ -131,6 +134,11 @@ STAGES = [
     # prefers MasksV2/roadv3_* when present, so a rebake without this stage
     # left 1161 stale-generation ODR3 tiles overriding every fresh ODR2 tile.
     ("export_road_mesh_bin_v2.py", "export extended ODR3 tiles -> Content/OpenDrive/MasksV2/roadv3_*.bin"),
+    # JUNCTION PADS (2026-10-08, was a manual step, §7.51): patches the road,
+    # ODR3 and terrain tiles and the station sidecar just written above, so it
+    # needs them all; furniture and menu spots read its patched sidecar, so it
+    # precedes them. --fresh-baseline drops the previous bake's backups.
+    ("experimental_junction_pads.py --fresh-baseline", "junction pads: regrade + pad road tiles, re-carve terrain"),
     ("build_road_barrier.py", "build road_barrier.json"),
     ("export_road_barrier_bin.py", "export barrier tiles -> Content/OpenDrive/Masks/barrier_*.bin"),
     # GUARDRAILS (2026-09-04): road-above-terrain drop detection (dam

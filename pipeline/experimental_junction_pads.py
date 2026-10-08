@@ -54,8 +54,8 @@ ground is recut to match wherever the road actually ended up.
 
 Kept DELIBERATELY separate from the real pipeline per Taylor's "keep it
 independent for now... slowly iterate through the issues before folding
-anything back in" - this script is never called by build_area.py or any
-other production script, and only ever touches the SHIPPED
+anything back in" - since 2026-10-08 it is a rebuild_area.py stage (with
+--fresh-baseline), still a separate script, and only ever touches the SHIPPED
 Content/OpenDrive/Masks/road_*.bin and terrain_*.bin files (never
 road_stations.json itself - v4's regrade_terrain_at_junctions() reuses
 build_terrain_mesh_tiles.build_tile()/write_tile_bin() as library calls on
@@ -66,9 +66,11 @@ overwritten again, so every run of this script - however different its
 algorithm - starts from that same known-good baseline and is trivially
 reversible via --restore.
 
-Usage:  python experimental_junction_pads.py [--restore]
+Usage:  python experimental_junction_pads.py [--restore | --fresh-baseline]
     (no args)   rebuild every road tile from a fresh regrade + pad pass
     --restore   copy the backed-up originals back, undoing every patch
+    --fresh-baseline  drop this area's backups first (rebuild_area.py only,
+                right after a fresh road/terrain bake)
 """
 
 import json
@@ -3280,10 +3282,31 @@ def _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy, bounds
             regraded_north[k] = north[k] * (1.0 - weight) + snap_xy[1] * weight
 
 
+def drop_baseline():
+    """Delete this area's backups so this run's on-disk tiles become the new
+    baseline. rebuild_area.py runs this right after a fresh road/terrain bake:
+    the backups are first-run-wins, so left alone they'd keep the previous
+    bake's tiles and the pads would ship against stale geometry. Never pass
+    it by hand on an already-padded area: the padded tiles would become the
+    baseline and get padded twice."""
+    n = 0
+    for d, pat in ((BACKUP_DIR, f"road_{AREA_NAME}_test_tile_*.bin"),
+                   (V3_BACKUP_DIR, f"roadv3_{AREA_NAME}_test_tile_*.bin"),
+                   (TERRAIN_BACKUP_DIR, f"terrain_{AREA_NAME}_test_tile_*.bin"),
+                   (TERRAIN_BACKUP_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin"),
+                   (SIDECAR_BACKUP_DIR, SIDECAR_PATH.name)):
+        for p in d.glob(pat):
+            p.unlink()
+            n += 1
+    print(f"--fresh-baseline: dropped {n} backup file(s) for {AREA_NAME}")
+
+
 def main():
     if "--restore" in sys.argv:
         restore()
         return
+    if "--fresh-baseline" in sys.argv:
+        drop_baseline()
 
     east, north, elev, terrain_exclude, clamp_r, _wp = btmt.load_stations()
     raw = json.loads(btmt.STATIONS_PATH.read_text())

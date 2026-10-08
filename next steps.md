@@ -32,9 +32,6 @@ water/coast, tunnels, wet weather) is phased in
 - **Junction-flatten steps.** About 45 steps of 2–3 m sit near segment ends.
   They predate §7.47. Re-measure them after §7.49, which added 1,276
   junctions.
-- **Junction pads are a manual step** (§7.51). `experimental_junction_pads.py`
-  is not in `rebuild_area.py` STAGES, so any rebuild wipes the pads until it
-  is rerun (about 15 min).
 - **Junction pad leftovers** (§7.51):
   - 108 pads still sit more than 1 m off their road's grade (worst 4.3 m at
     (24639, 17570)).

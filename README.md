@@ -170,8 +170,8 @@ mechanism producing mixed-generation bakes.
 
 Roadside furniture (PLAN-REALISM Phase 1) rides in the same run:
 `build_road_furniture.py` → `export_road_furniture_bin.py` (ODF1 tiles for
-`AODFurnitureManager`). Re-run those two after the manual
-`experimental_junction_pads.py` step, since props sit on the pad-snapped road.
+`AODFurnitureManager`). They run after the `experimental_junction_pads.py`
+stage, since props sit on the pad-snapped road.
 Gate: `python pipeline/verify_furniture_fit.py` (no prop in a lane, bases on
 terrain/edge, control poles ≤ 15 m from their OSM node, per-type counts) and
 `python pipeline/tests/test_furniture_place.py`. The meshes are a one-off:
@@ -182,10 +182,9 @@ terrain/edge, control poles ≤ 15 m from their OSM node, per-type counts) and
 Route / lane graph (PLAN-REALISM 3a): `export_road_centerline_bin.py` writes
 `routegraph_<area>_test.bin` (ODG1), which nav reads now and traffic will
 read later. It reads the pad-patched shipped stations and
-`road_furniture.json` `controls`, so **re-run it after
-`experimental_junction_pads.py` and `build_road_furniture.py`**:
-`python pipeline/export_road_centerline_bin.py`. The order is pads, then
-furniture, then this export. Layout (the full spec is the script's
+`road_furniture.json` `controls`, so `rebuild_area.py` runs it after the
+pads and furniture stages. By hand, keep that order: pads, then furniture,
+then `python pipeline/export_road_centerline_bin.py`. Layout (the full spec is the script's
 docstring):
 
 - `'ODG1'`, `u32 N`, `N × (f32 x_cm, f32 y_cm)`;

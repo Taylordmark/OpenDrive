@@ -62,10 +62,10 @@ scale, built from open data, with a stylized "real places, storybook look".
   terrain, and water comes before terrain. Never hand-run partial rebuilds out
   of order, because that bakes mixed generations. The GENID check catches
   stale tiles.
-- **A full rebake must clear the pads-backup dirs:**
-  - in `Masks/`: `_road_backup_junction_pads`, `_terrain_backup_junction_pads`
-    and `_sidecar_backup_junction_pads`;
-  - in `MasksV2/`: `_roadv3_backup_junction_pads`.
+- **Junction pads are a `rebuild_area.py` stage** (2026-10-08), run as
+  `experimental_junction_pads.py --fresh-baseline`. The flag drops the area's
+  pads backups so the fresh bake becomes the baseline. To rerun the pads by
+  hand on an already-padded area, omit the flag, or it pads twice.
 - **Downloads are cached in `data/cache/`** (§7.50). Delete a kind's dir to
   pull fresh data from the source.
 - **Commit early**, even to a scratch branch. Three pipeline scripts were
