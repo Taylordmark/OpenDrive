@@ -48,9 +48,6 @@ water/coast, tunnels, wet weather) is phased in
     (a stacked crossing, see bridges below); (16, 274) 0.92 m and
     (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at
     (65, −133).
-  - Poles option B: 18 SF poles stand off the road where a pad slid it
-    sideways, and 24 stop bars are dropped. Walk each back toward its node
-    until it clears the shipped pavement.
 - **Bridges for stacked crossings.** Grade-separated crossings that don't
   have a structure yet.
 - **Rubber-banding: jitter and pull.** Carried over from the last drive test.
@@ -249,15 +246,6 @@ gravel crunch, and the snow/wet grip feel.
   - Also: coarse terrain tiles sit ~9 m below roads in the corridor
     (`verify_road_fit` coarse poke median −5.9 m on Summit).
   - Far-corner sky still to check in a drive.
-- **Junction poles vs pads, option B (2026-10-06).** `build_road_furniture`
-  now places control poles and stop bars on the ORIGINAL station line
-  (option A): pads slide approach stations ~10 m along the road, which put
-  them inside the crossing arm (sf_russian_hill: signals 33 → 51, stops
-  52 → 84). Where a pad also slid the road sideways (skewed arms, bends)
-  18 poles stand 3+ m off the road on terrain and 24 stop bars are dropped
-  as off the pavement. Option B: walk back from the node along the approach
-  until the spot clears the shipped pavement, so the pole sits at the pad's
-  real edge.
 - **Multi-zone `test_areas.py` refactor (overdue).** Turn the module
   constants (`AREA_NAME`, `BBOX_SNWE`, `ORIGIN_HEIGHT_M`) into a table keyed
   by zone, and make every script take the zone as an argument. Required

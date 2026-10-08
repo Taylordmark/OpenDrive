@@ -23,9 +23,11 @@ Props sit on the SHIPPED road (experimental_junction_pads' snapped/regraded
 stations, via verify_road_fit._shipped_stations, banked with the pad fade
 exactly as the road ribbons are) at half_width_for_stations + an offset,
 their base on the shipped terrain where that is within 1 m of the banked
-pavement edge, else on the edge itself. So re-run this after the manual
-junction-pads step. Anything that would land inside any pavement (stop bars
-aside) is dropped - see in_pavement().
+pavement edge, else on the edge itself. So it runs after the junction-pads
+stage (rebuild_area). Anything that would land inside any pavement is dropped
+- see in_pavement() - except stop bars, which sit on the baked road surface
+(pads included, road_abs_m()) and are dropped off it. An OSM-tier pole whose
+spot lands in a crossing road walks along its own road (seat()) first.
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json (+ the roadstations
         sidecar / bank fade the junction-pads step patches)
@@ -52,7 +54,7 @@ import verify_road_fit as vrf
 from build_road_stations import junction_node_degree
 from export_road_centerline_bin import station_oneway_dirs
 from road_mesh_common import STATION_SPACING, gaussian1d
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, TERRAIN_TILE_SIZE_CM, to_local
 
 ROOT = Path(__file__).resolve().parent.parent
 TILE_DIR = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
@@ -92,6 +94,7 @@ PUSH_STEPS = 4
 SIGN_DEDUPE_M = 12.0
 BASE_SNAP_M = 1.0           # terrain this close to the banked edge = the base
 CONTROL_MAX_M = 15.0        # OSM-tier pole to its node
+SEAT_SEARCH = 8             # stations tried, nearest first, for a clear OSM-tier pole spot
 
 # Class default speeds (mph -> km/h) where OSM has no maxspeed (US rural/town
 # typicals; the area set is all-US today).
@@ -202,6 +205,16 @@ def terrain_abs_m(pe, pn):
     return h / 100.0 + ORIGIN_HEIGHT_M
 
 
+def road_abs_m(pe, pn):
+    """Shipped road surface height (abs m, NaN = off the road) at each point:
+    the baked tiles, pads included - the station ribbons alone miss a pad."""
+    x_cm, y_cm = np.asarray(pe) * 100.0, -np.asarray(pn) * 100.0
+    h = vrf._sample_with_neighbors(vrf._load_road_tile,
+                                   np.floor(x_cm / ROAD_TILE_SIZE_CM).astype(int),
+                                   np.floor(y_cm / ROAD_TILE_SIZE_CM).astype(int), x_cm, y_cm, ring=2)
+    return h / 100.0 + ORIGIN_HEIGHT_M
+
+
 def shipped_stations(e0, n0, elev):
     """(east, north, road z abs m, bank slope) per station as the road
     ships, exactly as verify_road_fit.check_poke_through reads it."""
@@ -298,6 +311,23 @@ def main():
     jtree = cKDTree(jxy)
     otree = cKDTree(np.c_[e0, n0])          # matching uses the ORIGINAL positions
     stree = cKDTree(np.c_[east, north])
+    pav = pavement_index(east, north, road_z, hw, seg_idx, tunnel)
+
+    def seat(s, x0, y0, d, along, node, ex, ny):
+        """The station of segment s nearest (x0, y0), positions (ex, ny),
+        whose side-d pole spot (setback `along`) clears every pavement and
+        stays within CONTROL_MAX_M of the node. This walks a pole along its
+        own road out of a crossing arm; the sideways push below runs along
+        that arm and ends up past CONTROL_MAX_M. None = no such station."""
+        m = np.arange(offsets[s], offsets[s + 1])
+        for k in m[np.argsort(np.hypot(ex[m] - x0, ny[m] - y0))][:SEAT_SEARCH]:
+            o = d * (hw[k] + POLE_OFF_M)
+            pe = ex[k] + tn[k] * o + te[k] * d * along
+            pn = ny[k] - te[k] * o + tn[k] * d * along
+            if math.hypot(pe - node[0], pn - node[1]) <= CONTROL_MAX_M and \
+                    not in_pavement(pav, [pe], [pn], [surface_z(pe, pn)])[0]:
+                return k
+        return None
 
     def surface_z(px, py):
         """Shipped banked road surface at (px, py), clamped to the pavement
@@ -317,6 +347,7 @@ def main():
     hard = [cxy[nid] for nid, _e, k in ctrl if k in ("traffic_signals", "stop")]
     hard_tree = cKDTree(np.array(hard)) if hard else None
     controls, osm_skipped, osm_signs = [], Counter(), []
+    n_walked = 0
     for nid, e, kind in ctrl:
         tags = e.get("tags", {})
         if kind == "crossing" and (tags.get("crossing") in ("traffic_signals", "no", "unmarked")
@@ -386,11 +417,21 @@ def main():
                        and fx * te[i] * d + fy * tn[i] * d > 0.7 for t, x, y, fx, fy in osm_signs):
                     continue
                 osm_signs.append((sign, x0, y0, te[i] * d, tn[i] * d))
-                put(sign, i, d, POLE_OFF_M, d, along=d * along, node=p, at=(x0, y0))
-                # ponytail: where the pad also slid the road sideways (skewed
-                # arms) the pole stands off it - base on terrain; snapping it to
-                # the shipped edge is option B (next steps.md)
-                props[-1][-1] = int(dz > hw[kz] + 3.0)
+                # where the pad also slid the road sideways (skewed arms) the
+                # original spot is off the road: seat pole and bar on the
+                # shipped stations instead; failing that, the pole stands on
+                # terrain where it was
+                slid = dz > hw[kz] + 3.0
+                ex, ny, al = (east, north, 0.0) if slid else (e0, n0, along)
+                k_seat = seat(s, x0, y0, d, al, p, ex, ny)
+                n_walked += k_seat is not None and k_seat != i
+                if k_seat is None:
+                    put(sign, i, d, POLE_OFF_M, d, along=d * along, node=p, at=(x0, y0))
+                    props[-1][-1] = int(slid)
+                else:
+                    put(sign, k_seat, d, POLE_OFF_M, d, along=d * al, node=p, at=(ex[k_seat], ny[k_seat]))
+                    if slid:
+                        i, along, x0, y0 = k_seat, 0.0, east[k_seat], north[k_seat]
                 if sign in ("signal", "stop"):
                     # stripe across the travel lane(s), on the road surface
                     w = 2 * hw[i] if ow[i] else hw[i]
@@ -403,6 +444,8 @@ def main():
         if kind in ("traffic_signals", "stop", "give_way") and appr:
             controls.append({"id": nid, "kind": kind, "x_cm": round(p[0] * 100, 1),
                              "y_cm": round(-p[1] * 100, 1), "approaches": appr})
+
+    print(f"{n_walked} OSM-tier pole(s) walked along their road out of another pavement")
 
     # mapped street lamps: onto the nearest road's edge if they sit in it
     lamp_xy = []
@@ -499,15 +542,18 @@ def main():
     poles = P[:, 0] != T["stop_bar"]
     # a pole that lands in a pavement (a neighbouring road, a pad-snapped
     # approach) steps out from its own road up to PUSH_STEPS times first
-    pav = pavement_index(east, north, road_z, hw, seg_idx, tunnel)
     inside = poles & in_pavement(pav, P[:, 1], P[:, 2], P[:, 6])
     for _ in range(PUSH_STEPS):
         k = np.where(inside)[0]
         P[k, 1:3] += PUSH_OUT_M * P[k, 7:9]
         inside[k] = in_pavement(pav, P[k, 1], P[k, 2], P[k, 6])
-    # ... and a stop bar the same pad slide put off the road surface
-    bars = P[:, 0] == T["stop_bar"]
-    inside |= bars & ~in_pavement(pav, P[:, 1], P[:, 2], P[:, 3], clear=0.0)
+    # ... and a stop bar off the baked road surface; on it, the bar takes
+    # that surface's height (a pad's, where one covers the stop line)
+    bars = np.where(P[:, 0] == T["stop_bar"])[0]
+    rz = road_abs_m(P[bars, 1], P[bars, 2])
+    on = np.abs(rz - P[bars, 3]) < LAYER_DZ_M          # NaN (off the road) -> False
+    inside[bars[~on]] = True
+    P[bars[on], 3] = rz[on] + 0.01
     print(f"dropped {int(inside.sum())} prop(s) inside a pavement / bar off it: "
           + ", ".join(f"{TYPES[t]} {c}" for t, c in sorted(Counter(P[inside, 0].astype(int)).items())))
     # an OSM-tier pole pushed or set back past CONTROL_MAX_M from its node no

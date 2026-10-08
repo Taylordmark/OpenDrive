@@ -237,6 +237,14 @@ scale, built from open data, with a stylized "real places, storybook look".
     US 6 / Tennis Club Rd has no junction step; US 6's edge float there is
     the general road-float item. Wall coverage gate: 289 runs, 40 meshes,
     0 out of bound.
+  - Junction poles option B (2026-10-08): an OSM-tier pole whose spot
+    lands in a crossing arm walks along its own road (nearest of 8
+    stations that clears every pavement within 15 m of the node). Stop
+    bars sit on the baked road surface, pads included. SF: in-pavement
+    drops 70 → 16, far-from-node 18 → 11, bars dropped 24 → 1 (signals
+    51 → 62, ped crossings 54 → 61, bars 138 → 161). Summit: 556 → 455,
+    76 → 62, bars 34 → 2. `verify_furniture_fit` PASSES on both (bars
+    now checked against the baked road surface).
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

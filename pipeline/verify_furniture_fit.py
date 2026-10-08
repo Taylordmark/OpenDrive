@@ -77,7 +77,7 @@ def main():
         print(f"  {brf.TYPES[int(P[i, 0])]} at ({pe[i]:.1f}, {pn[i]:.1f}) m")
     ok = ok and not inside.any()
 
-    # 2. bases: terrain, else the banked edge (stop bars: surface) on the
+    # 2. bases: terrain (stop bars: baked road), else the banked edge (stop bars: surface) on the
     # prop's side of any station within EDGE_SEARCH_M - the bin does not say
     # which station placed it
     te, tn = np.empty_like(e0), np.empty_like(e0)
@@ -94,7 +94,8 @@ def main():
         edge_err[i] = np.min(np.abs(pz[i] - z), initial=np.inf)
     terr = np.full(len(P), np.nan)
     terr[~bar] = brf.terrain_abs_m(pe[~bar], pn[~bar])
-    err = np.where(bar, edge_err, np.fmin(np.abs(pz - terr), edge_err))
+    terr[bar] = brf.road_abs_m(pe[bar], pn[bar]) + 0.01   # bars: the baked road surface, pads included
+    err = np.fmin(np.abs(pz - terr), edge_err)
     bad = err > BASE_TOL_M
     print(f"[bases] max {np.nanmax(err):.3f} m off terrain/edge, {int(bad.sum())} over {BASE_TOL_M} m")
     for i in np.where(bad)[0][:10]:
