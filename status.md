@@ -232,6 +232,11 @@ scale, built from open data, with a stylized "real places, storybook look".
     over 2 m (were ~45 at 2–3 m near segment ends). Dense sampling shows 5
     are smooth 20–31% ramps (worst 2 cm jump); 1 is a real lip, Copper
     Circle (in `next steps.md`).
+  - Downstream re-checks (2026-10-08, Summit): Frisco North 6th Ave ends
+    now sit 0.26–0.48 m above the terrain (the §7.14 1–2 m float is gone).
+    US 6 / Tennis Club Rd has no junction step; US 6's edge float there is
+    the general road-float item. Wall coverage gate: 289 runs, 40 meshes,
+    0 out of bound.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

@@ -29,6 +29,8 @@ water/coast, tunnels, wet weather) is phased in
 - **Road float after the §7.48 ceiling.** 11,699 near-tile stations float
   more than 0.7 m (3,291 over 2 m). This is the price of 0 buried stations.
   If it shows in drive-tests, the next step is the 513 near grid (3.9 m cells).
+  Example: US 6's west edge near Tennis Club Rd shows −0.2 to +1.5 m of
+  skirt along its length (worst at (17088, 9005)).
 - **Junction pad leftovers** (§7.51):
   - Copper Circle (seg1386) ends in a 1.6 m lip at (1447, −2650): its end
     pad sits at 2980.25 m, a pad 25 m north at 2982.0 m overlaps it.
@@ -49,10 +51,6 @@ water/coast, tunnels, wet weather) is phased in
   - Poles option B: 18 SF poles stand off the road where a pad slid it
     sideways, and 24 stop bars are dropped. Walk each back toward its node
     until it clears the shipped pavement.
-- **Re-check the downstream systems against the new elevations:**
-  - `WALL_MIN_GRADE` and the conflict detection (§7.12);
-  - the Frisco North 6th Ave dead-end float, 1–2 m (§7.14);
-  - the US 6 / Tennis Club Rd skirt step.
 - **Bridges for stacked crossings.** Grade-separated crossings that don't
   have a structure yet.
 - **Rubber-banding: jitter and pull.** Carried over from the last drive test.
