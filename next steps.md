@@ -146,7 +146,10 @@ gravel crunch, and the snow/wet grip feel.
     pads; grass now reaches 120 m and thins out from 60 m instead of
     popping in; grass, scrub, bushes and the other non-conifer trees go
     white in snow and dark in rain. Deals Gap is in Scene Select next to
-    the old Dragon.
+    the old Dragon. Wheels should sit still on smooth road at any frame
+    rate; Summit lakes should meet their banks with no dark ring; the log
+    should have no `BuildTile ... exceeded 8 ms` warnings and driving
+    shouldn't rubber-band when Near tiles stream in.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).
@@ -353,7 +356,12 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 6. Performance and stability
 
-- A periodic hitch of about 25 s dominates every perf run. Not investigated.
+- Frame skips while driving (2026-10-09): Near terrain tiles built their mesh
+  on the game thread at 20-60 ms each. That build now runs on the parse
+  thread. If the drive still rubber-bands, check the log's remaining
+  `BuildTile` timings (collision cook, material setup) next. The older
+  "~25 s periodic hitch" was not reproducible and GC was ruled out
+  (`docs/perf_after_art_overhaul.md`).
 - Cold-start streaming latency after a teleport can take up to 20 s. The
   loading screen hides it. Check whether `FinalizeTile` runs unbudgeted on
   the game thread.

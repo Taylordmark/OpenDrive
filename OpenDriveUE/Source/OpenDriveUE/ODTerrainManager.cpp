@@ -18,6 +18,8 @@
 
 using namespace UE::Geometry;
 
+static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed);
+
 // ---------------------------------------------------------------------
 // Runtime terrain carve (2026-08-26, Arc 7 rescope): a straight port of
 // pipeline/build_terrain_mesh_tiles.py's carve_grid_m(), applied per-vertex
@@ -1353,6 +1355,12 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 			}
 		}
 
+		if (bOk)
+		{
+			Parsed.Mesh = MakeShared<FDynamicMesh3>();
+			FillTileMesh(*Parsed.Mesh, Parsed);
+		}
+
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Key, Fidelity, bOk, Parsed = MoveTemp(Parsed)]() mutable
 			{
@@ -1462,6 +1470,76 @@ void AODTerrainManager::ProcessPendingTileBuilds()
 // guessing which stage dominates.
 static constexpr double TerrainBuildWarnThresholdMs = 8.0;
 
+// The tile's render mesh, local to its first vertex (BuildTile's Origin).
+// Plain data - the parse thread calls this (see FParsedTerrainTile::Mesh).
+static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed)
+{
+	const uint32 VCount = Parsed.Verts.Num() / 3;
+	const uint32 TCount = Parsed.Tris.Num() / 3;
+	const FVector3d Origin = VCount ? FVector3d(Parsed.Verts[0], Parsed.Verts[1], 0.0) : FVector3d::ZeroVector;
+	const bool bHasTint = (uint32)Parsed.VertColors.Num() == VCount;
+	Mesh.EnableAttributes();
+	FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
+	FDynamicMeshColorOverlay* Color = nullptr;
+	if (bHasTint)
+	{
+		Mesh.Attributes()->EnablePrimaryColors();
+		Color = Mesh.Attributes()->PrimaryColors();
+	}
+
+	TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
+	TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+	TArray<int32> ColorIds; if (Color) { ColorIds.SetNumUninitialized(VCount); }
+
+	for (uint32 v = 0; v < VCount; ++v)
+	{
+		const float X = Parsed.Verts[v * 3 + 0];
+		const float Y = Parsed.Verts[v * 3 + 1];
+		const float Z = Parsed.Verts[v * 3 + 2];
+		VertIds[v] = Mesh.AppendVertex(FVector3d(X - Origin.X, Y - Origin.Y, Z));
+	}
+	for (uint32 v = 0; v < VCount; ++v)
+	{
+		UvIds[v] = UV->AppendElement(
+			FVector2f(Parsed.Uvs[v * 2 + 0], Parsed.Uvs[v * 2 + 1]));
+	}
+	if (Color)
+	{
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			// ReinterpretAsLinear() is a direct /255 unpack (no sRGB
+			// decode) - pairs with ApplyBiomeTint's QuantizeRound() and
+			// ColorSpaceMode=NoTransform below (2026-09-04 fix, see
+			// ApplyBiomeTint's own comment on the encode side for why).
+			const FLinearColor Lin = Parsed.VertColors[v].ReinterpretAsLinear();
+			ColorIds[v] = Color->AppendElement(FVector4f(Lin.R, Lin.G, Lin.B, Lin.A));
+		}
+	}
+	for (uint32 t = 0; t < TCount; ++t)
+	{
+		const uint32 I0 = Parsed.Tris[t * 3 + 0];
+		const uint32 I1 = Parsed.Tris[t * 3 + 1];
+		const uint32 I2 = Parsed.Tris[t * 3 + 2];
+		const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
+		if (Tid >= 0)
+		{
+			UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+			if (Color)
+			{
+				Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
+			}
+		}
+	}
+
+	// M_GroundStylized's slope-based grass/rock blend reads
+	// MaterialExpressionVertexNormalWS - without this, the normal
+	// overlay is left empty and the material shades every tile as flat
+	// black/near-black regardless of actual slope (the root cause of
+	// the "no grass, no floor" bug: exposure/material-load were both
+	// fine, the mesh just never had real normals).
+	FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
+}
+
 void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& Parsed, ETileFidelity Fidelity)
 {
 	const double StageStart = FPlatformTime::Seconds();
@@ -1508,71 +1586,14 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	// neutral white (see FParsedTerrainTile::VertColors's comment).
 	const bool bHasTint = (uint32)Parsed.VertColors.Num() == VCount;
 
-	Comp->EditMesh([&](FDynamicMesh3& Mesh)
+	if (Parsed.Mesh.IsValid())
 	{
-		Mesh.EnableAttributes();
-		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
-		FDynamicMeshColorOverlay* Color = nullptr;
-		if (bHasTint)
-		{
-			Mesh.Attributes()->EnablePrimaryColors();
-			Color = Mesh.Attributes()->PrimaryColors();
-		}
-
-		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
-		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
-		TArray<int32> ColorIds; if (Color) { ColorIds.SetNumUninitialized(VCount); }
-
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			const float X = Parsed.Verts[v * 3 + 0];
-			const float Y = Parsed.Verts[v * 3 + 1];
-			const float Z = Parsed.Verts[v * 3 + 2];
-			VertIds[v] = Mesh.AppendVertex(FVector3d(X - Origin.X, Y - Origin.Y, Z));
-		}
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			UvIds[v] = UV->AppendElement(
-				FVector2f(Parsed.Uvs[v * 2 + 0], Parsed.Uvs[v * 2 + 1]));
-		}
-		if (Color)
-		{
-			for (uint32 v = 0; v < VCount; ++v)
-			{
-				// ReinterpretAsLinear() is a direct /255 unpack (no sRGB
-				// decode) - pairs with ApplyBiomeTint's QuantizeRound() and
-				// ColorSpaceMode=NoTransform below (2026-09-04 fix, see
-				// ApplyBiomeTint's own comment on the encode side for why).
-				const FLinearColor Lin = Parsed.VertColors[v].ReinterpretAsLinear();
-				ColorIds[v] = Color->AppendElement(FVector4f(Lin.R, Lin.G, Lin.B, Lin.A));
-			}
-		}
-		for (uint32 t = 0; t < TCount; ++t)
-		{
-			const uint32 I0 = Parsed.Tris[t * 3 + 0];
-			const uint32 I1 = Parsed.Tris[t * 3 + 1];
-			const uint32 I2 = Parsed.Tris[t * 3 + 2];
-			const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
-			if (Tid >= 0)
-			{
-				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
-				if (Color)
-				{
-					Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
-				}
-			}
-		}
-
-		// M_GroundStylized's slope-based grass/rock blend reads
-		// MaterialExpressionVertexNormalWS - without this, the normal
-		// overlay is left empty and the material shades every tile as flat
-		// black/near-black regardless of actual slope (the root cause of
-		// the "no grass, no floor" bug: exposure/material-load were both
-		// fine, the mesh just never had real normals).
-		const double NormalsStart = FPlatformTime::Seconds();
-		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
-		TNormals = (FPlatformTime::Seconds() - NormalsStart) * 1000.0;
-	});
+		Comp->SetMesh(MoveTemp(*Parsed.Mesh));
+	}
+	else
+	{
+		Comp->EditMesh([&](FDynamicMesh3& Mesh) { FillTileMesh(Mesh, Parsed); });
+	}
 	TMeshBuild = Lap(Clock) - TNormals;
 
 	if (bHasTint)

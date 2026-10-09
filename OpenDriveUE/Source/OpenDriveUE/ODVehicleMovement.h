@@ -579,6 +579,9 @@ private:
 	float EscSlipRate = 0.0f;        // filtered growth rate, deg/s
 
 	bool bBodyInit = false;
+	/** Ix / (4 * half-track^2): the mass one corner moves in roll (InitBody).
+	 *  TickSuspension caps the damper at this / Dt - see there. */
+	float RollCornerMass = 0.0f;
 	double LastTraceTime = 0.0;
 
 	// weather (W3): cached controllers, re-searched every 2 s while missing

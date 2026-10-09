@@ -233,6 +233,11 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	BI->InertiaTensorScale = FVector(FMath::Sqrt(Sx2), 1.0f, 1.0f);
 	BI->UpdateMassProperties();
 	const float IzFinal = BodyIz();
+	const FVector IP = BI->GetBodyInertiaTensor();
+	const FVector XAx = BI->GetMassSpaceLocal().GetRotation().UnrotateVector(FVector::ForwardVector);
+	const float HalfTrack = Wheels.Num() > 0 ? FMath::Max(FMath::Abs(Wheels[0].Attach.Y), 1.0f) : 84.0f;
+	RollCornerMass = (IP.X * XAx.X * XAx.X + IP.Y * XAx.Y * XAx.Y + IP.Z * XAx.Z * XAx.Z)
+		/ (4.0f * HalfTrack * HalfTrack);
 
 	// seed loads so first-tick grip is sane - per axle from the static split
 	for (int32 i = 0; i < Wheels.Num(); ++i)
@@ -263,10 +268,10 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	UE_LOG(LogTemp, Display,
 		TEXT("ODVehicleMovement: bound to %s (mass=%.0f kg, com z=%.1f -> "
 		     "%.1f, com x=%.1f -> %.1f, split %.0f/%.0f, Iz=%.3g kg cm2 "
-		     "(target %.3g, scaleX %.2f), %d wheels)"),
+		     "(target %.3g, scaleX %.2f), %d wheels, roll corner mass %.0f kg)"),
 		*GetOwner()->GetName(), Mass, ComLocal.Z, ComLocalZ, ComLocal.X, ComX,
 		Frac * 100.0f, (1.0f - Frac) * 100.0f, IzFinal, IzTarget,
-		FMath::Sqrt(Sx2), Wheels.Num());
+		FMath::Sqrt(Sx2), Wheels.Num(), RollCornerMass);
 }
 
 void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
@@ -389,8 +394,17 @@ void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
 	const float CornerW = Body->GetMass() * 980.0f * 0.25f;
 	const float K = SpringRate * SpringRateScale;
 	// critical damping vs the corner mass; DampingRatio is the preset knob
-	const float C = 2.0f * DampingRatio
+	// Capped at RollCornerMass / Dt (2026-10-09, Taylor: wheels "bouncing
+	// around like crazy" on a 25-40 fps drive): these forces go in once per
+	// frame, and in roll a corner moves only ~half its mass share, so past
+	// C*Dt/m = 1 the roll mode flip-flops frame to frame. 60 fps is uncapped.
+	// See pipeline/check_suspension_stability.py.
+	float C = 2.0f * DampingRatio
 		* FMath::Sqrt(K * Body->GetMass() * 0.25f);
+	if (RollCornerMass > 0.0f)
+	{
+		C = FMath::Min(C, RollCornerMass / Dt);
+	}
 
 	FCollisionQueryParams Query(SCENE_QUERY_STAT(ODSuspension), true, GetOwner());
 	Query.bReturnPhysicalMaterial = true;

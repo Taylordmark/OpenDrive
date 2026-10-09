@@ -10,6 +10,7 @@
 #include "ODTerrainManager.generated.h"
 
 class UDynamicMeshComponent;
+namespace UE::Geometry { class FDynamicMesh3; }
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UTexture2D;
@@ -48,6 +49,11 @@ struct FParsedTerrainTile
 	// reads as neutral (1,1,1,1) white to the material's vertex-color
 	// multiply, i.e. a clean no-op back to the untinted look.
 	TArray<FColor> VertColors;
+
+	/** The render mesh, built on the parse thread after the tint (2026-10-09:
+	 *  building it in BuildTile cost 20-60 ms per Near tile on the game
+	 *  thread - Taylor's "frame skipping"). Null -> BuildTile builds it. */
+	TSharedPtr<UE::Geometry::FDynamicMesh3> Mesh;
 };
 
 // FRoadStation/FStationSpatialHash now live in ODBinSidecarUtil.h

@@ -199,8 +199,13 @@ def main():
     print(f"=== rebuild_area.py: AREA_NAME = {AREA_NAME!r} ({len(STAGES)} stages) ===")
     t_start = time.time()
 
+    # --from <script>: resume at that stage (e.g. a terrain-only change)
+    start = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else None
     for i, (cmd, desc) in enumerate(STAGES, start=1):
         script, *args = cmd.split()
+        if start and script != start:
+            continue
+        start = None
         script_path = PIPELINE_DIR / script
         if not script_path.is_file():
             print(f"\n[{i}/{len(STAGES)}] FAILED: {script} not found at {script_path}")

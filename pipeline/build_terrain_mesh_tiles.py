@@ -363,7 +363,7 @@ OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 # already documents as NOT subtracted (they're interior to the solid
 # triangulated water, so they never appear as boundary edges).
 WATER_TILE_GLOB = f"water_{AREA_NAME}_test_tile_*.bin"
-WATER_BED_MIN_DEPTH_M = 2.0     # bed depth right at the shoreline
+WATER_BED_MIN_DEPTH_M = 0.3     # bed depth right at the shoreline (was 2.0, see WATER_SHORE_RISE_M)
 WATER_BED_MAX_DEPTH_M = 5.0     # bed depth WATER_BED_FALLOFF_M+ into the lake
 WATER_BED_FALLOFF_M = 40.0      # shoreline->interior depth ramp distance
 # 2026-09-03 fix: the INTERIOR falloff above starts at WATER_BED_MIN_DEPTH_M
@@ -393,6 +393,16 @@ WATER_BED_FALLOFF_M = 40.0      # shoreline->interior depth ramp distance
 # the shoreline and eases back to natural grade at the outer edge, instead
 # of kinking at either seam.
 WATER_SHORE_BLEND_M = 35.0      # exterior rim->shore blend distance
+# 2026-10-09 (Taylor, Summit: "part of a lake?" - a grey water plane ringed
+# by a thick black band): the exterior blend used to aim at the interior's
+# 2 m bed depth, so every lake sat in a dry trench up to 2 m below its own
+# water plane (shipped Summit shore band: median lowest corner 2 m under the
+# surface). The bank now meets the ring WATER_SHORE_RISE_M ABOVE the water
+# and the bed starts WATER_BED_MIN_DEPTH_M below it, so the bank crosses
+# the waterline inside the ring and hides the plane's edge. The <1 m step
+# between the two sides sits inside one grid cell. Check:
+# pipeline/check_lake_shore.py.
+WATER_SHORE_RISE_M = 0.2
 
 
 def _read_lake_bin_tile(path):
@@ -705,7 +715,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
                 by1 + blend_cm < tile_y0 or by0 - blend_cm > tile_y1):
             continue
         inside = _point_in_polygon(flat_x, flat_y, lake["ring_x"], lake["ring_y"])
-        shore_z_cm = lake["z_cm"] - WATER_BED_MIN_DEPTH_M * 100.0
+        shore_z_cm = lake["z_cm"] + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
 
         if inside.any():
             touched = True
