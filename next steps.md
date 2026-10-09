@@ -59,8 +59,6 @@ water/coast, tunnels, wet weather) is phased in
   - Lifted decks have no piers; a median pier needs the lower road's
     footprint.
   - 7 station steps of 12-13% where a ramp meets an existing grade.
-- **Rubber-banding: jitter and pull.** Carried over from the last drive test.
-  Not fixed yet.
 - **Seam-failure investigation.** Carried over. Not started.
 - **Tune the `ROAD_CLASS_GRADE` / `FOLLOW_*` constants** by drive-test. The
   current values are first guesses.
@@ -358,12 +356,6 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 6. Performance and stability
 
-- Frame skips while driving (2026-10-09): Near terrain tiles built their mesh
-  on the game thread at 20-60 ms each. That build now runs on the parse
-  thread. If the drive still rubber-bands, check the log's remaining
-  `BuildTile` timings (collision cook, material setup) next. The older
-  "~25 s periodic hitch" was not reproducible and GC was ruled out
-  (`docs/perf_after_art_overhaul.md`).
 - Cold-start streaming latency after a teleport can take up to 20 s. The
   loading screen hides it. Check whether `FinalizeTile` runs unbudgeted on
   the game thread.

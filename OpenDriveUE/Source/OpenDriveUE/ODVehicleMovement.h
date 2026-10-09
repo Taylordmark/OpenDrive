@@ -583,6 +583,11 @@ private:
 	 *  TickSuspension caps the damper at this / Dt - see there. */
 	float RollCornerMass = 0.0f;
 	double LastTraceTime = 0.0;
+	// -odtrace per-frame jolt probe (TickComponent): last frame's body pose/velocity/dt
+	FVector JoltPrevPos = FVector::ZeroVector;
+	FVector JoltPrevVel = FVector::ZeroVector;
+	float JoltPrevDt = 0.0f;
+	float JoltDtEma = 0.0f;
 
 	// weather (W3): cached controllers, re-searched every 2 s while missing
 	// (spawned by AODGameMode, may come up after us; absent in the garage)

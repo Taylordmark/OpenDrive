@@ -358,6 +358,33 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	if (LastTraceTime >= 0.0)
 	{
 		const double Now = GetWorld()->GetTimeSeconds();
+		// Per-frame jolt probe (2026-10-09, Taylor: "jitter and pull" about every
+		// 2/3 s that the 10 Hz trace can't resolve). We tick PrePhysics, so the
+		// body moved by last frame's physics step: log a frame when it was >1.5x
+		// the running frame time, or when the step along the velocity was off
+		// by >20% of v*dt (a snap / sim time lost to the physics dt clamp).
+		const FVector JPos = Body->GetComponentLocation();
+		const FVector JVel = Body->GetPhysicsLinearVelocity();
+		if (JoltPrevDt > 0.0f)
+		{
+			const FVector Avg = 0.5f * (JoltPrevVel + JVel);
+			const float Expect = Avg.Size() * JoltPrevDt;
+			const float Moved = FVector::DotProduct(JPos - JoltPrevPos, Avg.GetSafeNormal());
+			const float Ratio = Expect > 20.0f ? Moved / Expect : 1.0f;
+			if (JoltPrevDt > 1.5f * JoltDtEma || FMath::Abs(Ratio - 1.0f) > 0.2f)
+			{
+				UE_LOG(LogTemp, Display, TEXT("ODJolt: t=%.3f dt=%.1f ms (avg %.1f) moved/expected=%.2f spd=%.0f"),
+					Now, JoltPrevDt * 1000.0f, JoltDtEma * 1000.0f, Ratio, Avg.Size());
+			}
+			JoltDtEma = FMath::Lerp(JoltDtEma, JoltPrevDt, 0.05f);
+		}
+		else
+		{
+			JoltDtEma = DeltaSeconds;
+		}
+		JoltPrevPos = JPos;
+		JoltPrevVel = JVel;
+		JoltPrevDt = DeltaSeconds;
 		if (Now - LastTraceTime > 0.1)
 		{
 			LastTraceTime = Now;

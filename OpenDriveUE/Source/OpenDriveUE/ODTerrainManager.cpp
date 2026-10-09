@@ -1911,15 +1911,31 @@ void AODTerrainManager::UpdateRoadDistTex(const FVector& Loc)
 			return;
 		}
 		constexpr int32 N = RoadDistTexels;
-		// fresh texture per publish, filled at creation: no in-place update to race the render thread
+		const double PublishT0 = FPlatformTime::Seconds();
 		TArray<FColor> Texels = RoadDistJob.Consume();
-		RoadDistTex = UTexture2D::CreateTransient(N, N, PF_B8G8R8A8, NAME_None,
-			TConstArrayView64<uint8>((const uint8*)Texels.GetData(), (int64)N * N * sizeof(FColor)));
-		RoadDistTex->SRGB = true;
-		RoadDistTex->AddressX = TA_Clamp;
-		RoadDistTex->AddressY = TA_Clamp;
-		RoadDistTex->UpdateResource();   // render-thread init, queued ahead of the origin change below
-		TerrainMID->SetTextureParameterValue(TEXT("RoadDistTex"), RoadDistTex);
+		if (!RoadDistTex)
+		{
+			RoadDistTex = UTexture2D::CreateTransient(N, N, PF_B8G8R8A8, NAME_None,
+				TConstArrayView64<uint8>((const uint8*)Texels.GetData(), (int64)N * N * sizeof(FColor)));
+			RoadDistTex->SRGB = true;
+			RoadDistTex->AddressX = TA_Clamp;
+			RoadDistTex->AddressY = TA_Clamp;
+			RoadDistTex->UpdateResource();   // render-thread init, queued ahead of the origin change below
+			TerrainMID->SetTextureParameterValue(TEXT("RoadDistTex"), RoadDistTex);
+		}
+		else
+		{
+			// 2026-10-09 (Taylor: "jitter and pull" every ~2/3 s): a fresh 4 MB
+			// texture + MID rebind per recenter cost a ~46 ms frame every 32 m
+			// (-odtrace ODJolt lines), and Chaos's 1/30 s step clamp then dropped
+			// ~30% of that frame's motion. Now one texture, refilled on the render
+			// thread - the copy is queued ahead of the origin change below, so
+			// texels and origin still land in the same frame.
+			TArray<FColor>* Data = new TArray<FColor>(MoveTemp(Texels));
+			FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(0, 0, 0, 0, N, N);
+			RoadDistTex->UpdateTextureRegions(0, 1, Region, N * sizeof(FColor), sizeof(FColor), (uint8*)Data->GetData(),
+				[Data, Region](uint8*, const FUpdateTextureRegion2D*) { delete Data; delete Region; });
+		}
 		RoadDistCenter = RoadDistJobCenter;
 		// tile components sit at actor-relative positions (menu vista copies are offset).
 		// Double param: a float origin lost world-minus-origin to LWC precision.
@@ -1927,6 +1943,11 @@ void AODTerrainManager::UpdateRoadDistTex(const FVector& Loc)
 		TerrainMID->SetDoubleVectorParameterValue(TEXT("RoadDistOrigin"),
 			FVector4(RoadDistCenter.X + Off.X, RoadDistCenter.Y + Off.Y, 0.0, 0.0));
 		RoadDistJob.Reset();
+		const double PublishMs = (FPlatformTime::Seconds() - PublishT0) * 1000.0;
+		if (PublishMs > 4.0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: road-dist publish took %.1f ms on the game thread"), PublishMs);
+		}
 	}
 	if (FVector2D::Distance(FVector2D(Loc.X, Loc.Y), RoadDistCenter) < RoadDistRecenterCm)
 	{
