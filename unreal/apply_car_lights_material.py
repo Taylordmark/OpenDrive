@@ -19,9 +19,14 @@ CAR_DIR = "/Game/OpenDrive/Cars"
 # name: roughness - mirrors import_car_meshes.py CATEGORY_MATERIALS(_HI)["lights"]
 LIGHT_MATS = {"M_CarLights": 0.30, "M_CarLights_Hi": 0.08}
 
+# LocalX gates by end of the car (+X = nose): mip blends of palette cells
+# (reverse + tail) read as a head cell and flashed head glow on the rear
+# lenses (Taylor 2026-10-09: "backup lights are flickering while driving
+# forward"); pipeline/check_lamp_mask.py mirrors this.
 LAMP_HLSL = """
-float head = saturate((Pal.g - 0.3) * 10.0);
-float rev = saturate((Pal.b - 0.75) * 10.0);
+float front = step(0.0, LocalX);
+float head = saturate((Pal.g - 0.3) * 10.0) * front;
+float rev = saturate((Pal.b - 0.75) * 10.0) * (1.0 - front);
 float3 e = lerp(float3(1.0, 0.03, 0.02) * Tail, float3(1.0, 0.95, 0.85) * Head, head);
 return lerp(e, float3(1.0, 1.0, 1.0) * Reverse, rev);
 """
@@ -66,12 +71,21 @@ for name, roughness in LIGHT_MATS.items():
     lamp.set_editor_property("code", LAMP_HLSL)
     lamp.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
     ins = []
-    for n in ("Pal", "Head", "Tail", "Reverse"):
+    for n in ("Pal", "Head", "Tail", "Reverse", "LocalX"):
         i = unreal.CustomInput()
         i.set_editor_property("input_name", n)
         ins.append(i)
     lamp.set_editor_property("inputs", ins)
     req(MEL.connect_material_expressions(ts, "RGB", lamp, "Pal"), "palette -> lamp")
+    wp = MEL.create_material_expression(mat, unreal.MaterialExpressionWorldPosition, -1100, 1250)
+    to_local = MEL.create_material_expression(mat, unreal.MaterialExpressionTransformPosition, -950, 1250)
+    to_local.set_editor_property("transform_source_type", unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_WORLD)
+    to_local.set_editor_property("transform_type", unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_LOCAL)
+    req(MEL.connect_material_expressions(wp, "", to_local, ""), "world pos -> local")
+    lx = MEL.create_material_expression(mat, unreal.MaterialExpressionComponentMask, -800, 1250)
+    lx.set_editor_property("r", True)
+    req(MEL.connect_material_expressions(to_local, "", lx, ""), "local -> X")
+    req(MEL.connect_material_expressions(lx, "", lamp, "LocalX"), "LocalX -> lamp")
     for y, n in ((900, "Head"), (1000, "Tail"), (1100, "Reverse")):
         p = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -800, y)
         p.set_editor_property("parameter_name", f"{n}Glow")
