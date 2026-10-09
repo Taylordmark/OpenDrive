@@ -794,6 +794,7 @@ def compute_side(seg, side, lakes, junction_touched_seg,
         "drop_m": drop_m, "drop_cm": drop_cm, "cls_arr": cls_arr,
         "is_bridge_osm": is_bridge_osm_seg,
         "water_crossing": np.zeros(n, dtype=bool),  # filled in by main()'s §7.23 pass
+        "over_road": np.array(seg.get("over_road", [False] * n), dtype=bool),
     }
 
 
@@ -866,6 +867,9 @@ def subclassify_bridge_runs(seg_i, side, d, other, report):
 
         reasons = []
         genuine = False
+        if d["over_road"][run_start:run_end].any():
+            genuine = True
+            reasons.append("overpass: OSM bridge over another road (lift_overpasses)")
         # §7.34 fix: the module's own docstring promises demote_short_runs()
         # already stops "isolated single-station polygon touches" from
         # spawning degenerate stubs - measured false on real data. demote_
@@ -898,7 +902,9 @@ def subclassify_bridge_runs(seg_i, side, d, other, report):
         # *some* deck-worthy road to carry it - a dirt road fords or
         # culverts a creek, it doesn't get a concrete span - so the paved
         # gate applies here too, same as the ordinary short-span path below.
-        if water_frac >= BRIDGE_WATER_MIN_FRAC and not is_single_station_touch and not is_unpaved:
+        if genuine:
+            pass
+        elif water_frac >= BRIDGE_WATER_MIN_FRAC and not is_single_station_touch and not is_unpaved:
             # Unconditional OR - a water crossing always gets a deck, per the
             # task brief, regardless of the paved/rebound rules below (a
             # genuine reservoir/creek crossing IS the abutment-plausibility
@@ -1089,6 +1095,10 @@ def main():
             # existing "drop_cm - DECK_DEPTH_M" pier-height math terminates the
             # pier foot a half-meter below the real water surface instead of at
             # whatever the raw DEM happened to read under the lake.
+            # overpass decks (build_road_stations.lift_overpasses) are bridges
+            # whatever the DEM drop says - the deck must span the road below
+            d["cls_arr"] = np.where(d["over_road"], BRIDGE_CLS, d["cls_arr"]).astype(np.int8)
+
             has_lake_z = d["in_lake"] & ~np.isnan(d["lake_z_cm"])
             if has_lake_z.any():
                 water_drop_cm = (d["z_cm"] - (d["lake_z_cm"] - WATER_PIER_SUBMERGENCE_M * 100.0))
@@ -1126,6 +1136,7 @@ def main():
                     for sr in station_runs:
                         sr["side"] = int(side)
                         sr["cls"] = cls_name
+                        sr["overpass"] = bool(d["over_road"][run_start:run_end].any())
                         runs_out.append(sr)
 
                     names = set(road_name[run_start:run_end])

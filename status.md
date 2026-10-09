@@ -289,6 +289,25 @@ scale, built from open data, with a stylized "real places, storybook look".
     15, pad steps 2020 -> 1547, kinks 1074 -> 1004; pads >1 m off grade
     23 -> 29, 28 of them stacked crossings. SF steps 59 -> 56, kinks
     55 -> 54. SF/Summit gates all PASS.
+  - Overpasses lifted (2026-10-08): the DEM is bare earth, so OSM
+    overpasses sat 0.2-4 m over the road below (Bighorn Road under I-70
+    at -0.5 m). `lift_overpasses` (road_mesh_common) finds bridge-over-road
+    centerline crossings, lifts the upper road to 6.5 m over the lower one
+    across the deck plus 12 m each side, and ramps back at 6% through
+    shared junction nodes (never onto the road below). Same-level
+    crossings within 40 m of a deck join it unless they share a node.
+    The deck (`over_road`) is a genuine bridge run with no terrain fill
+    and no piers (a median pier needs the lower road's footprint).
+    Summit: 35 crossings, 30 lifted (1975 stations), 1 skipped
+    (Columbine Drive at layer -1 under an untagged I-70); separation
+    6.3-6.5 m after smoothing; 7 station steps of 12-13% made worse.
+    Every stacked crossing with an upper structure now has a bridge mesh
+    and none are padded. Pad kinks 1004 -> 774, steps 1547 -> 1319,
+    holes 1; pads >1 m off grade 30, 29 at stacked crossings where the
+    probe reads the deck above (worst 6.41 m: US 6 under I-70). SF has
+    no such crossings. SF/Summit gates all PASS. Test:
+    `pipeline/tests/test_lift_overpasses.py`; `test_flatten_to_pad_rims`
+    now reads `PAD_TILT_MAX_GRADE` instead of a hardcoded 12%.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

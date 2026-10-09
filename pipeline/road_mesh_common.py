@@ -1043,6 +1043,173 @@ def flatten_graph_junctions(elev, offsets, seg_s, incident, targets, box_r):
     return final, w_min
 
 
+OVERPASS_SEPARATION_M = 6.5   # upper pavement over lower pavement at an OSM
+                              # bridge crossing: 4.9 m (16 ft) clearance + the
+                              # 1.25 m deck + a little margin. The bare-earth DEM
+                              # has no overpasses, so short spans sat 0.2-4 m
+                              # above the road under them (Summit, 2026-10-08)
+OVERPASS_RAMP_GRADE = 0.06    # steepest grade the lift's approach ramps add
+OVERPASS_FLAT_M = 12.0        # full lift at least this far either side of the crossing
+OVERPASS_JOIN_M = 40.0        # a same-level crossing this close to a bridge's deck zone joins it
+OVERPASS_SMOOTH_STATIONS = 5  # moving average over the lift (25 m at 5 m stations)
+
+
+def lift_overpasses(segs, passes=3):
+    """Raises the upper road at every mid-segment centerline crossing whose
+    upper road is an OSM bridge there, until it sits OVERPASS_SEPARATION_M
+    over the lower road. Upper = higher OSM layer, else the bridge one. A
+    non-bridge upper is skipped: terrain conforms to it, so lifting it would
+    bury the road below in fill. The road is raised to a floor that is the
+    deck height over the bridge run (and OVERPASS_FLAT_M around the crossing)
+    and falls OVERPASS_RAMP_GRADE per metre of road-graph distance beyond -
+    through junction nodes too - so the DEM's sag under the span fills in
+    instead of riding along; the lift is then lightly smoothed. Repeats so a
+    lifted road that is itself crossed over gets its upper road lifted too.
+
+    segs: [{"e","n","s","h","is_struct_s","is_tunnel_s","layer_s"}].
+    Returns (h list, over_road list - each crossing's flat deck zone,
+    lifted list - stations the lift moved, report rows
+    (x, y, up_seg, lo_seg, sep_before_m, sep_after_m), n_skipped)."""
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+
+    lines = {i: LineString(np.c_[g["e"], g["n"]]) for i, g in enumerate(segs) if len(g["e"]) > 1}
+    ids = list(lines)
+    tree = STRtree([lines[i] for i in ids])
+
+    def win(i, k):   # +-1 station: a crossing at an abutment reads the bridge's own tags
+        return range(max(k - 1, 0), min(k + 2, len(segs[i]["s"])))
+
+    def is_br(i, k):
+        return any(segs[i]["is_struct_s"][j] and not segs[i]["is_tunnel_s"][j] for j in win(i, k))
+
+    def layer(i, k):
+        return max(segs[i]["layer_s"][j] for j in win(i, k))
+
+    def near(i, p):   # by distance - projected length drifts from s over km
+        return int(np.argmin(np.hypot(segs[i]["e"] - p.x, segs[i]["n"] - p.y)))
+
+    crossings, level, n_skipped = [], [], 0   # [x, y, up, s_up, flat_lo, flat_hi, lo, s_lo]
+    for a in ids:
+        for b in (ids[j] for j in tree.query(lines[a])):
+            if b <= a:
+                continue
+            x = lines[a].intersection(lines[b])
+            for p in getattr(x, "geoms", [x]):
+                if p.geom_type != "Point":
+                    continue
+                da, db = lines[a].project(p), lines[b].project(p)
+                if min(da, lines[a].length - da, db, lines[b].length - db) < 3.0:
+                    continue   # the roads meet at a shared node: a junction, not a stack
+                ka, kb = near(a, p), near(b, p)
+                da, db = segs[a]["s"][ka], segs[b]["s"][kb]
+                la, lb = layer(a, ka), layer(b, kb)
+                if la != lb:
+                    up = a if la > lb else b
+                elif is_br(a, ka) != is_br(b, kb):
+                    up = a if is_br(a, ka) else b
+                else:
+                    level.append((a, da, b, db))   # at grade - unless next to a bridge, below
+                    continue
+                (ku, su), (lo, sl) = ((ka, da), (b, db)) if up == a else ((kb, db), (a, da))
+                if not is_br(up, ku):
+                    n_skipped += 1
+                    level.append((a, da, b, db))
+                    continue
+                st = segs[up]["is_struct_s"]
+                ku = next(j for j in win(up, ku) if st[j])
+                r0 = r1 = ku
+                while r0 > 0 and st[r0 - 1]:
+                    r0 -= 1
+                while r1 < len(st) - 1 and st[r1 + 1]:
+                    r1 += 1
+                s_up = segs[up]["s"]
+                crossings.append([p.x, p.y, up, su, min(s_up[r0], su - OVERPASS_FLAT_M),
+                                  max(s_up[r1], su + OVERPASS_FLAT_M), lo, sl])
+
+    # the OSM bridge way often stops short: the road below crosses the upper
+    # road's centerline again 10-30 m past it (Summit Post Blvd, I-70 over
+    # US 6) and was left at ~5 m with terrain fill. Such a same-level
+    # crossing near a bridge crossing joins its flat deck zone - unless the
+    # two roads also share a node: that's a ramp merging, not a road below
+    # (Summit seg264 at Shrine Pass, held down and then yanked 1.9 m by the
+    # junction flatten)
+    nodes = [{nd for nd, _ in g.get("node_s", ())} for g in segs]
+    extra_under = []
+    for c in crossings:
+        for a, sa, b, sb in level:
+            for r, sr, o in ((a, sa, b), (b, sb, a)):
+                if r == c[2] and c[4] - OVERPASS_JOIN_M <= sr <= c[5] + OVERPASS_JOIN_M                         and not nodes[r] & nodes[o]:
+                    c[4], c[5] = min(c[4], sr - OVERPASS_FLAT_M), max(c[5], sr + OVERPASS_FLAT_M)
+                    extra_under.append((r, o))
+
+    # a ramp that reaches a junction node continues into every road at that
+    # node - else the junction flatten pulls the lifted road back down to the
+    # unlifted ones in a step (Summit I-70 seg008's on-ramp gore: 2.5 m lift
+    # pulled to 0.4 m over 15 m, 28%)
+    by_node = defaultdict(list)
+    for i, g in enumerate(segs):
+        for node, s_node in g.get("node_s", ()):
+            by_node[node].append((i, s_node))
+    seg_nodes = defaultdict(list)
+    for node, inc in by_node.items():
+        if len(inc) > 1:
+            for i, s_node in inc:
+                seg_nodes[i].append((node, s_node))
+    under = defaultdict(set)
+    for c in crossings:
+        under[c[2]].add(c[6])
+    for r, o in extra_under:
+        under[r].add(o)
+
+    h0 = [np.array(g["h"], dtype=np.float64) for g in segs]
+    h = [v.copy() for v in h0]
+    box = np.ones(OVERPASS_SMOOTH_STATIONS) / OVERPASS_SMOOTH_STATIONS
+    for _ in range(passes):
+        lift = [np.zeros(len(v)) for v in h]
+        for _x, _y, up, su, f0, f1, lo, sl in crossings:
+            need = np.interp(sl, segs[lo]["s"], h[lo]) + OVERPASS_SEPARATION_M
+            s = np.asarray(segs[up]["s"], dtype=np.float64)
+            seen = {up} | under[up]   # never lift a road this bridge crosses
+            stack = [(up, np.maximum(np.maximum(f0 - s, s - f1), 0.0))]
+            while stack:
+                j, dj = stack.pop()
+                floor = need - OVERPASS_RAMP_GRADE * dj
+                lift[j] = np.maximum(lift[j], floor - h0[j])
+                for node, s_node in seg_nodes[j]:
+                    dn = float(np.interp(s_node, segs[j]["s"], dj))
+                    if need - OVERPASS_RAMP_GRADE * dn <= float(np.interp(s_node, segs[j]["s"], h0[j])):
+                        continue   # the floor is under the road here: the ramp has landed
+                    for k, s_k in by_node[node]:
+                        if k not in seen:
+                            seen.add(k)
+                            stack.append((k, dn + np.abs(np.asarray(segs[k]["s"], dtype=np.float64) - s_k)))
+        new_h = []
+        for v0, lf in zip(h0, lift):
+            lf = np.maximum(lf, 0.0)
+            if lf.max() > 0.0 and len(lf) > OVERPASS_SMOOTH_STATIONS:
+                # rounds off the crease where the floor lands; the end
+                # stations keep the raw floor so roads still meet at a node
+                pad = OVERPASS_SMOOTH_STATIONS // 2
+                sm = np.convolve(np.pad(lf, pad, mode="edge"), box, mode="valid")
+                sm[:pad], sm[-pad:] = lf[:pad], lf[-pad:]
+                lf = sm
+            new_h.append(v0 + lf)
+        if all(np.allclose(x, y, atol=0.01) for x, y in zip(h, new_h)):
+            break
+        h = new_h
+
+    over_road = [np.zeros(len(v), dtype=bool) for v in h]
+    rows = []
+    for x, y, up, su, f0, f1, lo, sl in crossings:
+        s = np.asarray(segs[up]["s"])
+        over_road[up] |= (s >= f0) & (s <= f1)
+        sep = [np.interp(su, segs[up]["s"], hh[up]) - np.interp(sl, segs[lo]["s"], hh[lo]) for hh in (h0, h)]
+        rows.append((x, y, up, lo, sep[0], sep[1]))
+    lifted = [np.abs(v - v0) > 0.01 for v, v0 in zip(h, h0)]
+    return h, over_road, lifted, rows, n_skipped
+
+
 JUNCTION_ZBIAS_PER_CLASS_M = 0.02   # tiny deterministic per-road-class Z
                                   # nudge (2 cm/class step below the major
                                   # road), scaled by junction influence

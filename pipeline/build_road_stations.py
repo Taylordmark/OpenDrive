@@ -142,6 +142,7 @@ from road_mesh_common import (STATION_SPACING, resample_stations,
                                despike_road_profile,
                                classify_wall_stations, junction_agreement_pass,
                                reconcile_junction_elevations,
+                               lift_overpasses, OVERPASS_SEPARATION_M,
                                ROAD_HALF_WIDTH, JUNCTION_BOX_MARGIN_M, JUNCTION_APPROACH_M,
                                JUNCTION_MAX_DISAGREEMENT_M, flatten_graph_junctions)
 
@@ -824,6 +825,23 @@ def main():
         print(f"{n_spike_repairs} station(s) despiked by the final grade-spike "
               f"repair pass (see SPIKE REPAIR lines above)")
 
+    # Overpass clearance (2026-10-08): the bare-earth DEM has no overpasses,
+    # so an OSM bridge over another road sat only 0.2-4 m above it - see
+    # lift_overpasses(). Before the conflict/junction passes so they see
+    # the lifted profile; the lifted ramps sit out the agreement pass below.
+    lifted_h, over_road, lifted, overpass_rows, n_overpass_skipped = lift_overpasses(
+        segments)
+    for seg, hh, o in zip(segments, lifted_h, over_road):
+        seg["h"], seg["over_road_s"] = hh, o
+    all_lifted = np.concatenate(lifted)
+    print(f"{len(overpass_rows)} bridge-over-road crossing(s): "
+          f"{sum(r[4] < OVERPASS_SEPARATION_M - 0.05 for r in overpass_rows)} lifted to "
+          f"{OVERPASS_SEPARATION_M} m separation ({int(all_lifted.sum())} station(s) moved); "
+          f"{n_overpass_skipped} grade-separated crossing(s) skipped (upper road not a bridge)")
+    for x, y, up, lo, before, after in overpass_rows:
+        print(f"  overpass ({x:.0f},{y:.0f}) '{segments[up]['road_name_s'][0]}' over "
+              f"'{segments[lo]['road_name_s'][0]}': {before:.1f} m -> {after:.1f} m")
+
     # cross-segment elevation-conflict pass (2026-07-25) - needs every
     # segment's final resampled stations first, hence deferred until after
     # the loop above instead of computed inline per-segment like is_struct_s
@@ -1049,7 +1067,7 @@ def main():
         all_h = np.concatenate([seg["h"] for seg in segments])
         agreed_h, _agree_touched = junction_agreement_pass(
             all_east, all_north, all_h, all_seg_idx,
-            junction_skip=conflict_flat | all_is_struct)
+            junction_skip=conflict_flat | all_is_struct | all_lifted)
         for idx in sorted(set(all_seg_idx[agreed_h != all_h].tolist())):
             segments[idx]["h"] = agreed_h[offsets[idx]:offsets[idx + 1]]
 
@@ -1065,7 +1083,9 @@ def main():
         # different mechanism (fixed station-count dilation, not
         # buffer_frac-of-run-length) and must never feed fill_structure_gaps
         # (these stations' elev_m is already correct real DEM elevation).
-        is_bridge_out = expand_carve_exclusion(seg["is_struct_s"], CARVE_BUFFER_FRAC) | conflict_s
+        # over_road: an overpass deck zone spans the road below, no fill under it
+        is_bridge_out = (expand_carve_exclusion(seg["is_struct_s"], CARVE_BUFFER_FRAC)
+                         | conflict_s | seg["over_road_s"])
         out_segments.append({
             "name": seg["name"],
             "lat": [round(float(v), 7) for v in seg["lat_s"]],
@@ -1073,6 +1093,7 @@ def main():
             "is_bridge": [bool(v) for v in is_bridge_out],
             "is_struct": [bool(v) for v in seg["is_struct_s"]],
             "is_tunnel": [bool(v) for v in seg["is_tunnel_s"]],
+            "over_road": [bool(v) for v in seg["over_road_s"]],
             "road_name": seg["road_name_s"],
             "oneway": seg["is_oneway_s"],
             "highway_class": seg["highway_s"],

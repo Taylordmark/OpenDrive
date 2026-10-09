@@ -32,14 +32,14 @@ water/coast, tunnels, wet weather) is phased in
   Example: US 6's west edge near Tennis Club Rd shows −0.2 to +1.5 m of
   skirt along its length (worst at (17088, 9005)).
 - **Junction pad leftovers** (§7.51):
-  - 29 Summit pads still sit more than 1 m off their road's grade
-    (worst 3.9 m); 28 of them are stacked crossings (see bridges below).
-    Was 108 before the median flatten and carriageway fix.
+  - 30 Summit pads read more than 1 m off grade; 29 are stacked
+    crossings where the probe hits the lifted deck above, not a pad
+    fault. Was 108 before the median flatten and carriageway fix.
   - SF steep-street tabling: 8 station steps of 40-46% where Jones,
     Filbert and Hyde (22-31%) flatten into a level junction box. A longer
     blend can't fix it (peak is ~1.3-1.9x the street grade); tilting the
     box along the steep street would. Judge in a drive first.
-  - Summit pad kinks 1004 (791 in the lane interior) / steps 1547
+  - Summit pad kinks 774 (603 in the lane interior) / steps 1319
     (holes 1). The 400 gate-coverage caps added ~170 kinks.
   - 15 Summit pads are pinned at the 18% tilt cap (`PAD_TILT_MAX_GRADE`,
     was 12% with 79 pinned).
@@ -52,8 +52,13 @@ water/coast, tunnels, wet weather) is phased in
     Filbert's 31% rim (102, -341). Same family as the steep-street item:
     close or steep junctions need pads shaped along the street, not
     level boxes.
-- **Bridges for stacked crossings.** Grade-separated crossings that don't
-  have a structure yet.
+- **Overpass leftovers** (status: Overpasses lifted):
+  - Columbine Drive (layer -1) under I-70 is skipped: the upper road
+    isn't a bridge in OSM, so nothing is lifted. Cut the lower road, or
+    trust the layer tag and build a deck.
+  - Lifted decks have no piers; a median pier needs the lower road's
+    footprint.
+  - 7 station steps of 12-13% where a ramp meets an existing grade.
 - **Rubber-banding: jitter and pull.** Carried over from the last drive test.
   Not fixed yet.
 - **Seam-failure investigation.** Carried over. Not started.

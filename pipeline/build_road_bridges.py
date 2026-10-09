@@ -82,7 +82,9 @@ def main():
     total_stations = 0
     for r in bridge_runs:
         xyzd = r["station_xyzd_cm"]
-        piers = build_piers(xyzd)
+        # ponytail: overpasses ship deck-only (no column dropped onto the road
+        # below); a median pier needs the lower road's footprint here
+        piers = [] if r.get("overpass") else build_piers(xyzd)
         total_piers += len(piers) // 4
         total_stations += len(xyzd) // 4
         out_runs.append({
