@@ -125,5 +125,6 @@ private:
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> BeamMat;
 	float LastNight = -1.0f;
+	int32 LastLampState = -1;   // player car brake|reverse, logged on change
 	TMap<TWeakObjectPtr<APawn>, TArray<TWeakObjectPtr<USpotLightComponent>>> Lights;
 };

@@ -116,7 +116,7 @@ public:
 	// Frisco spawn coasted ~19m down a 0.4% grade). Lives here rather than
 	// as a pawn-side SetHandbrakeInput(true) because the gamepad/wheel input
 	// paths rewrite the handbrake state every tick.
-	void EngageParkHold() { bParkHold = true; }
+	void EngageParkHold() { bParkHold = true; ParkHoldPos = FVector(UE_BIG_NUMBER); }
 	bool IsParkHeld() const { return bParkHold; }
 
 	// --- engine (pause menu swaps these live) ---
@@ -561,6 +561,7 @@ private:
 	float ThrottleIn = 0.0f, BrakeIn = 0.0f, SteerIn = 0.0f;
 	bool bHandbrakeIn = false;
 	bool bParkHold = false;   // see EngageParkHold()
+	FVector ParkHoldPos;      // where it holds, anchored on the first held tick
 
 	// engine/gearbox state
 	float EngineRpm = 900.0f;

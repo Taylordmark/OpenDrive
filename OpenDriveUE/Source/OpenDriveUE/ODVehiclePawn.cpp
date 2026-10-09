@@ -1415,9 +1415,26 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// wheel mesh scaled on its axle axis Y and tilted top-inward)
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 	{
+		// shown spin: rolling with the road, so a stopped car's wheels sit
+		// still and a moving one's turn true; the sim's own wheel speed only
+		// for real wheelspin / lock-up (>1 m/s slip) or in the air. Physics
+		// off (menu showroom) = still - the sim stops ticking there and its
+		// frozen Omega spun the wheels nonstop (2026-10-09, Taylor: "why
+		// dont the tires just normally sit still ... spinning like crazy").
+		float SpinRadS = 0.0f;
+		if (Body->IsSimulatingPhysics())
+		{
+			const float RadiusCm = Movement->GetWheelRadius(i);
+			const float RollRadS = Movement->GetForwardSpeed() / RadiusCm;
+			SpinRadS = Movement->GetWheelOmega(i);
+			if (Movement->IsWheelInContact(i)
+				&& FMath::Abs(SpinRadS - RollRadS) * RadiusCm < 100.0f)
+			{
+				SpinRadS = RollRadS;
+			}
+		}
 		WheelSpinDeg[i] = FMath::Fmod(WheelSpinDeg[i]
-			+ FMath::RadiansToDegrees(Movement->GetWheelOmega(i)) * DeltaSeconds,
-			360.0f);
+			+ FMath::RadiansToDegrees(SpinRadS) * DeltaSeconds, 360.0f);
 		const float S = Movement->GetWheelRadius(i) / ReferenceWheelMeshRadiusCm;
 		const float Width = i < 2
 			? Movement->FrontTireWidthScale : Movement->RearTireWidthScale;

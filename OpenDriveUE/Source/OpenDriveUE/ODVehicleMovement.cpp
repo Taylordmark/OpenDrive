@@ -310,9 +310,19 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	// so the release frame is never pinned.
 	if (bParkHold)
 	{
+		// hold a position, not zero velocity: gravity adds a step's worth
+		// of downhill speed after every zero pin, so a parked spawn on a
+		// grade still slid a steady 2 cm/s (2026-10-09, Taylor: "why do the
+		// wheels move when stationary" - ~14 cm in 6 s at Summit). Steer
+		// back by last step's creep instead; re-anchor after a teleport.
+		const FVector P = Body->GetComponentLocation();
+		if (FVector::DistSquared2D(P, ParkHoldPos) > FMath::Square(100.0f))
+		{
+			ParkHoldPos = P;
+		}
 		FVector Vel = Body->GetPhysicsLinearVelocity();
-		Vel.X = 0.0f;
-		Vel.Y = 0.0f;
+		Vel.X = (ParkHoldPos.X - P.X) / Dt;
+		Vel.Y = (ParkHoldPos.Y - P.Y) / Dt;
 		Body->SetPhysicsLinearVelocity(Vel);
 
 		// 2026-09-03 fix ("tips over on flat pavement right after settle",
@@ -960,6 +970,15 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 		const float ReM = W.Radius / 100.0f;                       // m
 		const bool bFront = W.Attach.X > 0.0f;
 
+		// A coupled driven wheel carries the engine's REFLECTED inertia
+		// (I*ratio^2 ~ 12x the wheel's own in 1st) - without it the
+		// driveline spin-up/down is unphysically twitchy.
+		const bool bDrivenCoupled = bDrivelineCoupled && W.bDriven;
+		const float EffInertia = WheelInertia + (bDrivenCoupled && DrivenCount > 0
+			? EngineInertia * FMath::Square(CurTotalRatio) * Efficiency
+				/ DrivenCount
+			: 0.0f);
+
 		float ReactionNm = 0.0f;
 		float WheelSlipRatio = 0.0f;   // braking slip; ABS reads this below
 		float WheelSlipAngle = 0.0f;   // cornering ABS reads this too
@@ -1075,8 +1094,21 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 				if (FMath::Abs(Vx) < 1.5f && EffectiveThrottle < 0.05f
 					&& W.BrakeNm < 1.0f)
 				{
-					const float FxStop =
-						QuarterMassKg * FMath::Abs(Vx) * 100.0f / Dt * 0.45f;
+					// FxStop bounds the car's side; SlipStop the wheel's.
+					// The slip denominator's 1 m/s floor makes Fx far too
+					// stiff for the wheel's inertia here, so explicit Euler
+					// overshot rolling speed every tick and the coasting
+					// wheel shuddered at a near-stop (2026-10-09, Taylor:
+					// "why do the wheels move when stationary" - FxR flipping
+					// sign each sample, omega -0.2/-0.9; mirrored in
+					// pipeline/check_wheel_settle.py). Cap at what closes the
+					// wheel-vs-road slip in one tick, both inertias counted.
+					const float SlipMassKg = 1.0f
+						/ (1.0f / QuarterMassKg + ReM * ReM / EffInertia);
+					const float FxStop = FMath::Min(
+						QuarterMassKg * FMath::Abs(Vx),
+						SlipMassKg * FMath::Abs(WheelSpeedMs - Vx))
+						* 100.0f / Dt * 0.45f;
 					Fx = FMath::Clamp(Fx, -FxStop, FxStop);
 				}
 			}
@@ -1109,16 +1141,8 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 			}
 		}
 
-		// integrate the drive/reaction half of wheel spin here; the brake
-		// half (ABS-modulated, axle-paired) happens in the pass below.
-		// A coupled driven wheel carries the engine's REFLECTED inertia
-		// (I*ratio^2 ~ 12x the wheel's own in 1st) - without it the
-		// driveline spin-up/down is unphysically twitchy.
-		const bool bDrivenCoupled = bDrivelineCoupled && W.bDriven;
-		const float EffInertia = WheelInertia + (bDrivenCoupled && DrivenCount > 0
-			? EngineInertia * FMath::Square(CurTotalRatio) * Efficiency
-				/ DrivenCount
-			: 0.0f);
+		// integrate the drive/reaction half of wheel spin below; the brake
+		// half (ABS-modulated, axle-paired) happens in the pass after.
 		if (bParkHold)
 		{
 			// The tire-force clamp above already zeroes Fx/Fy while parked

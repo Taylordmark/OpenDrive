@@ -194,6 +194,15 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		const UODVehicleMovement* Move = It->FindComponentByClass<UODVehicleMovement>();
 		const bool bBrake = Move->GetPedalBrake() > 0.05f;
 		const bool bReverse = Move->GetGear() < 0;
+		// which rear-lamp signal flips (2026-10-09, Taylor: backup lights
+		// flicker driving forward - gear never reads reverse in the trace)
+		if (It->IsPlayerControlled() && LastLampState != (int32(bBrake) + 2 * int32(bReverse)))
+		{
+			LastLampState = int32(bBrake) + 2 * int32(bReverse);
+			UE_LOG(LogTemp, Warning, TEXT("ODLamps: t=%.2f brake=%d reverse=%d pedal=%.3f gear=%d spd=%.0f"),
+				GetWorld()->GetTimeSeconds(), bBrake, bReverse, Move->GetPedalBrake(),
+				Move->GetGear(), Move->GetForwardSpeed());
+		}
 		const float RearLm = bReverse ? ReverseLightLm : bBrake ? BrakeLightLm : bOn ? TailLightLm : 0.0f;
 		for (int32 i = 0; i < Spots.Num(); ++i)
 		{
