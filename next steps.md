@@ -137,6 +137,11 @@ gravel crunch, and the snow/wet grip feel.
     slush/white colors, track spacing, the berm shape and lighting (WPO
     keeps the lip's old normal), terrain/foliage whitening, and how grip
     (slush 0.60, packed 0.45) and the deep-snow drag feel.
+  - wet weather (2026-10-09): Summit at night, `od.Weather Thunderstorm`,
+    then let it clear. Judge the puddles in road dips (they need wetness
+    > 0.6 and fade as it dries), the darker ground and trees, and each
+    strike's bolt plus the blue flash on the clouds and terrain (near
+    strikes are brighter and wider). `od.Weather Auto` releases.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).
@@ -326,16 +331,19 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 5. Weather and atmosphere
 
-- W2 gaps:
-  - puddle mask, wet terrain and wet foliage;
-  - the Dragon's road gets no wetness (it isn't an `AODRoadManager` mesh);
+- W2 gaps (puddles, wet ground/trees, Dragon road wetness and the lightning
+  bolt + flash light landed 2026-10-09):
   - no separate dust hiss;
-  - lightning has no bolt or cloud flash.
+  - wetness skips static-material flora (olive, yucca, oaks, shrubs, grass
+    cards), rocks, walls and the old Dragon's Landscape (`M_Terrain`);
+  - no puddles on the old Dragon (its OBJ road has no sag UV3);
+  - `M_Road_OneWay` slots aren't MIDs, so they stay dry;
+  - the engine cloud material's own lightning inputs are unused.
 - W4/W5 gaps:
   - the funnel doesn't visibly spin (needs a panning-noise material);
   - vortex wind acts sideways only;
   - rain ignores the vortex;
-  - no hail, no tornado audio, no storm surge;
+  - no tornado audio, no storm surge (hail dropped, Taylor 2026-10-09);
   - the HUD banner isn't text-measured.
 
 ## 6. Performance and stability

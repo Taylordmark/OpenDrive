@@ -157,6 +157,16 @@ private:
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
 	TWeakObjectPtr<AODRoadManager> RoadMgr;   // Weather W2 road "Wetness"; absent on Tail of the Dragon
 
+	/** Wet weather (2026-10-09): Tail of the Dragon's road is plain
+	 *  StaticMeshActors on the M_Road asset, not AODRoadManager chunks, so it
+	 *  gets one shared MID here (BindStaticRoadMID) for "Wetness". Its OBJ
+	 *  meshes carry only UV0, so PuddleAmount = 0 (M_Road's UV3 sag read
+	 *  would clamp to UV0). */
+	void BindStaticRoadMID();
+	bool bStaticRoadBound = false;
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> StaticRoadMID;
+
 	/** Simple runtime falling-snow effect (2026-09-07): a pool of tiny sphere
 	 *  instances in a world-aligned box that follows the camera (2026-10-06 -
 	 *  it used to ride the pawn root and twist with the car's roll/pitch),

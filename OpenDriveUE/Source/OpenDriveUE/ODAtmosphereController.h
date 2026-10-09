@@ -12,6 +12,7 @@ class AODWeatherController;
 class AODAmbientSoundManager;
 class UDirectionalLightComponent;
 class UExponentialHeightFogComponent;
+class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class USkyAtmosphereComponent;
 class USkyLightComponent;
@@ -77,6 +78,19 @@ private:
 
 	// ---- Weather W2 ----
 	float UpdateLightning(float DeltaSeconds, const AODWeatherController& Weather);
+	/** Wet weather (PLAN-REALISM Phase 6, 2026-10-09): places this strike's
+	 *  bolt (a jagged cylinder chain + one branch, M_LightningBolt) DistM out
+	 *  on a random bearing, and aims FlashLight from it - a shadowless second
+	 *  atmosphere light, so the flash lights the ground at night (the sun is
+	 *  below the horizon) and the clouds/sky. Tick drives both from Flash. */
+	void Strike(float DistM);
+	void EnsureBoltComponents();
+	UPROPERTY()
+	TObjectPtr<UInstancedStaticMeshComponent> BoltISM;
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> BoltMID;
+	UPROPERTY()
+	TObjectPtr<UDirectionalLightComponent> FlashLight;
 	void FindLights();
 
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;

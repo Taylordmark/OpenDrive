@@ -233,6 +233,26 @@ def _value_noise(mat, uv2, scale_cm, period=97.0, seed_offset=(0.0, 0.0)):
     return _lerp(mat, top, bot, fy)
 
 
+# Wet weather (PLAN-REALISM Phase 6, 2026-10-09): "Wetness" scalar, pushed by
+# AODSeasonController to the forest MIDs (conifer foliage, deciduous foliage
+# + bark). 0 = the exact dry graph. Species on the static materials keep the
+# default 0 (no MID yet - same gap as their snow).
+WET_DARKEN = 0.7            # albedo multiplier at Wetness 1
+WET_BARK_ROUGHNESS = 0.35   # soaked bark sheen
+WET_LEAF_ROUGHNESS = 0.45   # wet leaves catch the sky
+
+
+def _wetness(mat):
+    w = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -900, 900)
+    w.set_editor_property("parameter_name", "Wetness")
+    w.set_editor_property("default_value", 0.0)
+    return w
+
+
+def _wet_darken(mat, color, w, a_out=""):
+    return _mul(mat, color, _lerp(mat, _const(mat, 1.0), _const(mat, WET_DARKEN), w), a_out=a_out)
+
+
 # ----------------------------------------------------------- M_Bark_* (opaque)
 BARK_MATS = {
     "M_Bark_Conifer": ("T_BarkConifer", 0.80),
@@ -244,12 +264,15 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
     ts = MEL.create_material_expression(
         mat, unreal.MaterialExpressionTextureSample, -400, 0)
     ts.set_editor_property("texture", tex[tex_name])
-    MEL.connect_material_property(ts, "RGB", unreal.MaterialProperty.MP_BASE_COLOR)
+    wet = _wetness(mat)
+    wet_bark = _wet_darken(mat, ts, wet, a_out="RGB")
+    must_connect_property(wet_bark, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     rough = MEL.create_material_expression(
         mat, unreal.MaterialExpressionConstant, -400, 250)
     rough.set_editor_property("r", roughness)
-    MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    must_connect_property(_lerp(mat, rough, _const(mat, WET_BARK_ROUGHNESS), wet),
+                          "", unreal.MaterialProperty.MP_ROUGHNESS)
 
     mat.set_editor_property("used_with_nanite", True)
     # ODForestManager places every tree via UHierarchicalInstancedStaticMesh
@@ -290,9 +313,9 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
         boosted = _mul(mat, snow_cover_bark, _const(mat, 1.6))
         snow_amt_bark = _clamp01(mat, _sub(mat, boosted, patch))
 
-        bark_color = ts  # the plain sampled bark TextureSample node above
+        bark_color = wet_bark  # the sampled bark, wet-darkened above
         snow_color_bark = _const3(mat, 0.95, 0.96, 0.98)
-        snowed_bark = _lerp(mat, bark_color, snow_color_bark, snow_amt_bark, a_out="RGB")
+        snowed_bark = _lerp(mat, bark_color, snow_color_bark, snow_amt_bark)
         must_connect_property(snowed_bark, "", unreal.MaterialProperty.MP_BASE_COLOR)
         log("  + twig-snow SnowCover wiring (chunky patch threshold, ~35cm cells)")
 
@@ -315,7 +338,9 @@ must_connect_property(ts, "A", unreal.MaterialProperty.MP_OPACITY_MASK)
 rough = MEL.create_material_expression(
     m_fol, unreal.MaterialExpressionConstant, -400, 250)
 rough.set_editor_property("r", 0.85)
-MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+fol_wet = _wetness(m_fol)
+must_connect_property(_lerp(m_fol, rough, _const(m_fol, WET_LEAF_ROUGHNESS), fol_wet),
+                      "", unreal.MaterialProperty.MP_ROUGHNESS)
 
 # 2026-09-03 dark-crown fix: plain "Two Sided" only disables backface
 # culling, it does NOT flip the backface normal for lighting - half of every
@@ -526,7 +551,8 @@ base_after_fall = _lerp(m_fol, ts, fall_color, fall_amount, a_out="RGB")
 # color instead of the raw sampled atlas color (was `ts` "RGB" - see the
 # snowed_base_color wiring above); harmless for every non-deciduous species
 # since fall_amount is 0 there, so base_after_fall == ts exactly.
-if not MEL.connect_material_expressions(base_after_fall, "", snowed_base_color, "A"):
+# Wet weather: darken before the snow lerp, so fresh snow stays white.
+if not MEL.connect_material_expressions(_wet_darken(m_fol, base_after_fall, fol_wet), "", snowed_base_color, "A"):
     raise RuntimeError("could not re-point canopy-snow Lerp.A at base_after_fall")
 
 opacity_after_drop = _mul(m_fol, ts, _sub(m_fol, _const(m_fol, 1.0), drop_amount), a_out="A")

@@ -134,6 +134,20 @@ if SURFACE == "gravel":
     WetDarken, WetRoughness = 0.6, 0.4    # stones darken, little film
 elif SURFACE == "dirt":
     WetDarken, WetRoughness = 0.5, 0.25   # mud: dark, satin sheen
+# Puddles (PLAN-REALISM Phase 6, 2026-10-09): UV3.x = how far the pavement
+# sits below its +-20 m neighbours, cm (ODRoadManager's RoadSagCm; 0 off the
+# ribbon and on non-V3 chunks). Past Wetness 0.6, 2D value noise thresholded
+# by sag x wetness pools water into the sags. "PuddleAmount" (default 1)
+# turns them off where UV3 isn't the sag (the Dragon's OBJ meshes read UV0).
+# Mirrored by pipeline/check_puddle_sag.py.
+PuddleWetStart = 0.6
+PuddleWetFull = 0.9
+PuddleSagFullCm = 8.0           # sag that reaches PuddleMaxCover
+PuddleMaxCover = 0.7            # noise fraction pooled at full sag + wetness
+PuddleCellM = 2.5               # noise cell, m
+PuddleEdge = 10.0               # threshold sharpness
+PuddleDarken = 0.75             # on top of WetDarken
+PuddleRoughness = 0.03          # standing water = mirror
 # Snow (2026-10-06): per-chunk depth in Custom Primitive Data (AODRoadManager::
 # TickSnow) - "SnowDepth" (index 0, road cm) and "SideSnowDepth" (index 1,
 # roadside cm). Both 0 = the exact pre-snow graph output, incl. the WPO.
@@ -523,6 +537,32 @@ wet_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(WetDarken), wetness)
 wet_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
 
 
+# ---------------------------------------------------------------- puddles (Phase 6)
+def smooth01(f):
+    return g.mul(g.mul(f, f), g.sub(g.const(3.0), g.mul(f, g.const(2.0))))
+
+
+def value_noise2(x, y):
+    ix, iy, fx, fy = g.floorv(x), g.floorv(y), smooth01(g.fracv(x)), smooth01(g.fracv(y))
+
+    def h(dx, dy):
+        return hash1(g.add(g.add(ix, g.const(dx)), g.mul(g.add(iy, g.const(dy)), g.const(57.0))))
+
+    return g.lerp(g.lerp(h(0, 0), h(1, 0), fx), g.lerp(h(0, 1), h(1, 1), fx), fy)
+
+
+sag = g.mask(g.tex_coord(3), r=True)
+puddle_fill = g.mul(g.mul(g.clamp01(g.mul(g.sub(wetness, g.const(PuddleWetStart)), g.const(1.0 / (PuddleWetFull - PuddleWetStart)))),
+                          g.clamp01(g.mul(sag, g.const(1.0 / PuddleSagFullCm)))),
+                    g.mul(g.scalar_param("PuddleAmount", 1.0), g.const(PuddleMaxCover)))
+puddle_noise = value_noise2(g.mul(meter_pos, g.const(1.0 / PuddleCellM)),
+                            g.add(g.mul(v0, g.const(1.0 / PuddleCellM)), g.mul(wear_seed, g.const(131.0))))
+puddle = g.clamp01(g.mul(g.sub(puddle_noise, g.sub(g.const(1.0), puddle_fill)), g.const(PuddleEdge)))
+wet_albedo = g.mul(wet_albedo, g.lerp(g.const(1.0), g.const(PuddleDarken), puddle))
+wet_rough = g.lerp(wet_rough, g.const(PuddleRoughness), puddle)
+base_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), puddle)
+
+
 # ---------------------------------------------------------------- snow (per-chunk depth, CPD)
 def cpd_param(name, index):
     n = g.scalar_param(name, 0.0)
@@ -595,4 +635,4 @@ if not all_ok:
 
 log(f"built + saved {MAT_NAME} - asphalt sets={list(TILE_M.keys())}, "
     f"fallback half-width={RoadHalfWidthFallbackM}m, Wetness param (darken {WetDarken}, "
-    f"rough {WetRoughness}), SnowDepth/SideSnowDepth CPD params + berm WPO")
+    f"rough {WetRoughness}), puddles (UV3 sag, PuddleAmount), SnowDepth/SideSnowDepth CPD params + berm WPO")

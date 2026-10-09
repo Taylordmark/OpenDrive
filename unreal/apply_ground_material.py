@@ -126,6 +126,14 @@ DIRT_PATCH_STRENGTH = 0.30      # max blend toward the dirt-trail texture from m
 # Beach/sand blend (2026-07-27, Oahu era) - kept verbatim, see module docstring.
 SAND_COLOR = (0.76, 0.69, 0.52)
 SAND_ROUGHNESS = 0.55
+# Wet weather (PLAN-REALISM Phase 6, 2026-10-09): "Wetness" scalar pushed by
+# AODSeasonController from AODWeatherController::Wetness (same value as the
+# road's). 0 = the exact dry graph. Wet soil/rock darkens and takes a sheen;
+# steep rock (water runs off, the face stays slick) gets the gloss, flat
+# ground soaks it up and mostly darkens. Snow still lerps on top.
+WET_DARKEN = 0.6                # albedo multiplier at Wetness 1
+WET_ROUGHNESS_FLAT = 0.55       # roughness at Wetness 1, flat ground
+WET_ROUGHNESS_STEEP = 0.3       # ... and on steep rock
 BEACH_BAND_CM = 3.0 * 0.3048 * 100.0
 SEA_LEVEL_Z_CM = -ORIGIN_HEIGHT_M * 100.0
 
@@ -667,6 +675,12 @@ sand_color = g.const3(*SAND_COLOR)
 base_albedo = g.lerp(base_albedo, sand_color, sand_factor)
 base_rough = g.lerp(base_rough, g.const(SAND_ROUGHNESS), sand_factor)
 
+# ---------------------------------------------------------------- wetness (Phase 6)
+wetness = g.scalar_param("Wetness", 0.0)
+base_albedo = g.mul(base_albedo, g.lerp(g.const(1.0), g.const(WET_DARKEN), wetness))
+wet_rough_target = g.lerp(g.const(WET_ROUGHNESS_FLAT), g.const(WET_ROUGHNESS_STEEP), steep_w)
+base_rough = g.lerp(base_rough, g.binop(unreal.MaterialExpressionMin, base_rough, wet_rough_target), wetness)
+
 # ---------------------------------------------------------------- snow (altitude, noise-broken-up, reduced on cliffs)
 snow = sample_layer("snow")
 snow_low = g.scalar_param("SnowLineLowZCm", SNOW_LOW_CM)
@@ -734,7 +748,7 @@ log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"treeline={TREELINE_LOW_M:.0f}-{TREELINE_HIGH_M:.0f}m ({TREELINE_LOW_CM:.0f}-{TREELINE_HIGH_CM:.0f}cm), "
     f"snowline={SNOW_START_M:.0f}-{SNOW_FULL_M:.0f}m ({SNOW_LOW_CM:.0f}-{SNOW_HIGH_CM:.0f}cm), "
     f"layers={list(LAYERS.keys())}, triplanar=rock, "
-    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen], "
+    f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen,Wetness], "
     f"v3_macro={MACRO_FINE_SCALE_CM / 100:.0f}m/{MACRO_COARSE_SCALE_CM / 100:.0f}m, "
     f"patches={PATCH_FINE_SCALE_CM / 100:.0f}m/{PATCH_COARSE_SCALE_CM / 100:.0f}m, "
     f"shoulder={SHOULDER_MIN_M}-{SHOULDER_MAX_M}m+-{SHOULDER_JITTER_M}, "

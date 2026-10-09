@@ -2,6 +2,7 @@
 
 #include "Camera/PlayerCameraManager.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -9,6 +10,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Math/RandomStream.h"
 #include "Misc/CommandLine.h"
+#include "UObject/UObjectIterator.h"
 #include "ODForestManager.h"
 #include "ODRoadManager.h"
 #include "ODTerrainManager.h"
@@ -395,6 +397,10 @@ void AODSeasonController::PushParamsToMIDs()
 	// reading the season SnowCover member (road depth has its own term).
 	const AODWeatherController* Wx = WeatherCtl.Get();
 	const float Cover = FMath::Max(SnowCover, Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f);
+	// Wet weather (PLAN-REALISM Phase 6, 2026-10-09): the road's Wetness also
+	// darkens/glosses the ground and the forest MIDs ("Wetness" in
+	// apply_ground_material.py / build_flora_materials.py, 0 = dry).
+	const float Wet = Wx ? Wx->Wetness : 0.0f;
 	for (TActorIterator<AODTerrainManager> It(World); It; ++It)
 	{
 		AODTerrainManager* Terrain = *It;
@@ -425,6 +431,7 @@ void AODSeasonController::PushParamsToMIDs()
 			GroundMID->SetScalarParameterValue(TEXT("SnowLineLowZCm"), Low);
 			GroundMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), High);
 			GroundMID->SetScalarParameterValue(TEXT("SpringGreen"), SpringGreen);
+			GroundMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 		}
 	}
 	for (TActorIterator<AODWaterManager> It(World); It; ++It)
@@ -446,6 +453,7 @@ void AODSeasonController::PushParamsToMIDs()
 		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
 		{
 			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
+			FoliageMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 			// FallBlend is deliberately NOT pushed here (2026-09 deciduous-arc
 			// follow-up): this MID is the Conifer/evergreen species batch
 			// (see ConiferSpeciesIndex in ODForestManager.cpp), and
@@ -468,19 +476,67 @@ void AODSeasonController::PushParamsToMIDs()
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("LeafDrop"), LeafDrop);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 		}
 		if (UMaterialInstanceDynamic* DeciduousBarkMID = Forest->GetDeciduousBarkMID())
 		{
 			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
+			DeciduousBarkMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 		}
 	}
 	// Weather W2 (sec 7.40): wet road = darker + glossier (unreal/
 	// apply_road_material.py's "Wetness" param, 0 = the dry baseline).
+	bool bAnyRoadMgr = false;
 	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{
-		const AODWeatherController* Weather = WeatherCtl.Get();
-		It->SetWetness(Weather ? Weather->Wetness : 0.0f);
+		It->SetWetness(Wet);
+		bAnyRoadMgr = true;
 	}
+	if (!bAnyRoadMgr)
+	{
+		BindStaticRoadMID();
+		if (StaticRoadMID)
+		{
+			StaticRoadMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
+		}
+	}
+}
+
+void AODSeasonController::BindStaticRoadMID()
+{
+	if (bStaticRoadBound)
+	{
+		return;
+	}
+	bStaticRoadBound = true;
+	UMaterialInterface* RoadMat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road.M_Road"));
+	if (!RoadMat)
+	{
+		return;
+	}
+	int32 Swapped = 0;
+	for (TObjectIterator<UStaticMeshComponent> It; It; ++It)
+	{
+		if (It->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+		for (int32 i = 0; i < It->GetNumMaterials(); ++i)
+		{
+			if (It->GetMaterial(i) == RoadMat)
+			{
+				if (!StaticRoadMID)
+				{
+					StaticRoadMID = UMaterialInstanceDynamic::Create(RoadMat, this);
+					StaticRoadMID->SetScalarParameterValue(TEXT("PuddleAmount"), 0.0f);
+				}
+				It->SetMaterial(i, StaticRoadMID);
+				++Swapped;
+			}
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODSeasonController: no AODRoadManager - %d static M_Road slot(s) on a wetness MID"), Swapped);
 }
 
 void AODSeasonController::EnsureSnowfallComponent()

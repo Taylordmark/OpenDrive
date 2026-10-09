@@ -36,6 +36,46 @@ uint16 ReadU16LE(const uint8* P)
 // Returns false (leaving Out untouched) if the declared length would run
 // past End - the same "truncated file" bail-out every other parser in this
 // project uses, just for a variable-length field instead of a fixed one.
+// Puddles (PLAN-REALISM Phase 6, 2026-10-09): how far each ribbon station's
+// pavement sits below the mean of its +-PuddleSagHalfWindow neighbours, in
+// cm (0 = crest or straight grade). M_Road reads it from UV3.x. Ribbon verts
+// lead the chunk at 7 per station (pave-L/pave-R = columns 2/3, u0 0 or 1);
+// junction-pad verts appended after them (u0 strictly inside 0..1) get 0.
+// Mirrored in pipeline/check_puddle_sag.py.
+constexpr int32 PuddleSagHalfWindow = 4;   // +-20 m at 5 m stations
+TArray<float> RoadSagCm(const TArray<float>& Verts, const TArray<float>& Uvs, int32 VCount)
+{
+	TArray<float> Sag;
+	Sag.Init(0.0f, VCount);
+	int32 NRibbon = 0;
+	while (NRibbon < VCount && !(Uvs[NRibbon * 2] > 1e-3f && Uvs[NRibbon * 2] < 1.0f - 1e-3f))
+	{
+		++NRibbon;
+	}
+	const int32 NSt = NRibbon / 7;
+	TArray<float> Z;
+	Z.SetNumUninitialized(NSt);
+	for (int32 s = 0; s < NSt; ++s)
+	{
+		Z[s] = 0.5f * (Verts[(s * 7 + 2) * 3 + 2] + Verts[(s * 7 + 3) * 3 + 2]);
+	}
+	for (int32 s = 0; s < NSt; ++s)
+	{
+		const int32 A = FMath::Max(0, s - PuddleSagHalfWindow), B = FMath::Min(NSt - 1, s + PuddleSagHalfWindow);
+		float Sum = 0.0f;
+		for (int32 k = A; k <= B; ++k)
+		{
+			Sum += Z[k];
+		}
+		const float S = FMath::Max(0.0f, Sum / (B - A + 1) - Z[s]);
+		for (int32 c = 0; c < 7; ++c)
+		{
+			Sag[s * 7 + c] = S;
+		}
+	}
+	return Sag;
+}
+
 bool ReadPascalUtf8(const uint8*& Cur, const uint8* End, FString& Out)
 {
 	if (End - Cur < 2)
@@ -1141,10 +1181,17 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 		// Always 3 layers (2026-10-06): M_Road reads TexCoord[1]/[2] and must
 		// see zeros on a non-V3 chunk, not a clamped-to-UV0 read. UV2 = snow
-		// berm direction, see BermDir below.
-		Mesh.Attributes()->SetNumUVLayers(3);
+		// berm direction, see BermDir below. UV3.x = puddle sag (RoadSagCm).
+		Mesh.Attributes()->SetNumUVLayers(4);
 		FDynamicMeshUVOverlay* UV1 = Mesh.Attributes()->GetUVLayer(1);
 		FDynamicMeshUVOverlay* UV2 = Mesh.Attributes()->GetUVLayer(2);
+		FDynamicMeshUVOverlay* UV3 = Mesh.Attributes()->GetUVLayer(3);
+		const TArray<float> SagCm = RoadSagCm(Chunk.Verts, Chunk.Uvs, (int32)VCount);
+		TArray<int32> Uv3Ids; Uv3Ids.SetNumUninitialized(VCount);
+		for (uint32 v = 0; v < VCount; ++v)
+		{
+			Uv3Ids[v] = UV3->AppendElement(FVector2f(SagCm[v], 0.0f));
+		}
 		FDynamicMeshColorOverlay* Colors = nullptr;
 		if (bHasV3)
 		{
@@ -1251,6 +1298,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
 				UV1->SetTriangle(Tid, FIndex3i(Uv1Ids[I0], Uv1Ids[I1], Uv1Ids[I2]));
 				UV2->SetTriangle(Tid, FIndex3i(Uv2Ids[I0], Uv2Ids[I1], Uv2Ids[I2]));
+				UV3->SetTriangle(Tid, FIndex3i(Uv3Ids[I0], Uv3Ids[I1], Uv3Ids[I2]));
 				if (Colors)
 				{
 					Colors->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));

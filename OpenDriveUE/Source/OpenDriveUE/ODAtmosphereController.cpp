@@ -3,6 +3,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Components/VolumetricCloudComponent.h"
@@ -10,8 +11,11 @@
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/SkyLight.h"
+#include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "Math/RandomStream.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
@@ -47,11 +51,104 @@ constexpr float OvercastSkyLuminance = 0.35f; // x SkyLuminanceFactor
 constexpr float OvercastSun = 0.25f;          // x sun intensity
 constexpr float OvercastSkyLight = 0.6f;      // x sky light intensity
 constexpr float FlashSeconds = 0.35f;
+
+// ---- Lightning bolt + flash light (PLAN-REALISM Phase 6, 2026-10-09) ----
+// Mirrored in pipeline/check_lightning.py.
+constexpr float BoltCloudBaseM = 1500.0f;   // bolt top above the camera
+constexpr int32 BoltSegments = 14;
+constexpr int32 BoltBranchSegments = 5;
+constexpr float BoltJitter = 0.5f;          // lateral step / vertical step
+constexpr float BoltWidthPerKm = 1.5f;      // m wide per km away: stays a few px at 8 km
+constexpr float BoltMinWidthM = 1.0f;
+constexpr float FlashLightScale = 0.15f;    // flash light = day sun x this x Flash (peak 1.5..6)
+constexpr float FlashLightFallbackLux = 10.0f;
+
+// Appends N cylinder segments (/Engine/BasicShapes/Cylinder: 100 uu tall,
+// 100 uu across, centred) walking from A along Dir with sideways jitter;
+// returns the path's points (A first).
+TArray<FVector> AddBoltPath(TArray<FTransform>& Out, FRandomStream& R, FVector A, const FVector& Dir,
+	int32 N, float StepCm, float WidthCm)
+{
+	TArray<FVector> Pts{A};
+	for (int32 i = 0; i < N; ++i)
+	{
+		const FVector B = A + Dir * StepCm + FVector(R.FRandRange(-1.0f, 1.0f), R.FRandRange(-1.0f, 1.0f), 0.0f) * StepCm * BoltJitter;
+		const FVector D = B - A;
+		Out.Add(FTransform(FRotationMatrix::MakeFromZ(D).Rotator(), (A + B) * 0.5f,
+			FVector(WidthCm / 100.0f, WidthCm / 100.0f, D.Size() / 100.0f)));
+		Pts.Add(B);
+		A = B;
+	}
+	return Pts;
+}
 }
 
 AODAtmosphereController::AODAtmosphereController()
 {
 	PrimaryActorTick.bCanEverTick = true;   // Weather W2
+	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));   // bolt + flash light attach here
+}
+
+void AODAtmosphereController::EnsureBoltComponents()
+{
+	if (BoltISM)
+	{
+		return;
+	}
+	UMaterialInterface* Mat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_LightningBolt.M_LightningBolt"));
+	if (!Mat)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODAtmosphereController: M_LightningBolt missing (unreal/apply_lightning_material.py) - default material"));
+	}
+	BoltMID = Mat ? UMaterialInstanceDynamic::Create(Mat, this) : nullptr;
+	BoltISM = NewObject<UInstancedStaticMeshComponent>(this);
+	BoltISM->SetupAttachment(RootComponent);
+	BoltISM->SetUsingAbsoluteLocation(true);
+	BoltISM->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")));
+	if (BoltMID)
+	{
+		BoltISM->SetMaterial(0, BoltMID);
+	}
+	BoltISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	BoltISM->SetCastShadow(false);
+	BoltISM->SetVisibility(false);
+	BoltISM->RegisterComponent();
+
+	FlashLight = NewObject<UDirectionalLightComponent>(this);
+	FlashLight->SetupAttachment(RootComponent);
+	FlashLight->SetUsingAbsoluteRotation(true);
+	FlashLight->SetMobility(EComponentMobility::Movable);
+	FlashLight->SetCastShadows(false);
+	FlashLight->SetLightColor(FLinearColor(0.75f, 0.8f, 1.0f));
+	FlashLight->SetAtmosphereSunLight(true);       // lights the clouds and sky too
+	FlashLight->SetAtmosphereSunLightIndex(1);     // the sun is index 0
+	FlashLight->SetAtmosphereSunDiskColorScale(FLinearColor::Black);   // no second sun disk
+	FlashLight->SetIntensity(0.0f);
+	FlashLight->SetVisibility(false);
+	FlashLight->RegisterComponent();
+}
+
+void AODAtmosphereController::Strike(float DistM)
+{
+	EnsureBoltComponents();
+	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	const FVector C = Cam ? Cam->GetCameraLocation() : GetActorLocation();
+	FRandomStream R(FMath::Rand());
+	const float Bearing = R.FRandRange(0.0f, 2.0f * PI);
+	const FVector Ground = C + FVector(FMath::Cos(Bearing), FMath::Sin(Bearing), 0.0f) * DistM * 100.0f;
+	const float HeightCm = BoltCloudBaseM * 100.0f;
+	const float WidthCm = FMath::Max(BoltMinWidthM, BoltWidthPerKm * DistM / 1000.0f) * 100.0f;
+	const float StepCm = HeightCm / BoltSegments;
+	TArray<FTransform> Xf;
+	const TArray<FVector> Main = AddBoltPath(Xf, R, Ground + FVector(0.0f, 0.0f, HeightCm), FVector::DownVector,
+		BoltSegments, StepCm, WidthCm);
+	const FVector Out = FVector(R.FRandRange(-1.0f, 1.0f), R.FRandRange(-1.0f, 1.0f), 0.0f).GetSafeNormal();
+	AddBoltPath(Xf, R, Main[R.RandRange(2, BoltSegments / 2)], (FVector::DownVector + Out * 0.8f).GetSafeNormal(),
+		BoltBranchSegments, StepCm * 0.8f, WidthCm * 0.5f);
+	BoltISM->ClearInstances();
+	BoltISM->AddInstances(Xf, false);
+	FlashLight->SetWorldRotation((C - (Ground + FVector(0.0f, 0.0f, HeightCm * 0.5f))).Rotation());
 }
 
 void AODAtmosphereController::BeginPlay()
@@ -424,7 +521,24 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	// it cached and the next change here overwrites it from our baseline.
 	if (UDirectionalLightComponent* Sun = SunComp.Get(); Sun && BaseSunIntensity > 0.0f && Sun->Intensity > 0.0f)
 	{
-		Sun->SetIntensity(BaseSunIntensity * FMath::Lerp(1.0f, OvercastSun, CloudW) * (1.0f + Flash));
+		Sun->SetIntensity(BaseSunIntensity * FMath::Lerp(1.0f, OvercastSun, CloudW));
+	}
+	// Lightning (Phase 6): the bolt glows and FlashLight fires with Flash -
+	// day or night, since the night sun is below the horizon. Skipped in the
+	// garage blackout (sun at 0) like the lights above.
+	const bool bFlash = Flash > 0.0f && !(SunComp.IsValid() && SunComp->Intensity <= 0.0f);
+	if (BoltISM)
+	{
+		BoltISM->SetVisibility(bFlash);
+		if (BoltMID)
+		{
+			BoltMID->SetScalarParameterValue(TEXT("Glow"), Flash);
+		}
+	}
+	if (FlashLight)
+	{
+		FlashLight->SetVisibility(bFlash);
+		FlashLight->SetIntensity((BaseSunIntensity > 0.0f ? BaseSunIntensity : FlashLightFallbackLux) * FlashLightScale * Flash);
 	}
 	if (USkyLightComponent* Sky = SkyLightComp.Get(); Sky && BaseSkyLightIntensity > 0.0f && Sky->Intensity > 0.0f)
 	{
@@ -480,6 +594,7 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 			const float Near = 1.0f - (DistM - 500.0f) / 7500.0f;
 			FlashAge = 0.0f;
 			FlashPeak = FMath::Lerp(1.5f, 6.0f, Near);
+			Strike(DistM);
 			if (!AmbientMgr.IsValid())
 			{
 				for (TActorIterator<AODAmbientSoundManager> It(GetWorld()); It; ++It) { AmbientMgr = *It; break; }
