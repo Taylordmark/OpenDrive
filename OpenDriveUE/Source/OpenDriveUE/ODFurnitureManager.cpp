@@ -38,7 +38,7 @@ namespace
 	};
 	constexpr int32 NumFurnitureTypes = UE_ARRAY_COUNT(FurnitureTypes);
 	constexpr int32 StreetLightType = 8;
-	constexpr int32 RecordBytes = 21;   // <B5f
+	constexpr int32 FurnitureRecordBytes = 21;   // <B5f
 }
 
 AODFurnitureManager::AODFurnitureManager()
@@ -83,12 +83,12 @@ bool AODFurnitureManager::ParseFurnitureTileFile(const FString& Path, FParsedFur
 	Out.GenerationId = ReadGenerationId(Cur);
 	Cur += GenerationIdBytes;
 	const uint32 Count = ReadU32LE(Cur); Cur += 4;
-	if ((int64)(Bin.GetData() + Bin.Num() - Cur) < (int64)Count * RecordBytes)
+	if ((int64)(Bin.GetData() + Bin.Num() - Cur) < (int64)Count * FurnitureRecordBytes)
 	{
 		return false;
 	}
 	Out.Props.Reserve(Count);
-	for (uint32 i = 0; i < Count; ++i, Cur += RecordBytes)
+	for (uint32 i = 0; i < Count; ++i, Cur += FurnitureRecordBytes)
 	{
 		FParsedFurnitureProp& P = Out.Props.AddDefaulted_GetRef();
 		P.Type = Cur[0];

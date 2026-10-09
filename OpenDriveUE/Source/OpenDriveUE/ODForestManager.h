@@ -231,6 +231,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
 	float GrassRadiusCm = 12000.0f;   // 2026-10-09: was 60 m - Taylor watched cells pop in; M_Foliage now thins tufts out over the 0.5R..R fade band
 
+	/** Speed lead (2026-10-09, "grass needs to draw a little further ahead,
+	 *  maybe based on speed"): the grass circle's centre slides this many
+	 *  seconds of travel ahead of the car, capped at GrassMaxLeadCm, and
+	 *  cells built meanwhile cull at GrassRadiusCm + lead. */
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	float GrassLeadSeconds = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Ground Cover")
+	float GrassMaxLeadCm = 6000.0f;
+
 	/** Bare gap past the pavement edge: the shoulder strip's widest band
 	 *  (SHOULDER_MAX_M + edge jitter in apply_ground_material.py). */
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
@@ -436,7 +446,7 @@ public:
 
 	// --- trunk collision (moved from the retired ODForestCollisionManager) ---
 	UPROPERTY(EditAnywhere, Category = "Collision")
-	int32 PoolSize = 48;
+	int32 PoolSize = 96;   // trunks + rocks share it (2026-10-09, was 48 trunks only)
 
 	UPROPERTY(EditAnywhere, Category = "Collision")
 	float CollisionRadius = 6000.0f;
@@ -453,6 +463,7 @@ private:
 		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;
 		TArray<FVector> Trunks;        // world tree positions (collision)
 		TArray<float> TrunkScales;
+		TArray<FVector4> Rocks;        // rock collision spheres: xyz centre, w radius (cm)
 	};
 
 	bool LoadMask();
@@ -517,6 +528,7 @@ private:
 	static constexpr float GrassCellCm = 1600.0f;
 	static constexpr int32 GrassLatticeN = 8;   // 2 m squares per cell side
 	static constexpr int32 GrassCellsPerTick = 2;
+	float GrassLeadCm = 0.0f;   // this tick's lead, see GrassLeadSeconds
 	TMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GrassCells;   // null = built, nothing to grow
 	TMap<FIntPoint, double> GrassFirstTry;
 	void ReleaseTile(const FIntPoint& Key);
@@ -632,6 +644,7 @@ private:
 	// one-time) and applied per-instance in BuildTile() so a rock/scrub's
 	// GEOMETRY BASE - not its pivot - sits on the traced ground point.
 	float RockMeshBaseOffsetCm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	FBox RockMeshBounds[4] = {FBox(ForceInit), FBox(ForceInit), FBox(ForceInit), FBox(ForceInit)};   // for each rock's collision sphere (UpdateCollision)
 	float ScrubMeshBaseOffsetCm = 0.0f;
 	// Throttled visibility into the base-offset correction above (temporary
 	// QA instrumentation, same 5 s cadence convention as the other counters
@@ -645,6 +658,7 @@ private:
 
 	UPROPERTY()
 	TArray<TObjectPtr<UCapsuleComponent>> Pool;
+	TArray<FVector> PoolAt;   // centre of the obstacle each Pool slot holds (stable slots)
 
 	TMap<FIntPoint, FTile> Tiles;
 

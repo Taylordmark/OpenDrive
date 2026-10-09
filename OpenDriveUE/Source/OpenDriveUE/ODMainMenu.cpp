@@ -412,6 +412,11 @@ void AODMainMenu::OpenMenu()
 	// showroom camera at its first, unpositioned frame. The preview pawn
 	// can't drive off anyway (PlaceInShowroom disables physics). OpenGarage()
 	// pauses because it opens mid-drive, with the camera already placed.
+	// The pause menu's "Main Menu" row arrives here PAUSED (2026-10-09,
+	// Taylor: "selecting main menu when driving should take you back to the
+	// garage view") - unpause so it runs exactly like a fresh boot: pawn,
+	// sky and the re-spawned vista managers all tick again.
+	UGameplayStatics::SetGamePaused(this, false);
 	SetCursorVisible(true);
 }
 

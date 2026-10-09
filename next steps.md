@@ -150,6 +150,14 @@ gravel crunch, and the snow/wet grip feel.
     shouldn't rubber-band when Near tiles stream in. Scene menu: Season
     sits above Weather, and the Weather row only cycles that season's
     weather (Summit winter: Clear, Overcast, Snow, Blizzard, Fog).
+  - drive feedback round 2 (2026-10-09): Summit trees and boulders should
+    stop the car (pebbles under 15 cm still drive over); grass should
+    reach further ahead at speed; pause -> Main Menu should land in the
+    garage room. Night/Dusk: headlights should be nearly the only light,
+    with a faint moonlit floor, a moon disk and stars that hide behind
+    clouds and fog. Tune `NightMinEV`, `StarBrightness`, `MoonIntensity`
+    on the DayNight controller. Check the log for `M_NightSky` shader
+    errors (built with -nullrhi, never compiled for a GPU yet).
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).
@@ -251,7 +259,7 @@ gravel crunch, and the snow/wet grip feel.
   - free-roam ↔ stage entry flow;
   - stage discovery (drive to a famous road to unlock its time trial);
   - a cache-management UI. This one is a release requirement.
-- **Night sky:** moon and stars. Optional "real-time accurate" sun.
+- **Night sky:** optional "real-time accurate" sun and moon phases (moon and stars done 2026-10-09).
 
 ## 4. World pipeline
 

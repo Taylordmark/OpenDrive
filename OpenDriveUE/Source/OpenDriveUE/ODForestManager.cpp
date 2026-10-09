@@ -301,6 +301,7 @@ void AODForestManager::BeginPlay()
 		if (const UStaticMesh* Mesh = RockMeshes[i].Get())
 		{
 			RockMeshBaseOffsetCm[i] = Mesh->GetBoundingBox().Min.Z;
+			RockMeshBounds[i] = Mesh->GetBoundingBox();
 		}
 	}
 	if (const UStaticMesh* Mesh = ScrubMesh.Get())
@@ -321,6 +322,7 @@ void AODForestManager::BeginPlay()
 		Cap->RegisterComponent();
 		Pool.Add(Cap);
 	}
+	PoolAt.Init(FVector(UE_BIG_NUMBER), PoolSize);
 
 	// ground-truth elevation grid + road centerline (open-world levels,
 	// 2026-07-20) - independent of the biome/mask path below, loaded
@@ -1985,17 +1987,19 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 			if (bRock)
 			{
 				const int32 MeshIdx = RockBatchBase + RockVariantIdx;
-				Batches[MeshIdx].Emplace(FRotator(Pitch, Yaw, Roll), PlacementLoc,
-					FVector(ScaleBase * JitterX, ScaleBase * JitterY, ScaleBase * JitterZ));
-				// No collision: these are small stylized rocks (see
-				// RockMinScale/RockMaxScale) - deliberately NOT added to the
-				// trunk-capsule-pool pattern. That pool is sized/shaped
-				// (vertical capsule) for tree trunks specifically; giving
-				// rocks real collision would mean a second pool plus
-				// per-rock capsule orientation to match the random
-				// pitch/roll above, for an object the player mostly just
-				// drives past rather than into. Skipped entirely per the
-				// task's "otherwise skip collision" fallback.
+				const FVector RockScale(ScaleBase * JitterX, ScaleBase * JitterY, ScaleBase * JitterZ);
+				Batches[MeshIdx].Emplace(FRotator(Pitch, Yaw, Roll), PlacementLoc, RockScale);
+				// collision sphere (2026-10-09, "most rocks were not causing
+				// collisions" - they had none, see below): the smallest scaled
+				// half-extent, so the sphere never pokes out of the rock.
+				// Pebbles under 15 cm stay drive-over.
+				const FBox& RB = RockMeshBounds[RockVariantIdx];
+				const float RockR = (RB.GetExtent() * RockScale).GetMin();
+				if (RockR >= 15.0f)
+				{
+					Tile.Rocks.Add(FVector4(PlacementLoc
+						+ FRotator(Pitch, Yaw, Roll).RotateVector(RB.GetCenter() * RockScale), RockR));
+				}
 				++NRocksPlaced;
 			}
 			else
@@ -2333,7 +2337,7 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		Hism->SetStaticMesh(ScrubMesh);
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Hism->SetCullDistances(GrassRadiusCm * 0.5f, GrassRadiusCm);   // fade band, see M_Foliage PerInstanceFadeAmount
+		Hism->SetCullDistances((GrassRadiusCm + GrassLeadCm) * 0.5f, GrassRadiusCm + GrassLeadCm);   // fade band, see M_Foliage PerInstanceFadeAmount
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
@@ -2359,8 +2363,11 @@ void AODForestManager::UseSeasonFoliage(UMeshComponent* Comp) const
 	}
 }
 
-void AODForestManager::UpdateGrass(const FVector& Loc, const AActor* Player)
+void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 {
+	const FVector Vel2D = Player->GetVelocity() * FVector(1, 1, 0);
+	GrassLeadCm = FMath::Min(Vel2D.Size() * GrassLeadSeconds, GrassMaxLeadCm);
+	const FVector Loc = CarLoc + Vel2D.GetSafeNormal() * GrassLeadCm;
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / GrassCellCm), FMath::FloorToInt(Loc.Y / GrassCellCm));
 	const int32 Reach = FMath::CeilToInt(GrassRadiusCm / GrassCellCm);
 
@@ -2419,7 +2426,8 @@ void AODForestManager::ReleaseTile(const FIntPoint& Key)
 
 void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 {
-	struct FNear { FVector Pos; float Scale; float DistSq; };
+	// trunks are vertical capsules, rocks spheres (capsule with HalfHeight == Radius)
+	struct FNear { FVector Pos; float Radius; float HalfHeight; float DistSq; };
 	TArray<FNear> Near;
 	const float R2 = CollisionRadius * CollisionRadius;
 	const FIntPoint Center(FMath::FloorToInt(PlayerLoc.X / TileSizeCm),
@@ -2436,28 +2444,66 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 					const float D2 = FVector::DistSquared2D(Tile->Trunks[i], PlayerLoc);
 					if (D2 < R2)
 					{
-						Near.Add({Tile->Trunks[i], Tile->TrunkScales[i], D2});
+						const float S = Tile->TrunkScales[i];
+						Near.Add({Tile->Trunks[i] + FVector(0, 0, TrunkHalfHeight * S),
+							TrunkRadius * S, TrunkHalfHeight * S, D2});
+					}
+				}
+				for (const FVector4& Rock : Tile->Rocks)
+				{
+					const float D2 = FVector::DistSquared2D(FVector(Rock), PlayerLoc);
+					if (D2 < R2)
+					{
+						Near.Add({FVector(Rock), (float)Rock.W, (float)Rock.W, D2});
 					}
 				}
 			}
 		}
 	}
 	Near.Sort([](const FNear& A, const FNear& B) { return A.DistSq < B.DistSq; });
+	const int32 NumNear = Near.Num();
+	Near.SetNum(FMath::Min(NumNear, Pool.Num()));
 
-	for (int32 i = 0; i < Pool.Num(); ++i)
+	// Stable slots (2026-10-09, "most of the trees and rocks were not causing
+	// collisions"): a slot keeps its obstacle while that stays in the nearest
+	// set. The old code re-dealt every slot by distance rank each frame and
+	// moved it without teleport - for a kinematic capsule that is a kinematic
+	// TARGET, so Chaos swept each re-dealt capsule in from its previous tree
+	// over the whole step instead of standing it at the new one.
+	// ponytail: O(pool^2) match, fine at ~100 slots; hash PoolAt if the pool grows
+	TArray<bool> Kept;
+	Kept.Init(false, Near.Num());
+	TArray<int32> Free;
+	for (int32 s = 0; s < Pool.Num(); ++s)
 	{
-		UCapsuleComponent* Cap = Pool[i];
-		if (i < Near.Num())
+		const int32 Hit = Near.IndexOfByPredicate([&](const FNear& N) { return N.Pos == PoolAt[s]; });
+		if (Hit != INDEX_NONE && !Kept[Hit])
 		{
-			Cap->SetWorldLocation(Near[i].Pos
-				+ FVector(0, 0, TrunkHalfHeight * Near[i].Scale));
-			Cap->SetWorldScale3D(FVector(Near[i].Scale));
-			Cap->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+			Kept[Hit] = true;
 		}
 		else
 		{
-			Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Free.Add(s);
 		}
+	}
+	int32 F = 0;
+	for (int32 i = 0; i < Near.Num(); ++i)
+	{
+		if (Kept[i])
+		{
+			continue;
+		}
+		const int32 s = Free[F++];
+		UCapsuleComponent* Cap = Pool[s];
+		Cap->SetCapsuleSize(Near[i].Radius, Near[i].HalfHeight, false);
+		Cap->SetWorldLocation(Near[i].Pos, false, nullptr, ETeleportType::TeleportPhysics);
+		Cap->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		PoolAt[s] = Near[i].Pos;
+	}
+	for (; F < Free.Num(); ++F)
+	{
+		Pool[Free[F]]->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PoolAt[Free[F]] = FVector(UE_BIG_NUMBER);
 	}
 
 	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastDiagTime > 5.0)
@@ -2472,8 +2518,8 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 			}
 		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODForestManager: tiles=%d instances=%d trunksNear=%d capsulesOn=%d"),
-			Tiles.Num(), NumInst, Near.Num(), FMath::Min(Near.Num(), Pool.Num()));
+			TEXT("ODForestManager: tiles=%d instances=%d obstaclesNear=%d capsulesOn=%d"),
+			Tiles.Num(), NumInst, NumNear, Near.Num());
 	}
 }
 

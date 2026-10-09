@@ -338,7 +338,7 @@ void AODPauseMenu::Activate()
 		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
 			bOpen = false;                // hand the screen to the front-end
-			Main->OpenMenu();             // keeps the game paused
+			Main->OpenMenu();             // unpauses, like a fresh boot
 		}
 	}
 	else if (Selected == 9)               // Quit Game

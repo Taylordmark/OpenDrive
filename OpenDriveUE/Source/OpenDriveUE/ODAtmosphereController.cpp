@@ -537,6 +537,23 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	}
 	if (FlashLight)
 	{
+		// the moon shares atmosphere index 1 (its disk) - it steps aside so
+		// two lights never compete for the slot
+		if (!MoonComp.IsValid())
+		{
+			for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
+			{
+				UDirectionalLightComponent* Comp = It->FindComponentByClass<UDirectionalLightComponent>();
+				if (Comp && Comp->IsUsedAsAtmosphereSunLight() && Comp->GetAtmosphereSunLightIndex() == 1)
+				{
+					MoonComp = Comp;
+				}
+			}
+		}
+		if (MoonComp.IsValid())
+		{
+			MoonComp->SetVisibility(!bFlash);
+		}
 		FlashLight->SetVisibility(bFlash);
 		FlashLight->SetIntensity((BaseSunIntensity > 0.0f ? BaseSunIntensity : FlashLightFallbackLux) * FlashLightScale * Flash);
 	}
@@ -553,14 +570,14 @@ void AODAtmosphereController::FindLights()
 	{
 		return;
 	}
-	// The sun is the atmosphere sun light (AODDayNightController's moon is
-	// spawned with bAtmosphereSunLight=false); fall back to the first one.
+	// The sun is atmosphere light 0 (AODDayNightController's moon is
+	// atmosphere light 1, for its disk); fall back to the first one.
 	if (BaseSunIntensity <= 0.0f)
 	{
 		for (TActorIterator<ADirectionalLight> It(World); It; ++It)
 		{
 			UDirectionalLightComponent* Comp = It->FindComponentByClass<UDirectionalLightComponent>();
-			if (Comp && (Comp->IsUsedAsAtmosphereSunLight() || !SunComp.IsValid()))
+			if (Comp && ((Comp->IsUsedAsAtmosphereSunLight() && Comp->GetAtmosphereSunLightIndex() == 0) || !SunComp.IsValid()))
 			{
 				SunComp = Comp;
 			}

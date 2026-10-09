@@ -91,6 +91,7 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> BoltMID;
 	UPROPERTY()
 	TObjectPtr<UDirectionalLightComponent> FlashLight;
+	TWeakObjectPtr<UDirectionalLightComponent> MoonComp;   // AODDayNightController's moon, also atmosphere light 1 - hidden while FlashLight is lit
 	void FindLights();
 
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
