@@ -1003,6 +1003,46 @@ JUNCTION_MAX_DISAGREEMENT_M = 10.0   # = WALL_MIN_GRADE (0.50, defined below -
                                   # same "leave it alone, don't manufacture
                                   # new geometry from it" treatment already
                                   # given to bridge/tunnel endpoints above.
+JUNCTION_PULL_MAX_GRADE = 0.10   # flatten_graph_junctions: steepest grade a
+                                  # junction pull may ADD to a road - the approach
+                                  # lengthens past JUNCTION_APPROACH_M for a big pull
+
+
+def flatten_graph_junctions(elev, offsets, seg_s, incident, targets, box_r):
+    """Pulls each junction's roads to its target height (2026-10-08 rewrite of
+    build_road_stations' inline pass). Inside box_r a station takes the target;
+    past it a smoothstep blends back over JUNCTION_APPROACH_M, or longer when
+    the pull is big enough that 1.5 * pull / length would add more than
+    JUNCTION_PULL_MAX_GRADE. Junctions apply one after another as continuous
+    blends - the old "strongest pull wins" switched targets between two close
+    junctions in one station step (Summit: all 51 station steps over 40%
+    grade sat in junction blends, e.g. seg377's 4.3 m jump between boxes).
+
+    incident: node -> [(seg_i, s_node)], targets: node -> elev.
+    Returns (final_elev, w): w is the plain JUNCTION_APPROACH_M weight
+    (0 = in a box, 1 = untouched), min over junctions - the lane-marking
+    suppression and in_junction_box masks keep their old footprint."""
+    final = np.array(elev, dtype=np.float64)
+    w_min = np.ones(len(final))
+    for node, inc in incident.items():
+        if len(inc) < 2 or node not in targets:
+            continue
+        target = targets[node]
+        for seg_i, s_node in inc:
+            lo, hi = offsets[seg_i], offsets[seg_i + 1]
+            d = np.abs(np.asarray(seg_s[seg_i], dtype=np.float64) - s_node)
+            pull = abs(target - float(np.interp(s_node, seg_s[seg_i], elev[lo:hi])))
+            for L, out in ((JUNCTION_APPROACH_M, None),
+                           (max(JUNCTION_APPROACH_M, 1.5 * pull / JUNCTION_PULL_MAX_GRADE), final)):
+                t = np.clip((d - box_r) / L, 0.0, 1.0)
+                w = t * t * (3.0 - 2.0 * t)
+                if out is None:
+                    w_min[lo:hi] = np.minimum(w_min[lo:hi], w)
+                else:
+                    out[lo:hi] = target * (1.0 - w) + out[lo:hi] * w
+    return final, w_min
+
+
 JUNCTION_ZBIAS_PER_CLASS_M = 0.02   # tiny deterministic per-road-class Z
                                   # nudge (2 cm/class step below the major
                                   # road), scaled by junction influence

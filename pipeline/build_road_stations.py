@@ -143,7 +143,7 @@ from road_mesh_common import (STATION_SPACING, resample_stations,
                                classify_wall_stations, junction_agreement_pass,
                                reconcile_junction_elevations,
                                ROAD_HALF_WIDTH, JUNCTION_BOX_MARGIN_M, JUNCTION_APPROACH_M,
-                               JUNCTION_MAX_DISAGREEMENT_M)
+                               JUNCTION_MAX_DISAGREEMENT_M, flatten_graph_junctions)
 
 # ---------------------------------------------------------------- config
 DEM_ZOOM = 15                   # matches build_terrain_tiles.py's MAX_ZOOM
@@ -967,10 +967,12 @@ def main():
             # with <2 incident segments to begin with.
             continue
         elevs_ok = [z for _, _, z in ok]
-        # highest incident approach wins (same "never lower a station, only
-        # raise" doctrine reconcile_junction_elevations() above already
-        # uses) - every other road meeting here blends UP to it, never down.
-        target_elev = float(max(elevs_ok))
+        # median, not the highest (2026-10-08): "highest wins" lifted a road
+        # up to JUNCTION_MAX_DISAGREEMENT_M (10 m) over a 20 m approach -
+        # seg776 rode a 40% ramp onto a junction plateau. Meeting in the
+        # middle halves the pull, and flatten_graph_junctions stretches the
+        # approach of whatever pull is left.
+        target_elev = float(np.median(elevs_ok))
         junction_target_elev[node_id] = target_elev
         junctions.append({"east_m": float(ej), "north_m": float(nj),
                            "elev_m": target_elev, "num_roads": len(incident_ok)})
@@ -998,29 +1000,9 @@ def main():
         # segment's OWN arc-length distance from its OWN endpoint - so a
         # station can only be pulled toward a junction its road structurally
         # connects to, never one it merely passes near in plan view.
-        final_elev = current_elev.copy()
-        best_w = np.ones(len(current_elev))   # 1.0 = untouched; smaller = more pulled
-        for node_id, incident in junction_incident.items():
-            if len(incident) < 2:
-                continue
-            target = junction_target_elev[node_id]
-            for seg_i, s_node in incident:
-                lo, hi = offsets[seg_i], offsets[seg_i + 1]
-                s_seg = np.asarray(segments[seg_i]["s"], dtype=np.float64)
-                d = np.abs(s_seg - s_node)
-                w = np.ones_like(d)
-                w[d <= box_r] = 0.0
-                ease = (d > box_r) & (d <= box_r + JUNCTION_APPROACH_M)
-                t = (d[ease] - box_r) / JUNCTION_APPROACH_M
-                w[ease] = t * t * (3.0 - 2.0 * t)
-                seg_slice = best_w[lo:hi]
-                pull_here = w < seg_slice   # this junction pulls harder than
-                                             # whatever (if anything) already
-                                             # claimed this station
-                seg_slice[pull_here] = w[pull_here]
-                best_w[lo:hi] = seg_slice
-                final_elev[lo:hi] = np.where(
-                    pull_here, target * (1.0 - w) + current_elev[lo:hi] * w, final_elev[lo:hi])
+        final_elev, best_w = flatten_graph_junctions(
+            current_elev, offsets, [seg["s"] for seg in segments],
+            junction_incident, junction_target_elev, box_r)
         all_junction_suppress_elev = 1.0 - best_w   # kept for the print below only
     else:
         print("0 real junction nodes detected (3+ incident roads) - no elevation flattening applied")
