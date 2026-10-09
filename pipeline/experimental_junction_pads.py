@@ -465,6 +465,12 @@ def nearest_chunk(chunks, xy_m):
 # junctions in an OSM-derived network are T/Y, not X, so requiring a literal
 # centerline crossing (tried first) found zero real junctions.
 JUNCTION_OVERLAP_M = 2.0 * ROAD_HALF_WIDTH
+# ...which also catches divided-highway carriageways running side by side
+# 6-9 m apart (I-70 seg0/seg1: 23 pads). Two roads that run within
+# PARALLEL_MAX_DEG of each other and whose centerlines never come within
+# PARALLEL_MIN_GAP_M never meet; a real Y merge shares an OSM node (~0 m).
+PARALLEL_MAX_DEG = 20.0
+PARALLEL_MIN_GAP_M = 2.0
 
 
 def closest_segment_points(ax, ay, bx, by, cx, cy, dx, dy):
@@ -578,13 +584,15 @@ def find_crossings(east, north, s_m, elev, seg_ids, structural):
         elev_b = elev[ej] + u * (elev[ej + 1] - elev[ej])
         if abs(elev_a - elev_b) > JUNCTION_MAX_ELEV_DIFF_M:
             continue   # grade-separated crossing, not a real merge
+        ang = crossing_angle_deg(east[ei + 1] - east[ei], north[ei + 1] - north[ei],
+                                  east[ej + 1] - east[ej], north[ej + 1] - north[ej])
+        if ang < PARALLEL_MAX_DEG and dist2 > PARALLEL_MIN_GAP_M ** 2:
+            continue   # side-by-side carriageways, not a junction
         if any((ix - sx) ** 2 + (iy - sy) ** 2 < 25.0 for sx, sy in seen_xy):
             continue   # same physical junction already found via another edge pair
         seen_xy.append((ix, iy))
         s_a = s_m[ei] + t * (s_m[ei + 1] - s_m[ei])
         s_b = s_m[ej] + u * (s_m[ej + 1] - s_m[ej])
-        ang = crossing_angle_deg(east[ei + 1] - east[ei], north[ei + 1] - north[ei],
-                                  east[ej + 1] - east[ej], north[ej + 1] - north[ej])
         crossings.append({
             "xy": (ix, iy), "angle_deg": ang,
             "a": {"seg": int(seg_ids[ei]), "edge": ei, "s": s_a, "elev": elev_a},
