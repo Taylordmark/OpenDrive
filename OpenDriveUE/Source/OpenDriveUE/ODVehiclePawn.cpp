@@ -1,5 +1,6 @@
 #include "ODVehiclePawn.h"
 #include "ODAssetDetail.h"
+#include "ODVisualStyle.h"
 
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -95,6 +96,7 @@ void AODVehiclePawn::EnsureMeshes()
 		if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, ChassisPath)))
 		{
 			Body->SetStaticMesh(Chassis);
+			ODVisualStyle::PickSlots(Body);
 			Body->BodyInstance.bOverrideMass = true;
 			Body->BodyInstance.SetMassOverride(MassKg);
 			Movement->MarkBodyDirty();   // mass/COM re-derived on next tick
@@ -113,6 +115,7 @@ void AODVehiclePawn::EnsureMeshes()
 			for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 			{
 				WheelVisuals[i]->SetStaticMesh(Wheel);
+				ODVisualStyle::PickSlots(WheelVisuals[i]);
 			}
 		}
 	}
@@ -198,6 +201,7 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(Def->ChassisMesh.LoadSynchronous()))
 	{
 		Body->SetStaticMesh(Chassis);
+		ODVisualStyle::PickSlots(Body);
 	}
 	else
 	{
@@ -222,6 +226,7 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 			if (WV)
 			{
 				WV->SetStaticMesh(Wheel);
+				ODVisualStyle::PickSlots(WV);
 				WV->SetRelativeScale3D(FVector(WheelVisualScale));
 			}
 		}

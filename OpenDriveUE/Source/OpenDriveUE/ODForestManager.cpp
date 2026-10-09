@@ -1,5 +1,6 @@
 #include "ODForestManager.h"
 #include "ODAssetDetail.h"
+#include "ODVisualStyle.h"
 
 #include "Components/CapsuleComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -222,11 +223,11 @@ void AODForestManager::BeginPlay()
 	// array's own comment for why ODForestManager keeps its own superset.
 	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
-		TreeMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		TreeMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 	for (const TCHAR* Path : ShrubMeshPaths)
 	{
-		ShrubMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		ShrubMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 
 	// Ground cover (2026-09-03) - see the RockMeshes declaration in
@@ -242,17 +243,17 @@ void AODForestManager::BeginPlay()
 	};
 	for (const TCHAR* Path : RockMeshPaths)
 	{
-		RockMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		RockMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
-	ScrubMesh = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft")));
+	ScrubMesh = ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(
+		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"))));
 
 	// Real CC0 rock texture (bonus scope, 2026-09-03) - see RockMat's own
 	// header comment. Missing asset (script not yet run) is not fatal - the
 	// HISM SetMaterial() call in BuildTile() just no-ops, same "optional
 	// dependency" convention every LoadObject in this file already follows.
-	RockMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030"));
+	RockMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030")));
 
 	// Seasons feature (2026-09-07): one shared MID for canopy snow, applied
 	// ONLY to the Conifer (evergreen) species batch in BuildTile() below -
@@ -263,8 +264,8 @@ void AODForestManager::BeginPlay()
 	// (added by unreal/build_flora_materials.py), not from anything here -
 	// every HISM using this MID still varies per-instance because
 	// PerInstanceRandom is a per-instance shader input, not a MID parameter.
-	if (UMaterialInterface* FoliageBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage")))
+	if (UMaterialInterface* FoliageBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage"))))
 	{
 		FoliageSeasonMID = UMaterialInstanceDynamic::Create(FoliageBase, this);
 
@@ -283,8 +284,8 @@ void AODForestManager::BeginPlay()
 	// snow (SnowCover-driven, see build_flora_materials.py's M_Bark_Aspen
 	// wiring) must not affect tree_scrub_oak, which also uses M_Bark_Aspen's
 	// STATIC (non-dynamic) reference and is out of this task's scope.
-	if (UMaterialInterface* BarkBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen")))
+	if (UMaterialInterface* BarkBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen"))))
 	{
 		DeciduousBarkMID = UMaterialInstanceDynamic::Create(BarkBase, this);
 	}
@@ -2356,7 +2357,9 @@ void AODForestManager::UseSeasonFoliage(UMeshComponent* Comp) const
 	if (!FoliageSeasonMID) return;
 	for (int32 i = 0; i < Comp->GetNumMaterials(); ++i)
 	{
-		if (Comp->GetMaterial(i) == FoliageSeasonMID->Parent)
+		// Pick: a stylized mesh still carries plain M_Foliage when Realistic
+		// made the MID's parent M_Foliage_real (identity in Stylized)
+		if (ODVisualStyle::Pick(Comp->GetMaterial(i)) == FoliageSeasonMID->Parent)
 		{
 			Comp->SetMaterial(i, FoliageSeasonMID);
 		}

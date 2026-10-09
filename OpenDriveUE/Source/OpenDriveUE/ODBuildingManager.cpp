@@ -1,4 +1,5 @@
 #include "ODBuildingManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "ODRoadManager.h"
@@ -99,8 +100,8 @@ void AODBuildingManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	FacadeMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_BuildingFacade.M_BuildingFacade"));
+	FacadeMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_BuildingFacade.M_BuildingFacade")));
 
 	ClampSpawnRadiusToTerrainCollision();
 }

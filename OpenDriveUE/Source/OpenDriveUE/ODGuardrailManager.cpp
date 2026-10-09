@@ -1,4 +1,5 @@
 #include "ODGuardrailManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -26,10 +27,10 @@ void AODGuardrailManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	WBeamMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Guardrail_WBeam.M_Guardrail_WBeam"));
-	JerseyMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Guardrail_Jersey.M_Guardrail_Jersey"));
+	WBeamMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Guardrail_WBeam.M_Guardrail_WBeam")));
+	JerseyMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Guardrail_Jersey.M_Guardrail_Jersey")));
 	SlickPhysMat = LoadObject<UPhysicalMaterial>(nullptr,
 		TEXT("/Game/OpenDrive/Physics/PM_GuardrailSlick.PM_GuardrailSlick"));
 	PostMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));

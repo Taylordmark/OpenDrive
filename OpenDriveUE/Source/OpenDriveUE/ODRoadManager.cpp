@@ -1,4 +1,5 @@
 #include "ODRoadManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Algo/Reverse.h"
@@ -116,20 +117,20 @@ void AODRoadManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	RoadMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road.M_Road"));
+	RoadMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road.M_Road")));
 	// Weather W2 (sec 7.40): one shared MID so AODSeasonController can push
 	// the "Wetness" scalar to every road chunk at once.
 	if (RoadMat)
 	{
 		RoadMat = UMaterialInstanceDynamic::Create(RoadMat, this);
 	}
-	RoadMatOneWay = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay"));
-	RoadMatGravel = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Gravel.M_Road_Gravel"));
-	RoadMatDirt = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Dirt.M_Road_Dirt"));
+	RoadMatOneWay = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_OneWay.M_Road_OneWay")));
+	RoadMatGravel = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Gravel.M_Road_Gravel")));
+	RoadMatDirt = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road_Dirt.M_Road_Dirt")));
 	// unpaved roads get their own shared MIDs so SetWetness reaches them too
 	if (RoadMatGravel)
 	{

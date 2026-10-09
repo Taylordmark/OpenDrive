@@ -1,4 +1,5 @@
 #include "ODTerrainManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "ODForestManager.h" // EODBiome only, for BiomeGroundTintTable below - no calls into AODForestManager itself
@@ -242,8 +243,8 @@ void AODTerrainManager::BeginPlay()
 	// which is correct (this is the ground beside the road, not the
 	// driving surface). LoadObject failing is a silent no-op, same
 	// null-safety convention as AODRoadManager::RoadMat.
-	TerrainMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
+	TerrainMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized")));
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: TerrainMat load %s"),
 		TerrainMat ? TEXT("OK") : TEXT("FAILED (terrain will use engine default material)"));
 

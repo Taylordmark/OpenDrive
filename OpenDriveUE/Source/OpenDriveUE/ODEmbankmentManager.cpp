@@ -1,4 +1,5 @@
 #include "ODEmbankmentManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -23,8 +24,8 @@ void AODEmbankmentManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	EmbankMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Embankment.M_Embankment"));
+	EmbankMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Embankment.M_Embankment")));
 
 	UE_LOG(LogTemp, Display, TEXT("ODEmbankmentManager: EmbankMat=%s"),
 		EmbankMat ? TEXT("OK") : TEXT("FAILED"));
