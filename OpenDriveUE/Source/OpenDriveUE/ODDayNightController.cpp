@@ -99,6 +99,11 @@ void AODDayNightController::BeginPlay()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODDayNightController: no M_NightSky - run unreal/apply_night_sky_material.py; no stars"));
 	}
+	BeamMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/OpenDrive/Materials/M_HeadlightBeam.M_HeadlightBeam"));
+	if (!BeamMat)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODDayNightController: no M_HeadlightBeam - run unreal/apply_headlight_beam_material.py; no beams"));
+	}
 }
 
 void AODDayNightController::Tick(float DeltaSeconds)
@@ -210,6 +215,49 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			{
 				Spot->SetVisibility(Lm > 0.0f);
 			}
+		}
+		// visible beams (BeamHaze): M_HeadlightBeam on a sphere off the nose,
+		// fed both head spots relative to its centre. ponytail: unshadowed -
+		// the beam shows through trees it passes (it still ends where the view
+		// hits them); light-space occlusion would need the spots' shadow maps.
+		UStaticMeshComponent* Beam = It->FindComponentByTag<UStaticMeshComponent>(TEXT("HeadlightBeam"));
+		if (!Beam && BeamMat)
+		{
+			Beam = NewObject<UStaticMeshComponent>(*It);
+			Beam->ComponentTags.Add(TEXT("HeadlightBeam"));
+			Beam->SetupAttachment(It->GetRootComponent());
+			Beam->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")));
+			Beam->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Beam->SetCastShadow(false);
+			Beam->bAffectDistanceFieldLighting = false;
+			Beam->bVisibleInReflectionCaptures = false;
+			Beam->bVisibleInRayTracing = false;
+			Beam->SetMaterial(0, UMaterialInstanceDynamic::Create(BeamMat, Beam));
+			Beam->SetVisibility(false);
+			Beam->RegisterComponent();
+		}
+		const USpotLightComponent* L = Spots[0].Get();
+		const USpotLightComponent* R = Spots[1].Get();
+		const bool bBeam = bOn && BeamHaze > 0.0f && L && R;
+		if (Beam && Beam->GetVisibleFlag() != bBeam)
+		{
+			Beam->SetVisibility(bBeam);
+		}
+		if (Beam && bBeam)
+		{
+			const FVector Dir = L->GetForwardVector();
+			const FVector Centre = (L->GetComponentLocation() + R->GetComponentLocation()) * 0.5 + Dir * (BeamRadius - 300.0);
+			Beam->SetWorldLocation(Centre);
+			Beam->SetWorldScale3D(FVector(BeamRadius / 50.0));   // engine sphere: 50 cm radius
+			UMaterialInstanceDynamic* BeamMID = Cast<UMaterialInstanceDynamic>(Beam->GetMaterial(0));
+			const float Cd = HeadlightLm / (2.0f * PI * (1.0f - FMath::Cos(FMath::DegreesToRadians(L->OuterConeAngle))));
+			BeamMID->SetVectorParameterValue(TEXT("Lamp0"), FLinearColor(L->GetComponentLocation() - Centre));
+			BeamMID->SetVectorParameterValue(TEXT("Lamp1"), FLinearColor(R->GetComponentLocation() - Centre));
+			BeamMID->SetVectorParameterValue(TEXT("BeamDir"), FLinearColor(Dir));
+			BeamMID->SetVectorParameterValue(TEXT("Beam"), FLinearColor(1.0f, 0.95f, 0.85f) * (Cd * BeamHaze * 100.0f));
+			BeamMID->SetScalarParameterValue(TEXT("Radius"), BeamRadius);
+			BeamMID->SetScalarParameterValue(TEXT("CosIn"), FMath::Cos(FMath::DegreesToRadians(L->InnerConeAngle)));
+			BeamMID->SetScalarParameterValue(TEXT("CosOut"), FMath::Cos(FMath::DegreesToRadians(L->OuterConeAngle)));
 		}
 		// lamp lenses: the car mesh's "lights" slot (head, tail, reverse share it)
 		const float Head = bOn ? HeadlampGlow : 0.0f;

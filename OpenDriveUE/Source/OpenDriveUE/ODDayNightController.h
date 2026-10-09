@@ -7,6 +7,7 @@
 class ADirectionalLight;
 class APostProcessVolume;
 class UMaterialInstanceDynamic;
+class UMaterialInterface;
 class USpotLightComponent;
 class UStaticMeshComponent;
 
@@ -63,6 +64,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float BrakelampGlow = 400.0f;
 
+	/** Visible headlight beams in any weather (2026-10-09, Taylor: "a
+	 *  transparent beam of light ... dimmer than where the lights actually
+	 *  land ... it should work in all scenarios"): M_HeadlightBeam
+	 *  (unreal/apply_headlight_beam_material.py) marches the two head spots
+	 *  through this much air haze (scattering, 1/m) on a sphere off the nose.
+	 *  pipeline/check_headlight_beam.py tunes it. Weather fog adds on top. */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float BeamHaze = 0.015f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float BeamRadius = 2200.0f;
+
 	/** Moon light intensity (lux) once the sun drops below the horizon - a
 	 * dim night key light so Lumen has something to expose against instead
 	 * of clipping to black (2026-08-25, Taylor: exposure-clipping warning /
@@ -110,6 +122,8 @@ private:
 	TObjectPtr<UStaticMeshComponent> StarDome;
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> StarMID;
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> BeamMat;
 	float LastNight = -1.0f;
 	TMap<TWeakObjectPtr<APawn>, TArray<TWeakObjectPtr<USpotLightComponent>>> Lights;
 };
