@@ -6,7 +6,8 @@ each car's nose at night. Additive, unlit, two-sided with no depth test;
 only back faces draw (TwoSidedSign), so it works with the camera inside or
 outside the sphere. Per pixel a Custom node marches the view ray through
 the sphere, stopped at the scene depth, summing haze x phase x spot cone /
-d^2 for both lamps - the beam fades with distance and off-axis, and ends
+(d^2 + (10 m)^2) for both lamps (the soft core keeps a chase camera
+looking down the beam able to see through it) - the beam fades with distance and off-axis, and ends
 where it hits the road, a tree or the car.
 
 All positions are relative to the sphere centre (object position), so large
@@ -34,24 +35,21 @@ float b = dot(C, rd);
 float h = b * b - (dot(C, C) - Radius * Radius);
 float tNear = max(0.0, -b - sqrt(max(h, 0.0)));
 if (tEnd <= tNear) return float3(0, 0, 0);
-const float G = 0.2;
-float dt = (tEnd - tNear) / 32.0;
+float dt = (tEnd - tNear) / 48.0;
 float jit = frac(52.9829189 * frac(dot(Px, float2(0.06711056, 0.00583715))));
 float s = 0.0;
-for (int i = 0; i < 32; i++)
+for (int i = 0; i < 48; i++)
 {
     float3 x = C + rd * (tNear + (i + jit) * dt);
     for (int k = 0; k < 2; k++)
     {
         float3 v = x - (k == 0 ? L0 : L1);
-        float d = max(length(v), 100.0);
-        float3 l = v / d;
-        float t = saturate((dot(l, Dir) - CosOut) / (CosIn - CosOut));
-        float ph = (1.0 - G * G) / (12.566 * pow(1.0 + G * G + 2.0 * G * dot(l, rd), 1.5));
-        s += t * t * (3.0 - 2.0 * t) * ph / (d * d);
+        float d2 = dot(v, v);
+        float t = saturate((dot(v, Dir) * rsqrt(d2) - CosOut) / (CosIn - CosOut));
+        s += t * t * (3.0 - 2.0 * t) / (d2 + 1.0e6);   // + (10 m)^2: soft core, see-through from behind
     }
 }
-return Beam * s * dt;
+return Beam * s * dt / 12.566;   // isotropic phase
 """
 
 

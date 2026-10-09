@@ -71,9 +71,9 @@ public:
 	 *  through this much air haze (scattering, 1/m) on a sphere off the nose.
 	 *  pipeline/check_headlight_beam.py tunes it. Weather fog adds on top. */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float BeamHaze = 0.015f;
+	float BeamHaze = 0.01f;
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float BeamRadius = 2200.0f;
+	float BeamRadius = 4500.0f;   // reaches ~87 m, the spots' 90 m attenuation
 
 	/** Moon light intensity (lux) once the sun drops below the horizon - a
 	 * dim night key light so Lumen has something to expose against instead
