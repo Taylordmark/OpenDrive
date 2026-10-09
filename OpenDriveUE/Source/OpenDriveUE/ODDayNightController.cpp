@@ -263,7 +263,8 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		const float Head = bOn ? HeadlampGlow : 0.0f;
 		// at night brake / reverse = 5x tail (a fixed daylight value blooms the scene)
 		const float Signal = bOn ? TaillampGlow * 5.0f : BrakelampGlow;
-		const float Tail = bBrake ? Signal : (bOn ? TaillampGlow : 0.0f);
+		// reversing keeps the brake lamps lit too (Taylor 2026-10-09)
+		const float Tail = (bBrake || bReverse) ? Signal : (bOn ? TaillampGlow : 0.0f);
 		TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
 		for (UStaticMeshComponent* Mesh : Meshes)
 		{

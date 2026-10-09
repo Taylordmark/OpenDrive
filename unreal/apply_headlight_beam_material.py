@@ -6,7 +6,7 @@ each car's nose at night. Additive, unlit, two-sided with no depth test;
 only back faces draw (TwoSidedSign), so it works with the camera inside or
 outside the sphere. Per pixel a Custom node marches the view ray through
 the sphere, stopped at the scene depth, summing haze x phase x spot cone /
-(d^2 + (10 m)^2) for both lamps (the soft core keeps a chase camera
+(d^2 + (15 m)^2) for both lamps (the soft core keeps a chase camera
 looking down the beam able to see through it) - the beam fades with distance and off-axis, and ends
 where it hits the road, a tree or the car.
 
@@ -46,7 +46,7 @@ for (int i = 0; i < 48; i++)
         float3 v = x - (k == 0 ? L0 : L1);
         float d2 = dot(v, v);
         float t = saturate((dot(v, Dir) * rsqrt(d2) - CosOut) / (CosIn - CosOut));
-        s += t * t * (3.0 - 2.0 * t) / (d2 + 1.0e6);   // + (10 m)^2: soft core, see-through from behind
+        s += t * t * (3.0 - 2.0 * t) / (d2 + 2.25e6);   // + (15 m)^2: soft core, see-through from behind
     }
 }
 return Beam * s * dt / 12.566;   // isotropic phase

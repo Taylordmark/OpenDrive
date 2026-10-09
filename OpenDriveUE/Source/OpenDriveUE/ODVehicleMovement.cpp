@@ -706,7 +706,7 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		ReverseIntent = 0.0f;
 	}
 	// while reversing the pedals swap: brake input drives, throttle brakes
-	float Demand = Gear < 0 ? BrakeIn : ThrottleIn;
+	float Demand = Gear < 0 ? (IsReverseRollingForward() ? 0.0f : BrakeIn) : ThrottleIn;
 	// setup top-speed cap (offroad gearing): fade throttle over the last 8 km/h
 	if (TopSpeedCapKph > 0.0f && Gear > 0)
 	{

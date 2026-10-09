@@ -99,7 +99,14 @@ public:
 	float GetThrottleInput() const { return ThrottleIn; }
 	float GetBrakeInput() const { return BrakeIn; }
 	/** The pedal that is braking: throttle while reversing (pedals swap). */
-	float GetPedalBrake() const { return Gear < 0 ? ThrottleIn : BrakeIn; }
+	// reverse: throttle brakes - and so does the reverse pedal while the car
+	// still rolls forward from the auto-shift under 4 mph (Taylor 2026-10-09:
+	// "gets me to like 3mph then I have to hit the parking brake")
+	bool IsReverseRollingForward() const { return Gear < 0 && FwdSpeedCmS > 30.0f; }
+	float GetPedalBrake() const
+	{
+		return Gear >= 0 ? BrakeIn : IsReverseRollingForward() ? FMath::Max(ThrottleIn, BrakeIn) : ThrottleIn;
+	}
 	float GetSteeringInput() const { return SteerIn; }
 
 	// --- spawn parking hold (2026-09-02) ---

@@ -23,7 +23,7 @@ HEAD_LM, COS_IN, COS_OUT = 4500.0, math.cos(math.radians(22)), math.cos(math.rad
 CD = HEAD_LM / (2 * math.pi * (1 - COS_OUT))
 HAZE = 0.01                       # BeamHaze (1/m)
 RADIUS = 4500.0                   # BeamRadius, cm: reaches 2R - 3 m ahead, ~ the spots' 90 m
-G, D0, N = 0.0, 1000.0, 48         # = MARCH_HLSL: phase g, core softening (cm), steps
+G, D0, N = 0.0, 1500.0, 48         # = MARCH_HLSL: phase g, core softening (cm), steps
 MID = 0.5                         # night mid grey, nits (check_night_exposure.py)
 
 PITCH = math.radians(-6)
