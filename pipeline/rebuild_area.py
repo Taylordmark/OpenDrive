@@ -139,6 +139,7 @@ STAGES = [
     # needs them all; furniture and menu spots read its patched sidecar, so it
     # precedes them. --fresh-baseline drops the previous bake's backups.
     ("experimental_junction_pads.py --fresh-baseline", "junction pads: regrade + pad road tiles, re-carve terrain"),
+    ("export_pad_points_bin.py", "junction-pad pavement points -> padpts_*.bin (forest road exclusion)"),
     ("build_road_barrier.py", "build road_barrier.json"),
     ("export_road_barrier_bin.py", "export barrier tiles -> Content/OpenDrive/Masks/barrier_*.bin"),
     # GUARDRAILS (2026-09-04): road-above-terrain drop detection (dam

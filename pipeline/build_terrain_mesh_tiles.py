@@ -1368,11 +1368,13 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
 
     if is_near:
         # AUDIT.md item 1: adaptive martini triangulation instead of a
-        # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. `elev`
-        # (meters, pre-UE-Z-shift) is what martini simplifies against;
-        # road_ue_z_m is a pure additive shift (road_mesh_common.py) so an
-        # error tolerance in DEM meters is identical to one in UE-Z meters.
-        tile = _martini_for(n).create_tile(elev.astype(np.float32))
+        # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. Martini
+        # simplifies the FINAL z (2026-10-09, Deals Gap station 4107: it used
+        # to read `elev`, from before the lake-bed depression and cap, so a
+        # triangle it judged flat kept one corner on a lake bed 20 m down and
+        # sank the lakeside road's edge 3.6 m). Meters; the UE-Z shift is
+        # additive, so the tolerance is unchanged.
+        tile = _martini_for(n).create_tile((z_cm / 100.0).astype(np.float32))
         grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M)
         grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
         gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]

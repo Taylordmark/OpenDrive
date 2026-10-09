@@ -133,6 +133,21 @@ AREAS = {
         max_building_levels=12,
     ),
 
+    # Deals Gap, US 129 "Tail of the Dragon" (2026-10-09) - Taylor's
+    # side-by-side with the old hand-built /Game/TailOfTheDragon stage
+    # (build_stage.py, own equirect frame). Same road, Deals Gap (35.466,
+    # -83.919) to the Tabcat Creek bridge (35.530, -83.994), now on the area
+    # pipeline. Origin 445.1 m (z12 at bbox centre); z12 16x16 grid read
+    # 265..1006 m, padded (Calderwood/Cheoah reservoirs below, Gregory Bald
+    # ridge to the east). Bake with OD_AREA=deals_gap.
+    "deals_gap": dict(
+        bbox_snwe=(35.455, -84.005, 35.540, -83.905),
+        background_bbox_snwe=(35.38, -84.10, 35.60, -83.83),
+        origin_height_m=445.1,
+        elev_plausible_m=(150.0, 1300.0),
+        max_building_levels=3,
+    ),
+
     # Gasquet, US 199 along the Smith River (2026-10-02) - the far-corner
     # physics test for a California-wide world. Drive it and compare
     # handling with summit_county. Origin 116.5 m (z12 at bbox centre); z15

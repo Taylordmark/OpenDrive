@@ -142,6 +142,11 @@ gravel crunch, and the snow/wet grip feel.
     > 0.6 and fade as it dries), the darker ground and trees, and each
     strike's bolt plus the blue flash on the clouds and terrain (near
     strikes are brighter and wider). `od.Weather Auto` releases.
+  - drive-feedback fixes (2026-10-09): no trees on the I-70 Wheeler Junction
+    pads; grass now reaches 120 m and thins out from 60 m instead of
+    popping in; grass, scrub, bushes and the other non-conifer trees go
+    white in snow and dark in rain. Deals Gap is in Scene Select next to
+    the old Dragon.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).

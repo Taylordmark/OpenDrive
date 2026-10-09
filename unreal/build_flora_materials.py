@@ -583,6 +583,16 @@ in_cell = _mul(m_fol, _clamp01(m_fol, _mul(m_fol, _sub(m_fol, uv_u, _const(m_fol
                _clamp01(m_fol, _mul(m_fol, _sub(m_fol, uv_v, _const(m_fol, 1.0 - gv1 - 0.01)), _const(m_fol, 1000.0))))
 up = _clamp01(m_fol, _div(m_fol, _sub(m_fol, _const(m_fol, g_root_v), uv_v), _const(m_fol, g_card_v * GRASS_SHADE_FRAC)))
 shade = _lerp(m_fol, _const(m_fol, 1.0), _lerp(m_fol, _const(m_fol, GRASS_ROOT_SHADE), _const(m_fol, 1.0), up), in_cell)
+# Grass distance fade (2026-10-09, Taylor: tufts popped in ~60 m ahead).
+# PerInstanceFadeAmount runs 1 -> 0 across each HISM's own cull start..end
+# (BuildGrassCell's SetCullDistances), and a tuft drops out once it falls
+# below its PerInstanceRandom, so density thins out over the band instead of
+# a whole 16 m cell popping. Grass-blade cell only - tree canopies would
+# dissolve to bare trunks.
+fade = MEL.create_material_expression(m_fol, unreal.MaterialExpressionPerInstanceFadeAmount, -900, 1900)
+keep = _clamp01(m_fol, _mul(m_fol, _sub(m_fol, fade, per_instance_random), _const(m_fol, 8.0)))
+must_connect_property(_mul(m_fol, opacity_after_drop, _lerp(m_fol, _const(m_fol, 1.0), keep, in_cell)),
+                      "", unreal.MaterialProperty.MP_OPACITY_MASK)
 must_connect_property(_mul(m_fol, snowed_base_color, shade), "", unreal.MaterialProperty.MP_BASE_COLOR)
 must_connect_property(_mul(m_fol, snowed_subsurface, shade), "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
 

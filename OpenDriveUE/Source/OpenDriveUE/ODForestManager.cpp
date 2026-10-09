@@ -539,44 +539,56 @@ bool AODForestManager::LoadCenterline()
 		return false;   // Tail of the Dragon's actor instance - unaffected
 	}
 	// 'ODC1', uint32 LE N, N * (float32 X_cm, float32 Y_cm) -
-	// pipeline/export_road_centerline_bin.py
-	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (CenterlineFilePrefix + TEXT(".bin"));
-	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
+	// pipeline/export_road_centerline_bin.py. Junction-pad pavement points
+	// (padpts_<area>_test.bin, pipeline/export_pad_points_bin.py, 2026-10-09)
+	// join the same exclusion: a pad reaches up to ~28 m from any station.
+	auto LoadPoints = [this](const FString& Prefix) -> bool
 	{
-		return false;
-	}
-	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
-		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
-	constexpr int32 RecordBytes = 4 + 4;   // X_cm, Y_cm
-	if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODForestManager: %s truncated/corrupt (N=%d, %lld bytes)"),
-			*BinPath, N, Bin.Num());
-		return false;
-	}
-	RoadCenterline.Reserve(Vista.bActive ? 0 : N);
-	const uint8* P = Bin.GetData() + 8;
-	for (int32 i = 0; i < N; ++i, P += RecordBytes)
-	{
-		float X, Y;
-		FMemory::Memcpy(&X, P, 4);
-		FMemory::Memcpy(&Y, P + 4, 4);
-		if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
+		TArray<uint8> Bin;
+		const FString BinPath = FPaths::ProjectContentDir()
+			/ TEXT("OpenDrive/Masks") / (Prefix + TEXT(".bin"));
+		if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
+			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 		{
-			continue;   // menu vista (2026-10-05)
+			return false;
 		}
-		const int32 Idx = RoadCenterline.Add(FVector2D(X, Y));
-		const int32 CellX = FMath::FloorToInt(X / CenterlineCellCm);
-		const int32 CellY = FMath::FloorToInt(Y / CenterlineCellCm);
-		CenterlineBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
+		const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
+			| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
+		constexpr int32 RecordBytes = 4 + 4;   // X_cm, Y_cm
+		if (N <= 0 || Bin.Num() < 8 + (int64)N * RecordBytes)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ODForestManager: %s truncated/corrupt (N=%d, %lld bytes)"),
+				*BinPath, N, Bin.Num());
+			return false;
+		}
+		const int32 Before = RoadCenterline.Num();
+		RoadCenterline.Reserve(Before + (Vista.bActive ? 0 : N));
+		const uint8* P = Bin.GetData() + 8;
+		for (int32 i = 0; i < N; ++i, P += RecordBytes)
+		{
+			float X, Y;
+			FMemory::Memcpy(&X, P, 4);
+			FMemory::Memcpy(&Y, P + 4, 4);
+			if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
+			{
+				continue;   // menu vista (2026-10-05)
+			}
+			const int32 Idx = RoadCenterline.Add(FVector2D(X, Y));
+			const int32 CellX = FMath::FloorToInt(X / CenterlineCellCm);
+			const int32 CellY = FMath::FloorToInt(Y / CenterlineCellCm);
+			CenterlineBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
+		}
+		UE_LOG(LogTemp, Display,
+			TEXT("ODForestManager: loaded %d centerline point(s) from %s, exclusion %.1f m"),
+			RoadCenterline.Num() - Before, *BinPath, PavementExclusionCm / 100.0);
+		return true;
+	};
+	if (!LoadPoints(CenterlineFilePrefix))
+	{
+		return false;
 	}
-	UE_LOG(LogTemp, Display,
-		TEXT("ODForestManager: loaded %d centerline point(s) from %s, exclusion %.1f m"),
-		RoadCenterline.Num(), *BinPath, PavementExclusionCm / 100.0);
+	LoadPoints(CenterlineFilePrefix.Replace(TEXT("centerline_"), TEXT("padpts_")));
 	return true;
 }
 
@@ -2089,6 +2101,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 				Hism->SetMaterial(1, DeciduousFoliageMID);
 			}
 		}
+		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
 		Hism->SetCastShadow(!bLowVeg);
@@ -2318,8 +2331,9 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
 		Hism->SetupAttachment(RootComponent);
 		Hism->SetStaticMesh(ScrubMesh);
+		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Hism->SetCullDistances(GrassRadiusCm * 0.7f, GrassRadiusCm);
+		Hism->SetCullDistances(GrassRadiusCm * 0.5f, GrassRadiusCm);   // fade band, see M_Foliage PerInstanceFadeAmount
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
@@ -2327,6 +2341,22 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 	}
 	GrassCells.Add(Key, Hism);
 	return true;
+}
+
+// Any slot still on plain M_Foliage (bushes, sagebrush, scrub, grass, the
+// non-conifer/non-deciduous species) -> FoliageSeasonMID, so SnowCover and
+// Wetness reach it (2026-10-09, Taylor: grass stayed green in a blizzard).
+// FoliageSeasonMID gets no FallBlend, so none of these turn orange.
+void AODForestManager::UseSeasonFoliage(UMeshComponent* Comp) const
+{
+	if (!FoliageSeasonMID) return;
+	for (int32 i = 0; i < Comp->GetNumMaterials(); ++i)
+	{
+		if (Comp->GetMaterial(i) == FoliageSeasonMID->Parent)
+		{
+			Comp->SetMaterial(i, FoliageSeasonMID);
+		}
+	}
 }
 
 void AODForestManager::UpdateGrass(const FVector& Loc, const AActor* Player)

@@ -229,7 +229,7 @@ public:
 	float GrassPerSqM = 3.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
-	float GrassRadiusCm = 6000.0f;
+	float GrassRadiusCm = 12000.0f;   // 2026-10-09: was 60 m - Taylor watched cells pop in; M_Foliage now thins tufts out over the 0.5R..R fade band
 
 	/** Bare gap past the pavement edge: the shoulder strip's widest band
 	 *  (SHOULDER_MAX_M + edge jitter in apply_ground_material.py). */
@@ -513,6 +513,7 @@ private:
 	bool BuildTile(const FIntPoint& Key, const AActor* Player);
 	bool BuildGrassCell(const FIntPoint& Key, const AActor* Player);
 	void UpdateGrass(const FVector& Loc, const AActor* Player);
+	void UseSeasonFoliage(UMeshComponent* Comp) const;
 	static constexpr float GrassCellCm = 1600.0f;
 	static constexpr int32 GrassLatticeN = 8;   // 2 m squares per cell side
 	static constexpr int32 GrassCellsPerTick = 2;
