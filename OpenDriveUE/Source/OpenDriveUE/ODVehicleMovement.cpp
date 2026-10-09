@@ -1182,7 +1182,12 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 	// like production cornering-brake control - otherwise ABS parks the
 	// tire at peak LONGITUDINAL slip and the rear has nothing left sideways.
 	float AbsFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-	if (bAbsEnabled)
+	// not at a crawl: like real ABS (out below ~7 km/h). At 0.2 m/s the
+	// 1 m/s slip floor read a held parking brake as a skid: ABS released it,
+	// the free wheel spun to +5 rad/s and shoved the car, then it re-locked -
+	// the car rocked 0 <-> 1 mph (2026-10-09, Taylor: "holding parking brake
+	// at a stop alternate the speed between 0 and 1"; drive_wheels trace).
+	if (bAbsEnabled && FMath::Abs(FwdSpeedCmS) > 200.0f)
 	{
 		auto WheelAbsFactor = [&](int32 i)
 		{
