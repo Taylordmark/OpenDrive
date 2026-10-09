@@ -157,6 +157,14 @@ def weights(climate, month, biome, elev_delta_m, current):
     return w
 
 
+def menu_offer(climate, month):
+    """AODWeatherController::CanProduce under a garage season lock (2026-10-09):
+    the states the Weather row offers in that month (Prev=Thunderstorm opens
+    the event gates; a Tornado also needs the month's Thunderstorm)."""
+    w = weights(climate, month, None, 0.0, THUNDERSTORM)
+    return {i for i in range(12) if w[i] > 0 and (i != TORNADO or w[THUNDERSTORM] > 0)}
+
+
 def hold_seconds(state, rng):
     if state == TORNADO:
         return rng.uniform(*TORNADO_HOLD_S)
@@ -248,6 +256,11 @@ def main():
     for name in results:
         assert (all_seasons(name, HURRICANE) > 0) == (name == "oahu_test"), name
     check_hurricane_envelope()
+    # garage Season -> Weather row (2026-10-09): season lock months (hold midpoints)
+    summit, _ = load_stage(ROOT / "data" / "road_tiles" / "summit_county_test")
+    winter, summer = menu_offer(summit, 0.5), menu_offer(summit, 6.5)
+    assert SNOW in winter and RAIN not in winter and THUNDERSTORM not in winter, winter
+    assert THUNDERSTORM in summer and SNOW not in summer and BLIZZARD not in summer, summer
     print("\nsanity ok")
 
 

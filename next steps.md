@@ -149,7 +149,9 @@ gravel crunch, and the snow/wet grip feel.
     the old Dragon. Wheels should sit still on smooth road at any frame
     rate; Summit lakes should meet their banks with no dark ring; the log
     should have no `BuildTile ... exceeded 8 ms` warnings and driving
-    shouldn't rubber-band when Near tiles stream in.
+    shouldn't rubber-band when Near tiles stream in. Scene menu: Season
+    sits above Weather, and the Weather row only cycles that season's
+    weather (Summit winter: Clear, Overcast, Snow, Blizzard, Fog).
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).

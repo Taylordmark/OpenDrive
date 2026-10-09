@@ -390,13 +390,24 @@ bool AODWeatherController::CanProduce(EODWeatherState S) const
 	float ElevDeltaM = 0.0f;
 	int32 BiomeIdx = -1;
 	SampleBiome(Mult, ElevDeltaM, BiomeIdx);
-	for (int32 m = 0; m < 12; ++m)
+	// A locked season (garage Season row, -odseason=) freezes the clock on one
+	// month, so only that month's weather can roll (2026-10-09, Taylor: pick
+	// the season first, then the weather it allows). Auto = any month.
+	float Months[12];
+	int32 NumMonths = 12;
+	for (int32 m = 0; m < 12; ++m) { Months[m] = m + 0.5f; }
+	for (TActorIterator<AODSeasonController> It(GetWorld()); It; ++It)
+	{
+		if (It->IsFrozen()) { Months[0] = It->MonthOfYear(); NumMonths = 1; }
+		break;
+	}
+	for (int32 m = 0; m < NumMonths; ++m)
 	{
 		float W[NumStates];
 		float T = 0.0f, P = 0.0f;
 		// Prev = Thunderstorm opens both event gates; a Tornado also needs that
 		// month's Thunderstorm to roll out of
-		StateWeights(Climate, m + 0.5f, ElevDeltaM, Mult, EODWeatherState::Thunderstorm, W, T, P);
+		StateWeights(Climate, Months[m], ElevDeltaM, Mult, EODWeatherState::Thunderstorm, W, T, P);
 		if (W[(int32)S] > 0.0f
 			&& (S != EODWeatherState::Tornado || W[(int32)EODWeatherState::Thunderstorm] > 0.0f))
 		{

@@ -44,7 +44,7 @@ enum class EODMenuScreen : uint8
 {
 	Main,     // Start, Garage, Settings, Credits, Quit - garage-room backdrop
 	Garage,   // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
-	Scene,    // Area, Time of Day, Weather, Season, Drive - always the picked area's vista
+	Scene,    // Area, Time of Day, Season, Weather, Drive - always the picked area's vista
 };
 
 /**

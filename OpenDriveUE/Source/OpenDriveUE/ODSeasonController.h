@@ -127,6 +127,9 @@ public:
 		return FMath::Fmod(6.5f + (ClockSeconds - 0.5f * HoldSeconds) / LoopSeconds() * 12.0f + 12.0f, 12.0f);
 	}
 
+	/** True while a season lock (garage row or -odseason=) holds the clock on one month. */
+	bool IsFrozen() const { return bFrozen; }
+
 private:
 	/** Pure function of a loop-position clock (seconds, [0, LoopSeconds)) to
 	 *  the five season blends - see the .cpp definition for the segment

@@ -246,7 +246,8 @@ public:
 
 	/** Garage Weather row (2026-10-05): true if S has weight > 0 under the
 	 *  Auto walk's weighting (StateWeights) in at least one month of the
-	 *  active climate, at the active biome/elevation sample (SampleBiome). */
+	 *  active climate (only the locked month when a season is locked,
+	 *  2026-10-09), at the active biome/elevation sample (SampleBiome). */
 	bool CanProduce(EODWeatherState S) const;
 
 	/** Garage-menu vista (2026-10-05): the Auto walk and CanProduce use

@@ -420,7 +420,7 @@ were decoupled from it on 2026-07-20.
     to GameUserSettings.ini like Season.
   - Drive starts at the area's spot (same level: `StartAt`; other area:
     `odspawnx/odspawny/odspawnyaw` URL options, auto-start after load).
-  - (2026-10-05) Per-vista climate: a shown vista swaps the weather to its area's `climate_<area>_test.json` and its forest copy's biome/elevation at the spot; the Weather row offers only states that climate can produce (`AODWeatherController::CanProduce`, shared `StateWeights`), and an impossible forced pick falls back to Auto (vista swap, level start).
+  - (2026-10-05) Per-vista climate: a shown vista swaps the weather to its area's `climate_<area>_test.json` and its forest copy's biome/elevation at the spot; the Weather row offers only states that climate can produce (`AODWeatherController::CanProduce`, shared `StateWeights`), and an impossible forced pick falls back to Auto (vista swap, level start). (2026-10-09) Season now comes before Weather in the Scene rows: a locked season limits the Weather row to that season's month (`AODSeasonController::IsFrozen`), and a season change that rules out the picked weather drops it to Auto (`sim_weather.py` `menu_offer` check: Summit winter offers no rain or thunderstorm, summer no snow).
 
 ## Arc 5 — Audio (5.1, 5.2, 5.4 done)
 

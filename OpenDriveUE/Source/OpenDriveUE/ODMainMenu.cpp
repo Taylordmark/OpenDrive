@@ -188,7 +188,7 @@ enum ERow : int32
 {
 	RowCar, RowEngine, RowDrivetrain, RowTuning,                   // Garage: CAR
 	RowExhaust, RowLoudness, RowRasp, RowMuffler, RowPop,          // Garage: SOUND
-	RowArea, RowTime, RowWeather, RowSeason, RowDrive,             // Scene
+	RowArea, RowTime, RowSeason, RowWeather, RowDrive,             // Scene: season before the weather it allows
 	RowStart, RowGarage, RowSettings, RowCredits,                  // Main
 	RowBack, RowQuit,                                              // footers
 };
@@ -940,6 +940,12 @@ void AODMainMenu::Adjust(int32 Dir)
 		// persisted the same GConfig way as the exhaust rows.
 		SeasonIdx = (SeasonIdx + Dir + UE_ARRAY_COUNT(SeasonNames)) % UE_ARRAY_COUNT(SeasonNames);
 		ApplySeason();
+		// the Weather row only offers the picked season's weather (2026-10-09):
+		// a pick the new season can't produce drops to Auto
+		if (!WeatherPossible(WeatherIdx))
+		{
+			ApplyWeather();
+		}
 		GConfig->SetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
@@ -950,7 +956,8 @@ void AODMainMenu::Adjust(int32 Dir)
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
 	case RowWeather:
-		// only states the active climate can produce (2026-10-05); Auto always can
+		// only states the active climate can produce (2026-10-05) in the picked
+		// season (2026-10-09); Auto always can
 		do
 		{
 			WeatherIdx = (WeatherIdx + Dir + UE_ARRAY_COUNT(WeatherNames)) % UE_ARRAY_COUNT(WeatherNames);
