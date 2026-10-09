@@ -264,6 +264,27 @@ scale, built from open data, with a stylized "real places, storybook look".
     Summit full rebuilds PASS every gate. Gasquet and gv_west/east pick
     it up on their next rebuild. Tests: `pipeline/tests/test_resample_stations.py`,
     `pipeline/tests/test_match_sidecar.py`.
+  - Junction flatten to the median (2026-10-08, 3b9d573): graph
+    junctions flattened toward the highest incident road, so seg776 got a
+    40% ramp and two junctions 30 m apart jumped 4.3 m in one station.
+    `flatten_graph_junctions` now targets the median and stretches each
+    blend so the pull adds at most 10% grade. Summit station steps >40%
+    in blends 51 -> 2, >25% 307 -> 197; pads >1 m off grade 94 -> 49.
+    Test: `pipeline/tests/test_flatten_graph_junctions.py`.
+  - Side-by-side carriageways are not crossings (2026-10-08, 76bc4a5):
+    the 9 m overlap test padded divided-highway carriageways and parallel
+    ways (I-70 seg0/seg1, Columbus Avenue) across 1-3 m of height. Roads
+    within 20 deg whose centerlines never come within 2 m are skipped.
+    Summit pads 1865 -> 1680, pad kinks 1553 -> 900, steps 2951 -> 1769,
+    pads >1 m off grade 49 -> 23. Test:
+    `pipeline/tests/test_find_crossings_parallel.py`.
+  - Road coverage gate (2026-10-08, 41827e3): `verify_road_fit`'s
+    road-surface check and the pads gate-coverage pass skipped every
+    wall-conflict station (48% of Summit), hiding 240 Summit and 16 SF
+    centerline stations with no pavement, e.g. the I-70 on-ramp merge at
+    (-17784, 13378). Both now skip `is_struct` only. Summit: 400 holes
+    capped, 0 unpaved centerline stations, end probes fully paved 96.9%;
+    pad kinks 1074 (the caps), steps 2020. SF/Summit gates all PASS.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

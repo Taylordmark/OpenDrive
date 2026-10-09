@@ -32,8 +32,14 @@ water/coast, tunnels, wet weather) is phased in
   Example: US 6's west edge near Tennis Club Rd shows −0.2 to +1.5 m of
   skirt along its length (worst at (17088, 9005)).
 - **Junction pad leftovers** (§7.51):
-  - 108 pads still sit more than 1 m off their road's grade (worst 4.3 m at
-    (24639, 17570)).
+  - 23 Summit pads still sit more than 1 m off their road's grade
+    (worst 3.9 m); was 108 before the median flatten and carriageway fix.
+  - SF steep-street tabling: 8 station steps of 40-46% where Jones,
+    Filbert and Hyde (22-31%) flatten into a level junction box. A longer
+    blend can't fix it (peak is ~1.3-1.9x the street grade); tilting the
+    box along the steep street would. Judge in a drive first.
+  - Summit pad kinks 1074 / steps 2020 (holes 1); the 400 gate-coverage
+    caps added ~170 kinks.
   - About 10% of pads are pinned at the 12% tilt cap
     (`PAD_TILT_MAX_GRADE`).
   - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
