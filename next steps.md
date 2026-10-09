@@ -160,10 +160,12 @@ gravel crunch, and the snow/wet grip feel.
     errors (built with -nullrhi, never compiled for a GPU yet).
   - car lamps (2026-10-09): head and tail lenses glow with the headlights
     (menu vista at Dusk/Night too), brake lights on the brake pedal (the
-    throttle in reverse) day or night. Tune `HeadlampGlow`, `TaillampGlow`,
-    `BrakelampGlow`. Not yet: reverse lights (no geometry), `M_CarLights_Hi`
-    (not built on this machine - rerun `apply_car_lights_material.py`
-    after `import_car_meshes.py` builds it), the GT car (no lights slot).
+    throttle in reverse) day or night, white reverse lenses in reverse gear.
+    The headlights should now visibly light the road (they were ~7 cd);
+    a rear spot washes the road red on braking, white reversing. Tune
+    `Headlight/Tail/Brake/ReverseLightLm` and `Head/Tail/BrakelampGlow`.
+    High/Ultra cars are imported now, clear coat skipped (UE 5.8 Python
+    has no CustomData pins) - check their look before relying on them.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).

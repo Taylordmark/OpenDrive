@@ -219,6 +219,10 @@ def build_material(cat, mat_name, roughness, metallic, two_sided, opacity, clear
     spec.set_editor_property("r", 0.9 if cat in ("body", "glass", "chrome") else 0.5)
     MEL.connect_material_property(spec, "", unreal.MaterialProperty.MP_SPECULAR)
 
+    # UE 5.8 Python exposes no MP_CUSTOM_DATA0/1 (2026-10-09 run): default lit, coat roughness skipped
+    if clear_coat is not None and not hasattr(unreal.MaterialProperty, "MP_CUSTOM_DATA0"):
+        log(f"{mat_name}: no CustomData pins in this UE Python - default lit, no clear coat")
+        clear_coat = None
     if clear_coat is not None:
         mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_CLEAR_COAT)
         for i, (val, prop) in enumerate(zip(clear_coat, (unreal.MaterialProperty.MP_CUSTOM_DATA0,

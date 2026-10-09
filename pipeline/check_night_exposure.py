@@ -15,7 +15,9 @@ MAX_ELEV = 68.0           # AODDayNightController::MaxElevation
 NIGHT_MIN_EV = 1.0        # AODDayNightController::NightMinEV
 EXPOSURE_BIAS = -1.0      # AODAtmosphereController grade AutoExposureBias
 MOON_LUX = 0.15           # AODDayNightController::MoonIntensity
-HEAD_LM, HEAD_CONE = 4500.0, 38.0   # UpdateHeadlights spot: lumens, outer cone deg
+HEAD_LM, HEAD_CONE = 4500.0, 38.0   # UpdateHeadlights spot: lumens (units set explicitly -
+                                    # runtime lights default to Unitless, 1/16 cd), outer cone deg
+REAR_CONE, TAIL_LM, BRAKE_LM, REVERSE_LM = 70.0, 30.0, 200.0, 400.0   # rear spot
 STAR_PEAK = 3.0 * 4.15    # M_NightSky Brightness x brightest-star magnitude
 HEAD_GLOW, TAIL_GLOW, BRAKE_DAY = 300.0, 25.0, 400.0   # AODDayNightController lamp glow, nits
 DAY_EV = 12.0             # bright day exposure (Grade volume max)
@@ -47,6 +49,10 @@ def main():
     road30 = lambert(head_cd / 30 ** 2, 0.1) / mid
     moonlit = lambert(MOON_LUX, 0.2) / mid
     star = STAR_PEAK / mid
+    rear_cd = lambda lm: lm / (2 * math.pi * (1 - math.cos(math.radians(REAR_CONE))))
+    behind = {n: lambert(rear_cd(lm) / 3 ** 2, 0.1) / mid
+              for n, lm in (("tail", TAIL_LM), ("brake", BRAKE_LM), ("reverse", REVERSE_LM))}
+    print("road 3 m behind x mid grey: " + "  ".join(f"{n} {v:.2f}" for n, v in behind.items()))
     tail, brake_night = TAIL_GLOW / mid, 5 * TAIL_GLOW / mid
     brake_day = BRAKE_DAY / mid_grey_nits(DAY_EV)
     print(f"lamps x mid grey: head {HEAD_GLOW / mid:.0f}  tail {tail:.0f}  brake night {brake_night:.0f}  "
@@ -66,6 +72,7 @@ def main():
     assert star > 10.0, "bright stars read white"
     assert 10.0 < tail < 200.0 and brake_night < 500.0, "tails glow red at night without flooding bloom"
     assert brake_day > 0.1, "brake lights still read in daylight"
+    assert behind["tail"] < 0.1 < behind["brake"] < behind["reverse"] < 1.5, "faint tail wash, visible brake and reverse"
     print("PASS: night is headlights first, a faint moon/star floor, stars visible")
 
 

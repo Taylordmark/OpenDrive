@@ -1,12 +1,13 @@
 """Car lamp glow (2026-10-09, Taylor: "do we even have lights like tail
 lights headlights and do they work on braking"): rebuilds M_CarLights and
 M_CarLights_Hi (first built by import_car_meshes.py - run this after it)
-with an emissive driven by two params AODDayNightController sets per car:
-"HeadGlow" and "TailGlow" (emissive nits, 0 = off).
+with an emissive driven by three params AODDayNightController sets per car:
+"HeadGlow", "TailGlow" and "ReverseGlow" (emissive nits, 0 = off).
 
-Head and tail lenses share the one "lights" slot; the palette cell tells
-them apart (make_car_meshes.py HEADLIGHT (0.93, 0.85, 0.60) vs TAILLIGHT
-(0.62, 0.05, 0.03) - green channel). Rally aux lamps are HEADLIGHT cells.
+All lenses share the one "lights" slot; the palette cell tells them apart
+(make_car_meshes.py HEADLIGHT (0.93, 0.85, 0.60), TAILLIGHT (0.62, 0.05,
+0.03), REVERSE (0.90, 0.92, 0.95): green splits tail from the rest, blue
+splits reverse from head). Rally aux lamps are HEADLIGHT cells.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
@@ -20,7 +21,9 @@ LIGHT_MATS = {"M_CarLights": 0.30, "M_CarLights_Hi": 0.08}
 
 LAMP_HLSL = """
 float head = saturate((Pal.g - 0.3) * 10.0);
-return lerp(float3(1.0, 0.03, 0.02) * Tail, float3(1.0, 0.95, 0.85) * Head, head);
+float rev = saturate((Pal.b - 0.75) * 10.0);
+float3 e = lerp(float3(1.0, 0.03, 0.02) * Tail, float3(1.0, 0.95, 0.85) * Head, head);
+return lerp(e, float3(1.0, 1.0, 1.0) * Reverse, rev);
 """
 
 MEL = unreal.MaterialEditingLibrary
@@ -63,13 +66,13 @@ for name, roughness in LIGHT_MATS.items():
     lamp.set_editor_property("code", LAMP_HLSL)
     lamp.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
     ins = []
-    for n in ("Pal", "Head", "Tail"):
+    for n in ("Pal", "Head", "Tail", "Reverse"):
         i = unreal.CustomInput()
         i.set_editor_property("input_name", n)
         ins.append(i)
     lamp.set_editor_property("inputs", ins)
     req(MEL.connect_material_expressions(ts, "RGB", lamp, "Pal"), "palette -> lamp")
-    for y, n in ((900, "Head"), (1000, "Tail")):
+    for y, n in ((900, "Head"), (1000, "Tail"), (1100, "Reverse")):
         p = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -800, y)
         p.set_editor_property("parameter_name", f"{n}Glow")
         p.set_editor_property("default_value", 0.0)
@@ -82,7 +85,7 @@ for name, roughness in LIGHT_MATS.items():
     unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
 
     names = [str(p) for p in MEL.get_scalar_parameter_names(unreal.load_asset(path))]
-    for want in ("HeadGlow", "TailGlow"):
+    for want in ("HeadGlow", "TailGlow", "ReverseGlow"):
         if want not in names:
             raise RuntimeError(f"{name}: {want} missing after save")
     log(f"rebuilt {name} with lamp emissive (params {names})")

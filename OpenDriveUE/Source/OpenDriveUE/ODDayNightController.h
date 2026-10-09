@@ -41,10 +41,21 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float HeadlightElevation = 8.0f;
 
+	/** Real light cast by the lamps (lumens): two headlight spots off the
+	 *  nose, one rear spot that is red for tail / brake, white reversing. */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float HeadlightLm = 4500.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float TailLightLm = 30.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float BrakeLightLm = 200.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float ReverseLightLm = 400.0f;
+
 	/** Lamp lens glow, emissive nits (M_CarLights "HeadGlow"/"TailGlow",
 	 *  unreal/apply_car_lights_material.py, 2026-10-09). Head and tail glow
-	 *  with the headlights; the brake pedal lights the tails at BrakelampGlow by
-	 *  day, 5x TaillampGlow at night. */
+	 *  with the headlights; the brake pedal (and reverse gear, on the reverse
+	 *  lenses) glow at BrakelampGlow by day, 5x TaillampGlow at night. */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float HeadlampGlow = 300.0f;
 	UPROPERTY(EditAnywhere, Category = "DayNight")

@@ -149,7 +149,7 @@ void AODGarageEnvironment::BuildRoom()
 		Light->SetMobility(EComponentMobility::Movable);
 		Light->SetRelativeLocation(Loc);
 		Light->SetLightColor(FLinearColor(0.75f, 0.85f, 1.0f));   // cool ~6500K white
-		Light->SetIntensity(4500.0f);   // lumens (bUseInverseSquaredFalloff default true)
+		Light->SetIntensity(4500.0f);   // Unitless (runtime default; ~7 cd) - the room was tuned by eye at this
 		Light->AttenuationRadius = RoomHalfExtentCm * 2.5f;
 		Light->SetCastShadows(false);   // cheap - this room only exists while the menu is paused
 		Light->RegisterComponent();

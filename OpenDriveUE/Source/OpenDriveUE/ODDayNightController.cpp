@@ -158,38 +158,64 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		{
 			continue;
 		}
-		TArray<TWeakObjectPtr<USpotLightComponent>>& Pair = Lights.FindOrAdd(*It);
-		if (Pair.Num() == 0)
+		// [0], [1] headlights, [2] rear (tail / brake / reverse). Runtime lights
+		// default to Unitless (4500 was ~7 cd - Taylor 2026-10-09: "don't
+		// actually light anything"), so the units are set explicitly.
+		TArray<TWeakObjectPtr<USpotLightComponent>>& Spots = Lights.FindOrAdd(*It);
+		if (Spots.Num() == 0)
 		{
-			for (const float Side : {-55.0f, 55.0f})
+			for (int32 i = 0; i < 3; ++i)
 			{
 				USpotLightComponent* Spot = NewObject<USpotLightComponent>(*It);
 				Spot->SetupAttachment(It->GetRootComponent());
-				Spot->SetRelativeLocation(FVector(160.0f, Side, 70.0f));
-				Spot->SetRelativeRotation(FRotator(-6.0f, 0.0f, 0.0f));
-				Spot->SetIntensity(4500.0f);                 // lumens
-				Spot->SetAttenuationRadius(9000.0f);
-				Spot->SetInnerConeAngle(22.0f);
-				Spot->SetOuterConeAngle(38.0f);
-				Spot->SetLightColor(FLinearColor(1.0f, 0.95f, 0.85f));
+				Spot->SetIntensityUnits(ELightUnits::Lumens);
+				Spot->SetAttenuationRadius(i < 2 ? 9000.0f : 1500.0f);
+				Spot->SetInnerConeAngle(i < 2 ? 22.0f : 40.0f);
+				Spot->SetOuterConeAngle(i < 2 ? 38.0f : 70.0f);
+				Spot->SetCastShadows(i < 2);
 				Spot->SetVisibility(false);
 				Spot->RegisterComponent();
-				Pair.Add(Spot);
+				Spots.Add(Spot);
 			}
 		}
-		for (const TWeakObjectPtr<USpotLightComponent>& Spot : Pair)
-		{
-			if (Spot.IsValid() && Spot->GetVisibleFlag() != bOn)
-			{
-				Spot->SetVisibility(bOn);
-			}
-		}
-		// lamp lenses: the car mesh's "lights" slot (head + tail share it)
+		// placed off the body mesh's bounds (body-local, so the def's visual
+		// scale carries through): just outside the nose / tail so the
+		// two-sided hull can't shadow them, at the lenses' measured height
+		// (make_car_meshes.py: heads ~28% up, ~half the half-width)
+		const UStaticMeshComponent* Body = Cast<UStaticMeshComponent>(It->GetRootComponent());
+		const FBox B = Body && Body->GetStaticMesh() ? Body->GetStaticMesh()->GetBoundingBox()
+			: FBox(FVector(-220.0, -90.0, -20.0), FVector(220.0, 90.0, 100.0));
+		const double H = B.Max.Z - B.Min.Z;
 		const UODVehicleMovement* Move = It->FindComponentByClass<UODVehicleMovement>();
-		const float Head = bOn ? HeadlampGlow : 0.0f;
 		const bool bBrake = Move->GetPedalBrake() > 0.05f;
-		// at night brake = 5x tail (a fixed daylight value blooms the scene red)
-		const float Tail = bOn ? TaillampGlow * (bBrake ? 5.0f : 1.0f) : (bBrake ? BrakelampGlow : 0.0f);
+		const bool bReverse = Move->GetGear() < 0;
+		const float RearLm = bReverse ? ReverseLightLm : bBrake ? BrakeLightLm : bOn ? TailLightLm : 0.0f;
+		for (int32 i = 0; i < Spots.Num(); ++i)
+		{
+			USpotLightComponent* Spot = Spots[i].Get();
+			if (!Spot)
+			{
+				continue;
+			}
+			const bool bRear = i == 2;
+			Spot->SetRelativeLocationAndRotation(
+				bRear ? FVector(B.Min.X - 5.0, 0.0, B.Min.Z + 0.4 * H)
+				      : FVector(B.Max.X + 5.0, (i ? 0.5 : -0.5) * B.Max.Y, B.Min.Z + 0.28 * H),
+				FRotator(bRear ? -15.0f : -6.0f, bRear ? 180.0f : 0.0f, 0.0f));
+			const float Lm = bRear ? RearLm : (bOn ? HeadlightLm : 0.0f);
+			Spot->SetIntensity(Lm);
+			Spot->SetLightColor(bRear ? (bReverse ? FLinearColor::White : FLinearColor(1.0f, 0.02f, 0.01f))
+				: FLinearColor(1.0f, 0.95f, 0.85f));
+			if (Spot->GetVisibleFlag() != (Lm > 0.0f))
+			{
+				Spot->SetVisibility(Lm > 0.0f);
+			}
+		}
+		// lamp lenses: the car mesh's "lights" slot (head, tail, reverse share it)
+		const float Head = bOn ? HeadlampGlow : 0.0f;
+		// at night brake / reverse = 5x tail (a fixed daylight value blooms the scene)
+		const float Signal = bOn ? TaillampGlow * 5.0f : BrakelampGlow;
+		const float Tail = bBrake ? Signal : (bOn ? TaillampGlow : 0.0f);
 		TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
 		for (UStaticMeshComponent* Mesh : Meshes)
 		{
@@ -205,6 +231,7 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			}
 			Lamp->SetScalarParameterValue(TEXT("HeadGlow"), Head);
 			Lamp->SetScalarParameterValue(TEXT("TailGlow"), Tail);
+			Lamp->SetScalarParameterValue(TEXT("ReverseGlow"), bReverse ? Signal : 0.0f);
 		}
 	}
 }
