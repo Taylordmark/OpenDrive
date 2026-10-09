@@ -885,6 +885,13 @@ bool AODWeatherController::ForceState(const FString& Name, bool bInstant)
 			From = To;
 			RampT = 1.0f;
 			Wetness = To.Precip > 0.05f ? 1.0f : 0.0f;
+			// 2026-10-09 (Taylor: Summit set to Summer was "still snowing in the
+			// view"): an instant switch to weather that isn't snowing also drops
+			// the lying snow instead of melting it at sim speed
+			if (To.Precip * To.PrecipType <= 0.05f && !bSnowHeld)
+			{
+				RoadSnowCm = SideSnowCm = RoadChill = 0.0f;
+			}
 		}
 	};
 	if (Name.IsEmpty() || Name.Equals(TEXT("Auto"), ESearchCase::IgnoreCase))

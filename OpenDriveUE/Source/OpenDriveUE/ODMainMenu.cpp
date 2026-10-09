@@ -941,11 +941,10 @@ void AODMainMenu::Adjust(int32 Dir)
 		SeasonIdx = (SeasonIdx + Dir + UE_ARRAY_COUNT(SeasonNames)) % UE_ARRAY_COUNT(SeasonNames);
 		ApplySeason();
 		// the Weather row only offers the picked season's weather (2026-10-09):
-		// a pick the new season can't produce drops to Auto
-		if (!WeatherPossible(WeatherIdx))
-		{
-			ApplyWeather();
-		}
+		// re-apply instantly - Auto re-rolls in the new season (SetSeasonLock's
+		// own re-roll ramps in over minutes, so a winter blizzard kept falling),
+		// and a pick the new season can't produce drops to Auto
+		ApplyWeather();
 		GConfig->SetInt(SeasonConfigSection, TEXT("SeasonIdx"), SeasonIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
