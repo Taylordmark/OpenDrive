@@ -881,7 +881,7 @@ void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
 		bParkHold = false;
 	}
 
-	const float PedalBrake = Gear < 0 ? ThrottleIn : BrakeIn;
+	const float PedalBrake = GetPedalBrake();
 	for (int32 i = 0; i < Wheels.Num(); ++i)
 	{
 		FODWheel& W = Wheels[i];

@@ -162,7 +162,7 @@ CATEGORY_MATERIALS = {
     "chrome":  ("M_CarChrome", 0.05, 1.0, True, None),
     "tire":    ("M_CarTire", 0.90, 0.0, True, None),
     "rim":     ("M_CarRim", 0.25, 0.85, True, None),
-    "lights":  ("M_CarLights", 0.30, 0.0, True, None),
+    "lights":  ("M_CarLights", 0.30, 0.0, True, None),   # lamp glow: apply_car_lights_material.py, run after
 }
 
 # 2026-09-25 "Asset Detail" High/Ultra set (M_Car*_Hi, on the _high/_ultra

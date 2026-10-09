@@ -41,6 +41,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float HeadlightElevation = 8.0f;
 
+	/** Lamp lens glow, emissive nits (M_CarLights "HeadGlow"/"TailGlow",
+	 *  unreal/apply_car_lights_material.py, 2026-10-09). Head and tail glow
+	 *  with the headlights; the brake pedal lights the tails at BrakelampGlow by
+	 *  day, 5x TaillampGlow at night. */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float HeadlampGlow = 300.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float TaillampGlow = 25.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float BrakelampGlow = 400.0f;
+
 	/** Moon light intensity (lux) once the sun drops below the horizon - a
 	 * dim night key light so Lumen has something to expose against instead
 	 * of clipping to black (2026-08-25, Taylor: exposure-clipping warning /

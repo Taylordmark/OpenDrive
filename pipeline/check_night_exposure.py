@@ -17,6 +17,8 @@ EXPOSURE_BIAS = -1.0      # AODAtmosphereController grade AutoExposureBias
 MOON_LUX = 0.15           # AODDayNightController::MoonIntensity
 HEAD_LM, HEAD_CONE = 4500.0, 38.0   # UpdateHeadlights spot: lumens, outer cone deg
 STAR_PEAK = 3.0 * 4.15    # M_NightSky Brightness x brightest-star magnitude
+HEAD_GLOW, TAIL_GLOW, BRAKE_DAY = 300.0, 25.0, 400.0   # AODDayNightController lamp glow, nits
+DAY_EV = 12.0             # bright day exposure (Grade volume max)
 PRESETS = {"Golden Hour": 17.5, "Dusk": 18.3, "Night": 22.0, "Noon": 12.0}
 
 
@@ -45,6 +47,10 @@ def main():
     road30 = lambert(head_cd / 30 ** 2, 0.1) / mid
     moonlit = lambert(MOON_LUX, 0.2) / mid
     star = STAR_PEAK / mid
+    tail, brake_night = TAIL_GLOW / mid, 5 * TAIL_GLOW / mid
+    brake_day = BRAKE_DAY / mid_grey_nits(DAY_EV)
+    print(f"lamps x mid grey: head {HEAD_GLOW / mid:.0f}  tail {tail:.0f}  brake night {brake_night:.0f}  "
+          f"brake day {brake_day:.2f}")
     print(f"night mid grey {mid:.2f} nits | x mid grey: road@10m {road10:.2f}  road@30m {road30:.3f}  "
           f"moonlit grass {moonlit:.3f}  brightest star {star:.0f}")
     for name, hour in PRESETS.items():
@@ -58,6 +64,8 @@ def main():
     assert road30 > 5 * moonlit, "headlights clearly beat the moon even at 30 m"
     assert 0.005 < moonlit < 0.05, "moonlit ground: very faint, not black, not lit"
     assert star > 10.0, "bright stars read white"
+    assert 10.0 < tail < 200.0 and brake_night < 500.0, "tails glow red at night without flooding bloom"
+    assert brake_day > 0.1, "brake lights still read in daylight"
     print("PASS: night is headlights first, a faint moon/star floor, stars visible")
 
 

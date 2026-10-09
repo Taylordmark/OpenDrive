@@ -184,5 +184,27 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 				Spot->SetVisibility(bOn);
 			}
 		}
+		// lamp lenses: the car mesh's "lights" slot (head + tail share it)
+		const UODVehicleMovement* Move = It->FindComponentByClass<UODVehicleMovement>();
+		const float Head = bOn ? HeadlampGlow : 0.0f;
+		const bool bBrake = Move->GetPedalBrake() > 0.05f;
+		// at night brake = 5x tail (a fixed daylight value blooms the scene red)
+		const float Tail = bOn ? TaillampGlow * (bBrake ? 5.0f : 1.0f) : (bBrake ? BrakelampGlow : 0.0f);
+		TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
+		for (UStaticMeshComponent* Mesh : Meshes)
+		{
+			const int32 Slot = Mesh->GetMaterialIndex(TEXT("lights"));
+			if (Slot == INDEX_NONE)
+			{
+				continue;
+			}
+			UMaterialInstanceDynamic* Lamp = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(Slot));
+			if (!Lamp)   // first tick, or a car / detail-tier swap put the asset back
+			{
+				Lamp = Mesh->CreateDynamicMaterialInstance(Slot);
+			}
+			Lamp->SetScalarParameterValue(TEXT("HeadGlow"), Head);
+			Lamp->SetScalarParameterValue(TEXT("TailGlow"), Tail);
+		}
 	}
 }

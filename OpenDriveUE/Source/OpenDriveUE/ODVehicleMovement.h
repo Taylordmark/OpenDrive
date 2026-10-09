@@ -98,6 +98,8 @@ public:
 	void SetHandbrakeInput(bool bOn) { bHandbrakeIn = bOn; }
 	float GetThrottleInput() const { return ThrottleIn; }
 	float GetBrakeInput() const { return BrakeIn; }
+	/** The pedal that is braking: throttle while reversing (pedals swap). */
+	float GetPedalBrake() const { return Gear < 0 ? ThrottleIn : BrakeIn; }
 	float GetSteeringInput() const { return SteerIn; }
 
 	// --- spawn parking hold (2026-09-02) ---

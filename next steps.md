@@ -158,6 +158,12 @@ gravel crunch, and the snow/wet grip feel.
     clouds and fog. Tune `NightMinEV`, `StarBrightness`, `MoonIntensity`
     on the DayNight controller. Check the log for `M_NightSky` shader
     errors (built with -nullrhi, never compiled for a GPU yet).
+  - car lamps (2026-10-09): head and tail lenses glow with the headlights
+    (menu vista at Dusk/Night too), brake lights on the brake pedal (the
+    throttle in reverse) day or night. Tune `HeadlampGlow`, `TaillampGlow`,
+    `BrakelampGlow`. Not yet: reverse lights (no geometry), `M_CarLights_Hi`
+    (not built on this machine - rerun `apply_car_lights_material.py`
+    after `import_car_meshes.py` builds it), the GT car (no lights slot).
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).
