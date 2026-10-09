@@ -62,3 +62,23 @@ content_src/audio/ambient/normalized/*.wav
 # Claude Code local state, scratch data arrays
 .claude/
 scratchpad/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local env / secrets / virtualenvs
+.env
+.env.*
+.venv/
+venv/
+
+# Editor + OS cruft
+.vscode/
+.idea/
+*.code-workspace
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store
