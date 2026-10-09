@@ -36,7 +36,6 @@ water/coast, tunnels, wet weather) is phased in
     (24639, 17570)).
   - About 10% of pads are pinned at the 12% tilt cap
     (`PAD_TILT_MAX_GRADE`).
-  - 9 road ends are less paved than before the pads, e.g. (-27544, 11341).
   - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
     the ribbon leaves the molded rim up to 0.68 m high on steep downhill arms.
   - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road

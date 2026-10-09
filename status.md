@@ -252,6 +252,18 @@ scale, built from open data, with a stylized "real places, storybook look".
     height. Spurs are now rebuilt after the flatten, one per mutual pair.
     Summit steps over 1.5 m: 6 -> 5 (the 5 are smooth ramps). Summit and SF
     gates all PASS.
+  - Road ends pinned (2026-10-08): `resample_stations` stopped 2-7 m short
+    of every road's end (edge-padded smoothing) and left closed loops with
+    a 3-9 m unpaved seam, e.g. seg357 at (7733, 5442). The "9 road ends
+    less paved than before the pads" were a frame artifact: the backups
+    predate the LCC switch. The last station now lands on the
+    polyline's end and every Summit loop seam closes (gap 0.00 m). Ends
+    meeting at a node now share one XY, so the sidecar match is one-to-one
+    (`match_sidecar`, up to 16 per node; a nearest match left SF
+    Francisco/Leavenworth at its pre-pad z, a 3 m poke-through). SF and
+    Summit full rebuilds PASS every gate. Gasquet and gv_west/east pick
+    it up on their next rebuild. Tests: `pipeline/tests/test_resample_stations.py`,
+    `pipeline/tests/test_match_sidecar.py`.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.

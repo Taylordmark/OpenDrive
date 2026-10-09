@@ -3161,7 +3161,7 @@ def match_sidecar(key_x, key_y, px_cm, py_cm):
     (2026-10-08, resample_stations pins the ends) - a plain nearest match
     gives both the same entry and the other one never gets patched."""
     from scipy.spatial import cKDTree
-    d, j = cKDTree(np.c_[key_x, key_y]).query(np.c_[px_cm, py_cm], k=4,
+    d, j = cKDTree(np.c_[key_x, key_y]).query(np.c_[px_cm, py_cm], k=16,   # Summit has 5-road nodes
                                                distance_upper_bound=SIDECAR_MATCH_EPS_CM)
     out = np.where(np.isfinite(d[:, 0]), j[:, 0], -1)
     multi = np.isfinite(d[:, 1])                   # usually a handful of coincident ends
