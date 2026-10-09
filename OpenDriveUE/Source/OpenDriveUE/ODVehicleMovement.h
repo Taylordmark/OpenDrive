@@ -251,7 +251,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	float EscLookahead = 0.2f;
 
-	/** ABS: release brake torque past this lock-slip; off = lockups live. */
+	/** ABS: hold each braked tire at AbsSlipTarget; off = lockups live. */
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	bool bAbsEnabled = true;
 

@@ -1576,6 +1576,17 @@ void AODVehiclePawn::OnBodyHit(UPrimitiveComponent*, AActor* OtherActor,
 			OpenCrashTraceWindow(Now, V0.Size(), TEXT("wall hit"));
 		}
 	}
+	// belly contacts (2026-10-09, stuck high-centered off road with the rear
+	// wheels hanging and spinning): name what the underside rests on, 1/s
+	if (bCrashTrace && !bWall && Now - LastBellyLog > 1.0)
+	{
+		LastBellyLog = Now;
+		UE_LOG(LogTemp, Display, TEXT("ODBelly: t=%.2f other=%s/%s n=(%.2f,%.2f,%.2f) local=%s spd=%.0f"),
+			Now, OtherActor ? *OtherActor->GetName() : TEXT("none"),
+			OtherComp ? *OtherComp->GetName() : TEXT("none"), N.X, N.Y, N.Z,
+			*GetActorTransform().InverseTransformPosition(Hit.ImpactPoint).ToCompactString(),
+			VSolver.Size());
+	}
 	if (bCrashTrace && Now < CrashTraceUntil)
 	{
 		UE_LOG(LogTemp, Display,

@@ -448,6 +448,7 @@ private:
 	double CrashTraceUntil = 0.0;      // >0 while a window is open
 	float CrashTraceImpactCmS = 0.0f;  // speed at the impact(s) in this window
 	float CrashTracePeakCmS = 0.0f;    // highest speed seen after them
+	double LastBellyLog = 0.0;         // ODBelly rate limit
 	// generous: the road tile at the spawn point now gets priority in
 	// AODRoadManager's own wait-queue (closest-to-player, not first-parsed),
 	// so this should rarely be hit, but a long fallback is cheap insurance

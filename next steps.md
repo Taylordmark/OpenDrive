@@ -169,9 +169,10 @@ gravel crunch, and the snow/wet grip feel.
   - fixed 120 Hz physics (2026-10-09): handling, braking, crashes and the
     spawn settle should feel the same at any frame rate. Watch for: a
     one-step (8 ms) visual lag, crash bounces, the parking brake now
-    holding at 0 mph, wheels still at a stop and spinning true. Holding S
-    faded at low speed on the LMP (an ABS/pitch bounce at ~4 Hz in the
-    trace); if it still fades, try ABS off in the pause menu. Backup
+    holding at 0 mph, wheels still at a stop and spinning true, the car
+    no longer jittering (p.AsyncPhysicsBlockMode=1), and holding S braking
+    as hard at 10 mph as at 60 (slip-target ABS). If the car beaches again
+    off road, run with -odcrashtrace and read the ODBelly lines. Backup
     lights flickering in the first seconds of a launch (LMP) is still
     open, render side.
   - the tornado funnel, debris and vortex numbers;

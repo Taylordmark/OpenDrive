@@ -1012,9 +1012,8 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 		ContactCount += W.bInContact ? 1 : 0;
 	}
 
-	// filled per wheel below, consumed after the loop by the axle-paired ABS
-	// pass (brake integration itself happens in that second pass)
-	float SlipRatios[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	// filled per wheel below, consumed after the loop by the ABS / brake pass
+	float RoadMs[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 	float SlipAngles[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 	float EffInertias[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -1034,7 +1033,6 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			: 0.0f);
 
 		float ReactionNm = 0.0f;
-		float WheelSlipRatio = 0.0f;   // braking slip; ABS reads this below
 		float WheelSlipAngle = 0.0f;   // cornering ABS reads this too
 		if (W.bInContact)
 		{
@@ -1047,6 +1045,7 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			const FVector Vel =
 				Body->GetPhysicsLinearVelocityAtPoint(W.ContactPoint); // cm/s
 			const float Vx = FVector::DotProduct(Vel, Fwd) / 100.0f;   // m/s
+			RoadMs[i] = Vx;
 			const float Vy = FVector::DotProduct(Vel, Right) / 100.0f;
 
 			// real suspension load, kg cm/s^2 - but CAPPED for grip purposes.
@@ -1092,7 +1091,6 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 				: FMath::Lerp(1.0f, SlideKeep,
 					FMath::Min((Sc - 1.0f) / 1.5f, 1.0f));
 
-			WheelSlipRatio = SlipRatio;
 			WheelSlipAngle = SlipAngle;
 
 			float Fx = 0.0f, Fy = 0.0f;
@@ -1217,62 +1215,41 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			W.Omega += (W.DriveNm - ReactionNm) / EffInertia * Dt;
 		}
 
-		SlipRatios[i] = WheelSlipRatio;
 		SlipAngles[i] = WheelSlipAngle;
 		EffInertias[i] = EffInertia;
 	}
 
-	// ---- ABS: select-low per axle. Braking slip is longitudinal-only
-	// (negative = wheel slower than road, i.e. locking under brakes) -
-	// release torque once past AbsSlipTarget so the wheel keeps rolling near
-	// peak grip instead of sliding at SlideFrac. Each axle's two wheels share
-	// whichever reduction is more aggressive, same as real ABS pairing an
-	// axle: independent per-wheel control brake-pulls the car off a straight
-	// line the instant one wheel locks a frame before its partner, which a
-	// keyboard's all-or-nothing brake input can't trail off to avoid the way
-	// a wheel/pedal driver would. Off = full lock reachable, same as before.
-	// Cornering ABS (2026-09-25): the slip target shrinks with the wheel's
-	// slip angle so braking mid-corner leaves friction-circle room for Fy,
-	// like production cornering-brake control - otherwise ABS parks the
-	// tire at peak LONGITUDINAL slip and the rear has nothing left sideways.
-	float AbsFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-	// not at a crawl: like real ABS (out below ~7 km/h). At 0.2 m/s the
-	// 1 m/s slip floor read a held parking brake as a skid: ABS released it,
-	// the free wheel spun to +5 rad/s and shoved the car, then it re-locked -
-	// the car rocked 0 <-> 1 mph (2026-10-09, Taylor: "holding parking brake
-	// at a stop alternate the speed between 0 and 1"; drive_wheels trace).
-	if (bAbsEnabled && FMath::Abs(FwdSpeedCmS) > 200.0f)
+	// ---- ABS (2026-10-09, Taylor: "abs should be helping braking not hurting
+	// it right?"): the brake may not pull a wheel's road speed below
+	// (1 - target) x Vx, i.e. the tire is held at its slip target, near peak
+	// grip, and the tire's own reaction does the rest. The old torque cut
+	// (memoryless, select-low per axle) cycled lock/release every step or two
+	// at 120 Hz and faded as omega fell - 0.56 g below 8 m/s vs 0.75 g locked
+	// (pipeline/check_abs.py). ponytail: ideal ABS, no valve/pump lag model.
+	// Cornering ABS (2026-09-25): the slip target shrinks with the wheel's slip
+	// angle so braking mid-corner leaves friction-circle room for Fy. Not at a
+	// crawl, like real ABS (out below ~7 km/h): at 0.2 m/s the 1 m/s slip floor
+	// read a held parking brake as a skid and rocked the car 0 <-> 1 mph
+	// (drive_wheels trace). The handbrake still locks the rears (flicks).
+	const bool bAbsOn = bAbsEnabled && FMath::Abs(FwdSpeedCmS) > 200.0f;
+	for (int32 i = 0; i < Wheels.Num(); ++i)
 	{
-		auto WheelAbsFactor = [&](int32 i)
+		FODWheel& W = Wheels[i];
+		const float Braked = FMath::Max(
+			FMath::Abs(W.Omega) - W.BrakeNm / EffInertias[i] * Dt, 0.0f);
+		float Floor = 0.0f;
+		if (bAbsOn && W.bInContact && W.BrakeNm > 1.0f
+			&& !(bHandbrakeIn && W.MaxHandbrakeNm > 0.0f)
+			&& W.Omega * RoadMs[i] > 0.0f)   // rolling the way the car goes
 		{
 			const float SyN = SlipAngles[i] / PeakSlipAngleRad;
 			const float Target = AbsSlipTarget
 				* FMath::Sqrt(FMath::Max(1.0f - SyN * SyN, 0.05f));
-			if (Wheels[i].bInContact && Wheels[i].BrakeNm > 1.0f
-				&& SlipRatios[i] < -Target)
-			{
-				return FMath::Clamp(
-					1.0f - ((-SlipRatios[i]) - Target) * 6.0f, 0.05f, 1.0f);
-			}
-			return 1.0f;
-		};
-		for (int32 Axle = 0; Axle < 2; ++Axle)   // 0 = front (FL,FR), 1 = rear
-		{
-			const int32 A = Axle * 2, B = Axle * 2 + 1;
-			const float FactorA = WheelAbsFactor(A), FactorB = WheelAbsFactor(B);
-			const float Paired = FMath::Min(FactorA, FactorB);
-			AbsFactor[A] = AbsFactor[B] = Paired;
-			bAbsActiveThisTick |= Paired < 0.999f;
+			Floor = FMath::Min(FMath::Abs(W.Omega),
+				(1.0f - Target) * FMath::Abs(RoadMs[i]) / (W.Radius / 100.0f));
+			bAbsActiveThisTick |= Floor > Braked;
 		}
-	}
-
-	for (int32 i = 0; i < Wheels.Num(); ++i)
-	{
-		FODWheel& W = Wheels[i];
-		const float EffBrakeNm = W.BrakeNm * AbsFactor[i];
-		const float BrakeDelta = EffBrakeNm / EffInertias[i] * Dt;
-		W.Omega = FMath::Sign(W.Omega)
-			* FMath::Max(FMath::Abs(W.Omega) - BrakeDelta, 0.0f);
+		W.Omega = FMath::Sign(W.Omega) * FMath::Max(Braked, Floor);
 		if (bDrivelineCoupled && W.bDriven
 			&& FMath::Abs(CurTotalRatio) > KINDA_SMALL_NUMBER)
 		{
