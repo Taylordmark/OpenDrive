@@ -32,22 +32,26 @@ water/coast, tunnels, wet weather) is phased in
   Example: US 6's west edge near Tennis Club Rd shows −0.2 to +1.5 m of
   skirt along its length (worst at (17088, 9005)).
 - **Junction pad leftovers** (§7.51):
-  - 23 Summit pads still sit more than 1 m off their road's grade
-    (worst 3.9 m); was 108 before the median flatten and carriageway fix.
+  - 29 Summit pads still sit more than 1 m off their road's grade
+    (worst 3.9 m); 28 of them are stacked crossings (see bridges below).
+    Was 108 before the median flatten and carriageway fix.
   - SF steep-street tabling: 8 station steps of 40-46% where Jones,
     Filbert and Hyde (22-31%) flatten into a level junction box. A longer
     blend can't fix it (peak is ~1.3-1.9x the street grade); tilting the
     box along the steep street would. Judge in a drive first.
-  - Summit pad kinks 1074 / steps 2020 (holes 1); the 400 gate-coverage
-    caps added ~170 kinks.
-  - About 10% of pads are pinned at the 12% tilt cap
-    (`PAD_TILT_MAX_GRADE`).
-  - SF (`OD_AREA=sf_russian_hill`) pads 0 and 5 keep about 20 kinks each:
-    the ribbon leaves the molded rim up to 0.68 m high on steep downhill arms.
-  - SF pad outliers after conform: (136, 201) is ~2.8 m over a lower road
-    (a stacked crossing, see bridges below); (16, 274) 0.92 m and
-    (133, 217) 0.58 m at the edge; inside-pad jumps up to 0.76 m at
-    (65, −133).
+  - Summit pad kinks 1004 (791 in the lane interior) / steps 1547
+    (holes 1). The 400 gate-coverage caps added ~170 kinks.
+  - 15 Summit pads are pinned at the 18% tilt cap (`PAD_TILT_MAX_GRADE`,
+    was 12% with 79 pinned).
+  - SF pad kinks (2026-10-08): 55 total; ~14 are the 0.5-1.5 m edge lip
+    every ribbon has. 41 sit in the lane interior (>= 3 m from unpaved),
+    nearly all on one crease on Leavenworth between Columbus
+    (8 m) and North Point (12.7 m): two flattened junctions 25 m apart
+    with 4.5 m between them. The rest: Bay St / Columbus at (136, 203)
+    (roads 4.4 m apart at the centre, up to 0.58 m) and a 0.43 m crease at
+    Filbert's 31% rim (102, -341). Same family as the steep-street item:
+    close or steep junctions need pads shaped along the street, not
+    level boxes.
 - **Bridges for stacked crossings.** Grade-separated crossings that don't
   have a structure yet.
 - **Rubber-banding: jitter and pull.** Carried over from the last drive test.

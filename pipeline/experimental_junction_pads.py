@@ -1216,7 +1216,8 @@ PAD_TILT_FIT_MARGIN_M = 10.0   # fit_pad_tilts: approach stations this far past
                                # the plane meets the roads where they leave
 PAD_TILT_RIDGE_M2 = 4.0        # just enough to zero the cross-slope of a
                                # single straight road (no lateral spread)
-PAD_TILT_MAX_GRADE = 0.12      # steepest a junction pad may tilt
+PAD_TILT_MAX_GRADE = 0.18      # steepest a junction pad may tilt (0.12 until
+                               # 2026-10-08: Summit pad steps 2020 -> 1547 at 0.18)
 PAD_MOLD_RINGS = 4             # concentric vertex rings a molded pad is drawn
                                # with (1 = the old hub+rim fan, planar only)
 PAD_MOLD_MAX_CENTER_MISS_M = 0.5   # no mold if a road misses the plane by more

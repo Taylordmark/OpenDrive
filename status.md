@@ -285,6 +285,10 @@ scale, built from open data, with a stylized "real places, storybook look".
     (-17784, 13378). Both now skip `is_struct` only. Summit: 400 holes
     capped, 0 unpaved centerline stations, end probes fully paved 96.9%;
     pad kinks 1074 (the caps), steps 2020. SF/Summit gates all PASS.
+  - Pad tilt cap 12% -> 18% (2026-10-08): Summit pads at the cap 79 ->
+    15, pad steps 2020 -> 1547, kinks 1074 -> 1004; pads >1 m off grade
+    23 -> 29, 28 of them stacked crossings. SF steps 59 -> 56, kinks
+    55 -> 54. SF/Summit gates all PASS.
   - `--preview-pads=<json>` is a dry run for plot review. It and
     `--dump-pads` now skip the prune/forest steps.
   - Test: `pipeline/tests/test_pad_profile.py`.
