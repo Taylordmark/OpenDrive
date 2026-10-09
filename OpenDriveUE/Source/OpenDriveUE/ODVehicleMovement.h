@@ -6,6 +6,7 @@
 
 class UPhysicalMaterial;
 class UPrimitiveComponent;
+struct FODStepBody;
 class UODVehicleDef;
 class AODWeatherController;
 class AODSeasonController;
@@ -90,6 +91,9 @@ public:
 	UODVehicleMovement();
 	virtual void TickComponent(float DeltaSeconds, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
+	virtual void BeginPlay() override;
+	/** The sim proper, once per fixed Chaos step (AsyncFixedTimeStepSize). */
+	virtual void AsyncPhysicsTickComponent(float DeltaTime, float SimTime) override;
 
 	// --- inputs (pawn writes every tick; already smoothed there) ---
 	void SetThrottleInput(float V) { ThrottleIn = FMath::Clamp(V, 0.0f, 1.0f); }
@@ -471,6 +475,31 @@ public:
 	}
 	float GetWheelSteerDeg(int32 i) const { return Wheels[i].SteerDeg; }
 	float GetWheelOmega(int32 i) const { return Wheels[i].Omega; }
+	/** Crash response's pre-impact velocity (AODVehiclePawn::OnBodyHit):
+	 *  the step-start velocity, of the last StepHistory fixed steps, that ran
+	 *  hardest into the wall (normal WallN, out of the wall). Hits arrive a
+	 *  frame's worth of steps late, so "last frame's velocity" was fps-bound.
+	 *  ponytail: max into-wall speed over ~0.13 s, slightly high under hard
+	 *  braking; key by hit time if that ever shows. */
+	void PreHitVelocity(const FVector& WallN, FVector& OutV, FVector& OutWDeg) const
+	{
+		int32 Best = 0;
+		for (int32 i = 1; i < StepHistory; ++i)
+		{
+			Best = FVector::DotProduct(StepV[i], WallN) < FVector::DotProduct(StepV[Best], WallN) ? i : Best;
+		}
+		OutV = StepV[Best];
+		OutWDeg = StepWDeg[Best];
+	}
+	/** After a crash response (or a teleport): forget the pre-impact steps. */
+	void ResetStepHistory(const FVector& V, const FVector& WDeg)
+	{
+		for (int32 i = 0; i < StepHistory; ++i)
+		{
+			StepV[i] = V;
+			StepWDeg[i] = WDeg;
+		}
+	}
 	/** Body-local XY of wheel i's strut attach point (Z deliberately omitted -
 	 *  callers doing a ground-level probe pair this with their own downward
 	 *  raycast at that world XY rather than trusting a pre-settle Z). Wheel
@@ -543,12 +572,12 @@ private:
 
 	UPrimitiveComponent* GetBody() const;
 	void InitBody(UPrimitiveComponent* Body);
-	void TickSuspension(UPrimitiveComponent* Body, float Dt);
-	void TickDrivetrain(UPrimitiveComponent* Body, float Dt);
-	void TickTires(UPrimitiveComponent* Body, float Dt);
-	void TickAero(UPrimitiveComponent* Body);
+	void TickSuspension(FODStepBody* Body, float Dt);
+	void TickDrivetrain(FODStepBody* Body, float Dt);
+	void TickTires(FODStepBody* Body, float Dt);
+	void TickAero(FODStepBody* Body);
 	/** W3: refresh WeatherGripMult + apply the crosswind force. */
-	void TickWeather(UPrimitiveComponent* Body);
+	void TickWeather(FODStepBody* Body);
 	float TorqueCurve(float Rpm) const;
 	float SurfaceGrip(const UPhysicalMaterial* Mat) const;
 	/** Highest gear that keeps rpm in the band at this road speed. */
@@ -589,9 +618,10 @@ private:
 	float EscSlipRate = 0.0f;        // filtered growth rate, deg/s
 
 	bool bBodyInit = false;
-	/** Ix / (4 * half-track^2): the mass one corner moves in roll (InitBody).
-	 *  TickSuspension caps the damper at this / Dt - see there. */
-	float RollCornerMass = 0.0f;
+	static constexpr int32 StepHistory = 16;   // fixed steps, ~0.13 s at 120 Hz
+	FVector StepV[StepHistory];                // body velocity at each step's start, cm/s
+	FVector StepWDeg[StepHistory];             // and angular, deg/s
+	int32 StepIdx = 0;
 	double LastTraceTime = 0.0;
 	// -odtrace per-frame jolt probe (TickComponent): last frame's body pose/velocity/dt
 	FVector JoltPrevPos = FVector::ZeroVector;

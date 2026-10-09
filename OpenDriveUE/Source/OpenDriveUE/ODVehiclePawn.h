@@ -427,15 +427,14 @@ private:
 
 	// --- crash response state (see the Crash UPROPERTYs) ---
 	/** Body OnComponentHit: wall/building/rail/trunk impacts get a defined
-	 *  response computed from the PRE-step velocity (CrashPreVel), so nothing
-	 *  the solver did that step - depenetration included - reaches the car. */
+	 *  response computed from the PRE-impact step velocity
+	 *  (UODVehicleMovement::PreHitVelocity), so nothing the solver did that
+	 *  step - depenetration included - reaches the car. */
 	UFUNCTION()
 	void OnBodyHit(UPrimitiveComponent* HitComp, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
-	// body velocity as of this frame's (pre-physics) Tick; the hit handler
-	// runs after the step, when the body already holds the solver's output
+	// body velocity as of this frame's Tick - -odcrashtrace diagnostics only
 	FVector CrashPreVel = FVector::ZeroVector;
-	FVector CrashPreAngVel = FVector::ZeroVector;   // deg/s
 	float CrashShake = 0.0f;   // 0..1, decays in Tick
 
 	// -odcrashtrace: per-frame body state for the frames around an impact

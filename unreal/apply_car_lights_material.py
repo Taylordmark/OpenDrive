@@ -19,10 +19,12 @@ CAR_DIR = "/Game/OpenDrive/Cars"
 # name: roughness - mirrors import_car_meshes.py CATEGORY_MATERIALS(_HI)["lights"]
 LIGHT_MATS = {"M_CarLights": 0.30, "M_CarLights_Hi": 0.08}
 
-# LocalX gates by end of the car (+X = nose): mip blends of palette cells
-# (reverse + tail) read as a head cell and flashed head glow on the rear
-# lenses (Taylor 2026-10-09: "backup lights are flickering while driving
-# forward"); pipeline/check_lamp_mask.py mirrors this.
+# LocalX gates by end of the car (+X = nose): head glow front only, reverse
+# rear only, so no blend of palette cells can light the wrong end. Written for
+# Taylor's "backup lights are flickering while driving forward" (2026-10-09)
+# on a mip-blend theory that doesn't hold - T_CarPalette2 is TF_NEAREST with
+# no mips (import_car_meshes.py) - and that flicker is still open.
+# pipeline/check_lamp_mask.py mirrors the mask.
 LAMP_HLSL = """
 float front = step(0.0, LocalX);
 float head = saturate((Pal.g - 0.3) * 10.0) * front;

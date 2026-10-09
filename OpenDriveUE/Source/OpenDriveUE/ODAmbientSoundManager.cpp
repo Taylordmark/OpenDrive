@@ -291,7 +291,7 @@ void AODAmbientSoundManager::Tick(float DeltaSeconds)
 	const float SamplePeriod = SampleHz > 0.0f ? 1.0f / SampleHz : 0.5f;
 	if (TimeSinceSample >= SamplePeriod)
 	{
-		TimeSinceSample = 0.0f;
+		TimeSinceSample = FMath::Fmod(TimeSinceSample, SamplePeriod);   // keep the remainder: SampleHz at any fps
 		SampleAndRetarget();
 	}
 

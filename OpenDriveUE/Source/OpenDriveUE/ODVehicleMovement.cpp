@@ -10,6 +10,42 @@
 #include "GameFramework/Actor.h"
 #include "Misc/CommandLine.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
+#include "PhysicsProxy/SingleParticlePhysicsProxy.h"
+
+// The body as one fixed physics step sees it (2026-10-09, Taylor: "everything
+// in the game should be independent of frame rate"). The sim runs once per
+// Chaos step (AsyncPhysicsTickComponent, AsyncFixedTimeStepSize in
+// DefaultEngine.ini) instead of once per rendered frame, and there the
+// component's own getters still hold last frame's interpolated pose - so this
+// reads and pushes on the solver particle. Same names as UPrimitiveComponent
+// so the sim code reads unchanged.
+struct FODStepBody
+{
+	Chaos::FRigidBodyHandle_Internal* H;
+	FVector Scale;
+
+	FTransform GetComponentTransform() const { return FTransform(FQuat(H->R()), H->X(), Scale); }
+	FVector GetComponentLocation() const { return H->X(); }
+	FVector GetForwardVector() const { return FQuat(H->R()).GetForwardVector(); }
+	FVector GetRightVector() const { return FQuat(H->R()).GetRightVector(); }
+	FVector GetUpVector() const { return FQuat(H->R()).GetUpVector(); }
+	float GetMass() const { return H->M(); }
+	FVector GetCenterOfMass() const { return H->X() + FQuat(H->R()).RotateVector(H->CenterOfMass()); }
+	FVector GetPhysicsLinearVelocity() const { return H->V(); }
+	FVector GetPhysicsAngularVelocityInDegrees() const { return FMath::RadiansToDegrees(FVector(H->W())); }
+	FVector GetPhysicsLinearVelocityAtPoint(const FVector& P) const
+	{
+		return H->V() + FVector::CrossProduct(H->W(), P - GetCenterOfMass());
+	}
+	void AddForce(const FVector& F) { H->AddForce(F); }
+	void AddForceAtLocation(const FVector& F, const FVector& P)
+	{
+		H->AddForce(F);
+		H->AddTorque(FVector::CrossProduct(P - GetCenterOfMass(), F));
+	}
+	void SetPhysicsLinearVelocity(const FVector& V) { H->SetV(V); }
+	void SetPhysicsAngularVelocityInDegrees(const FVector& W) { H->SetW(FMath::DegreesToRadians(W)); }
+};
 
 namespace
 {
@@ -75,6 +111,8 @@ UODVehicleMovement::UODVehicleMovement()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+	bAutoActivate = true;   // the async physics tick check()s IsActive()
+	ResetStepHistory(FVector::ZeroVector, FVector::ZeroVector);
 
 	// Placeholder-coupe defaults; AODVehiclePawn overwrites these per car via
 	// ApplyVehicleDef(). geometry contract with pipeline/make_car_mesh.py
@@ -233,11 +271,6 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	BI->InertiaTensorScale = FVector(FMath::Sqrt(Sx2), 1.0f, 1.0f);
 	BI->UpdateMassProperties();
 	const float IzFinal = BodyIz();
-	const FVector IP = BI->GetBodyInertiaTensor();
-	const FVector XAx = BI->GetMassSpaceLocal().GetRotation().UnrotateVector(FVector::ForwardVector);
-	const float HalfTrack = Wheels.Num() > 0 ? FMath::Max(FMath::Abs(Wheels[0].Attach.Y), 1.0f) : 84.0f;
-	RollCornerMass = (IP.X * XAx.X * XAx.X + IP.Y * XAx.Y * XAx.Y + IP.Z * XAx.Z * XAx.Z)
-		/ (4.0f * HalfTrack * HalfTrack);
 
 	// seed loads so first-tick grip is sane - per axle from the static split
 	for (int32 i = 0; i < Wheels.Num(); ++i)
@@ -268,10 +301,10 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	UE_LOG(LogTemp, Display,
 		TEXT("ODVehicleMovement: bound to %s (mass=%.0f kg, com z=%.1f -> "
 		     "%.1f, com x=%.1f -> %.1f, split %.0f/%.0f, Iz=%.3g kg cm2 "
-		     "(target %.3g, scaleX %.2f), %d wheels, roll corner mass %.0f kg)"),
+		     "(target %.3g, scaleX %.2f), %d wheels)"),
 		*GetOwner()->GetName(), Mass, ComLocal.Z, ComLocalZ, ComLocal.X, ComX,
 		Frac * 100.0f, (1.0f - Frac) * 100.0f, IzFinal, IzTarget,
-		FMath::Sqrt(Sx2), Wheels.Num(), RollCornerMass);
+		FMath::Sqrt(Sx2), Wheels.Num());
 }
 
 void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
@@ -291,72 +324,6 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 		{
 			return;
 		}
-	}
-	const float Dt = FMath::Clamp(DeltaSeconds, 0.001f, 0.05f);
-	FwdSpeedCmS = FVector::DotProduct(
-		Body->GetPhysicsLinearVelocity(), Body->GetForwardVector());
-
-	TickWeather(Body);
-	TickSuspension(Body, Dt);
-	TickDrivetrain(Body, Dt);
-	TickTires(Body, Dt);
-	TickAero(Body);
-
-	// spawn parking hold, static part: brake torque alone can't hold on a
-	// grade - locked wheels still creep on the tire model (Frisco verify
-	// drifted ~0.4 m/s downhill under full BrakeNm). Pin the horizontal
-	// velocity; Z stays free so the suspension can settle. TickDrivetrain
-	// already ran this tick and clears bParkHold on the first pedal input,
-	// so the release frame is never pinned.
-	if (bParkHold)
-	{
-		// hold a position, not zero velocity: gravity adds a step's worth
-		// of downhill speed after every zero pin, so a parked spawn on a
-		// grade still slid a steady 2 cm/s (2026-10-09, Taylor: "why do the
-		// wheels move when stationary" - ~14 cm in 6 s at Summit). Steer
-		// back by last step's creep instead; re-anchor after a teleport.
-		const FVector P = Body->GetComponentLocation();
-		if (FVector::DistSquared2D(P, ParkHoldPos) > FMath::Square(100.0f))
-		{
-			ParkHoldPos = P;
-		}
-		FVector Vel = Body->GetPhysicsLinearVelocity();
-		Vel.X = (ParkHoldPos.X - P.X) / Dt;
-		Vel.Y = (ParkHoldPos.Y - P.Y) / Dt;
-		Body->SetPhysicsLinearVelocity(Vel);
-
-		// 2026-09-03 fix ("tips over on flat pavement right after settle",
-		// Breckenridge/Lincoln Ave): this pin only ever killed horizontal
-		// TRANSLATION. A settle that releases with an uneven per-wheel spring
-		// load (curb edge, camber, or the ground-snap's off-asphalt fallback -
-		// see AODVehiclePawn::TrySnapToGround's timeout branch) puts a real
-		// net TORQUE on the body the instant physics goes live, and nothing
-		// here was damping that - the car could spin/roll right out from
-		// under itself before the first pedal input ever arrived, sliding in
-		// place (translation pinned) while rotating onto its roof. Angular
-		// velocity isn't load-bearing for anything while parked (the whole
-		// point is the car ISN'T moving yet), so zero it outright, same as
-		// the linear pin above.
-		Body->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
-	}
-
-	// airborne attitude damping - see AirborneRollDampPerSec's comment. Only
-	// with ALL wheels off the ground, so it can never fight the tire model.
-	bool bAnyContact = false;
-	for (const FODWheel& W : Wheels)
-	{
-		bAnyContact |= W.bInContact;
-	}
-	if (!bAnyContact
-		&& (AirborneRollDampPerSec > 0.0f || AirbornePitchDampPerSec > 0.0f))
-	{
-		const FTransform Xf = Body->GetComponentTransform();
-		FVector AngLocal = Xf.InverseTransformVectorNoScale(
-			Body->GetPhysicsAngularVelocityInDegrees());
-		AngLocal.X *= FMath::Max(1.0f - AirborneRollDampPerSec * Dt, 0.0f);
-		AngLocal.Y *= FMath::Max(1.0f - AirbornePitchDampPerSec * Dt, 0.0f);
-		Body->SetPhysicsAngularVelocityInDegrees(
-			Xf.TransformVectorNoScale(AngLocal));
 	}
 
 	// ---- 10 Hz trace, same -odtrace flag as the audio hooks ----
@@ -423,25 +390,112 @@ void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
 	}
 }
 
-void UODVehicleMovement::TickSuspension(UPrimitiveComponent* Body, float Dt)
+void UODVehicleMovement::BeginPlay()
+{
+	Super::BeginPlay();
+	SetAsyncPhysicsTickEnabled(true);   // after activation - see bAutoActivate
+}
+
+void UODVehicleMovement::AsyncPhysicsTickComponent(float DeltaTime, float SimTime)
+{
+	// game thread, frozen between fixed Chaos steps: TickComponent's checks
+	// plus the solver-side handle (FODStepBody)
+	UPrimitiveComponent* Comp = GetBody();
+	FBodyInstance* BI = bBodyInit && Comp && Comp->IsSimulatingPhysics()
+		? Comp->GetBodyInstance() : nullptr;
+	FPhysicsActorHandle Actor = BI ? BI->GetPhysicsActorHandle() : nullptr;
+	Chaos::FRigidBodyHandle_Internal* Handle = Actor ? Actor->GetPhysicsThreadAPI() : nullptr;
+	if (!Handle)
+	{
+		ResetStepHistory(FVector::ZeroVector, FVector::ZeroVector);   // teleports happen with physics off
+		return;
+	}
+	FODStepBody StepBody{Handle, Comp->GetComponentScale()};
+	FODStepBody* Body = &StepBody;
+	StepV[StepIdx] = Body->GetPhysicsLinearVelocity();
+	StepWDeg[StepIdx] = Body->GetPhysicsAngularVelocityInDegrees();
+	StepIdx = (StepIdx + 1) % StepHistory;
+	const float Dt = FMath::Clamp(DeltaTime, 0.001f, 0.05f);
+	FwdSpeedCmS = FVector::DotProduct(
+		Body->GetPhysicsLinearVelocity(), Body->GetForwardVector());
+
+	TickWeather(Body);
+	TickSuspension(Body, Dt);
+	TickDrivetrain(Body, Dt);
+	TickTires(Body, Dt);
+	TickAero(Body);
+
+	// spawn parking hold, static part: brake torque alone can't hold on a
+	// grade - locked wheels still creep on the tire model (Frisco verify
+	// drifted ~0.4 m/s downhill under full BrakeNm). Pin the horizontal
+	// velocity; Z stays free so the suspension can settle. TickDrivetrain
+	// already ran this tick and clears bParkHold on the first pedal input,
+	// so the release frame is never pinned.
+	if (bParkHold)
+	{
+		// hold a position, not zero velocity: gravity adds a step's worth
+		// of downhill speed after every zero pin, so a parked spawn on a
+		// grade still slid a steady 2 cm/s (2026-10-09, Taylor: "why do the
+		// wheels move when stationary" - ~14 cm in 6 s at Summit). Steer
+		// back by last step's creep instead; re-anchor after a teleport.
+		const FVector P = Body->GetComponentLocation();
+		if (FVector::DistSquared2D(P, ParkHoldPos) > FMath::Square(100.0f))
+		{
+			ParkHoldPos = P;
+		}
+		FVector Vel = Body->GetPhysicsLinearVelocity();
+		Vel.X = (ParkHoldPos.X - P.X) / Dt;
+		Vel.Y = (ParkHoldPos.Y - P.Y) / Dt;
+		Body->SetPhysicsLinearVelocity(Vel);
+
+		// 2026-09-03 fix ("tips over on flat pavement right after settle",
+		// Breckenridge/Lincoln Ave): this pin only ever killed horizontal
+		// TRANSLATION. A settle that releases with an uneven per-wheel spring
+		// load (curb edge, camber, or the ground-snap's off-asphalt fallback -
+		// see AODVehiclePawn::TrySnapToGround's timeout branch) puts a real
+		// net TORQUE on the body the instant physics goes live, and nothing
+		// here was damping that - the car could spin/roll right out from
+		// under itself before the first pedal input ever arrived, sliding in
+		// place (translation pinned) while rotating onto its roof. Angular
+		// velocity isn't load-bearing for anything while parked (the whole
+		// point is the car ISN'T moving yet), so zero it outright, same as
+		// the linear pin above.
+		Body->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+	}
+
+	// airborne attitude damping - see AirborneRollDampPerSec's comment. Only
+	// with ALL wheels off the ground, so it can never fight the tire model.
+	bool bAnyContact = false;
+	for (const FODWheel& W : Wheels)
+	{
+		bAnyContact |= W.bInContact;
+	}
+	if (!bAnyContact
+		&& (AirborneRollDampPerSec > 0.0f || AirbornePitchDampPerSec > 0.0f))
+	{
+		const FTransform Xf = Body->GetComponentTransform();
+		FVector AngLocal = Xf.InverseTransformVectorNoScale(
+			Body->GetPhysicsAngularVelocityInDegrees());
+		AngLocal.X *= FMath::Max(1.0f - AirborneRollDampPerSec * Dt, 0.0f);
+		AngLocal.Y *= FMath::Max(1.0f - AirbornePitchDampPerSec * Dt, 0.0f);
+		Body->SetPhysicsAngularVelocityInDegrees(
+			Xf.TransformVectorNoScale(AngLocal));
+	}
+}
+
+void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 {
 	const FTransform Xf = Body->GetComponentTransform();
 	const FVector Up = Xf.GetUnitAxis(EAxis::Z);
 	const float RestLen = FMath::Max(RestLengthCm + RideHeightDelta, 5.0f);
 	const float CornerW = Body->GetMass() * 980.0f * 0.25f;
 	const float K = SpringRate * SpringRateScale;
-	// critical damping vs the corner mass; DampingRatio is the preset knob
-	// Capped at RollCornerMass / Dt (2026-10-09, Taylor: wheels "bouncing
-	// around like crazy" on a 25-40 fps drive): these forces go in once per
-	// frame, and in roll a corner moves only ~half its mass share, so past
-	// C*Dt/m = 1 the roll mode flip-flops frame to frame. 60 fps is uncapped.
-	// See pipeline/check_suspension_stability.py.
-	float C = 2.0f * DampingRatio
+	// critical damping vs the corner mass; DampingRatio is the preset knob.
+	// Uncapped: at the fixed physics step C*Dt/m stays well under 1 even for
+	// the roll mode (pipeline/check_suspension_stability.py) - the old
+	// RollCornerMass / Dt cap was for 25-40 fps per-frame steps.
+	const float C = 2.0f * DampingRatio
 		* FMath::Sqrt(K * Body->GetMass() * 0.25f);
-	if (RollCornerMass > 0.0f)
-	{
-		C = FMath::Min(C, RollCornerMass / Dt);
-	}
 
 	FCollisionQueryParams Query(SCENE_QUERY_STAT(ODSuspension), true, GetOwner());
 	Query.bReturnPhysicalMaterial = true;
@@ -585,7 +639,7 @@ float UODVehicleMovement::TorqueCurve(float Rpm) const
 	return PeakTorqueNm * TorqueScale * FMath::Min(T, Fall);
 }
 
-void UODVehicleMovement::TickDrivetrain(UPrimitiveComponent* Body, float Dt)
+void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 {
 	int32 DrivenCount = 0, DrivenInContact = 0;
 	float WheelRadSum = 0.0f;
@@ -939,7 +993,7 @@ float UODVehicleMovement::SurfaceGrip(const UPhysicalMaterial* Mat) const
 	return OffRoadGrip;   // off-road (any surface that isn't the road)
 }
 
-void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
+void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 {
 	const float PeakSlipAngleRad =
 		FMath::DegreesToRadians(PeakSlipAngleDeg + SlipAngleAddDeg);
@@ -1230,7 +1284,7 @@ void UODVehicleMovement::TickTires(UPrimitiveComponent* Body, float Dt)
 	}
 }
 
-void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
+void UODVehicleMovement::TickWeather(FODStepBody* Body)
 {
 	UWorld* World = GetWorld();
 	if (!WeatherCtl.IsValid() && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
@@ -1283,7 +1337,7 @@ void UODVehicleMovement::TickWeather(UPrimitiveComponent* Body)
 	Body->AddForce(Right * WindSideForceCoeff * LatMs * FMath::Abs(LatMs) * 100.0f);
 }
 
-void UODVehicleMovement::TickAero(UPrimitiveComponent* Body)
+void UODVehicleMovement::TickAero(FODStepBody* Body)
 {
 	const FVector Vel = Body->GetPhysicsLinearVelocity();
 	const float SpeedMs = Vel.Size() / 100.0f;

@@ -17,7 +17,7 @@ import math
 
 MU, PEAK, SLIDE, RR = 1.05, 0.14, 0.72, 0.015      # MuPeak, PeakSlipRatio, SlideFrac, RollingResistance
 I_WHEEL, I_ENG, EFF, RATIO = 1.5, 0.25, 0.9, 3.0 * 3.5   # coupled 1st: reflected engine inertia
-R, M, DT = 0.34, 1500.0, 1 / 60                     # m, kg, s
+R, M, DT = 0.34, 1500.0, 1 / 120                    # m, kg, s (fixed physics step)
 GRADE = 0.07                                        # downhill pull, g
 
 
@@ -53,7 +53,7 @@ def main():
     for clamp in (False, True):
         flips, jump, v = run(clamp)
         print(f"clamp={clamp!s:5s}  Fx sign flips (100 ticks) {flips:3d}  "
-              f"max wheel omega step {jump:.3f} rad/s  speed after 2 s {v * 100:.0f} cm/s")
+              f"max wheel omega step {jump:.3f} rad/s  speed after {len(range(120)) * DT:.0f} s {v * 100:.0f} cm/s")
     flips0, _, _ = run(False)
     flips, jump, _ = run(True)
     assert flips0 > 20, "mirror reproduces the trace's per-tick Fx flip-flop"

@@ -1,10 +1,10 @@
 """Lamp lens masks (2026-10-09, Taylor: "the backup lights are flickering
 while driving forward"). M_CarLights tells lenses apart by palette colour
-(unreal/apply_car_lights_material.py LAMP_HLSL). Mip / filter blends of
-neighbouring palette cells made a reverse+tail mix read as a HEADLIGHT
-cell, so rear lenses flashed at head glow as the mip level changed. The
-mask now also gates on the car's local X: head glow front only, reverse
-rear only. Mirrors LAMP_HLSL over blends of the lamp cells and checks no
+(unreal/apply_car_lights_material.py LAMP_HLSL). A blend of palette
+cells could read a reverse+tail mix as a HEADLIGHT cell, so the mask also
+gates on the car's local X: head glow front only, reverse rear only. (The
+palette is nearest-filtered with no mips, so this was not the flicker's
+cause - that is still open.) Mirrors LAMP_HLSL over blends of the lamp cells and checks no
 rear pixel ever gets head glow and no front pixel reverse glow.
 
 Usage:  python pipeline/check_lamp_mask.py

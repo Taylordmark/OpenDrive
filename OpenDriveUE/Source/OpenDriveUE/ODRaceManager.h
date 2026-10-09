@@ -85,6 +85,11 @@ private:
 	TArray<FRotator> RecRotations;
 	TArray<float> RecGateTimes;
 	TArray<float> BestGateTimes;
+	/** Last Tick's pawn pose: gate times and ghost samples interpolate
+	 *  between it and this Tick's, so they don't snap to the frame. */
+	FVector PrevPos = FVector::ZeroVector;
+	FQuat PrevRot = FQuat::Identity;
+	double PrevTime = -1.0;
 
 	TWeakObjectPtr<class AODGhost> Ghost;
 };

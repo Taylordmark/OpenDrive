@@ -9,6 +9,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "ODGhost.h"
 
 AODRaceManager::AODRaceManager()
@@ -135,12 +136,35 @@ void AODRaceManager::Tick(float DeltaSeconds)
 		}
 	}
 
+	// Sub-frame timing (2026-10-09, Taylor: "everything in the game should be
+	// independent of frame rate"): ghost samples and gate crossings are
+	// placed on the straight path from last Tick's pose to this one, not
+	// stamped with the frame's time - lap times were +/- a frame.
+	const double Now = GetWorld()->GetTimeSeconds();
+	const FVector Pos = Pawn->GetActorLocation();
+	const FQuat Rot = Pawn->GetActorQuat();
+	if (PrevTime < 0.0)
+	{
+		PrevPos = Pos;
+		PrevRot = Rot;
+		PrevTime = Now;
+	}
+	ON_SCOPE_EXIT
+	{
+		PrevPos = Pos;
+		PrevRot = Rot;
+		PrevTime = Now;
+	};
+	const double FrameDt = Now - PrevTime;
+
 	if (bRunning)
 	{
-		while (GetWorld()->GetTimeSeconds() - RaceStart >= NextSampleTime)
+		while (Now - RaceStart >= NextSampleTime)
 		{
-			RecPositions.Add(Pawn->GetActorLocation());
-			RecRotations.Add(Pawn->GetActorRotation());
+			const float A = FrameDt > 0.0
+				? FMath::Clamp(float((RaceStart + NextSampleTime - PrevTime) / FrameDt), 0.0f, 1.0f) : 1.0f;
+			RecPositions.Add(FMath::Lerp(PrevPos, Pos, A));
+			RecRotations.Add(FQuat::Slerp(PrevRot, Rot, A).Rotator());
 			NextSampleTime += SampleInterval;
 		}
 	}
@@ -154,10 +178,18 @@ void AODRaceManager::Tick(float DeltaSeconds)
 		: (NextGate == Checkpoints.Num() - 1 ? FColor::Blue : FColor::Yellow),
 		false, -1.0f, 0, 12.0f);
 
-	if (FVector::Dist2D(Pawn->GetActorLocation(), Gate) > GateRadius)
+	if (FVector::Dist2D(Pos, Gate) > GateRadius)
 	{
 		return;
 	}
+	// when this frame's path entered the gate circle: |F + t*D| = R, first root
+	const FVector2D D(Pos - PrevPos), F(PrevPos - Gate);
+	const double Qa = D.SizeSquared(), Qb = 2.0 * FVector2D::DotProduct(F, D);
+	const double Qc = F.SizeSquared() - FMath::Square(GateRadius);
+	const double Disc = Qb * Qb - 4.0 * Qa * Qc;
+	const double Enter = Qc <= 0.0 ? 0.0
+		: Qa > 1e-6 && Disc >= 0.0 ? FMath::Clamp((-Qb - FMath::Sqrt(Disc)) / (2.0 * Qa), 0.0, 1.0) : 1.0;
+	const double CrossTime = PrevTime + Enter * FrameDt;
 
 	// the start gate surrounds the spawn point: arm it only at rolling speed
 	// (horizontal - the spawn drop spikes vertical velocity) for a flying start
@@ -169,7 +201,7 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	if (NextGate == 0)
 	{
 		bRunning = true;
-		RaceStart = GetWorld()->GetTimeSeconds();
+		RaceStart = float(CrossTime);
 		NextSampleTime = 0.0f;
 		RecPositions.Reset();
 		RecRotations.Reset();
@@ -181,7 +213,7 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	}
 	else if (bRunning)
 	{
-		const float Elapsed = GetWorld()->GetTimeSeconds() - RaceStart;
+		const float Elapsed = float(CrossTime - RaceStart);
 		RecGateTimes.Add(Elapsed);
 		// gate index in RecGateTimes = NextGate - 1 after the start gate
 		if (BestGateTimes.IsValidIndex(RecGateTimes.Num() - 1))
@@ -195,7 +227,7 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	if (NextGate == Checkpoints.Num() && bRunning)
 	{
 		bRunning = false;
-		LastTime = GetWorld()->GetTimeSeconds() - RaceStart;
+		LastTime = float(CrossTime - RaceStart);
 		if (BestTime <= 0.0f || LastTime < BestTime)
 		{
 			BestTime = LastTime;

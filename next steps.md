@@ -166,6 +166,14 @@ gravel crunch, and the snow/wet grip feel.
     `Headlight/Tail/Brake/ReverseLightLm` and `Head/Tail/BrakelampGlow`.
     High/Ultra cars are imported now, clear coat skipped (UE 5.8 Python
     has no CustomData pins) - check their look before relying on them.
+  - fixed 120 Hz physics (2026-10-09): handling, braking, crashes and the
+    spawn settle should feel the same at any frame rate. Watch for: a
+    one-step (8 ms) visual lag, crash bounces, the parking brake now
+    holding at 0 mph, wheels still at a stop and spinning true. Holding S
+    faded at low speed on the LMP (an ABS/pitch bounce at ~4 Hz in the
+    trace); if it still fades, try ABS off in the pause menu. Backup
+    lights flickering in the first seconds of a launch (LMP) is still
+    open, render side.
   - the tornado funnel, debris and vortex numbers;
   - hurricane gusts (§7.42);
   - the garage season row (§7.38).

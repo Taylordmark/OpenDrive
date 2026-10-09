@@ -1169,11 +1169,13 @@ void AODVehiclePawn::UpdateActiveInputDevice()
 	bool bWheelChanged = bWheelHandbrake;
 	for (int32 i = 0; i < NumWheelAxesBound; ++i)
 	{
+		// vs the last value that counted, not last tick's: a slow squeeze
+		// moves < 0.0005 per frame at high fps and never registered
 		if (!FMath::IsNearlyEqual(RawWheelAxis[i], PrevWheelAxis[i], 0.0005f))
 		{
 			bWheelChanged = true;
+			PrevWheelAxis[i] = RawWheelAxis[i];
 		}
-		PrevWheelAxis[i] = RawWheelAxis[i];
 	}
 	if (bWheelChanged)
 	{
@@ -1507,8 +1509,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		{
 			TickCrashTrace(GetWorld()->GetTimeSeconds());
 		}
-		CrashPreVel = Body->GetPhysicsLinearVelocity();
-		CrashPreAngVel = Body->GetPhysicsAngularVelocityInDegrees();
+		CrashPreVel = Body->GetPhysicsLinearVelocity();   // -odcrashtrace's velocity-jump probe only
 	}
 
 	TickOutOfBounds(DeltaSeconds);
@@ -1528,8 +1529,8 @@ void AODVehiclePawn::OnBodyHit(UPrimitiveComponent*, AActor* OtherActor,
 	{
 		N = -N;
 	}
-	const FVector V0 = CrashPreVel;
-	const FVector W0 = CrashPreAngVel;
+	FVector V0, W0;
+	Movement->PreHitVelocity(N, V0, W0);
 	const float Vn = -FVector::DotProduct(V0, N);   // speed into the wall
 	// Walls only. Buildings, retaining walls, rails, trunks AND the road and
 	// terrain are all the same BlockAll WorldStatic, so the normal is what
@@ -1558,8 +1559,8 @@ void AODVehiclePawn::OnBodyHit(UPrimitiveComponent*, AActor* OtherActor,
 		Body->SetPhysicsLinearVelocity(VOut);
 		Body->SetPhysicsAngularVelocityInDegrees(WOut);
 		// a second wall in the same step (a corner) builds on this result
+		Movement->ResetStepHistory(VOut, WOut);
 		CrashPreVel = VOut;
-		CrashPreAngVel = WOut;
 
 		// feedback (D1): the road synth's impact thump - no crash sample in
 		// content_src/audio yet - plus a small camera shake, both by Vn

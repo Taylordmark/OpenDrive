@@ -14,6 +14,7 @@ public class OpenDriveUE : ModuleRules
 			"InputCore",
 			"EnhancedInput",
 			"PhysicsCore",
+			"Chaos",   // FRigidBodyHandle_Internal - the car sim's fixed-step body (ODVehicleMovement)
 			"Landscape",
 			"Foliage",
 			"AudioMixer",

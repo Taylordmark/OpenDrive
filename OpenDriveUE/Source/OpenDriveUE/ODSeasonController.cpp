@@ -288,7 +288,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 	const float PushInterval = ParamPushHz > 0.0f ? 1.0f / ParamPushHz : 0.0f;
 	if (PushAccumSeconds >= PushInterval)
 	{
-		PushAccumSeconds = 0.0f;
+		PushAccumSeconds = PushInterval > 0.0f ? FMath::Fmod(PushAccumSeconds, PushInterval) : 0.0f;   // keep the remainder: ParamPushHz at any fps
 		PushParamsToMIDs();
 	}
 
@@ -653,7 +653,10 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const FVector Center = CamLoc + CamMgr->GetCameraRotation().Vector().GetSafeNormal2D() * AheadCm;
 	FVector Shift = Center - SnowFxCenter;
 	FVector CamVel = (CamLoc - SnowFxPrevCam) / FMath::Max(DeltaSeconds, 1.0e-3f);
-	if (!bSnowFxCentered || Shift.SizeSquared() > FMath::Square(HalfExtentXYCm))
+	// a teleport is a camera SPEED no car reaches (150 m/s, as the lens
+	// wipe's LENS_TELEPORT_MS) - a per-frame distance fired on every frame
+	// at low fps and highway speed
+	if (!bSnowFxCentered || CamVel.SizeSquared() > FMath::Square(15000.0f))
 	{
 		Shift = CamVel = FVector::ZeroVector;   // first frame or a teleport: keep the pattern, just move the box
 	}
