@@ -51,6 +51,7 @@ sample_mesh_height returns the TOPMOST surface, which at a crossing is the
 other road's deck and would hide a poke).
 """
 
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -199,8 +200,14 @@ def check_road_vs_terrain_fit():
     east, north, elev, exclude, _clamp_r, wall_pairs = btmt.load_stations()
     st_x_cm, st_y_cm = east * 100.0, -north * 100.0
 
-    # owned stations only: the halo's tiles are pruned (2026-10-05, step 3)
-    fit_idx = np.where(~exclude & owns(st_x_cm, st_y_cm))[0]
+    # owned stations only: the halo's tiles are pruned (2026-10-05, step 3).
+    # Road coverage skips only real bridges/tunnels: `exclude` also holds
+    # every wall-conflict station (48% of Summit), which hid 246 unpaved
+    # centerline stations, e.g. the I-70 on-ramp merge at (-17784, 13378)
+    # (2026-10-08). The road-vs-terrain gap still skips all of `exclude`.
+    struct = np.concatenate([np.asarray(s["is_struct"], dtype=bool)
+                             for s in json.loads(btmt.STATIONS_PATH.read_text())["segments"]])
+    road_idx = np.where(~struct & owns(st_x_cm, st_y_cm))[0]
     n_excluded = int(np.sum(exclude))
     print(f"{len(east)} road station(s) loaded"
           + (f" ({n_excluded} excluded - bridge/tunnel or an auto-detected "
@@ -216,10 +223,8 @@ def check_road_vs_terrain_fit():
     rtx_all = np.floor(st_x_cm / ROAD_TILE_SIZE_CM).astype(int)
     rty_all = np.floor(st_y_cm / ROAD_TILE_SIZE_CM).astype(int)
 
-    road_h = _sample_with_neighbors(_load_road_tile, rtx_all[fit_idx], rty_all[fit_idx],
-                                    st_x_cm[fit_idx], st_y_cm[fit_idx], ring=2)
-    terrain_h = _sample_with_neighbors(_load_terrain_tile, tx_all[fit_idx], ty_all[fit_idx],
-                                       st_x_cm[fit_idx], st_y_cm[fit_idx])
+    road_h = _sample_with_neighbors(_load_road_tile, rtx_all[road_idx], rty_all[road_idx],
+                                    st_x_cm[road_idx], st_y_cm[road_idx], ring=2)
     # A way-end station sits exactly on its ribbon's end edge, and float32 .bin
     # verts far from the origin (4 cm ulp at 650 km) can leave it a hair
     # outside - retry those within the format's own precision (far_gasquet: 4
@@ -228,12 +233,18 @@ def check_road_vs_terrain_fit():
     for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False):
         if not len(miss):
             break
-        sel = fit_idx[miss]
+        sel = road_idx[miss]
         road_h[miss] = _sample_with_neighbors(
             _load_road_tile, rtx_all[sel], rty_all[sel],
             st_x_cm[sel] + 5.0 * np.cos(ang), st_y_cm[sel] + 5.0 * np.sin(ang), ring=2)
         miss = miss[np.isnan(road_h[miss])]
     road_misses = int(np.isnan(road_h).sum())
+    for i in road_idx[np.isnan(road_h)][:5]:
+        print(f"  no road surface at station ({east[i]:.0f}, {north[i]:.0f})")
+    in_fit = ~exclude[road_idx]
+    fit_idx, road_h = road_idx[in_fit], road_h[in_fit]
+    terrain_h = _sample_with_neighbors(_load_terrain_tile, tx_all[fit_idx], ty_all[fit_idx],
+                                       st_x_cm[fit_idx], st_y_cm[fit_idx])
     terrain_misses = int((~np.isnan(road_h) & np.isnan(terrain_h)).sum())
     ok_pts = ~np.isnan(road_h) & ~np.isnan(terrain_h)
     gaps = ((road_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M) - (terrain_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M))

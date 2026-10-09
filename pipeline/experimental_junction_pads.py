@@ -4142,8 +4142,10 @@ def main():
             all_chunks.append(pad)
             n_standalone += 1
 
+    # only real structures skip the cap: terrain_exclude also holds every
+    # wall-conflict station and left 246 Summit centerlines unpaved (2026-10-08)
     n_gate_fills = add_gate_coverage_fills(all_chunks, junctions, east, north,
-                                            regraded, terrain_exclude, seg_ids)
+                                            regraded, structural, seg_ids)
 
     buckets = defaultdict(list)
     for chunk in all_chunks:
