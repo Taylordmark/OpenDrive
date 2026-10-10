@@ -1,5 +1,6 @@
 #include "ODRoadManager.h"
 #include "ODVisualStyle.h"
+#include "ODRoadDecals.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Algo/Reverse.h"
@@ -111,11 +112,21 @@ void AODRoadManager::SetWetness(float Wetness)
 			Mid->SetScalarParameterValue(TEXT("Wetness"), Wetness);
 		}
 	}
+	if (Decals)
+	{
+		Decals->SetWetness(Wetness);
+	}
 }
 
 void AODRoadManager::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (ODVisualStyle::IsRealistic())
+	{
+		Decals = NewObject<UODRoadDecals>(this, TEXT("RoadDecals"));
+		Decals->RegisterComponent();
+	}
 
 	RoadMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_Road.M_Road")));
@@ -1371,6 +1382,10 @@ void AODRoadManager::BuildOneChunk(const FIntPoint& Key, FRoadTile& Tile, const 
 
 	UDynamicMeshComponent* Comp = CreateChunkMeshComponent(Chunk, CompXf, /*bRecordSkirtSamples=*/true);
 	Tile.Chunks.Add(Comp);
+	if (Decals)
+	{
+		Decals->AddChunk(Key, Chunk, Comp);
+	}
 
 	// 2026-08-26 diagnostic: the earlier bulk-same-frame-registration theory
 	// (see OnTileParsed's comment above) assumed the affected component's own
@@ -1505,6 +1520,10 @@ void AODRoadManager::ReleaseTile(const FIntPoint& Key)
 			}
 		}
 		Tiles.Remove(Key);
+	}
+	if (Decals)
+	{
+		Decals->ReleaseTile(Key);
 	}
 }
 

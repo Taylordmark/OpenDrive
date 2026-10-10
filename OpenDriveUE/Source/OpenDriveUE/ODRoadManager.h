@@ -11,6 +11,7 @@ class UPrimitiveComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
+class UODRoadDecals;
 
 /** One parsed road-mesh chunk, plain data only - safe to build off the game
  *  thread (no UObject/component touched). Mirrors the per-chunk payload
@@ -506,6 +507,10 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatDirt;
+
+	// Realistic-only wear decals (PLAN-VISUALS Track C), null in Stylized
+	UPROPERTY()
+	TObjectPtr<UODRoadDecals> Decals;
 
 	// skirt-bottom world positions sampled every 10th station as tiles
 	// load, for -odseam
