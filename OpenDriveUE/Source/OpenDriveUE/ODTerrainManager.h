@@ -472,6 +472,16 @@ private:
 	void LoadRoadStationSidecar();
 	void LoadBiomeSidecar();
 
+	/** PLAN-VISUALS Track L (Realistic only): Sentinel-2 ground albedo for the
+	 *  whole area, sat_<area>_test.png + .json in Masks/ (pipeline/
+	 *  build_sat_albedo.py), bound once on TerrainMID as SatTex/SatOrigin/
+	 *  SatSizeCm and SatAmount = 1. One texture over the baked extent, so
+	 *  tile borders are seamless; missing files leave SatAmount at its 0
+	 *  default = the old look. */
+	void LoadSatAlbedo();
+	UPROPERTY()
+	TObjectPtr<UTexture2D> SatTex;
+
 	void RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity);
 	void OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed);
 	void ProcessPendingTileBuilds();

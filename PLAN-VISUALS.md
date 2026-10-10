@@ -184,6 +184,7 @@ fewer than seven run at once.
 | H | first pass: `_real` W-beam and Jersey, W6x9 posts, delineators | see Track H |
 | J | shader shoulder blend, no RVT; junction pad rims + aprons fringe too (UV3.y edge code from ODRoadManager, Realistic only; `check_pad_edge.py`) | 5cbf1ee, this commit |
 | K | first pass: tall grass, weeds, low shrubs, pebbles on the grass cells | see Track K |
+| L | first pass: Sentinel-2 macro ground colour (deals_gap, near_gasquet, sf_russian_hill) | see Track L |
 
 `main` merged in with the menu work (cbbce1f). Known gaps:
 - The old static Dragon level gets no decals.
@@ -438,6 +439,57 @@ beyond the 120 m grass ring.
 **Drive check:** a meadow road (Summit County) and a desert road, at each
 Model Detail level. Watch the shoulder edge and the 60–120 m fade.
 
+### Track L — Satellite ground colour (small)
+
+Taylor: the landscape is bland. At a distance a hillside is one biome tint
+plus noise. Real imagery makes it read as what is there: fields, bare
+patches, burn scars, dry versus irrigated land, scree.
+
+**Status (2026-10-09):** first pass, Realistic only.
+- Source: raw Copernicus Sentinel-2 L2A from Element84 Earth Search on AWS
+  (no login). Copernicus terms allow free commercial use with attribution:
+  "Contains modified Copernicus Sentinel data 2023-2025". It is recorded in
+  `content_src/realistic/satellite/manifest.json` and the credits. Not the
+  EOX "cloudless" mosaics: their 2018+ editions are non-commercial.
+- `pipeline/build_sat_albedo.py` (run with `python -I`, `OD_AREA=<area>`).
+  It covers the baked terrain tiles' rect with up to 10 lowest-cloud summer
+  scenes per MGRS tile (Jun to mid-Sep, 2023 to 2025). It reads B04/B03/B02
+  at their 20 m COG overview through a small built-in COG reader (no
+  rasterio or pyproj), masks with SCL (keeps vegetation, bare, water and
+  unclassified) and takes a per-band median. Reflectance uses a fixed scale,
+  so tiles and areas match. Road footprints from `roadstations_<area>.bin`
+  plus 12 m are inpainted from the ground around them. Asphalt-grey texels
+  and the extent border lose alpha (confidence). Downloads are cached in
+  `data/cache/sentinel2/`.
+- Output: `Masks/sat_<area>_test.png` (RGBA8: sRGB-encoded linear albedo
+  and confidence) plus `.json` (extent in UE cm). Sizes: deals_gap 3.1 MB,
+  near_gasquet 1.9 MB, sf_russian_hill 1.2 MB.
+- Runtime: one texture per area on the shared `TerrainMID`
+  (`AODTerrainManager::LoadSatAlbedo`, only when `IsRealistic()`). This is
+  seamless across tiles by construction, with no per-tile MIDs and no mesh
+  data. `SatAmount` stays 0 when the files are missing, which gives the old
+  look. Walls and other users of the material also stay at 0.
+- Material (`sat_macro()` in `apply_terrain_real_materials.py`): the albedo
+  is multiplied by the imagery's chroma relative to the biome tint's (neutral
+  on steep rock), times its luminance relative to `SAT_TINT_LUMA_K` × the
+  tint's, both clamped. The weight is 25% up close, rising to full by 200 m,
+  × `SAT_STRENGTH` 0.85 × alpha. It applies before wetness and snow, so both
+  still cover it.
+- `pipeline/checks/check_sat_albedo.py` checks the extent, the 0 border,
+  the albedo range, tile-border and granule seams, a port of the material
+  math (fallback is exact) and the order relative to snow. It also refits
+  the two luminance references from the biome sidecars.
+
+Not done: other areas (run the script per area, about 1 to 2 min uncached);
+terrain-shadow removal (the imagery carries some hill shading; the value
+exponent and clamp soften it); roads outside the OSM bbox (background ring)
+aren't inpainted, only down-weighted when they're asphalt-grey; no mips on
+the runtime texture (fine at 20 m texels out to the horizon ring).
+
+**Drive check:** the Dragon from a high pull-off, and near_gasquet's
+serpentine slopes. Do fields, clearings and bare ground read at 200 m+
+without a halo along the road? Then check SF.
+
 ---
 
 ## Join — after C and D
@@ -479,6 +531,7 @@ check is in.
 | G | Frisco/Breck at day and night. |
 | J | Slow drive along a road edge. Is the seam gone? |
 | K | A meadow road and a desert road. Does the roadside read as grown-in, without pop-in at the fade? |
+| L | The Dragon from a high pull-off. Do real fields, clearings and bare slopes read at 200 m+, with no dark smear along the road and no snow-line regression? |
 
 - **T2. Perf capture for Track F:** one CSV profile run on the densest
   Dragon tile, per Asset Detail level, in each style.

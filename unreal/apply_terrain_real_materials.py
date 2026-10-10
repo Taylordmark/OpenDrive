@@ -37,6 +37,9 @@ gravel. The rest is material math:
     setting (r.Nanite.Tessellation defaults to 1); `r.Nanite.Tessellation 0`
     turns it off.
 
+Track L: sat_macro() multiplies in a Sentinel-2 macro colour (SatTex, bound by
+AODTerrainManager in Realistic only; SatAmount 0 = off) before wetness/snow.
+
 Interface rule: each _real material must expose every parameter its twin
 has, read the twin's vertex-color and data-UV channels, and copy its physical
 material and usage flags - check_interface() fails the run otherwise.
@@ -158,6 +161,18 @@ SHOULDER_JITTER_M = 0.5
 SHOULDER_SOFT_M = 0.35
 SHOULDER_TINT = (1.05, 0.98, 0.9)   # Gravel040 (mean 0.39) - slightly warm grey
 SHOULDER_EDGE_FADE_CM = 8000.0
+
+# satellite macro colour (Track L, sat_macro; pipeline/checks/check_sat_albedo.py
+# parses these)
+SAT_STRENGTH = 0.85      # overall share at full distance weight
+SAT_NEAR_W = 0.25        # weight up close, where texture detail leads ...
+SAT_NEAR_CM = 3000.0     # ... until 30 m, ramping to full ...
+SAT_FAR_CM = 20000.0     # ... at 200 m
+SAT_TINT_LUMA_K = 0.24   # S2 luminance expected per unit biome-tint luminance (flat ground) ...
+SAT_STEEP_REF_LUMA = 0.05    # ... and on steep (rock) ground - both fitted by check_sat_albedo.py
+SAT_VALUE_EXP = 0.6      # softens the luminance ratio (imagery also carries hill shading)
+SAT_VALUE_CLAMP = (0.6, 1.6)
+SAT_CHROMA_CLAMP = (0.5, 2.0)
 
 # boulders (M_Rock030_real) - world-space triplanar, so the spherical UV0
 # seam of make_rock_meshes.py's boulders disappears
@@ -650,6 +665,8 @@ def build_ground():
     base["albedo"] = g.lerp(base["albedo"], g.c3(*SAND_COLOR), sand)
     base["rough"] = g.lerp(base["rough"], g.c(SAND_ROUGHNESS), sand)
 
+    base["albedo"] = sat_macro(g, base["albedo"], xy, depth, vtint, flat_w)
+
     # wetness: soil darkens and soaks it up (more in crevices), rock gets slick
     wet = g.scalar_param("Wetness", 0.0)
     base["albedo"] = g.mul(base["albedo"], g.lerp(one, g.c(WET_DARKEN), wet))
@@ -665,6 +682,39 @@ def build_ground():
     out = blend_layers(g, base, L["snow"], g.height_blend(snow_amt, base["ao"], g.sub(g.c(1.1), base["ao"])))
     out["albedo"] = g.mul(out["albedo"], g.lerp(g.c(0.85), one, out["ao"]))   # cavity darkening
     finish(g, path, f"{MAT_DIR}/M_GroundStylized", out)
+
+
+def sat_macro(g, albedo, xy, depth, vtint, flat_w):
+    """Track L: Sentinel-2 macro colour (pipeline/build_sat_albedo.py ->
+    AODTerrainManager SatTex/SatOrigin/SatSizeCm/SatAmount). Multiplies the
+    albedo by the satellite's chroma relative to the biome tint's (neutral
+    on steep rock) times its luminance relative to the tint's, both
+    clamped, so the biome look stays the base and the imagery nudges it.
+    Value is relative too: S2 luminance over SAT_TINT_LUMA_K * the tint's
+    (flat) or SAT_STEEP_REF_LUMA (steep rock).
+    Weight = SatAmount (0 by default: walls, other users, no data = the old
+    look) * texel confidence (alpha) * a distance ramp. Before wetness/snow,
+    so both still apply on top."""
+    white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
+    origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="SatOrigin")
+    size = g.node(unreal.MaterialExpressionVectorParameter, parameter_name="SatSizeCm",
+                  default_value=unreal.LinearColor(1.0, 1.0, 0.0, 0.0))
+    uv = g.div(g.sub(xy, g.mask(origin, r=True, gg=True)), g.mask(size, r=True, gg=True))
+    tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name="SatTex", texture=white,
+                 sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
+    G.req(any(MEL.connect_material_expressions(uv, "", tex, p) for p in ("UVs", "Coordinates")), "SatTex UV")
+    luma_w = g.c3(0.2126, 0.7152, 0.0722)
+    sl = g.maxv(g.dot(tex, luma_w, a_out="RGB"), g.c(0.005))
+    sat_c = g.div(g.mask(tex, r=True, gg=True, b=True, a_out="RGB"), sl)
+    tl = g.maxv(g.dot(vtint, luma_w), g.c(0.005))
+    ref_c = g.lerp(g.c3(1.0, 1.0, 1.0), g.div(vtint, tl), flat_w)
+    ref_l = g.lerp(g.c(SAT_STEEP_REF_LUMA), g.mul(tl, g.c(SAT_TINT_LUMA_K)), flat_w)
+    chroma = g.minv(g.maxv(g.div(sat_c, ref_c), g.c(SAT_CHROMA_CLAMP[0])), g.c(SAT_CHROMA_CLAMP[1]))
+    value = g.power(g.div(sl, ref_l), g.c(SAT_VALUE_EXP))
+    value = g.minv(g.maxv(value, g.c(SAT_VALUE_CLAMP[0])), g.c(SAT_VALUE_CLAMP[1]))
+    w = g.mul(g.mul(g.scalar_param("SatAmount", 0.0), g.c(SAT_STRENGTH)), g.mask(tex, r=True, a_out="A"))
+    w = g.mul(w, g.lerp(g.c(SAT_NEAR_W), g.c(1.0), g.ramp(depth, SAT_NEAR_CM, SAT_FAR_CM)))
+    return g.mul(albedo, g.lerp(g.c(1.0), g.mul(chroma, value), w))
 
 
 def road_edge_blend(g, base, xy, flat_w, dirt):

@@ -10,6 +10,10 @@
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "Engine/Texture2D.h"
+#include "ImageUtils.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -253,6 +257,10 @@ void AODTerrainManager::BeginPlay()
 	if (TerrainMat)
 	{
 		TerrainMID = UMaterialInstanceDynamic::Create(TerrainMat, this);
+		if (ODVisualStyle::IsRealistic())
+		{
+			LoadSatAlbedo();
+		}
 	}
 
 	// Runtime terrain carve (2026-08-26): load the road-station sidecar once
@@ -464,6 +472,42 @@ void AODTerrainManager::LoadRoadStationSidecar()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODTerrainManager: loaded %d road station(s) from %s (gen %s) for runtime terrain carve"),
 		NumStations, *Path, *GenId);
+}
+
+void AODTerrainManager::LoadSatAlbedo()
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return;
+	}
+	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/sat_") + TerrainTilePrefix.Mid(8);
+	FString Json;
+	TSharedPtr<FJsonObject> Meta;
+	if (!FFileHelper::LoadFileToString(Json, *(Base + TEXT(".json")))
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no satellite albedo (%s.json) - biome tint only"), *Base);
+		return;
+	}
+	SatTex = FImageUtils::ImportFileAsTexture2D(Base + TEXT(".png"));
+	if (!SatTex)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - biome tint only"), *Base);
+		return;
+	}
+	SatTex->SRGB = true;              // RGB = linear albedo, sRGB-encoded
+	SatTex->AddressX = TA_Clamp;      // 0-alpha border = no data outside the extent
+	SatTex->AddressY = TA_Clamp;
+	SatTex->UpdateResource();
+	const FVector Off = GetActorLocation();   // tiles sit at actor-relative positions
+	TerrainMID->SetTextureParameterValue(TEXT("SatTex"), SatTex);
+	TerrainMID->SetDoubleVectorParameterValue(TEXT("SatOrigin"),
+		FVector4(Meta->GetNumberField(TEXT("x_min_cm")) + Off.X, Meta->GetNumberField(TEXT("y_min_cm")) + Off.Y, 0.0, 0.0));
+	TerrainMID->SetVectorParameterValue(TEXT("SatSizeCm"),
+		FLinearColor(Meta->GetNumberField(TEXT("size_x_cm")), Meta->GetNumberField(TEXT("size_y_cm")), 0.0f, 0.0f));
+	TerrainMID->SetScalarParameterValue(TEXT("SatAmount"), 1.0f);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: satellite albedo %dx%d bound (%s)"),
+		SatTex->GetSizeX(), SatTex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
 }
 
 void AODTerrainManager::LoadBiomeSidecar()

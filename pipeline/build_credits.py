@@ -150,6 +150,8 @@ def build_lines():
     add("Elevation data: USGS 3DEP, via AWS Terrain Tiles (Terrarium format).")
     add("Imagery: USGS.")
     add("U.S. Geological Survey data - public domain.")
+    add("Ground colour (Realistic style): Contains modified Copernicus Sentinel data")
+    add("2023-2025. Sentinel-2 L2A via Element84 Earth Search on AWS.")
     add()
 
     # ---- content_src/**/manifest.json walk ----
