@@ -258,6 +258,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Assists")
 	float AbsSlipTarget = 0.13f;
 
+	/** ESC's braked outside-front wheel runs ABS at AbsSlipTarget x this
+	 *  (no cornering shrink) so the yaw-correcting brake actually bites. */
+	UPROPERTY(EditAnywhere, Category = "Assists")
+	float EscAbsSlipScale = 2.5f;
+
 	static const TCHAR* TractionModeName(EODTractionMode M)
 	{
 		return M == EODTractionMode::High ? TEXT("High")
@@ -361,21 +366,30 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float RollingResistance = 0.015f;
 
-	/** Per-axle grip scales (tuning presets route here). */
+	/** Per-axle grip trims, relative to the physical tire (tuning presets
+	 *  route here; 1 = as the compound grips). */
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float FrontGripScale = 4.0f;
+	float FrontGripScale = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
-	float RearGripScale = 4.0f;
+	float RearGripScale = 1.0f;
+
+	/** Rear/front axle grip ratio (per car via UODVehicleDef). */
+	UPROPERTY(EditAnywhere, Category = "Tires")
+	float RearGripRatio = 1.06f;
 
 	// --- aero ---
 	/** Drag, N per (m/s)^2 (CdA * rho/2; 0.45 ~= 186 mph drag limit). */
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DragCoeff = 0.45f;
 
-	/** Downforce, N per (m/s)^2 of forward speed. */
+	/** Downforce, N per (m/s)^2 of forward speed (0.6125 * ClA). */
 	UPROPERTY(EditAnywhere, Category = "Aero")
-	float DownforceCoeff = 1.1f;
+	float DownforceCoeff = 0.25f;
+
+	/** Front share of downforce: applied at RearX + bal*(FrontX - RearX). */
+	UPROPERTY(EditAnywhere, Category = "Aero")
+	float AeroBalanceFront = 0.50f;
 
 	/** Weather crosswind (W3), N per (m/s)^2 of wind across the car's side:
 	 *  ~0.5 * rho * Cd * side area, scaled down to stay gentle. Quadratic, so
