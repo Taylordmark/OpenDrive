@@ -31,7 +31,7 @@ float r = length(frac(p) - 0.5 - o);
 float core = saturate(1.0 - r / 0.25);
 float mag = 0.5 + 4.0 * pow(frac(h * 911.7), 6.0);
 float3 tint = lerp(float3(1.0, 0.85, 0.7), float3(0.75, 0.85, 1.0), frac(h * 53.3));
-return tint * mag * core * core;
+return tint * mag * 8.0 * core;   // 8x, linear core: a diag pass at 20x proved 1x invisible in game
 """
 
 
