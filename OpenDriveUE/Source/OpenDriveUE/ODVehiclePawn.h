@@ -103,17 +103,52 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float LookRecenterSpeed = 4.0f;
 
-	/** Steering input speed toward full lock (1/s) and back to center. */
-	UPROPERTY(EditAnywhere, Category = "Input")
-	float SteerRate = 2.5f;
+	// ---- Keyboard driving (2026-10-09 rework; Taylor: "the current inputs
+	// make it difficult to stay on the road"). ALL keyboard steer/pedal
+	// tuning lives here. The old ramp (2.5/s in, 5/s out, lock cap 0.52 at
+	// 60 mph) still reached ~13 deg of road wheel at 60 mph in 0.4 s - a
+	// 0.1 s tap was ~1.5 g kinematic. Now: a linear ramp state (time held)
+	// -> response curve -> speed cap. Exact piecewise integration
+	// (RampKeyAxis in the .cpp), so the trace is identical at any fps;
+	// pipeline/check_kbm_steer_ramp.py mirrors the math. Gamepad/wheel never
+	// touch any of these.
 
-	/** Speed-sensitive keyboard steering (2026-08-27): tapping A/D at highway
-	 *  speed used to command the same full-lock target as a parking-lot turn,
-	 *  which is what flips the car. Below FadeStart the key still means full
-	 *  lock; by FadeEnd it only means HighSpeedSteerFrac of lock, and the
-	 *  ramp-toward-lock rate shrinks by the same factor (return-to-center
-	 *  stays fast). The lock cap also applies to the gamepad stick
-	 *  (2026-09-25); the wheel stays 1:1. */
+	/** Seconds of holding A/D to go from center to the full (speed-capped) lock. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerRampInSec = 0.6f;
+
+	/** Seconds to return from full lock to center on release (and to unwind
+	 *  before ramping the other way on a reversal) - faster than ramp-in so
+	 *  corrections are quick. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerReturnSec = 0.2f;
+
+	/** Response curve on the ramp: steer = ramp^Exp. >1 makes short taps
+	 *  tiny (0.1 s tap = 0.17 ramp -> 0.07 steer) while a held key still
+	 *  reaches full lock at KbSteerRampInSec. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerCurveExp = 1.5f;
+
+	/** Speed-sensitive keyboard lock: full lock up to this speed, then the
+	 *  cap falls as (V/speed)^2 - kinematic lateral accel v^2*delta/L stays
+	 *  roughly constant, so a held key means "corner at ~1 g" at any speed
+	 *  instead of "spin" at highway speed. 715 cm/s = 16 mph; cap (x the
+	 *  movement's own MaxSteer*Taper) -> 30 mph 0.28 (~9 deg road wheel),
+	 *  60 mph 0.07 (~1.8 deg), 80 mph 0.04 (~0.9 deg). */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerFullLockSpeedCmS = 715.0f;
+
+	/** Throttle/brake keys: seconds 0 -> full on press, full -> 0 on release. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float PedalRampInSec = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float PedalReleaseSec = 0.1f;
+
+	/** Speed-sensitive GAMEPAD stick lock (2026-08-27 keyboard, 2026-09-25
+	 *  gamepad; keyboard moved to KbSteerFullLockSpeedCmS 2026-10-09). Below
+	 *  FadeStart the stick means full lock; by FadeEnd only
+	 *  HighSpeedSteerFrac of lock. The wheel stays 1:1. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float SteerFadeStartCmS = 900.0f;   // ~20 mph
 
@@ -122,13 +157,6 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	float HighSpeedSteerFrac = 0.35f;
-
-	UPROPERTY(EditAnywhere, Category = "Input")
-	float SteerReturnRate = 5.0f;
-
-	/** Throttle/brake key smoothing (1/s). */
-	UPROPERTY(EditAnywhere, Category = "Input")
-	float PedalRate = 6.0f;
 
 	/** Showroom camera placement (2026-07-28) - deliberately NOT routed
 	 *  through the SpringArm's TargetArmLength/SocketOffset/bInheritYaw
@@ -390,6 +418,7 @@ private:
 	bool bThrottleKey = false, bBrakeKey = false;
 	bool bLeftKey = false, bRightKey = false;
 	float SmSteer = 0.0f, SmThrottle = 0.0f, SmBrake = 0.0f;
+	float KbSteerRamp = 0.0f;   // keyboard steer time-held state [-1,1], pre-curve/cap
 	TArray<float> WheelSpinDeg;
 
 	// free-look orbit offset on top of the SpringArm's base -12 deg tilt
