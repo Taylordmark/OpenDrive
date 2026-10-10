@@ -445,9 +445,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 		S.bOverride_ColorGainHighlights = true;
 		S.ColorGainHighlights = FVector4(1.04, 1.0, 0.94, 1.0);
 		S.bOverride_ColorGammaShadows = true;
-		S.ColorGammaShadows = FVector4(0.95, 0.96, 1.0, 1.0);   // slightly crushed, cool
-		S.bOverride_FilmToe = true;
-		S.FilmToe = 0.6f;                                      // engine 0.55
+		S.ColorGammaShadows = FVector4(0.98, 0.99, 1.02, 1.0);   // cool, barely crushed (0.95 was too dark at night)
 		S.BloomIntensity = 0.7f;
 		S.BloomThreshold = 0.8f;
 		S.VignetteIntensity = 0.3f;
