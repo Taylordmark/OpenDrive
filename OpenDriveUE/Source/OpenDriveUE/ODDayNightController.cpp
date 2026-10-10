@@ -6,6 +6,7 @@
 #include "Engine/DirectionalLight.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TextureLightProfile.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -104,6 +105,11 @@ void AODDayNightController::BeginPlay()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODDayNightController: no M_HeadlightBeam - run unreal/apply_headlight_beam_material.py; no beams"));
 	}
+	HeadIES = LoadObject<UTextureLightProfile>(nullptr, TEXT("/Game/OpenDrive/Lights/IES_Headlight.IES_Headlight"));
+	if (!HeadIES)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODDayNightController: no IES_Headlight - run unreal/import_headlight_ies.py; headlights are a plain %.0f cd cone"), HeadlightCd);
+	}
 }
 
 void AODDayNightController::Tick(float DeltaSeconds)
@@ -173,11 +179,24 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			{
 				USpotLightComponent* Spot = NewObject<USpotLightComponent>(*It);
 				Spot->SetupAttachment(It->GetRootComponent());
-				Spot->SetIntensityUnits(ELightUnits::Lumens);
+				// heads: candela at the IES low beam's peak; the cone only trims
+				// the profile's sideways tail (2026-10-09: was 4500 lm in a
+				// 22/38 deg cone pitched -6 - a blown-out pool 4-6 m ahead and
+				// black past 16 m / beyond +-5 m; make_headlight_ies.py)
+				Spot->SetIntensityUnits(i < 2 ? ELightUnits::Candelas : ELightUnits::Lumens);
 				Spot->SetAttenuationRadius(i < 2 ? 9000.0f : 1500.0f);
-				Spot->SetInnerConeAngle(i < 2 ? 22.0f : 40.0f);
-				Spot->SetOuterConeAngle(i < 2 ? 38.0f : 70.0f);
+				Spot->SetInnerConeAngle(i < 2 ? 60.0f : 40.0f);
+				Spot->SetOuterConeAngle(70.0f);
 				Spot->SetCastShadows(i < 2);
+				if (i < 2)
+				{
+					Spot->SetIESTexture(HeadIES);
+					// volumetric fog ignores IES (no ComputeLightProfileMultiplier
+					// in VolumetricFog.usf), so it would scatter the full peak over
+					// the 70 deg cone - 139k lm vs the profile's 4.4k. 0.015 keeps
+					// the fog glow at ~0.8x the old spots' (make_headlight_ies.py)
+					Spot->SetVolumetricScatteringIntensity(0.015f);
+				}
 				Spot->SetVisibility(false);
 				Spot->RegisterComponent();
 				Spots.Add(Spot);
@@ -215,8 +234,9 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			Spot->SetRelativeLocationAndRotation(
 				bRear ? FVector(B.Min.X - 5.0, 0.0, B.Min.Z + 0.4 * H)
 				      : FVector(B.Max.X + 5.0, (i ? 0.5 : -0.5) * B.Max.Y, B.Min.Z + 0.28 * H),
-				FRotator(bRear ? -15.0f : -6.0f, bRear ? 180.0f : 0.0f, 0.0f));
-			const float Lm = bRear ? RearLm : (bOn ? HeadlightLm : 0.0f);
+				FRotator(bRear ? -15.0f : 0.0f, bRear ? 180.0f : 0.0f, 0.0f));   // heads level: the IES aims below the horizon
+			// no profile -> a plain cone at the old ~3400 cd rather than 40k
+			const float Lm = bRear ? RearLm : (bOn ? HeadlightCd * (HeadIES ? 1.0f : 0.085f) : 0.0f);
 			Spot->SetIntensity(Lm);
 			Spot->SetLightColor(bRear ? (bReverse ? FLinearColor::White : FLinearColor(1.0f, 0.02f, 0.01f))
 				: FLinearColor(1.0f, 0.95f, 0.85f));
@@ -254,19 +274,20 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		}
 		if (Beam && bBeam)
 		{
-			const FVector Dir = L->GetForwardVector();
+			// the profile's main lobe: 2 deg down, ~5/30 deg (check_headlight_beam.py)
+			const FVector Dir = (L->GetComponentRotation() + FRotator(-2.0f, 0.0f, 0.0f)).Vector();
 			const FVector Centre = (L->GetComponentLocation() + R->GetComponentLocation()) * 0.5 + Dir * (BeamRadius - 300.0);
 			Beam->SetWorldLocation(Centre);
 			Beam->SetWorldScale3D(FVector(BeamRadius / 50.0));   // engine sphere: 50 cm radius
 			UMaterialInstanceDynamic* BeamMID = Cast<UMaterialInstanceDynamic>(Beam->GetMaterial(0));
-			const float Cd = HeadlightLm / (2.0f * PI * (1.0f - FMath::Cos(FMath::DegreesToRadians(L->OuterConeAngle))));
+			const float Cd = L->Intensity;   // candela
 			BeamMID->SetVectorParameterValue(TEXT("Lamp0"), FLinearColor(L->GetComponentLocation() - Centre));
 			BeamMID->SetVectorParameterValue(TEXT("Lamp1"), FLinearColor(R->GetComponentLocation() - Centre));
 			BeamMID->SetVectorParameterValue(TEXT("BeamDir"), FLinearColor(Dir));
 			BeamMID->SetVectorParameterValue(TEXT("Beam"), FLinearColor(1.0f, 0.95f, 0.85f) * (Cd * BeamHaze * 100.0f));
 			BeamMID->SetScalarParameterValue(TEXT("Radius"), BeamRadius);
-			BeamMID->SetScalarParameterValue(TEXT("CosIn"), FMath::Cos(FMath::DegreesToRadians(L->InnerConeAngle)));
-			BeamMID->SetScalarParameterValue(TEXT("CosOut"), FMath::Cos(FMath::DegreesToRadians(L->OuterConeAngle)));
+			BeamMID->SetScalarParameterValue(TEXT("CosIn"), FMath::Cos(FMath::DegreesToRadians(5.0f)));
+			BeamMID->SetScalarParameterValue(TEXT("CosOut"), FMath::Cos(FMath::DegreesToRadians(30.0f)));
 		}
 		// lamp lenses: the car mesh's "lights" slot (head, tail, reverse share it)
 		const float Head = bOn ? HeadlampGlow : 0.0f;

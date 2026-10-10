@@ -10,13 +10,16 @@ headlit road, moonlit ground and stars land at for the menu time presets.
 Usage:  python pipeline/check_night_exposure.py
 """
 import math
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from make_headlight_ies import road as head_road   # noqa: E402  IES low beam, x mid grey at NIGHT_MIN_EV
 
 MAX_ELEV = 68.0           # AODDayNightController::MaxElevation
 NIGHT_MIN_EV = 1.0        # AODDayNightController::NightMinEV
 EXPOSURE_BIAS = -1.0      # AODAtmosphereController grade AutoExposureBias
 MOON_LUX = 0.15           # AODDayNightController::MoonIntensity
-HEAD_LM, HEAD_CONE = 4500.0, 38.0   # UpdateHeadlights spot: lumens (units set explicitly -
-                                    # runtime lights default to Unitless, 1/16 cd), outer cone deg
 REAR_CONE, TAIL_LM, BRAKE_LM, REVERSE_LM = 70.0, 30.0, 200.0, 400.0   # rear spot
 STAR_GAIN = 8.0           # STARS_HLSL "mag * 8.0 * core"
 STAR_PEAK = 3.0 * 4.5 * STAR_GAIN   # M_NightSky Brightness x brightest-star magnitude
@@ -47,10 +50,8 @@ def lambert(lux, albedo):
 
 
 def main():
-    head_cd = HEAD_LM / (2 * math.pi * (1 - math.cos(math.radians(HEAD_CONE)))) * 2   # two lamps
     mid = mid_grey_nits(NIGHT_MIN_EV)   # night: the scene is darker than the floor, so it clamps
-    road10 = lambert(head_cd / 10 ** 2, 0.1) / mid
-    road30 = lambert(head_cd / 30 ** 2, 0.1) / mid
+    road10, road30 = float(head_road(10.0, 0.0)), float(head_road(30.0, 0.0))   # grazing, both lamps
     moonlit = lambert(MOON_LUX, 0.2) / mid
     star = STAR_PEAK / mid
     # a star is smaller than a pixel: what shows is its linear-core energy (pi R^2 / 3)
