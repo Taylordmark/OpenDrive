@@ -10,7 +10,7 @@ class AODSettingsMenu;
 
 /**
  * In-game pause menu (ESC / P). Rows (2026-10-09 menu redesign): World Map,
- * Garage, Settings, Main Menu, Quit Game, then the "Resume" footer (opened
+ * Garage, Settings, Main Menu, Quit, then the "Resume" footer (opened
  * pre-selected). Driver assists, mini-map and credits moved into
  * AODSettingsMenu. Garage opens AODMainMenu's Garage screen in place
  * (AODMainMenu::OpenGarage()) without leaving the drive. Drawn on canvas by

@@ -1658,8 +1658,8 @@ void AODRaceHUD::DrawHUD()
 
 	UFont* Font = GEngine->GetLargeFont();
 
-	// draws PlaceLabelText just above a map panel's top edge - shared by the
-	// mini-map and the full pause-screen map below; no-ops on an empty
+	// draws PlaceLabelText just above the mini-map's top edge (the pause
+	// map draws its own in the menu font); no-ops on an empty
 	// label (RoadMgr missing, prefix unset, or no nearby label point yet).
 	auto DrawPlaceLabel = [&](float PanelX, float PanelTopY)
 	{
@@ -1672,6 +1672,46 @@ void AODRaceHUD::DrawHUD()
 		LabelItem.EnableShadow(FLinearColor::Black);
 		Canvas->DrawItem(LabelItem);
 	};
+
+	// ---- pause menu (AODPauseMenu owns state): the shared left column, the
+	// full stage map on the right - it draws from whichever route source
+	// (Race or RoadMgr) is available, and no-ops when there's none
+	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+	{
+		AODPauseMenu* Menu = *It;
+		if (!Menu->IsOpen())
+		{
+			break;
+		}
+		DrawMenuBackdrop(0.35f, false);
+		if (Menu->IsSettingsOpen())
+		{
+			DrawSettingsPanel(Menu->GetSettingsMenu(), false);
+		}
+		else
+		{
+			DrawMenuPanel(TEXT("Paused"), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
+			const float S = MenuScale();
+			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),
+				{{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}, {TEXT("Esc"), TEXT("Resume")}});
+
+			const float FullSize = FMath::Min(520.0f * S, Canvas->SizeY - 300.0f * S);
+			const float FullMapX = Canvas->SizeX - ColX * S - FullSize;
+			const float FullMapY = (Canvas->SizeY - FullSize) * 0.5f;
+			if (!PlaceLabelText.IsEmpty())
+			{
+				const FMenuPaint P{Canvas, S};
+				P.Text(PlaceLabelText.ToUpper(), FullMapX, FullMapY - 24.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol, false, 60);
+				P.Rect(FullMapX, FullMapY - 10.0f * S, 56.0f * S, 4.0f * S, Accent);
+			}
+			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
+				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
+				0.55f, 0.0f, false, RoadMgr);
+		}
+		HandleMenuMouse(Menu);
+		return;   // drawn instead of the in-game HUD, like the main menu
+	}
 
 	const float Now = GetWorld()->GetTimeSeconds();
 
@@ -1793,13 +1833,7 @@ void AODRaceHUD::DrawHUD()
 	// real open-world map (Arc 7.4's planned NA map view) is a separate,
 	// bigger feature, not something this stage-shaped map can grow into
 	// as-is.
-	bool bMenuOpen = false;
-	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
-	{
-		bMenuOpen = It->IsOpen();
-		break;
-	}
-	if (bShowMiniMap && !bMenuOpen)
+	if (bShowMiniMap)
 	{
 		DrawPlaceLabel(24.0f, Canvas->SizeY - MiniMapSize - 24.0f);
 		DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
@@ -1809,43 +1843,8 @@ void AODRaceHUD::DrawHUD()
 	}
 
 	// ---- navigation next-turn / distance panel (SS7.37)
-	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr && !bMenuOpen)
+	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr)
 	{
 		DrawNavPanel(NavMgr);   // nearest area's road (2026-10-05, large world)
-	}
-
-	// ---- pause menu (AODPauseMenu owns state): the shared left column, the
-	// full stage map on the right - it draws from whichever route source
-	// (Race or RoadMgr) is available, and no-ops when there's none
-	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
-	{
-		AODPauseMenu* Menu = *It;
-		if (!Menu->IsOpen())
-		{
-			break;
-		}
-		DrawMenuBackdrop(0.35f, false);
-		if (Menu->IsSettingsOpen())
-		{
-			DrawSettingsPanel(Menu->GetSettingsMenu(), false);
-		}
-		else
-		{
-			DrawMenuPanel(TEXT("Paused"), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
-				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
-			const float S = MenuScale();
-			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),
-				{{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}, {TEXT("Esc"), TEXT("Resume")}});
-
-			const float FullSize = FMath::Min(520.0f * S, Canvas->SizeY - 300.0f * S);
-			const float FullMapX = Canvas->SizeX - ColX * S - FullSize;
-			const float FullMapY = (Canvas->SizeY - FullSize) * 0.5f;
-			DrawPlaceLabel(FullMapX, FullMapY);
-			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
-				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
-				0.55f, 0.0f, false, RoadMgr);
-		}
-		HandleMenuMouse(Menu);
-		break;
 	}
 }

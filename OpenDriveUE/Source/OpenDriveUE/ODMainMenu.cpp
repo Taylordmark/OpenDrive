@@ -1710,7 +1710,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	case RowBack:
-		OutLabel = bGarageMode ? TEXT("Resume Driving") : TEXT("Back");
+		OutLabel = bGarageMode ? TEXT("Resume") : TEXT("Back");
 		OutValue.Empty();
 		break;
 	case RowQuit:
