@@ -1,8 +1,10 @@
 """Keyboard steer/pedal ramp (2026-10-09, Taylor: "the current inputs make it
-difficult to stay on the road"). Mirrors RampKeyAxis + the keyboard block of
+difficult to stay on the road"; then fast-tap steering). Mirrors KbSteerStep /
+RampKeyAxis + the keyboard block of
 AODVehiclePawn::Tick (tuning: "Keyboard driving" in ODVehiclePawn.h) and
-asserts: ramp-in / return times, an identical steer trace at 30/60/144/240 fps
-(and with jittered frame times), and the speed cap values.
+asserts: ramp-in / counter times, tap-rhythm settle levels (duty cycle sets
+the lock), an identical steer trace at 30/60/144/240 fps (and with jittered
+frame times), and the speed cap values (front tyre near its peak slip).
 
 Key events sit on a 1/6 s grid (a whole number of frames at every tested
 fps): the game applies a key change from the frame it's read, so off-grid
@@ -12,7 +14,10 @@ Usage:  python pipeline/check_kbm_steer_ramp.py
 """
 import random
 
-RAMP_IN, RETURN, EXP, FULL_LOCK_CMS = 0.4, 0.2, 1.3, 1000.0   # ODVehiclePawn.h
+RAMP_IN, COUNTER, TAU, EXP = 0.35, 0.12, 0.2, 1.2   # ODVehiclePawn.h
+TARGET_G, SLIP_FRAC, WHEELBASE_M = 1.5, 0.8, 2.7
+PEAK_SLIP, MAX_STEER = 9.0, 38.0   # UODVehicleMovement defaults
+import math
 PEDAL_IN, PEDAL_OUT = 0.25, 0.1
 MPH = 44.704   # cm/s
 
@@ -40,8 +45,28 @@ def ramp(r, tgt, dt, rin, rout):   # RampKeyAxis
     return interp_const(r, tgt, dt, rin)
 
 
+def steer_step(r, key, dt):   # KbSteerStep
+    if key == 0:
+        return r * math.exp(-dt / TAU)
+    if r != 0 and sign(r) != sign(key):
+        need = abs(r) * COUNTER
+        if dt <= need:
+            return r - sign(r) * dt / COUNTER
+        r, dt = 0.0, dt - need
+    return interp_const(r, key, dt, 1 / RAMP_IN)
+
+
+def taper(mph):   # UODVehicleMovement::SteerTaper
+    if mph <= 30: return 1 + (0.85 - 1) * mph / 30
+    if mph <= 60: return 0.85 + (0.65 - 0.85) * (mph - 30) / 30
+    if mph <= 120: return 0.65 + (0.5 - 0.65) * (mph - 60) / 60
+    return 0.5
+
+
 def cap(speed_cms):
-    return (FULL_LOCK_CMS / max(speed_cms, FULL_LOCK_CMS)) ** 2
+    v = max(speed_cms / 100, 0.1)
+    deg = math.degrees(WHEELBASE_M * TARGET_G * 9.81 / (v * v)) + SLIP_FRAC * PEAK_SLIP
+    return min(max(deg / max(MAX_STEER * taper(speed_cms / MPH), 1), 0), 1)
 
 
 def steer_out(r, speed_cms):
@@ -65,7 +90,7 @@ def trace(frame_times, speed_cms=0.0):
     r, t, out = 0.0, 0.0, {}
     for dt in frame_times:
         k = key_at(t)         # key held through this frame
-        r = ramp(r, k, dt, 1 / RAMP_IN, 1 / RETURN)
+        r = steer_step(r, k, dt)
         t += dt
         g = round(t * 6)
         if abs(t * 6 - g) < 1e-6:
@@ -82,16 +107,25 @@ def time_to(target, key_seq_r0, key, rin, rout, dt=1e-4):
 
 
 def main():
-    # (a) times
-    t_in = time_to(1.0, 0.0, 1, 1 / RAMP_IN, 1 / RETURN)
-    t_out = time_to(0.0, 1.0, 0, 1 / RAMP_IN, 1 / RETURN)
-    t_rev = time_to(-1.0, 1.0, -1, 1 / RAMP_IN, 1 / RETURN)
-    print(f"center->full lock {t_in:.3f}s  full->center {t_out:.3f}s  full L->full R {t_rev:.3f}s")
-    assert abs(t_in - RAMP_IN) < 1e-3 and abs(t_out - RETURN) < 1e-3
-    assert abs(t_rev - (RAMP_IN + RETURN)) < 1e-3 and t_out < t_in
-    for tap in (0.05, 0.1, 0.2, 0.3):
-        print(f"  {tap * 1000:.0f} ms tap -> steer {steer_out(tap / RAMP_IN, 0):.3f} of lock (stopped)")
-    assert steer_out(0.1 / RAMP_IN, 0) < 0.2
+    # (a) times + tap rhythm
+    def t_to(target, r, key, dt=1e-4):
+        t = 0.0
+        while abs(r - target) > 1e-4:
+            r, t = steer_step(r, key, dt), t + dt
+        return t
+    t_in, t_ctr = t_to(1.0, 0.0, 1), t_to(0.0, 1.0, -1)
+    t_rel = t_to(0.05, 1.0, 0)
+    print(f"center->full {t_in:.3f}s  full->center (opposite key) {t_ctr:.3f}s  full->5% (released) {t_rel:.3f}s")
+    assert abs(t_in - RAMP_IN) < 2e-3 and abs(t_ctr - COUNTER) < 2e-3 and 0.5 < t_rel < 0.7
+    levels = {}
+    for duty in (0.3, 0.5, 0.7):
+        r, per = 0.0, 1 / 8   # 8 Hz taps
+        for _ in range(80):
+            r = steer_step(r, 1, duty * per)
+            r = steer_step(r, 0, (1 - duty) * per)
+        levels[duty] = r
+        print(f"  8 Hz taps, {duty:.0%} duty -> ramp settles {r:.2f} (end of gap)")
+    assert 0.1 < levels[0.3] < levels[0.5] < levels[0.7] and levels[0.5] > 0.3
     p_in = time_to(1.0, 0.0, 1, 1 / PEDAL_IN, 1 / PEDAL_OUT)
     p_out = time_to(0.0, 1.0, 0, 1 / PEDAL_IN, 1 / PEDAL_OUT)
     print(f"pedal 0->full {p_in:.3f}s  full->0 {p_out:.3f}s")
@@ -118,24 +152,17 @@ def main():
     print(f"jittered frames: max diff = {err:.2e}")
     assert err < 1e-5
 
-    # (c) speed cap. Road-wheel deg = steer * MaxSteer(38) * movement Taper
-    def taper(mph):   # UODVehicleMovement::TickSuspension
-        if mph <= 30: return 1 + (0.85 - 1) * mph / 30
-        if mph <= 60: return 0.85 + (0.65 - 0.85) * (mph - 30) / 30
-        if mph <= 120: return 0.65 + (0.5 - 0.65) * (mph - 60) / 60
-        return 0.5
-    import math
-    L = 2.7   # m, typical wheelbase
-    for mph, want in ((10, 1.0), (22, 1.0), (30, 0.556), (60, 0.139), (80, 0.078), (120, 0.0347)):
+    # (c) speed cap: held key puts the front tyre near its peak slip
+    L = WHEELBASE_M
+    for mph, lo, hi in ((10, 1.0, 1.0), (20, 1.0, 1.0), (30, 0.55, 0.7), (60, 0.35, 0.5), (80, 0.35, 0.5), (120, 0.35, 0.5)):
         c = cap(mph * MPH)
-        deg = c * 38 * taper(mph)
+        deg = c * MAX_STEER * taper(mph)
         v = mph * 0.44704
-        g = v * v * math.tan(math.radians(deg)) / L / 9.81
-        print(f"  {mph:>3} mph: cap {c:.3f}  road wheel {deg:5.2f} deg  kinematic {g:.2f} g")
-        assert abs(c - want) < 2e-3, (mph, c)
+        kin = math.degrees(L * 9.81 / (v * v))   # angle for 1 g with no slip
+        print(f"  {mph:>3} mph: cap {c:.3f}  road wheel {deg:5.2f} deg  (1 g geometry {kin:5.2f} + slip)")
+        assert lo - 1e-3 <= c <= hi + 1e-3, (mph, c)
         if mph >= 30:
-            assert g < 2.4   # held key asks ~2 g kinematic (~1 g real), never more
-
+            assert deg <= kin * TARGET_G + SLIP_FRAC * PEAK_SLIP + 1e-3   # never past target g + tyre peak
 
 if __name__ == "__main__":
     main()

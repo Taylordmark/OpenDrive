@@ -1296,6 +1296,28 @@ float RampKeyAxis(float R, float Target, float Dt, float InRate, float OutRate)
 	}
 	return FMath::FInterpConstantTo(R, Target, Dt, InRate);
 }
+
+// Keyboard steer state, exact over Dt (key fixed for the frame): no key ->
+// exponential decay toward 0 (Tau); opposite key -> linear unwind at
+// CounterRate to 0, then out at InRate; same key -> out at InRate to +-1.
+float KbSteerStep(float R, float Key, float Dt, float InRate, float CounterRate, float Tau)
+{
+	if (Key == 0.0f)
+	{
+		return R * FMath::Exp(-Dt / Tau);
+	}
+	if (R != 0.0f && FMath::Sign(R) != FMath::Sign(Key))
+	{
+		const float Need = FMath::Abs(R) / CounterRate;
+		if (Dt <= Need)
+		{
+			return R - FMath::Sign(R) * CounterRate * Dt;
+		}
+		R = 0.0f;
+		Dt -= Need;
+	}
+	return FMath::FInterpConstantTo(R, Key, Dt, InRate);
+}
 }
 
 void AODVehiclePawn::Tick(float DeltaSeconds)
@@ -1368,12 +1390,18 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// keyboard keys -> ramped axes (tuning + rationale: "Keyboard driving"
 	// block in ODVehiclePawn.h). Steer: time-held ramp -> curve -> speed cap.
 	const float SpeedCmS = FMath::Abs(Movement->GetForwardSpeed());
-	KbSteerRamp = RampKeyAxis(KbSteerRamp,
+	KbSteerRamp = KbSteerStep(KbSteerRamp,
 		(bRightKey ? 1.0f : 0.0f) - (bLeftKey ? 1.0f : 0.0f), DeltaSeconds,
 		1.0f / FMath::Max(KbSteerRampInSec, 0.01f),
-		1.0f / FMath::Max(KbSteerReturnSec, 0.01f));
-	const float FullLockCmS = FMath::Max(KbSteerFullLockSpeedCmS, 1.0f);
-	const float KbSteerCap = FMath::Square(FullLockCmS / FMath::Max(SpeedCmS, FullLockCmS));
+		1.0f / FMath::Max(KbSteerCounterSec, 0.01f),
+		FMath::Max(KbSteerReleaseTau, 0.01f));
+	const float VMs = FMath::Max(SpeedCmS * 0.01f, 0.1f);
+	const float KbCapDeg = FMath::RadiansToDegrees(
+			KbSteerWheelbaseCm * 0.01f * KbSteerTargetG * 9.81f / (VMs * VMs))
+		+ KbSteerSlipFrac * Movement->PeakSlipAngleDeg;
+	const float LockDeg = Movement->MaxSteerAngleDeg * Movement->SteerLockScale
+		* UODVehicleMovement::SteerTaper(SpeedCmS);
+	const float KbSteerCap = FMath::Clamp(KbCapDeg / FMath::Max(LockDeg, 1.0f), 0.0f, 1.0f);
 	SmSteer = FMath::Sign(KbSteerRamp)
 		* FMath::Pow(FMath::Abs(KbSteerRamp), FMath::Max(KbSteerCurveExp, 0.1f)) * KbSteerCap;
 	const float PedalIn = 1.0f / FMath::Max(PedalRampInSec, 0.01f);
