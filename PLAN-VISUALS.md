@@ -259,6 +259,16 @@ drive gives the same smoke at any fps.
 **Check:** compile; a small runnable check of the slip/surface → spawn
 rate mapping.
 
+**Status (2026-10-09):** first pass written, not yet compiled.
+- `UODVehicleFX` (one line in `AODVehiclePawn`'s constructor). Not Niagara:
+  a 512-sphere instanced pool animated in C++, like the snowfall, drawn
+  with `Realistic/FX/M_FXPuff` (`unreal/build_vehicle_fx_material.py`).
+- Smoke from contact-patch slide speed on asphalt, dust on gravel/dirt
+  roads and the landscape, spray on wet asphalt. Item 3 (rain on the
+  lens) already exists in both styles (`AODWeatherController::TickLens`).
+- `pipeline/tests/test_vehicle_fx_rates.py` checks the mapping, and that
+  puff count, spacing and motion match from 24 to 240 fps.
+
 ### Track F — Vegetation (large, we build the trees)
 
 The heaviest track for performance. The forest is dense deterministic

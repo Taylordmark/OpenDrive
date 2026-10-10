@@ -21,6 +21,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "ODTuningManager.h"
 #include "ODVehicleDef.h"
+#include "ODVehicleFX.h"
 #include "ODVehicleMovement.h"
 #include "UObject/UObjectIterator.h"
 
@@ -53,6 +54,7 @@ AODVehiclePawn::AODVehiclePawn()
 	Body->SetNotifyRigidBodyCollision(true);   // AODVehicleAudio impact hook
 
 	Movement = CreateDefaultSubobject<UODVehicleMovement>(TEXT("Movement"));
+	CreateDefaultSubobject<UODVehicleFX>(TEXT("VehicleFX"));   // Track E: Realistic-only smoke/dust/spray, reads Movement
 
 	for (int32 i = 0; i < 4; ++i)
 	{
