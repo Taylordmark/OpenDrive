@@ -4,6 +4,7 @@
 #include "Components/ActorComponent.h"
 #include "ODVehicleFX.generated.h"
 
+class AODSeasonController;
 class AODWeatherController;
 class UInstancedStaticMeshComponent;
 class UPhysicalMaterial;
@@ -42,6 +43,11 @@ struct FODFxRates
  * sub-frame time, and motion uses the exact solution of v' = a - k v.
  * pipeline/tests/test_vehicle_fx_rates.py mirrors Rates() and that loop.
  *
+ * Also hands the car's state to the Realistic car materials as custom
+ * primitive data (PushCarState; build_car_materials_real.py reads it):
+ * 0 Dirt, 1 Wetness, 2 SnowCover on every car mesh, 3..5 FrontAxleX /
+ * RearAxleX / WheelRadius (body-local cm) on the chassis.
+ *
  * Disabled at BeginPlay in Stylized (the style applies on level load).
  */
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
@@ -75,6 +81,7 @@ private:
 		const FVector& Fwd, float Tau);
 	void Integrate(FPuff& P, float Dt) const;
 	void Draw(bool bAnyLive);
+	void PushCarState();
 
 	UPROPERTY()
 	TObjectPtr<UInstancedStaticMeshComponent> Pool;
@@ -86,6 +93,7 @@ private:
 	bool bDrawnLive = false;        // last Draw had live puffs (so one more clears them)
 
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
+	TWeakObjectPtr<AODSeasonController> SeasonCtl;
 	double LastWeatherSearch = -10.0;
 
 	// scratch for Draw (kept to avoid per-frame allocs)

@@ -479,6 +479,10 @@ public:
 	bool IsTractionIntervening() const { return TcScale < 0.99f || EscU > 0.05f; }
 	bool IsHandbrakeOn() const { return bHandbrakeIn || bParkHold; }
 
+	/** Body dirt 0..ODCarGrime::MaxDirt (Realistic car materials). */
+	float GetDirt() const { return Dirt; }
+	void ResetDirt() { Dirt = 0.0f; }
+
 	int32 NumWheels() const { return Wheels.Num(); }
 	bool IsWheelInContact(int32 i) const { return Wheels[i].bInContact; }
 	const UPhysicalMaterial* GetContactSurface(int32 i) const
@@ -654,6 +658,7 @@ private:
 	// (spawned by AODGameMode, may come up after us; absent in the garage)
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
 	TWeakObjectPtr<AODSeasonController> SeasonCtl;
+	float Dirt = 0.0f;   // ODCarGrime.h, integrated per fixed step
 	double LastWeatherSearch = -10.0;
 	float WeatherGripMult = 1.0f;    // on-road tier multiplier, this tick
 	float GravelWeatherMult = 1.0f;  // ... x gravel mud loss

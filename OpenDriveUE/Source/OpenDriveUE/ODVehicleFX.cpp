@@ -4,6 +4,7 @@
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "Materials/MaterialInterface.h"
+#include "ODSeasonController.h"
 #include "ODVehicleMovement.h"
 #include "ODVisualStyle.h"
 #include "ODWeatherController.h"
@@ -107,8 +108,7 @@ void UODVehicleFX::BeginPlay()
 	if (!Sphere || !Mat || !Owner || !Owner->GetRootComponent())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODVehicleFX: M_FXPuff or Sphere missing (unreal/build_vehicle_fx_material.py) - no vehicle effects"));
-		SetComponentTickEnabled(false);
-		return;
+		return;   // keep ticking: PushCarState still feeds the car materials
 	}
 
 	Pool = NewObject<UInstancedStaticMeshComponent>(Owner, TEXT("VehicleFXPool"));
@@ -170,6 +170,7 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	PushCarState();
 	AActor* Owner = GetOwner();
 	if (!Pool || !Owner || DeltaTime <= 0.0f)
 	{
@@ -193,12 +194,6 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 		bAnyLive = true;
 	}
 
-	UWorld* World = GetWorld();
-	if (!WeatherCtl.IsValid() && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
-	{
-		LastWeatherSearch = World->GetTimeSeconds();
-		for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
-	}
 	const float Wet = WeatherCtl.IsValid() ? WeatherCtl->Wetness : 0.0f;
 
 	const UODVehicleMovement* Move = Owner->FindComponentByClass<UODVehicleMovement>();
@@ -249,6 +244,50 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 
 	Draw(bAnyLive);
+}
+
+void UODVehicleFX::PushCarState()
+{
+	AActor* Owner = GetOwner();
+	UWorld* World = GetWorld();
+	const UODVehicleMovement* Move = Owner ? Owner->FindComponentByClass<UODVehicleMovement>() : nullptr;
+	if (!Move || !World || Move->NumWheels() < 3)
+	{
+		return;
+	}
+	if ((!WeatherCtl.IsValid() || !SeasonCtl.IsValid()) && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
+	{
+		LastWeatherSearch = World->GetTimeSeconds();
+		for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
+		for (TActorIterator<AODSeasonController> It(World); It; ++It) { SeasonCtl = *It; break; }
+	}
+	const AODWeatherController* Wx = WeatherCtl.Get();
+	// the snow cover AODSeasonController::PushParamsToMIDs gives the ground
+	// and foliage: season cover, or fresh roadside snow at full by 15 cm
+	const float Snow = FMath::Max(SeasonCtl.IsValid() ? SeasonCtl->SnowCover : 0.0f,
+		Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f);
+	const float State[6] = { Move->GetDirt(), Wx ? Wx->Wetness : 0.0f, Snow,
+		Move->GetWheelAttachXY(0).X, Move->GetWheelAttachXY(2).X, Move->GetWheelRadius(0) };
+
+	TInlineComponentArray<UStaticMeshComponent*> Meshes(Owner);
+	for (UStaticMeshComponent* M : Meshes)
+	{
+		if (M == Pool)
+		{
+			continue;
+		}
+		const int32 N = M == Owner->GetRootComponent() ? 6 : 3;   // the chassis also gets its axles
+		const TArray<float>& Cur = M->GetCustomPrimitiveData().Data;
+		bool bChanged = Cur.Num() < N;
+		for (int32 i = 0; i < N && !bChanged; ++i)
+		{
+			bChanged = FMath::Abs(Cur[i] - State[i]) > 0.002f;   // each write re-sends render state
+		}
+		for (int32 i = 0; bChanged && i < N; ++i)
+		{
+			M->SetCustomPrimitiveDataFloat(i, State[i]);
+		}
+	}
 }
 
 void UODVehicleFX::Draw(bool bAnyLive)

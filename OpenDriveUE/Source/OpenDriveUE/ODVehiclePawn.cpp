@@ -217,6 +217,7 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	}
 
 	MassKg = Def->MassKg;
+	Movement->ResetDirt();   // a different car starts clean
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 
@@ -374,6 +375,7 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 	SpawnTime = GetWorld()->GetTimeSeconds();
 	SnapReadyTime = 0.0;
 	LastSnapLogTime = 0.0;
+	Movement->ResetDirt();   // respawn: clean car (Realistic grime)
 }
 
 void AODVehiclePawn::ResetVehicle()
@@ -419,6 +421,7 @@ void AODVehiclePawn::ResetVehicle()
 	}
 	SetActorLocation(ChosenLoc, false, nullptr, ETeleportType::TeleportPhysics);
 	SetActorRotation(FRotator(0.0f, Yaw, 0.0f));
+	Movement->ResetDirt();   // reset: clean car (Realistic grime)
 
 	// re-arm the ground snap, but back-date SpawnTime so the no-asphalt
 	// fallback fires after ~3 s instead of the full spawn timeout - a reset

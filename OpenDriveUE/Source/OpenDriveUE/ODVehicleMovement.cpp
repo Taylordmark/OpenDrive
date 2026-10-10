@@ -1,5 +1,7 @@
 #include "ODVehicleMovement.h"
 
+#include "ODCarGrime.h"
+
 #include "ODVehicleDef.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -427,6 +429,26 @@ void UODVehicleMovement::AsyncPhysicsTickComponent(float DeltaTime, float SimTim
 	TickDrivetrain(Body, Dt);
 	TickTires(Body, Dt);
 	TickAero(Body);
+
+	// body dirt for the Realistic materials (ODCarGrime.h): per distance
+	// rolled this fixed step, at the mean rate of the wheels on the ground
+	{
+		const float Wet = WeatherCtl.IsValid() ? WeatherCtl->Wetness : 0.0f;
+		float Rate = 0.0f;
+		int32 OnGround = 0;
+		for (const FODWheel& W : Wheels)
+		{
+			if (W.bInContact)
+			{
+				Rate += ODCarGrime::RatePerM(W.Surface.Get(), Wet);
+				++OnGround;
+			}
+		}
+		if (OnGround > 0)
+		{
+			Dirt = ODCarGrime::Step(Dirt, Body->GetPhysicsLinearVelocity().Size() * Dt / 100.0f, Rate / OnGround);
+		}
+	}
 
 	// spawn parking hold, static part: brake torque alone can't hold on a
 	// grade - locked wheels still creep on the tire model (Frisco verify
