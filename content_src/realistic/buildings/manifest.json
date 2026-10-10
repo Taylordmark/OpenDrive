@@ -1,0 +1,39 @@
+{
+  "_comment": "PLAN-VISUALS Track G: ambientCG CC0 PBR sets used only by M_BuildingFacade_real (unreal/apply_building_material_real.py), on top of the stylized building sets (content_src/textures/building/manifest.json). Whole site CC0 1.0 (public domain, no login; see https://ambientcg.com/about). Fetched at 2K-JPG by `python content_src/textures/ground/download_ground_textures.py content_src/realistic/buildings/manifest.json` into <asset_id>/ (gitignored); imported to /Game/OpenDrive/Realistic/Buildings/<asset_id>/ by apply_building_material_real.py.",
+  "resolution": "2K",
+  "format": "JPG (Color/Roughness/AmbientOcclusion), JPG NormalGL",
+  "textures": [
+    {
+      "role": "roof_asphalt_shingle",
+      "asset_id": "RoofingTiles009",
+      "display_name": "Roofing Tiles 009",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=RoofingTiles009",
+      "download_url": "https://ambientcg.com/get?file=RoofingTiles009_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Black modern shingle - second roof variant (asphalt-shingle read) beside the stylized RoofingTiles007."
+    },
+    {
+      "role": "roof_metal",
+      "asset_id": "CorrugatedSteel005",
+      "display_name": "Corrugated Steel 005",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=CorrugatedSteel005",
+      "download_url": "https://ambientcg.com/get?file=CorrugatedSteel005_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Bare painted corrugated steel - metal roof variant, recoloured per building (barn red, forest green, grey)."
+    }
+  ]
+}

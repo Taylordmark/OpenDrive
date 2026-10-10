@@ -180,7 +180,7 @@ fewer than seven run at once.
 | C/D | CC0 ambientCG cracks, rock, litter, moss, gravel | d85478b |
 | E | first pass: tire smoke, dust, spray | de561e9 |
 | F | trees for 6 of 7 slots + flora materials | d321c3c |
-| G | not started | |
+| G | first pass: `M_BuildingFacade_real` (paint, trim, grime, glass, night windows, 3 roof types) | see Track G |
 | J | first pass (shader shoulder blend, no RVT); agent still working on it | 5cbf1ee |
 
 `main` merged in with the menu work (cbbce1f). Known gaps:
@@ -326,6 +326,21 @@ stylized meshes; a render of each species turntable from the generator.
 2. Roof detail from the existing roof tiles set.
 
 **Check:** interface rule passes; compile.
+
+**Status (2026-10-09):** first pass, no C++ (`ODBuildingManager` already
+`Pick`s the facade). `unreal/apply_building_material_real.py` builds
+`M_BuildingFacade_real` on the twin's UV0 + vertex-color RGB:
+- per-building paint on siding/plaster, brightness jitter, weathering,
+  ground splash, rain streaks under sills;
+- window frames, mullion/transom, sills, flat normals; dark glossy glass by
+  day, some drawn blinds;
+- night windows: the shader takes NightFactor() from the sun
+  (SkyAtmosphereLightDirection 0), so up to 35% of rooms switch on through
+  dusk at 2.4-4 nits; `pipeline/check_night_exposure.py` checks them;
+- shingle roofs split between RoofingTiles007, CC0 RoofingTiles009 and
+  painted CorrugatedSteel005 (`content_src/realistic/buildings/manifest.json`).
+Not done: interior-mapped (parallax) rooms and real roof geometry; both
+need new meshes or interiors, out of scope for a material pass.
 
 ---
 

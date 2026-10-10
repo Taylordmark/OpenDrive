@@ -88,7 +88,8 @@ desktop.ini
 # generated PNGs are not.
 content_src/realistic/road/*.png
 
-# Same convention, Realistic-only ambientCG sets (PLAN-VISUALS Tracks C/D) -
+# Same convention, Realistic-only ambientCG sets (PLAN-VISUALS Tracks C/D/G) -
 # manifest.json is tracked; download_ground_textures.py <manifest> re-fetches.
 content_src/realistic/road/*/
 content_src/realistic/terrain/*/
+content_src/realistic/buildings/*/
