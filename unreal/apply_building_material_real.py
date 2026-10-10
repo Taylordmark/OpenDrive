@@ -1,6 +1,12 @@
 """PLAN-VISUALS Track G: M_BuildingFacade_real, the Realistic twin of
 M_BuildingFacade (unreal/apply_building_material.py), saved beside it so
-ODVisualStyle::Pick (AODBuildingManager::BeginPlay) finds it. No C++.
+ODVisualStyle::Pick (AODBuildingManager::BeginPlay) finds it, and
+M_BuildingRoof_real, which has no stylized twin: in Realistic,
+AODBuildingManager puts roof triangles (normal Z > ROOF_MASK_THRESHOLD) in a
+second mesh section with this material, so walls sample only the 5 wall sets
+(15 samples per pixel) and roofs only the roof sets (12), instead of one
+material sampling all 24 everywhere. Stylized keeps one section and the
+twin's single material.
 
 Same interface as the twin: UV0 (U = perimeter / 4 m, V = height / 4 m from
 pipeline/build_building_mesh.py, planar XY / 4 m on the roof cap), vertex
@@ -18,7 +24,7 @@ What's added over the stylized graph:
     reflections), some windows show drawn blinds. At night a hash-picked share
     of rooms lights up (LIT_MAX_FRACTION), switching on progressively as the
     sun sets, warm/neutral/cool, LIT_NITS each.
-  - roofs: shingle roofs pick RoofingTiles007 (stylized), RoofingTiles009
+  - roofs (M_BuildingRoof_real): shingle roofs pick RoofingTiles007 (stylized), RoofingTiles009
     (dark asphalt shingle) or CorrugatedSteel005 painted red/green/grey per
     building; flat roofs stay concrete, darker.
 Night comes from the sun itself: SkyAtmosphereLightDirection(0) is the sun
@@ -56,6 +62,7 @@ import unreal
 MAT_DIR = "/Game/OpenDrive/Materials"
 TWIN_NAME = "M_BuildingFacade"
 MAT_NAME = "M_BuildingFacade_real"
+ROOF_MAT_NAME = "M_BuildingRoof_real"   # AODBuildingManager loads it by this path
 BUILDING_TEX_DIR = "/Game/OpenDrive/Textures/Building"
 REAL_TEX_DIR = "/Game/OpenDrive/Realistic/Buildings"
 REAL_SRC_DIR = Path(__file__).resolve().parent.parent / "content_src" / "realistic" / "buildings"
@@ -285,23 +292,22 @@ def sample_set(g, s, uv):
     return {k: g.sample(s[k], uv, k) for k in ("A", "N", "R")}
 
 
-def build(mat):
-    g = G(mat)
+def inputs(g):
     uv = g.node(unreal.MaterialExpressionTextureCoordinate, coordinate_index=0)
-    u, v = g.mask(uv, r=True), g.mask(uv, gg=True)
-
     vc = g.node(unreal.MaterialExpressionVertexColor)
-    wall_r = g.mask(vc, r=True)
     # snapped to its 8-bit value like the twin (barycentric ulp noise x hash = speckle)
     seed = g.mul(g.floorv(g.add(g.mul(g.mask(vc, gg=True), 255.0), 0.5)), 1.0 / 255.0)
-    flat_roof = g.mask(vc, b=True)
-    s_roof = g.frac_hash(seed, 7.77, 0.13)
+    return uv, vc, seed
+
+
+def build_facade(mat):
+    g = G(mat)
+    uv, vc, seed = inputs(g)
+    u, v = g.mask(uv, r=True), g.mask(uv, gg=True)
+    wall_r = g.mask(vc, r=True)
     s_paint = g.frac_hash(seed, 17.31, 0.71)
     s_frame = g.frac_hash(seed, 3.37, 0.29)
     s_jit = g.frac_hash(seed, 11.13, 0.53)
-
-    up = g.dot(g.node(unreal.MaterialExpressionVertexNormalWS), g.c3((0.0, 0.0, 1.0)))
-    roof_mask = g.sat(g.mul(g.sub(up, ROOF_MASK_THRESHOLD), 20.0))
 
     # ---- night: AODDayNightController::NightFactor of the sun's elevation
     sun = g.node(unreal.MaterialExpressionSkyAtmosphereLightDirection)
@@ -384,9 +390,22 @@ def build(mat):
     lit = g.sat(g.mul(g.sub(g.mul(night, LIT_MAX_FRACTION), h_lit), 50.0))
     lit_col = g.select(h_col, [g.c3(luma_normalised(c)) for c in LIT_COLORS], list(LIT_COLOR_SPLIT))
     nits = g.mul(g.lerp(LIT_NITS * LIT_JITTER_MIN, LIT_NITS, h_var), g.mul(lit, glass))
-    emissive = g.mul(lit_col, g.mul(nits, g.sub(1.0, roof_mask)))
+    emissive = g.mul(lit_col, nits)
 
-    # ---- roofs
+    return {
+        unreal.MaterialProperty.MP_BASE_COLOR: facade_a,
+        unreal.MaterialProperty.MP_NORMAL: facade_n,
+        unreal.MaterialProperty.MP_ROUGHNESS: facade_r,
+        unreal.MaterialProperty.MP_EMISSIVE_COLOR: emissive,
+    }
+
+
+def build_roof(mat):
+    g = G(mat)
+    uv, vc, seed = inputs(g)
+    flat_roof = g.mask(vc, b=True)
+    s_roof = g.frac_hash(seed, 7.77, 0.13)
+    s_paint = g.frac_hash(seed, 17.31, 0.71)   # same per-building hash as the facade paint
     roof_sets = [sample_set(g, load_set(BUILDING_TEX_DIR, "RoofingTiles007"), uv),
                  sample_set(g, load_set(REAL_TEX_DIR, "RoofingTiles009"), uv),
                  sample_set(g, load_set(REAL_TEX_DIR, "CorrugatedSteel005"), uv)]
@@ -395,20 +414,12 @@ def build(mat):
     roof_sets[2]["A"] = g.mul(roof_sets[2]["A"], steel_paint)
     split = list(ROOF_SPLIT)
     pitched = {k: g.select(s_roof, [s[k] for s in roof_sets], split) for k in ("A", "N", "R")}
-    concrete = sets[WALL_LAYERS.index("Concrete034")]
-    roof_a = g.lerp(pitched["A"], g.mul(concrete["A"], FLAT_ROOF_DARK), flat_roof)
-    roof_n = g.lerp(pitched["N"], concrete["N"], flat_roof)
-    roof_r = g.lerp(pitched["R"], concrete["R"], flat_roof)
-
-    out = {
-        unreal.MaterialProperty.MP_BASE_COLOR: g.lerp(facade_a, roof_a, roof_mask),
-        unreal.MaterialProperty.MP_NORMAL: g.lerp(facade_n, roof_n, roof_mask),
-        unreal.MaterialProperty.MP_ROUGHNESS: g.lerp(facade_r, roof_r, roof_mask),
-        unreal.MaterialProperty.MP_EMISSIVE_COLOR: emissive,
+    concrete = sample_set(g, load_set(BUILDING_TEX_DIR, "Concrete034"), uv)
+    return {
+        unreal.MaterialProperty.MP_BASE_COLOR: g.lerp(pitched["A"], g.mul(concrete["A"], FLAT_ROOF_DARK), flat_roof),
+        unreal.MaterialProperty.MP_NORMAL: g.lerp(pitched["N"], concrete["N"], flat_roof),
+        unreal.MaterialProperty.MP_ROUGHNESS: g.lerp(pitched["R"], concrete["R"], flat_roof),
     }
-    for prop, node in out.items():
-        G.req(MEL.connect_material_property(node, "", prop), str(prop))
-    return out
 
 
 USAGE_FLAGS = ("used_with_instanced_static_meshes", "used_with_nanite", "used_with_skeletal_mesh",
@@ -431,7 +442,7 @@ def channels(mat):
     return vc, uvs
 
 
-def check_interface(twin, real, real_path):
+def check_interface(twin, real, real_path, outputs):
     problems = []
     missing = param_names(twin) - param_names(real)
     if missing:
@@ -444,8 +455,7 @@ def check_interface(twin, real, real_path):
     for prop in ("phys_material", "two_sided", "blend_mode") + USAGE_FLAGS:
         if twin.get_editor_property(prop) != real.get_editor_property(prop):
             problems.append(f"{prop} differs")
-    for prop in (unreal.MaterialProperty.MP_BASE_COLOR, unreal.MaterialProperty.MP_NORMAL,
-                 unreal.MaterialProperty.MP_ROUGHNESS, unreal.MaterialProperty.MP_EMISSIVE_COLOR):
+    for prop in outputs:
         if MEL.get_material_property_input_node(real, prop) is None:
             problems.append(f"{prop} unconnected")
     if problems:
@@ -454,26 +464,36 @@ def check_interface(twin, real, real_path):
         f"phys={real.get_editor_property('phys_material')} two_sided={real.get_editor_property('two_sided')}")
 
 
-def main():
-    twin_path, path = f"{MAT_DIR}/{TWIN_NAME}", f"{MAT_DIR}/{MAT_NAME}"
-    twin = unreal.load_asset(twin_path)
-    if twin is None:
-        raise RuntimeError(f"{twin_path} missing - run unreal/apply_building_material.py first")
+def make(twin, name, builder):
+    """Build one material on the twin's flags; the roof has no twin of its
+    own, so it is checked against the facade's (same mesh, same channels)."""
+    path = f"{MAT_DIR}/{name}"
     if EAL.does_asset_exist(path):
         mat = unreal.load_asset(path)
         for e in list(MEL.get_material_expressions(mat)):   # not delete_all_material_expressions (5.8 bug)
             MEL.delete_material_expression(mat, e)
     else:
-        mat = tools.create_asset(MAT_NAME, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+        mat = tools.create_asset(name, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
     for prop in ("phys_material", "blend_mode", "two_sided") + USAGE_FLAGS:
         mat.set_editor_property(prop, twin.get_editor_property(prop))
-    build(mat)
+    out = builder(mat)
+    for prop, node in out.items():
+        G.req(MEL.connect_material_property(node, "", prop), str(prop))
     MEL.recompile_material(mat)
     if not EAL.save_asset(path, only_if_is_dirty=False):
         raise RuntimeError(f"save failed (file in use?): {path}")
     real = unreal.load_asset(path)
-    check_interface(twin, real, path)
+    check_interface(twin, real, path, list(out))
     log(f"saved {path} ({MEL.get_num_material_expressions(real)} nodes)")
+
+
+def main():
+    twin_path = f"{MAT_DIR}/{TWIN_NAME}"
+    twin = unreal.load_asset(twin_path)
+    if twin is None:
+        raise RuntimeError(f"{twin_path} missing - run unreal/apply_building_material.py first")
+    make(twin, MAT_NAME, build_facade)
+    make(twin, ROOF_MAT_NAME, build_roof)
 
 
 main()

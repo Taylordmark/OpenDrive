@@ -102,6 +102,13 @@ void AODBuildingManager::BeginPlay()
 
 	FacadeMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
 		nullptr, TEXT("/Game/OpenDrive/Materials/M_BuildingFacade.M_BuildingFacade")));
+	// Realistic splits roofs into their own section (see RoofMat); the roof
+	// material has no stylized twin, so it is loaded directly, not Picked.
+	RoofMat = ODVisualStyle::IsRealistic()
+		? LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Game/OpenDrive/Materials/M_BuildingRoof_real.M_BuildingRoof_real"),
+			nullptr, LOAD_NoWarn | LOAD_Quiet)
+		: nullptr;
 
 	ClampSpawnRadiusToTerrainCollision();
 }
@@ -481,6 +488,10 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 		{
 			Comp->SetMaterial(0, FacadeMat);
 		}
+		if (RoofMat)
+		{
+			Comp->SetMaterial(1, RoofMat);
+		}
 		CompSlot = Comp;
 	}
 
@@ -491,6 +502,12 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 		Mesh.Attributes()->EnablePrimaryColors();
 		FDynamicMeshColorOverlay* Color = Mesh.Attributes()->PrimaryColors();
+		FDynamicMeshMaterialAttribute* MatId = nullptr;
+		if (RoofMat)
+		{
+			Mesh.Attributes()->EnableMaterialID();
+			MatId = Mesh.Attributes()->GetMaterialID();
+		}
 
 		for (const auto& Entry : Batch)
 		{
@@ -545,6 +562,12 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 				{
 					UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
 					Color->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));
+					if (MatId)
+					{
+						// roof = faces up, the same 0.55 cut as the stylized
+						// material's normal-Z roof mask (ROOF_MASK_THRESHOLD)
+						MatId->SetValue(Tid, Mesh.GetTriNormal(Tid).Z > 0.55 ? 1 : 0);
+					}
 				}
 			}
 		}

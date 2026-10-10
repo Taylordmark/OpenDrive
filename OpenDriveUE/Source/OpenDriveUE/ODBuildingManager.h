@@ -298,5 +298,12 @@ private:
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> FacadeMat;
 
+	/** Realistic only (PLAN-VISUALS Track G): M_BuildingRoof_real. When set,
+	 *  roof triangles go in mesh section 1 with this material and walls keep
+	 *  section 0, so neither material samples the other's textures. Null in
+	 *  Stylized (or if the asset is missing): one section, FacadeMat, as before. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RoofMat;
+
 	double LastDiagTime = 0.0;
 };
