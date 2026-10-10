@@ -1,9 +1,9 @@
 """Track F (PLAN-VISUALS.md) guard for make_tree_meshes.py:
   1. the stylized output is byte-identical to the pre-Track-F generator
      (sha256 prefixes below, recorded from commit 2b65727's script), and
-  2. every --real mesh stays inside REAL_TRI_BUDGET for its tier, has the
-     bark slot first and the foliage slot second, and only references the
-     _real textures.
+  2. every --real mesh stays inside its tier's triangle budget, has the
+     stylized twin's exact usemtl slot list (bark first, foliage second, or
+     foliage only), sits on the ground, and only references _real textures.
 
 Run:  python pipeline/tests/test_real_tree_meshes.py"""
 import hashlib
@@ -86,13 +86,17 @@ for name, want in STYLIZED_SHA.items():
 subprocess.run([sys.executable, str(PIPE / "make_tree_meshes.py"), "--real"], check=True, capture_output=True)
 import make_tree_meshes as mt
 for slot in mt.REAL_SPECIES:
-    for tier, budget in mt.REAL_TRI_BUDGET.items():
+    twin_mats = list(dict.fromkeys(l.split()[1] for l in (OBJ / f"{slot}.obj").read_text().splitlines()
+                                   if l.startswith("usemtl")))   # UE merges repeats into one slot
+    for tier, budget in mt.REAL_TRI_BUDGET_SLOT.get(slot, mt.REAL_TRI_BUDGET).items():
         name = f"{slot}_real{tier}"
         text = (OBJ / f"{name}.obj").read_text()
         tris = sum(1 for l in text.splitlines() if l.startswith("f "))
         mats = [l.split()[1] for l in text.splitlines() if l.startswith("usemtl")]
         assert 0 < tris <= budget, f"{name}: {tris} tris > budget {budget}"
-        assert mats[0].startswith("bark_") and mats[1:] == ["foliage"], f"{name}: slots {mats}"
+        assert mats == twin_mats, f"{name}: slots {mats} != stylized {twin_mats}"
+        min_z = min(float(l.split()[3]) for l in text.splitlines() if l.startswith("v "))
+        assert slot not in mt.REAL_TRI_BUDGET_SLOT or min_z > -6, f"{name}: min z {min_z} (ground cover is planted by its min Z)"
         mtl = (OBJ / f"{name}.mtl").read_text()
         assert all("_real" in l for l in mtl.splitlines() if l.startswith("map_")), name
         print(f"{name:28s} {tris:5d} tris (budget {budget})")

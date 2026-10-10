@@ -579,16 +579,27 @@ def _highpass(lum, r):
     return lum - blur
 
 
-def make_conifer_bark_real():
-    img = Image.open(SRC_DIR / "bark_conifer_polyhaven.jpg").convert("RGB").resize((1024, 1024), Image.LANCZOS)
+def make_photo_bark_real(src, out, tint, grey_mix, blur, strength):
+    """Colour-graded copy of a CC0 bark photo (mixed toward a tinted grey)
+    plus a tangent normal map from its high-passed luminance."""
+    img = Image.open(SRC_DIR / src).convert("RGB").resize((1024, 1024), Image.LANCZOS)
     a = np.asarray(img, dtype=np.float32) / 255
     lum = a @ [0.3, 0.59, 0.11]
+    grey = lum[..., None] * np.array(tint)
+    a = np.clip(a * (1 - grey_mix) + grey * grey_mix, 0, 1)
+    Image.fromarray(np.uint8(a * 255)).save(TEX_DIR / f"{out}.png")
+    _normal_from_height(_highpass(lum, blur), strength).save(TEX_DIR / f"{out}_N.png")
+    print(f"wrote {out}.png + _N")
+
+
+def make_conifer_bark_real():
     # lodgepole: thin grey-brown plates - pull the photo's warm cast toward grey
-    grey = lum[..., None] * np.array([1.02, 0.96, 0.9])
-    a = np.clip(a * 0.7 + grey * 0.3, 0, 1)
-    Image.fromarray(np.uint8(a * 255)).save(TEX_DIR / "T_BarkConifer_real.png")
-    _normal_from_height(_highpass(lum, 24), 9.0).save(TEX_DIR / "T_BarkConifer_real_N.png")
-    print("wrote T_BarkConifer_real.png + _N")
+    make_photo_bark_real("bark_conifer_polyhaven.jpg", "T_BarkConifer_real", (1.02, 0.96, 0.9), 0.3, 24, 9.0)
+
+
+def make_willow_bark_real():
+    # streamside willow stems: smoother, darker red-brown than the trunk photo
+    make_photo_bark_real("bark_willow_polyhaven.jpg", "T_BarkWillow_real", (0.95, 0.78, 0.66), 0.35, 12, 6.0)
 
 
 def _tile_noise(px, cutoff, aniso=(1.0, 1.0)):
@@ -646,6 +657,7 @@ def main_real():
     if not (SRC_DIR / "bark_conifer_polyhaven.jpg").exists():
         raise SystemExit("run build_flora_textures.py (stylized) first - it fetches the Poly Haven bark")
     make_conifer_bark_real()
+    make_willow_bark_real()
     make_aspen_bark_real()
     make_atlas_real()
     REAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -657,6 +669,9 @@ def main_real():
         "T_BarkConifer_real.png": {"source": "https://polyhaven.com/a/knotted_pine_bark", "license": "CC0",
                                    "author": "Poly Haven",
                                    "note": "colour-graded copy + luminance-derived _N normal map"},
+        "T_BarkWillow_real.png": {"source": "https://polyhaven.com/a/bark_willow", "license": "CC0",
+                                  "author": "Poly Haven",
+                                  "note": "colour-graded copy + luminance-derived _N normal map"},
         "tree meshes (*_real.obj)": {"source": "generated", "license": gen,
                                      "note": "make_tree_meshes.py --real"},
     }

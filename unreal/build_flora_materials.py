@@ -59,7 +59,8 @@ TEXTURES = ("T_BarkConifer.png", "T_BarkAspen.png", "T_BarkWillow.png",
             "T_FoliageAtlas.png")
 if REAL:
     TEXTURES = ("T_BarkConifer_real.png", "T_BarkConifer_real_N.png", "T_BarkAspen_real.png",
-                "T_BarkAspen_real_N.png", "T_FoliageAtlas_real.png")
+                "T_BarkAspen_real_N.png", "T_BarkWillow_real.png", "T_BarkWillow_real_N.png",
+                "T_FoliageAtlas_real.png")
 tex_tasks = []
 for fname in TEXTURES:
     ti = unreal.AssetImportTask()
@@ -100,7 +101,8 @@ def new_material(name):
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         m = unreal.load_asset(path)
         if m is not None:
-            MEL.delete_all_material_expressions(m)
+            for e in list(MEL.get_material_expressions(m)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+                MEL.delete_material_expression(m, e)
             return m
         unreal.EditorAssetLibrary.delete_asset(path)
     m = tools.create_asset(name, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
@@ -289,9 +291,10 @@ BARK_MATS = {
     "M_Bark_Aspen":   ("T_BarkAspen", 0.70),
     "M_Bark_Willow":  ("T_BarkWillow", 0.75),
 }
-if REAL:   # willow (bush) has no realistic twin yet - Pick falls back to it
+if REAL:
     BARK_MATS = {"M_Bark_Conifer_real": ("T_BarkConifer_real", 0.80),
-                 "M_Bark_Aspen_real": ("T_BarkAspen_real", 0.70)}
+                 "M_Bark_Aspen_real": ("T_BarkAspen_real", 0.70),
+                 "M_Bark_Willow_real": ("T_BarkWillow_real", 0.75)}
 for mat_name, (tex_name, roughness) in BARK_MATS.items():
     mat = new_material(mat_name)
     ts = MEL.create_material_expression(
@@ -647,6 +650,38 @@ if REAL:
     must_connect_property(_mul(m_fol, _mul(m_fol, snowed_base_color, shade), tint), "",
                           unreal.MaterialProperty.MP_BASE_COLOR)
     _must_connect(_mul(m_fol, base_after_fall, _const(m_fol, 0.75)), "", snowed_subsurface, "A")
+
+    # Wind: card flutter via world position offset (Track F 4). Driven by
+    # the Time node (game seconds), so it's frame-rate independent. Keyed off
+    # each card's own UV height - the atlas cells are 0.5 V tall and UE V =
+    # 1 - OBJ v, so frac(2V) runs 0.92 at a card's attached base to 0.08 at
+    # its tip: bases stay on their branch / in the ground, tips sway. No
+    # local-position height (it reads 0 in this HISM vertex factory - see the
+    # snow notes above), no trunk bend, no new parameter (the interface rule
+    # wants M_Foliage's exact scalar list). Phase: PerInstanceRandom plus a
+    # slow world-space gust wave rolling across the forest. Bark is static.
+    # ~20 vertex-shader ALU ops; same graph sways the trees, bushes and grass.
+    WIND_CM = 6.0                                       # tip sway amplitude
+    wind_dir = _const3(m_fol, 0.86, 0.45, 0.24)         # downwind, slight lift
+    t = _node(m_fol, unreal.MaterialExpressionTime)
+    wxy = _world_xy(m_fol)
+    tip = _clamp01(m_fol, _div(m_fol, _sub(m_fol, _const(m_fol, 0.92),
+                                            _frac(m_fol, _mul(m_fol, uv_v, _const(m_fol, 2.0)))),
+                                _const(m_fol, 0.84)))
+    phase = _add(m_fol, per_instance_random,
+                 _dotp(m_fol, wxy, _const2(m_fol, 0.0011, 0.0007)))        # Sine period 1 = cycles
+    gust = _add(m_fol, _const(m_fol, 0.65), _mul(m_fol, _const(m_fol, 0.35), _sine(m_fol, _add(
+        m_fol, _mul(m_fol, t, _const(m_fol, 0.09)), _dotp(m_fol, wxy, _const2(m_fol, 0.00025, 0.00016))))))
+    sway = _add(m_fol, _add(m_fol, _const(m_fol, 0.35),
+                            _mul(m_fol, _const(m_fol, 0.7), _sine(m_fol, _add(m_fol, _mul(m_fol, t, _const(m_fol, 0.45)), phase)))),
+                _mul(m_fol, _const(m_fol, 0.3), _sine(m_fol, _add(m_fol, _mul(m_fol, t, _const(m_fol, 1.3)),
+                                                                   _mul(m_fol, phase, _const(m_fol, 1.7))))))
+    amount = _mul(m_fol, _mul(m_fol, tip, gust), _mul(m_fol, sway, _const(m_fol, WIND_CM)))
+    must_connect_property(_mul(m_fol, wind_dir, amount), "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    try:   # bounds/culling headroom for the offset (max ~1.65 x WIND_CM)
+        m_fol.set_editor_property("max_world_position_offset_displacement", WIND_CM * 2.0)
+    except Exception as e:
+        log(f"  max WPO displacement not set: {e}")
 
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage{SFX}", only_if_is_dirty=False)

@@ -66,17 +66,16 @@ FLORA = {
 }
 # Graphics menu "Asset Detail" variants (make_tree_meshes.py TIERS) - same
 # materials; the game falls back to the base mesh if these aren't imported.
+BASE_SLOTS = tuple(FLORA)
 FLORA = {n + sfx: v for sfx in ("", "_high", "_ultra") for n, v in FLORA.items()}
 FOLIAGE_TEXTURES = ("T_FoliageAtlas.png", "T_BarkConifer.png", "T_BarkAspen.png",
                      "T_BarkWillow.png")
 REAL = os.environ.get("OD_FLORA_REAL") == "1"
 SFX = "_real" if REAL else ""
-if REAL:   # species with a realistic twin; the rest fall back via Pick()
-    FLORA = {f"{n}_real{t}": ("M_Bark_Aspen_real" if n in ("tree_blob", "tree_scrub_oak")
-                              else "M_Bark_Conifer_real", None)
+if REAL:   # every slot's realistic twin, same bark material family as stylized
+    FLORA = {f"{n}_real{t}": (bark and bark + "_real", None)
              for t in ("", "_high", "_ultra")
-             for n in ("tree_conifer", "tree_canyon_oak", "tree_olive", "tree_yucca",
-                       "tree_blob", "tree_scrub_oak")}
+             for n, (bark, _tex) in FLORA.items() if n in BASE_SLOTS}
     FOLIAGE_TEXTURES = ()   # build_flora_materials.py imported the _real textures
 
 tools = unreal.AssetToolsHelpers.get_asset_tools()
@@ -156,7 +155,10 @@ log(f"assigned bark/foliage materials to {len(fol)} meshes")
 
 if REAL:   # only the new twins - never re-save the stylized content
     for name, mesh in fol.items():
-        if mesh.get_num_sections(0) != 2 or mesh.get_material(BARK_SLOT) != bark_mats[FLORA[name][0]]:
+        bark = FLORA[name][0]
+        if bark is None and mesh.get_num_sections(0) != 1:
+            raise RuntimeError(f"{name}: foliage-only mesh has {mesh.get_num_sections(0)} sections")
+        if bark and (mesh.get_num_sections(0) != 2 or mesh.get_material(BARK_SLOT) != bark_mats[bark]):
             raise RuntimeError(f"{name}: expected 2 sections, bark at slot {BARK_SLOT}")
         unreal.EditorAssetLibrary.save_asset(f"{TREE_DIR}/{name}", only_if_is_dirty=False)
     log(f"DONE - saved {len(fol)} realistic meshes")
