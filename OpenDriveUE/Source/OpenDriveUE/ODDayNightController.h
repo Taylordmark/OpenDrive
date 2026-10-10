@@ -42,10 +42,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float HeadlightElevation = 8.0f;
 
-	/** Real light cast by the lamps (lumens): two headlight spots off the
-	 *  nose, one rear spot that is red for tail / brake, white reversing. */
+	/** Real light cast by the lamps: two headlight spots off the nose
+	 *  (candela at the peak of the IES low-beam profile IES_Headlight -
+	 *  pipeline/make_headlight_ies.py, which tunes it), one rear spot (lumens)
+	 *  that is red for tail / brake, white reversing. */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float HeadlightLm = 4500.0f;
+	float HeadlightCd = 40000.0f;
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float TailLightLm = 30.0f;
 	UPROPERTY(EditAnywhere, Category = "DayNight")
@@ -71,7 +73,7 @@ public:
 	 *  through this much air haze (scattering, 1/m) on a sphere off the nose.
 	 *  pipeline/check_headlight_beam.py tunes it. Weather fog adds on top. */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float BeamHaze = 0.01f;
+	float BeamHaze = 0.0003f;   // 2026-10-09: was 0.01 at ~3400 cd - veil hid the road ("hard to see through")
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float BeamRadius = 4500.0f;   // reaches ~87 m, the spots' 90 m attenuation
 
@@ -124,6 +126,8 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> StarMID;
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> BeamMat;
+	UPROPERTY()
+	TObjectPtr<class UTextureLightProfile> HeadIES;
 	float LastNight = -1.0f;
 	int32 LastLampState = -1;   // player car brake|reverse, logged on change
 	TMap<TWeakObjectPtr<APawn>, TArray<TWeakObjectPtr<USpotLightComponent>>> Lights;

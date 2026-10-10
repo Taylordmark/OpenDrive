@@ -9,7 +9,7 @@ at the lens that a chase camera looks straight down.
 
 Checks, in night mid-grey units: the chase view stays see-through (no
 bright veil), the beam still reads, it is dimmer than the road it lands on,
-and seen side-on it still shows 60 m out.
+and seen side-on it still shows 30 m out.
 
 Usage:  python pipeline/check_headlight_beam.py [out.png]
 """
@@ -18,15 +18,18 @@ import sys
 
 import numpy as np
 
-# AODDayNightController / UpdateHeadlights
-HEAD_LM, COS_IN, COS_OUT = 4500.0, math.cos(math.radians(22)), math.cos(math.radians(38))
-CD = HEAD_LM / (2 * math.pi * (1 - COS_OUT))
-HAZE = 0.01                       # BeamHaze (1/m)
+# AODDayNightController / UpdateHeadlights: the head spots are an IES low beam
+# (make_headlight_ies.py) at HeadlightCd peak; the haze marches its main lobe,
+# BeamCone deg around the spot axis pitched BeamPitch.
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+from make_headlight_ies import HEAD_CD as CD, road as profile_road   # noqa: E402
+COS_IN, COS_OUT = math.cos(math.radians(5)), math.cos(math.radians(30))
+HAZE = 0.0003                     # BeamHaze (1/m); 2026-10-09 was 0.01 at ~3400 cd (veil p99 0.82)
 RADIUS = 4500.0                   # BeamRadius, cm: reaches 2R - 3 m ahead, ~ the spots' 90 m
 G, D0, N = 0.0, 1500.0, 48         # = MARCH_HLSL: phase g, core softening (cm), steps
 MID = 0.5                         # night mid grey, nits (check_night_exposure.py)
 
-PITCH = math.radians(-6)
+PITCH = math.radians(-2)
 DIR = np.array([math.cos(PITCH), 0.0, math.sin(PITCH)])
 LAMPS = [np.array([230.0, s * 50.0, 25.0]) for s in (-1, 1)]   # nose, cm (car origin)
 GROUND = -35.0                    # road under the wheels, cm
@@ -58,18 +61,6 @@ def beam(c, d):
     return CD * HAZE * s * dt * 100.0 / MID
 
 
-def road(x_cm):
-    """Headlit road luminance (albedo 0.1) straight ahead at x_cm, x mid grey."""
-    p = np.array([x_cm, 0.0, GROUND])
-    e = 0.0
-    for lamp in LAMPS:
-        v = p - lamp
-        dist = np.linalg.norm(v)
-        t = np.clip((v / dist @ DIR - COS_OUT) / (COS_IN - COS_OUT), 0, 1)
-        e += CD * t * t * (3 - 2 * t) / (dist / 100) ** 2 * (-v[2] / dist)
-    return e * 0.1 / math.pi / MID
-
-
 def side(x_cm):
     """Beam seen side-on, x_cm ahead of the nose, from 15 m to the side at lamp height."""
     axis = (LAMPS[0] + LAMPS[1]) / 2 + DIR * (x_cm - 230.0) / DIR[0]
@@ -86,7 +77,7 @@ def main():
             v = 1 - (j + 0.5) / H * 2
             ray = np.array([1.0, -u * math.tan(fov / 2), v * math.tan(fov / 2) * H / W - 0.12])
             img[j, i] = beam(cam, ray / np.linalg.norm(ray))
-    pool = max(road(x) for x in range(250, 3000, 10))   # brightest spot the beams land on
+    pool = max(profile_road(x / 100.0, 0.0) for x in range(300, 3000, 10))   # brightest road the beams land on
     p50, p99 = np.percentile(img[img > 0.01], [50, 99])
     reach = {m: side(m * 100.0) for m in (10, 30, 60, 80)}
     print(f"chase view x mid grey: median {p50:.2f}  p99 {p99:.2f} | road pool peak {pool:.1f}")
@@ -99,11 +90,11 @@ def main():
         plt.colorbar(label="beam luminance / night mid grey (clipped at 2)")
         plt.title(f"chase cam, beam only (Haze {HAZE}/m, D0 {D0 / 100:.0f} m, R {RADIUS / 100:.0f} m)")
         plt.savefig(sys.argv[1], dpi=80)
-    assert p50 > 0.15, "beam reads in clear air (no weather fog)"
-    assert p99 < 1.5, "chase view stays see-through: no bright veil at the lenses"
+    assert p50 > 0.05, "beam still reads in clear air (no weather fog)"
+    assert p99 < 0.3, "chase view stays see-through: no bright veil at the lenses (was 0.82)"
     assert p99 < 0.1 * pool, "beam stays dimmer than where it lands"
-    assert reach[60] > 0.05, "beam still shows 60 m out"
-    print("PASS: see-through beam in clear air, dimmer than where it lands, reaching 60 m+")
+    assert reach[30] > 0.05, "beam still shows 30 m out"
+    print("PASS: see-through beam in clear air, dimmer than where it lands, reaching 30 m+")
 
 
 if __name__ == "__main__":
