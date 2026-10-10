@@ -31,12 +31,10 @@ class UInputComponent;
  * cancels capture outright (see OnCaptureKey) - Escape can never be assigned
  * to an action.
  *
- * Row layout: one row per action per device slot (10 actions x 2 slots = 20
- * rows), then 3 slider rows (steering deadzone, steering sensitivity,
- * throttle/brake deadzone - Arc 6 wheel conditioning, see FODInputConfig),
- * then "Reset to Defaults", then "Back". Scrolls like AODCreditsMenu
- * (VisibleLines window, auto-follows Selected) since 25 rows don't fit one
- * screen.
+ * Layout (2026-10-09): one row per action with Keyboard | Gamepad columns
+ * (Left/Right or a click picks the column), then "Reset to Defaults" and
+ * "Back". 12 rows fit one screen, so no scrolling. The wheel-conditioning
+ * sliders moved to AODSettingsMenu's CONTROLS tab.
  */
 UCLASS()
 class OPENDRIVEUE_API AODRebindMenu : public AActor
@@ -46,52 +44,44 @@ class OPENDRIVEUE_API AODRebindMenu : public AActor
 public:
 	AODRebindMenu();
 
-	static constexpr int32 VisibleLines = 12;
-
-	int32 NumRows() const { return FODInputConfig::NumActions * 2 + 3 + 2; }
+	int32 NumRows() const { return FODInputConfig::NumActions + 2; }
+	int32 ResetRow() const { return FODInputConfig::NumActions; }
+	int32 BackRow() const { return FODInputConfig::NumActions + 1; }
+	bool IsBindingRow(int32 Row) const { return Row >= 0 && Row < FODInputConfig::NumActions; }
 	int32 GetSelected() const { return Selected; }
-	int32 GetScrollOffset() const { return ScrollOffset; }
+	int32 GetColumn() const { return Column; }   // 0 keyboard, 1 gamepad
 	bool IsCapturing() const { return bCapturing; }
-	int32 GetCapturingRow() const { return CapturingRow; }
+	bool IsCapturingCell(int32 Row, int32 Col) const { return bCapturing && CapturingRow == Row * 2 + Col; }
+	/** True for the frame a capture ended on - that key press (maybe a
+	 *  mouse click) must not also act on the menu. */
+	bool CaptureJustEnded() const { return CaptureEndFrame != 0 && GFrameCounter - CaptureEndFrame <= 1; }
 
 	void MoveSelection(int32 Dir);
-	/** Left/Right on a slider row adjusts its value; no-op on every other
-	 *  row (binding rows are captured via Enter, not cycled via Left/Right -
-	 *  see ActivateSelected). */
+	/** Left/Right: switch column on a binding row. */
 	void AdjustSelected(int32 Dir);
-	/** Enter: starts key capture on a binding row, cycles a slider row
-	 *  (Dir=+1, same "Enter cycles" idiom as the other menus), resets
-	 *  bindings+sliders on the Reset row. Returns true iff the "Back" row
-	 *  was selected - caller (AODSettingsMenu::CloseRebind, via the parent
-	 *  menu) should close this screen. */
+	/** Mouse hover/click: select Row (and its column, Col >= 0). */
+	void SelectCell(int32 Row, int32 Col);
+	/** Enter: starts key capture on the selected cell, resets on the Reset
+	 *  row. Returns true iff the "Back" row was selected - the caller
+	 *  (AODSettingsMenu::Activate) closes this screen. */
 	bool ActivateSelected();
-	/** Cancels an in-progress capture (e.g. the parent's Escape handler
-	 *  should call this first before falling through) - no-op if not
-	 *  capturing. */
+	/** Cancels an in-progress capture - no-op if not capturing. */
 	void CancelCapture();
 
-	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
+	FString GetLabel(int32 Row) const;
+	FString GetBinding(int32 Row, int32 Col) const;
 
 private:
-	bool IsBindingRow(int32 Row) const { return Row < FODInputConfig::NumActions * 2; }
-	bool IsSliderRow(int32 Row) const
-	{
-		const int32 Base = FODInputConfig::NumActions * 2;
-		return Row >= Base && Row < Base + 3;
-	}
-	int32 ResetRow() const { return FODInputConfig::NumActions * 2 + 3; }
-	int32 BackRow() const { return FODInputConfig::NumActions * 2 + 4; }
-
-	void BeginCapture(int32 Row);
+	void BeginCapture(int32 Slot);   // Slot = Action * 2 + (gamepad ? 1 : 0)
 	void EndCapture();
 	void OnCaptureKey(FKey Key);
-	void EnsureScrollVisible();
 
 	int32 Selected = 0;
-	int32 ScrollOffset = 0;
+	int32 Column = 0;
 
 	bool bCapturing = false;
-	int32 CapturingRow = -1;
+	int32 CapturingRow = -1;     // capture slot, Action * 2 + column
+	uint64 CaptureEndFrame = 0;
 	UPROPERTY()
 	TObjectPtr<UInputComponent> CaptureInput;
 };

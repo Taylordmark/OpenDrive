@@ -1,27 +1,34 @@
 #include "ODRaceHUD.h"
 
+#include "Application/SlateApplicationBase.h"
 #include "Components/InputComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
 #include "Engine/Texture2D.h"
+#include "Fonts/CompositeFont.h"
+#include "Fonts/FontMeasure.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GlobalRenderResources.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/App.h"
+#include "Misc/Paths.h"
 #include "ODCreditsMenu.h"
+#include "ODGaugeCluster.h"
 #include "ODGhost.h"
 #include "ODInputConfig.h"
 #include "ODMainMenu.h"
 #include "ODPauseMenu.h"
+#include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
 #include "ODRaceManager.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
 #include "ODWeatherController.h"
+#include "Rendering/SlateRenderer.h"
 
 // Canvas text at Scale > 1 stretches a glyph bitmap rasterized at the font's
 // base size - blocky/blurry. Asking for the scaled point size instead makes
@@ -47,12 +54,20 @@ void AODRaceHUD::BeginPlay()
 	}
 	GConfig->GetBool(TEXT("OpenDrive.HUD"), TEXT("MiniMapHeadingUp"), bMiniMapHeadingUp,
 		GGameUserSettingsIni);
+	GConfig->GetBool(TEXT("OpenDrive.HUD"), TEXT("Metric"), bMetric, GGameUserSettingsIni);
 }
 
 void AODRaceHUD::SetMiniMapHeadingUp(bool bOn)
 {
 	bMiniMapHeadingUp = bOn;
 	GConfig->SetBool(TEXT("OpenDrive.HUD"), TEXT("MiniMapHeadingUp"), bOn, GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+}
+
+void AODRaceHUD::SetMetric(bool bOn)
+{
+	bMetric = bOn;
+	GConfig->SetBool(TEXT("OpenDrive.HUD"), TEXT("Metric"), bOn, GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -523,6 +538,503 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	}
 }
 
+// ---- menus (2026-10-09 redesign) -------------------------------------------
+// Every menu is one left-hand column on a dark gradient (mirrored right over
+// the Scene vista), Rajdhani text, sized from a 1080p layout by MenuScale().
+// While drawing, each clickable rect goes into MenuHits; HandleMenuMouse then
+// hit-tests the cursor against them and calls the owning menu's public
+// SelectRow/SetTab/Activate/Adjust/Back/Up/Down - the same entry points the
+// keyboard uses, so mouse and keys can't disagree.
+
+namespace
+{
+const FLinearColor Accent(1.0f, 0.68f, 0.25f);
+const FLinearColor TextCol(0.88f, 0.91f, 0.95f);
+const FLinearColor DimCol(0.52f, 0.58f, 0.65f);
+const FLinearColor Ink(0.012f, 0.016f, 0.028f);   // backdrop, and text on an accent fill
+
+// 1080p layout units (multiplied by MenuScale())
+constexpr float ColX = 96.0f;      // column inset from the screen edge
+constexpr float ColW = 640.0f;
+constexpr float RowH = 54.0f;
+constexpr float FooterH = 58.0f;
+
+const FODMenuTab PauseTabs[] = {{TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume}};
+
+// "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
+float ParsePercent(const FString& V)
+{
+	if (!V.EndsWith(TEXT("%")) || !V.LeftChop(1).IsNumeric())
+	{
+		return -1.0f;
+	}
+	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
+}
+
+enum class EMenuWeight : uint8 { Medium, SemiBold, Bold };
+
+// Rajdhani (SIL OFL, Content/Slate/Fonts) straight from its TTF - no UFont
+// asset (editor-agnostic); DefaultGame.ini stages the folder. One composite
+// font per weight, built once: the Slate font cache keys on it, so a fresh
+// one per call would re-rasterize glyphs every frame.
+FSlateFontInfo MenuFont(EMenuWeight Weight, float Size)
+{
+	static TSharedPtr<const FCompositeFont> Fonts[3];
+	static bool bTried[3] = {};
+	const int32 I = static_cast<int32>(Weight);
+	if (!bTried[I])
+	{
+		bTried[I] = true;
+		static const TCHAR* const Files[] = {
+			TEXT("Rajdhani-Medium.ttf"), TEXT("Rajdhani-SemiBold.ttf"), TEXT("Rajdhani-Bold.ttf")};
+		const FString Path = FPaths::ProjectContentDir() / TEXT("Slate/Fonts") / Files[I];
+		if (FPaths::FileExists(Path))
+		{
+			Fonts[I] = MakeShared<FCompositeFont>(NAME_None, Path, EFontHinting::Default, EFontLoadingPolicy::LazyLoad);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ODRaceHUD: menu font missing (%s) - using the engine font"), *Path);
+		}
+	}
+	if (Fonts[I])
+	{
+		return FSlateFontInfo(Fonts[I], Size);
+	}
+	return FSlateFontInfo(GEngine->GetLargeFont(), Size, Weight == EMenuWeight::Medium ? FName("Regular") : FName("Bold"));
+}
+
+/** Canvas painter at menu scale S - sizes are 1080p units, positions pixels. */
+struct FMenuPaint
+{
+	UCanvas* C;
+	float S;
+
+	void Rect(float X, float Y, float W, float H, const FLinearColor& Col) const
+	{
+		FCanvasTileItem T(FVector2D(X, Y), FVector2D(W, H), Col);
+		T.BlendMode = SE_BLEND_Translucent;
+		C->DrawItem(T);
+	}
+
+	static FSlateFontInfo Font(float Size, EMenuWeight W, int32 Spacing)
+	{
+		FSlateFontInfo F = MenuFont(W, Size);
+		F.LetterSpacing = Spacing;
+		return F;
+	}
+
+	// Y is the text's vertical centre
+	void Text(const FString& Str, float X, float Y, float Size, EMenuWeight W, const FLinearColor& Col,
+		bool bCenterX = false, int32 Spacing = 0) const
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), Font(Size * S, W, Spacing), Col);
+		T.bCentreX = bCenterX;
+		T.bCentreY = true;
+		T.EnableShadow(FLinearColor(0, 0, 0, 0.45f), FVector2D(S, S));
+		// HasValidText() needs a UFont even when SlateFontInfo is used; the
+		// file-loaded Rajdhani has no FontObject, so without this nothing drew
+		T.Font = GEngine->GetLargeFont();
+		C->DrawItem(T);
+	}
+
+	float Width(const FString& Str, float Size, EMenuWeight W, int32 Spacing = 0) const
+	{
+		if (FSlateApplicationBase::IsInitialized() && FSlateApplicationBase::Get().GetRenderer())
+		{
+			return FSlateApplicationBase::Get().GetRenderer()->GetFontMeasureService()
+				->Measure(Str, Font(Size * S, W, Spacing)).X;
+		}
+		return Str.Len() * Size * S * 0.5f;
+	}
+
+	// filled triangle pointing Dir (-1 left, +1 right), centred on X,Y
+	void Arrow(float X, float Y, float Dir, const FLinearColor& Col) const
+	{
+		FCanvasTriangleItem T(FVector2D(X + 5.0f * S * Dir, Y), FVector2D(X - 5.0f * S * Dir, Y - 7.0f * S),
+			FVector2D(X - 5.0f * S * Dir, Y + 7.0f * S), GWhiteTexture);
+		T.SetColor(Col);
+		T.BlendMode = SE_BLEND_Translucent;
+		C->DrawItem(T);
+	}
+
+	// horizontal fade, alpha A0 at X0 -> A1 at X1 (either direction), in strips
+	void Fade(float X0, float X1, float Y, float H, FLinearColor Col, float A0, float A1) const
+	{
+		const int32 N = FMath::Clamp(FMath::RoundToInt(FMath::Abs(X1 - X0) / (6.0f * S)), 1, 256);
+		const float Step = (X1 - X0) / N;
+		for (int32 i = 0; i < N; ++i)
+		{
+			Col.A = FMath::Lerp(A0, A1, (i + 0.5f) / N);
+			const float SX = X0 + Step * i;
+			Rect(FMath::Min(SX, SX + Step), Y, FMath::Abs(Step) + 0.5f, H, Col);
+		}
+	}
+
+	// a key cap; returns its width
+	float Key(const FString& K, float X, float Y) const
+	{
+		const float W = FMath::Max(Width(K, 15.0f, EMenuWeight::SemiBold) + 14.0f * S, 26.0f * S);
+		Rect(X, Y - 13.0f * S, W, 26.0f * S, FLinearColor(1, 1, 1, 0.14f));
+		Text(K, X + W * 0.5f, Y, 15.0f, EMenuWeight::SemiBold, TextCol, true);
+		return W;
+	}
+};
+
+struct FMenuHint
+{
+	const TCHAR* Key;
+	const TCHAR* Label;
+};
+
+// bottom-of-screen key hints, starting at the column's X
+void DrawHints(const FMenuPaint& P, float X, std::initializer_list<FMenuHint> Hints)
+{
+	const float Y = P.C->SizeY - 56.0f * P.S;
+	for (const FMenuHint& H : Hints)
+	{
+		X += P.Key(H.Key, X, Y) + 8.0f * P.S;
+		P.Text(H.Label, X, Y, 16.0f, EMenuWeight::Medium, DimCol);
+		X += P.Width(H.Label, 16.0f, EMenuWeight::Medium) + 28.0f * P.S;
+	}
+}
+
+// mouse -> menu, shared by AODMainMenu and AODPauseMenu (same public API)
+template <typename TMenu>
+void DispatchMenuMouse(TMenu* Menu, APlayerController* PC, const TArray<FODMenuHit>& Hits,
+	FVector2D& LastMouse, uint64& LastFrame)
+{
+	float Mx = 0.0f, My = 0.0f;
+	if (!Menu || !PC || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
+	{
+		return;
+	}
+	const FVector2D Mouse(Mx, My);
+	// hover only steals the selection when the mouse actually moves - not on
+	// the frame a menu opens under a resting cursor, nor while keys drive it
+	const bool bMoved = GFrameCounter - LastFrame <= 1 && !Mouse.Equals(LastMouse, 0.5);
+	LastMouse = Mouse;
+	LastFrame = GFrameCounter;
+
+	// a key capture owns every key, the mouse buttons included (they're
+	// bindable), and the click that ended it must not also hit the menu
+	if (const AODSettingsMenu* Set = Menu->IsSettingsOpen() ? Menu->GetSettingsMenu() : nullptr;
+		Set && Set->IsRebindOpen())
+	{
+		if (const AODRebindMenu* R = Set->GetRebindMenu(); R && (R->IsCapturing() || R->CaptureJustEnded()))
+		{
+			return;
+		}
+	}
+
+	const FODMenuHit* Hit = nullptr;
+	for (int32 i = Hits.Num() - 1; i >= 0 && !Hit; --i)   // last drawn = on top
+	{
+		const FODMenuHit& H = Hits[i];
+		Hit = (Mx >= H.X0 && Mx < H.X1 && My >= H.Y0 && My < H.Y1) ? &H : nullptr;
+	}
+	if (Hit && bMoved && Hit->Kind != FODMenuHit::Tab)
+	{
+		Menu->SelectRow(Hit->Id, Hit->Col);
+	}
+	if (Hit && PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+	{
+		const FODMenuHit H = *Hit;   // Activate may change what's on screen
+		switch (H.Kind)
+		{
+		case FODMenuHit::Tab: Menu->SetTab(H.Id); break;
+		case FODMenuHit::Prev: Menu->SelectRow(H.Id); Menu->Adjust(-1); break;
+		case FODMenuHit::Next: Menu->SelectRow(H.Id); Menu->Adjust(+1); break;
+		default: Menu->SelectRow(H.Id, H.Col); Menu->Activate(); break;
+		}
+	}
+	else if (PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+	{
+		Menu->Back();
+	}
+	if (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+	{
+		Menu->Up();
+	}
+	else if (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+	{
+		Menu->Down();
+	}
+}
+}
+
+float AODRaceHUD::MenuScale() const
+{
+	return Canvas ? FMath::Clamp(Canvas->SizeY / 1080.0f, 0.6f, 2.5f) : 1.0f;
+}
+
+float AODRaceHUD::MenuX(bool bRight, float W) const
+{
+	const float S = MenuScale();
+	return bRight ? Canvas->SizeX - ColX * S - W : ColX * S;
+}
+
+void AODRaceHUD::AddMenuHit(FODMenuHit::EKind Kind, int32 Id, int32 Col, float X, float Y, float W, float H) const
+{
+	MenuHits.Add({Kind, Id, Col, X, Y, X + W, Y + H});
+}
+
+void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
+{
+	DispatchMenuMouse(Menu, GetOwningPlayerController(), MenuHits, LastMenuMouse, LastMenuMouseFrame);
+}
+
+void AODRaceHUD::HandleMenuMouse(AODPauseMenu* Menu)
+{
+	DispatchMenuMouse(Menu, GetOwningPlayerController(), MenuHits, LastMenuMouse, LastMenuMouseFrame);
+}
+
+void AODRaceHUD::DrawMenuBackdrop(float Dim, bool bRight) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	if (Dim > 0.0f)
+	{
+		P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(0, 0, 0, Dim));
+	}
+	const float Reach = (ColX + ColW + 260.0f) * P.S;
+	if (bRight)
+	{
+		P.Fade(Canvas->SizeX, Canvas->SizeX - Reach, 0, Canvas->SizeY, Ink, 0.9f, 0.0f);
+	}
+	else
+	{
+		P.Fade(0, Reach, 0, Canvas->SizeY, Ink, 0.9f, 0.0f);
+	}
+}
+
+float AODRaceHUD::DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float TitleY = 150.0f * S;
+	P.Text(Title.ToUpper(), X, TitleY, 44.0f, EMenuWeight::Bold, FLinearColor::White, false, 60);
+	P.Rect(X, TitleY + 30.0f * S, 56.0f * S, 4.0f * S, Accent);
+	if (Tabs.Num() <= 1)
+	{
+		return 215.0f * S;
+	}
+
+	// tab strip: Q [TAB] [TAB] ... E, each tab clickable
+	const float TabY = 226.0f * S;
+	float TX = X + P.Key(TEXT("Q"), X, TabY) + 18.0f * S;
+	for (int32 i = 0; i < Tabs.Num(); ++i)
+	{
+		const bool bActive = i == ActiveTab;
+		const float TW = P.Width(Tabs[i].Name, 20.0f, EMenuWeight::SemiBold, 80);
+		P.Text(Tabs[i].Name, TX, TabY, 20.0f, EMenuWeight::SemiBold, bActive ? FLinearColor::White : DimCol, false, 80);
+		if (bActive)
+		{
+			P.Rect(TX, TabY + 16.0f * S, TW, 3.0f * S, Accent);
+		}
+		AddMenuHit(FODMenuHit::Tab, i, -1, TX - 10.0f * S, TabY - 20.0f * S, TW + 20.0f * S, 40.0f * S);
+		TX += TW + 30.0f * S;
+	}
+	P.Key(TEXT("E"), TX - 12.0f * S, TabY);
+	return 275.0f * S;
+}
+
+void AODRaceHUD::DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float X, float Y, float W) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float H = FooterH * P.S;
+	P.Rect(X, Y, W, H, bSel ? Accent : FLinearColor(1, 1, 1, 0.08f));
+	P.Text(Label.ToUpper(), X + W * 0.5f, Y + H * 0.5f, 22.0f, EMenuWeight::Bold,
+		bSel ? Ink : TextCol, true, 120);
+	AddMenuHit(FODMenuHit::Row, Id, -1, X, Y, W, H);
+}
+
+void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+	int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float W = ColW * S;
+	const float X = MenuX(bRight, W);
+	float Y = DrawMenuHeader(Title, Tabs, ActiveTab, X);
+
+	const float H = RowH * S;
+	const float VX0 = X + W - 300.0f * S, VX1 = X + W - 16.0f * S;   // value column
+	const FODMenuTab& Tab = Tabs[FMath::Clamp(ActiveTab, 0, Tabs.Num() - 1)];
+	for (int32 Row = Tab.First; Row < Tab.First + Tab.Count; ++Row, Y += H)
+	{
+		FString Label, Value;
+		GetRow(Row, Label, Value);
+		const bool bSel = Row == Selected;
+		const float CY = Y + H * 0.5f;
+		if (bSel)
+		{
+			P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
+			P.Rect(X, Y, 4.0f * S, H, Accent);
+		}
+		P.Text(Label, X + 22.0f * S, CY, 24.0f, bSel ? EMenuWeight::SemiBold : EMenuWeight::Medium,
+			bSel ? FLinearColor::White : TextCol);
+		AddMenuHit(FODMenuHit::Row, Row, -1, X, Y, W, H);
+
+		if (Value.IsEmpty())   // action row: opens something
+		{
+			P.Arrow(VX1 - 6.0f * S, CY, +1.0f, bSel ? Accent : DimCol);
+			continue;
+		}
+		const FLinearColor ArrowCol = bSel ? Accent : DimCol * FLinearColor(1, 1, 1, 0.6f);
+		P.Arrow(VX0 + 8.0f * S, CY, -1.0f, ArrowCol);
+		P.Arrow(VX1 - 8.0f * S, CY, +1.0f, ArrowCol);
+		AddMenuHit(FODMenuHit::Prev, Row, -1, VX0 - 10.0f * S, Y, 40.0f * S, H);
+		AddMenuHit(FODMenuHit::Next, Row, -1, VX1 - 30.0f * S, Y, 40.0f * S, H);
+
+		const float IX0 = VX0 + 30.0f * S, IX1 = VX1 - 30.0f * S;
+		const FLinearColor ValCol = bSel ? Accent : TextCol;
+		if (const float Pct = ParsePercent(Value); Pct >= 0.0f)
+		{
+			const float TX1 = IX1 - 62.0f * S;
+			P.Rect(IX0, CY - 2.0f * S, TX1 - IX0, 4.0f * S, FLinearColor(1, 1, 1, 0.14f));
+			P.Rect(IX0, CY - 2.0f * S, (TX1 - IX0) * Pct, 4.0f * S, bSel ? Accent : TextCol * FLinearColor(1, 1, 1, 0.7f));
+			P.Rect(IX0 + (TX1 - IX0) * Pct - 2.0f * S, CY - 8.0f * S, 4.0f * S, 16.0f * S, bSel ? FLinearColor::White : TextCol);
+			P.Text(Value, IX1 - 26.0f * S, CY, 20.0f, EMenuWeight::SemiBold, ValCol, true);
+		}
+		else
+		{
+			P.Text(Value, (IX0 + IX1) * 0.5f, CY, 22.0f, EMenuWeight::SemiBold, ValCol, true);
+		}
+	}
+
+	FString FootLabel, FootValue;
+	GetRow(Footer, FootLabel, FootValue);
+	DrawMenuFooter(FootLabel, Footer, Selected == Footer, X, Y + 22.0f * S, W);
+}
+
+void AODRaceHUD::DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const
+{
+	if (!Menu)
+	{
+		return;
+	}
+	if (Menu->IsRebindOpen())
+	{
+		DrawRebindPanel(Menu->GetRebindMenu(), bRight);
+		return;
+	}
+	if (Menu->IsCreditsOpen())
+	{
+		DrawCreditsPanel(Menu->GetCreditsMenu(), bRight);
+		return;
+	}
+	DrawMenuPanel(TEXT("Settings"), Menu->GetTabs(), Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
+		[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bRight);
+	const FMenuPaint P{Canvas, MenuScale()};
+	DrawHints(P, MenuX(bRight, ColW * P.S), {{TEXT("Q/E"), TEXT("Tabs")}, {TEXT("Arrows"), TEXT("Select / Change")},
+		{TEXT("Enter"), TEXT("Confirm")}, {TEXT("Esc"), TEXT("Back")}});
+}
+
+void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
+{
+	if (!Menu)
+	{
+		return;
+	}
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float W = ColW * S;
+	const float X = MenuX(bRight, W);
+	float Y = DrawMenuHeader(TEXT("Key Bindings"), {}, 0, X);
+
+	const float H = 42.0f * S;
+	const float KX0 = X + W * 0.40f;
+	const float CellW = (X + W - KX0) * 0.5f;
+	P.Text(TEXT("KEYBOARD"), KX0 + CellW * 0.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
+	P.Text(TEXT("GAMEPAD"), KX0 + CellW * 1.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
+	Y += 34.0f * S;
+
+	// capture pulse on real time - the game is paused, world time stands still
+	const float Pulse = 0.55f + 0.35f * FMath::Sin(FPlatformTime::Seconds() * 6.0);
+	for (int32 Row = 0; Row < Menu->ResetRow(); ++Row, Y += H)
+	{
+		const bool bRowSel = Row == Menu->GetSelected();
+		const float CY = Y + H * 0.5f;
+		if (bRowSel)
+		{
+			P.Rect(X, Y, 4.0f * S, H, Accent);
+		}
+		P.Text(Menu->GetLabel(Row), X + 22.0f * S, CY, 21.0f, bRowSel ? EMenuWeight::SemiBold : EMenuWeight::Medium,
+			bRowSel ? FLinearColor::White : TextCol);
+		for (int32 Col = 0; Col < 2; ++Col)
+		{
+			const float CX = KX0 + CellW * Col;
+			const bool bCap = Menu->IsCapturingCell(Row, Col);
+			const bool bCellSel = bRowSel && Col == Menu->GetColumn();
+			P.Rect(CX + 3.0f * S, Y + 3.0f * S, CellW - 6.0f * S, H - 6.0f * S,
+				bCap ? FLinearColor(Accent.R, Accent.G, Accent.B, Pulse * 0.5f)
+				: bCellSel ? FLinearColor(Accent.R, Accent.G, Accent.B, 0.25f) : FLinearColor(1, 1, 1, 0.05f));
+			FString Bind = Menu->GetBinding(Row, Col);
+			Bind.RemoveFromStart(TEXT("Gamepad "));
+			P.Text(Bind, CX + CellW * 0.5f, CY, 19.0f, EMenuWeight::SemiBold,
+				bCap || bCellSel ? FLinearColor::White : TextCol, true);
+			AddMenuHit(FODMenuHit::Cell, Row, Col, CX, Y, CellW, H);
+		}
+	}
+
+	// Reset row, then the Back footer
+	const int32 Reset = Menu->ResetRow();
+	const bool bResetSel = Menu->GetSelected() == Reset;
+	if (bResetSel)
+	{
+		P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
+		P.Rect(X, Y, 4.0f * S, H, Accent);
+	}
+	P.Text(Menu->GetLabel(Reset), X + 22.0f * S, Y + H * 0.5f, 21.0f,
+		bResetSel ? EMenuWeight::SemiBold : EMenuWeight::Medium, bResetSel ? FLinearColor::White : TextCol);
+	AddMenuHit(FODMenuHit::Row, Reset, -1, X, Y, W, H);
+	Y += H;
+	DrawMenuFooter(Menu->GetLabel(Menu->BackRow()), Menu->BackRow(), Menu->GetSelected() == Menu->BackRow(), X, Y + 22.0f * S, W);
+
+	if (Menu->IsCapturing())
+	{
+		DrawHints(P, X, {{TEXT("Any key"), TEXT("Assign")}, {TEXT("Esc"), TEXT("Cancel")}});
+	}
+	else
+	{
+		DrawHints(P, X, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Rebind")}, {TEXT("Esc"), TEXT("Back")}});
+	}
+}
+
+void AODRaceHUD::DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const
+{
+	if (!Menu)
+	{
+		return;
+	}
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float W = FMath::Min(900.0f * S, Canvas->SizeX - 2.0f * ColX * S);
+	const float X = MenuX(bRight, W);
+	float Y = DrawMenuHeader(TEXT("Credits"), {}, 0, X);
+
+	const float LineH = 30.0f * S;
+	const TArray<FString>& Lines = Menu->GetLines();
+	const int32 Start = Menu->GetScrollLine();
+	const int32 End = FMath::Min(Start + AODCreditsMenu::VisibleLines, Lines.Num());
+	const float Y0 = Y;
+	for (int32 i = Start; i < End; ++i, Y += LineH)
+	{
+		P.Text(Lines[i], X, Y + LineH * 0.5f, 17.0f, EMenuWeight::Medium, TextCol);
+	}
+
+	// scroll bar
+	const float TrackH = AODCreditsMenu::VisibleLines * LineH;
+	if (const int32 MaxScroll = Lines.Num() - AODCreditsMenu::VisibleLines; MaxScroll > 0)
+	{
+		const float ThumbH = TrackH * AODCreditsMenu::VisibleLines / Lines.Num();
+		P.Rect(X + W - 3.0f * S, Y0, 3.0f * S, TrackH, FLinearColor(1, 1, 1, 0.1f));
+		P.Rect(X + W - 3.0f * S, Y0 + (TrackH - ThumbH) * Start / MaxScroll, 3.0f * S, ThumbH, Accent);
+	}
+	DrawMenuFooter(TEXT("Back"), INDEX_NONE, true, X, Y0 + TrackH + 22.0f * S, FMath::Min(W, ColW * S));
+	DrawHints(P, X, {{TEXT("Arrows / Wheel"), TEXT("Scroll")}, {TEXT("Esc"), TEXT("Back")}});
+}
+
 void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 	const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const
 {
@@ -530,25 +1042,8 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	{
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
-
-	// Scene Select's vista: no full-screen dim over the outdoor view, and the
-	// panel moves to the right so the car (left of centre) stays clear
-	const bool bVista = Menu->GetStage() == EODMenuStage::Menu && Menu->IsVistaShown();
-	if (!bVista)
-	{
-		FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-			FLinearColor(0, 0, 0, 0.55f));
-		Dim.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(Dim);
-	}
-
-	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
 
 	// ---- loading: waiting on IsGroundSnapped() after a teleport (2026-07-26),
 	// PLUS AODTerrainManager/AODRoadManager's own initial-streaming settle
@@ -557,57 +1052,63 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	// around it, while a fresh area's road/terrain tiles are still streaming.
 	if (Menu->IsLoading())
 	{
-		FCanvasTileItem Black(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-			FLinearColor(0, 0, 0, 1.0f));
-		Black.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(Black);
-
+		P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(Ink.R, Ink.G, Ink.B, 1.0f));
 		const float CX = Canvas->SizeX * 0.5f;
 		const float CY = Canvas->SizeY * 0.5f;
-
-		// animated dots (0-3, ~2 per second) so a long hold still reads as
-		// "working", not a frozen/hung screen
-		const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
-		const int32 NumDots = FMath::FloorToInt(FMath::Fmod(Now, 2.0) / 2.0 * 4.0);
-		FString Dots;
-		for (int32 i = 0; i < NumDots; ++i)
-		{
-			Dots += TEXT(".");
-		}
-
-		Text(TEXT("LOADING WORLD") + Dots, CX - 150.0f, CY - 30.0f, 2.2f, FLinearColor::White);
+		P.Text(TEXT("LOADING WORLD"), CX, CY - 24.0f * S, 40.0f, EMenuWeight::Bold, FLinearColor::White, true, 200);
 
 		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
 		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
-		if (TerrainTotal > 0 || RoadTotal > 0)
+		const float BarW = 360.0f * S;
+		P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW, 3.0f * S, FLinearColor(1, 1, 1, 0.12f));
+		if (TerrainTotal + RoadTotal > 0)
 		{
-			const FString Progress = FString::Printf(TEXT("terrain %d/%d · roads %d/%d"),
-				TerrainReady, TerrainTotal, RoadReady, RoadTotal);
-			Text(Progress, CX - 110.0f, CY + 30.0f, 1.1f, FLinearColor(0.7f, 0.75f, 0.8f));
+			const float Frac = float(TerrainReady + RoadReady) / float(TerrainTotal + RoadTotal);
+			P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW * FMath::Clamp(Frac, 0.0f, 1.0f), 3.0f * S, Accent);
+			P.Text(FString::Printf(TEXT("Terrain %d/%d  ·  Roads %d/%d"), TerrainReady, TerrainTotal, RoadReady, RoadTotal),
+				CX, CY + 46.0f * S, 18.0f, EMenuWeight::Medium, DimCol, true);
 		}
 		return;
 	}
 
-	// ---- menu screens: tabbed panel on the left (right over a vista) ----
+	// ---- menu screens: left column (right over the Scene vista, so the car stays clear)
 	if (Menu->GetStage() == EODMenuStage::Menu)
 	{
+		const bool bVista = Menu->IsVistaShown();
+		DrawMenuBackdrop(bVista ? 0.0f : 0.2f, bVista);
+		if (Menu->IsSettingsOpen())
+		{
+			DrawSettingsPanel(Menu->GetSettingsMenu(), bVista);
+			return;
+		}
 		const EODMenuScreen Screen = Menu->GetScreen();
-		const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
-		const float H = TabbedPanelHeight(Tabs);
-		DrawTabbedPanel(bVista ? Canvas->SizeX - 70.0f - 640.0f : 70.0f,
-			FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), 640.0f,
-			Screen == EODMenuScreen::Garage ? TEXT("GARAGE")
-				: Screen == EODMenuScreen::Scene ? TEXT("SELECT SCENE") : TEXT("MAIN MENU"),
-			Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
-			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
-			Screen == EODMenuScreen::Main ? TEXT("↑↓  select     Enter  confirm")
-				: Screen == EODMenuScreen::Scene ? TEXT("↑↓  select     ←→  change     Enter  confirm     Esc  back")
-				: Menu->IsGarageMode() ? TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  resume")
-				: TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  back"));
+		DrawMenuPanel(Screen == EODMenuScreen::Garage ? TEXT("Garage")
+				: Screen == EODMenuScreen::Sound ? TEXT("Exhaust Sound")
+				: Screen == EODMenuScreen::Scene ? TEXT("Select Scene") : TEXT("OpenDrive"),
+			Menu->GetTabs(), Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
+			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista);
+		const float HX = MenuX(bVista, ColW * S);
+		if (Screen == EODMenuScreen::Main)
+		{
+			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}});
+		}
+		else
+		{
+			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")}, {TEXT("Enter"), TEXT("Confirm")},
+				{TEXT("Esc"), Screen == EODMenuScreen::Garage && Menu->IsGarageMode() ? TEXT("Resume") : TEXT("Back")}});
+		}
 		return;
 	}
 
-	// ---- map select: full route + clickable town nodes ----
+	// ---- map select (QA hook only): full route + clickable town nodes ----
+	UFont* Font = GEngine->GetLargeFont();
+	P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(0, 0, 0, 0.55f));
+	auto Text = [&](const FString& Str, float X, float Y, float Sc, const FLinearColor& C)
+	{
+		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), CrispFont(Font, Sc), C);
+		T.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(T);
+	};
 	const float FullSize = FMath::Min(Canvas->SizeY - 170.0f, Canvas->SizeX * 0.6f);
 	const float PanelX = (Canvas->SizeX - FullSize) * 0.5f;
 	const float PanelY = (Canvas->SizeY - FullSize) * 0.5f + 12.0f;
@@ -647,16 +1148,16 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 
 		for (int32 i = 0; i < Towns.Num(); ++i)
 		{
-			const FVector2D S = Fit.ToMap(Towns[i].Pos);
+			const FVector2D Pt = Fit.ToMap(Towns[i].Pos);
 			const bool bH = i == Hover;
 			const float R = bH ? 6.0f : 3.5f;
-			FCanvasTileItem Dot(S - FVector2D(R, R), FVector2D(2 * R, 2 * R),
+			FCanvasTileItem Dot(Pt - FVector2D(R, R), FVector2D(2 * R, 2 * R),
 				bH ? FLinearColor(1.0f, 0.85f, 0.3f) : FLinearColor(0.6f, 0.75f, 0.95f));
 			Dot.BlendMode = SE_BLEND_Translucent;
 			Canvas->DrawItem(Dot);
 			if (bH)
 			{
-				Text(Towns[i].Name, S.X + 12.0f, S.Y - 10.0f, 1.2f,
+				Text(Towns[i].Name, Pt.X + 12.0f, Pt.Y - 10.0f, 1.2f,
 					FLinearColor(1.0f, 0.9f, 0.5f));
 			}
 		}
@@ -672,298 +1173,20 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		FLinearColor(0.6f, 0.6f, 0.6f));
 }
 
-void AODRaceHUD::DrawSettingsMenu(AODSettingsMenu* Menu) const
-{
-	if (!Canvas || !Menu)
-	{
-		return;
-	}
-	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-		FLinearColor(0, 0, 0, 0.7f));
-	Dim.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Dim);
-
-	const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
-	const float W = 680.0f;
-	const float H = TabbedPanelHeight(Tabs);
-	DrawTabbedPanel((Canvas->SizeX - W) * 0.5f, FMath::Max(20.0f, (Canvas->SizeY - H) * 0.5f), W,
-		TEXT("SETTINGS"), Tabs, Menu->GetTab(), Menu->NumRows() - 1, Menu->GetSelected(),
-		[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); },
-		TEXT("Q/E  tabs     ↑↓  select     ←→  change     Esc  close"));
-
-	if (Menu->IsRebindOpen())
-	{
-		DrawRebindMenu(Menu->GetRebindMenu());
-	}
-}
-
-void AODRaceHUD::DrawRebindMenu(AODRebindMenu* Menu) const
-{
-	if (!Canvas || !Menu)
-	{
-		return;
-	}
-	UFont* Font = GEngine->GetLargeFont();
-
-	// second dim layer on top of the Settings panel already drawn behind us
-	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-		FLinearColor(0, 0, 0, 0.55f));
-	Dim.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Dim);
-
-	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
-
-	const float PanelW = 640.0f;
-	const float PanelH = AODRebindMenu::VisibleLines * 32.0f + 130.0f;
-	const float Mx = (Canvas->SizeX - PanelW) * 0.5f;
-	const float PanelTop = (Canvas->SizeY - PanelH) * 0.5f;
-
-	FCanvasTileItem Panel(FVector2D(Mx, PanelTop), FVector2D(PanelW, PanelH),
-		FLinearColor(0.02f, 0.03f, 0.05f, 0.92f));
-	Panel.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Panel);
-
-	float My = PanelTop + 24.0f;
-	Text(TEXT("CONTROLS"), Mx + 24.0f, My, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
-	My += 52.0f;
-
-	const int32 Start = Menu->GetScrollOffset();
-	const int32 End = FMath::Min(Start + AODRebindMenu::VisibleLines, Menu->NumRows());
-	for (int32 Row = Start; Row < End; ++Row)
-	{
-		FString Label, Value;
-		Menu->GetRow(Row, Label, Value);
-		const bool bSel = Row == Menu->GetSelected();
-		const bool bCapturingThisRow = Menu->IsCapturing() && Row == Menu->GetCapturingRow();
-		const FLinearColor Col = bCapturingThisRow
-			? FLinearColor(1.0f, 0.35f, 0.3f)
-			: bSel ? FLinearColor(1.0f, 0.75f, 0.4f) : FLinearColor(0.8f, 0.87f, 0.92f);
-		Text((bSel ? TEXT("> ") : TEXT("  ")) + Label, Mx + 24.0f, My, 1.15f, Col);
-		if (!Value.IsEmpty())
-		{
-			Text(Value, Mx + 380.0f, My, 1.15f, Col);
-		}
-		My += 32.0f;
-	}
-
-	Text(Menu->IsCapturing()
-			? TEXT("press a key or gamepad button... esc cancels")
-			: TEXT("arrows navigate    enter select/capture    esc back"),
-		Mx + 24.0f, PanelTop + PanelH - 30.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
-}
-
-void AODRaceHUD::DrawCreditsMenu(AODCreditsMenu* Menu) const
-{
-	if (!Canvas || !Menu)
-	{
-		return;
-	}
-	UFont* Font = GEngine->GetLargeFont();
-
-	FCanvasTileItem Dim(FVector2D(0, 0), FVector2D(Canvas->SizeX, Canvas->SizeY),
-		FLinearColor(0, 0, 0, 0.75f));
-	Dim.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Dim);
-
-	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
-
-	const float PanelW = FMath::Min(760.0f, Canvas->SizeX - 120.0f);
-	const float Mx = (Canvas->SizeX - PanelW) * 0.5f;
-	const float PanelTop = Canvas->SizeY * 0.5f - (AODCreditsMenu::VisibleLines * 22.0f + 110.0f) * 0.5f;
-	const float PanelH = AODCreditsMenu::VisibleLines * 22.0f + 130.0f;
-
-	FCanvasTileItem Panel(FVector2D(Mx, PanelTop), FVector2D(PanelW, PanelH),
-		FLinearColor(0.02f, 0.03f, 0.05f, 0.88f));
-	Panel.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Panel);
-
-	float My = PanelTop + 24.0f;
-	Text(TEXT("CREDITS"), Mx + 24.0f, My, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
-	My += 52.0f;
-
-	const TArray<FString>& Lines = Menu->GetLines();
-	const int32 Start = Menu->GetScrollLine();
-	const int32 End = FMath::Min(Start + AODCreditsMenu::VisibleLines, Lines.Num());
-	for (int32 i = Start; i < End; ++i)
-	{
-		Text(Lines[i], Mx + 24.0f, My, 0.95f, FLinearColor(0.85f, 0.87f, 0.88f));
-		My += 22.0f;
-	}
-
-	Text(TEXT("up/down scroll    esc/enter close"), Mx + 24.0f, PanelTop + PanelH - 30.0f, 1.0f,
-		FLinearColor(0.55f, 0.6f, 0.65f));
-}
-
-// ---- tabbed menu panel (2026-09-28) ----
-
-namespace
-{
-constexpr float TabRowH = 50.0f;
-constexpr float TabHeaderH = 150.0f;   // title + tab bar
-constexpr float TabFooterH = 150.0f;   // gap + footer button + hint
-const FLinearColor PanelBg(0.015f, 0.02f, 0.035f, 0.88f);
-const FLinearColor Accent(1.0f, 0.68f, 0.25f);
-const FLinearColor Cyan(0.55f, 0.85f, 1.0f);
-const FLinearColor TextCol(0.86f, 0.9f, 0.94f);
-const FLinearColor DimCol(0.48f, 0.55f, 0.62f);
-
-// "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
-float ParsePercent(const FString& V)
-{
-	if (!V.EndsWith(TEXT("%")) || !V.LeftChop(1).IsNumeric())
-	{
-		return -1.0f;
-	}
-	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
-}
-}
-
-float AODRaceHUD::TabbedPanelHeight(TArrayView<const FODMenuTab> Tabs)
-{
-	int32 MaxRows = 0;
-	for (const FODMenuTab& T : Tabs)
-	{
-		MaxRows = FMath::Max(MaxRows, T.Count);
-	}
-	return TabHeaderH + MaxRows * TabRowH + TabFooterH;
-}
-
-void AODRaceHUD::DrawTabbedPanel(float X, float Y, float W, const TCHAR* Title,
-	TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, int32 Footer, int32 Selected,
-	TFunctionRef<void(int32, FString&, FString&)> GetRow, const TCHAR* Hint) const
-{
-	// Text at its real pixel size - the old Scale=1.5-2.2 stretched a small
-	// raster and read blurry. The engine font is a runtime Slate composite,
-	// so any size/typeface rasterizes crisp.
-	const UFont* Font = GEngine->GetLargeFont();
-	auto Text = [&](const FString& S, float TX, float TY, float Size, const FLinearColor& C,
-		bool bBold = false, bool bCenterX = false)
-	{
-		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S),
-			FSlateFontInfo(Font, Size, bBold ? FName("Bold") : FName("Regular")), C);
-		T.bCentreX = bCenterX;
-		T.bCentreY = true;
-		T.EnableShadow(FLinearColor(0, 0, 0, 0.6f), FVector2D(1, 1));
-		Canvas->DrawItem(T);
-	};
-	auto Rect = [&](float RX, float RY, float RW, float RH, const FLinearColor& C)
-	{
-		FCanvasTileItem T(FVector2D(RX, RY), FVector2D(RW, RH), C);
-		T.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(T);
-	};
-	auto Arrow = [&](float AX, float AY, float Dir, const FLinearColor& C)   // Dir -1 left, +1 right
-	{
-		FCanvasTriangleItem T(FVector2D(AX + 6.0f * Dir, AY), FVector2D(AX - 6.0f * Dir, AY - 8.0f),
-			FVector2D(AX - 6.0f * Dir, AY + 8.0f), GWhiteTexture);
-		T.SetColor(C);
-		T.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(T);
-	};
-
-	const float H = TabbedPanelHeight(Tabs);
-	const float Pad = 32.0f;
-	Rect(X, Y, W, H, PanelBg);
-	Rect(X, Y, W, 3.0f, Cyan * FLinearColor(1, 1, 1, 0.7f));
-
-	Text(Title, X + Pad, Y + 44.0f, 30.0f, FLinearColor(0.8f, 0.92f, 1.0f), true);
-
-	// tab bar: equal segments, Q/E cues at the ends, accent underline on the
-	// active tab; none for a single-tab screen
-	const float BarY = Y + 104.0f;
-	const float BarX0 = X + Pad + 28.0f, BarX1 = X + W - Pad - 28.0f;
-	const float SegW = (BarX1 - BarX0) / FMath::Max(1, Tabs.Num());
-	if (Tabs.Num() > 1)
-	{
-		Text(TEXT("Q"), X + Pad + 4.0f, BarY, 15.0f, DimCol, true, true);
-		Text(TEXT("E"), X + W - Pad - 4.0f, BarY, 15.0f, DimCol, true, true);
-		Rect(BarX0, BarY + 20.0f, BarX1 - BarX0, 1.0f, FLinearColor(1, 1, 1, 0.12f));
-	}
-	for (int32 i = 0; Tabs.Num() > 1 && i < Tabs.Num(); ++i)
-	{
-		const bool bActive = i == ActiveTab;
-		const float SX = BarX0 + SegW * i;
-		Text(Tabs[i].Name, SX + SegW * 0.5f, BarY, 17.0f, bActive ? FLinearColor::White : DimCol, true, true);
-		if (bActive)
-		{
-			Rect(SX + 10.0f, BarY + 18.0f, SegW - 20.0f, 3.0f, Accent);
-		}
-	}
-
-	// rows of the active tab
-	const float VX0 = X + W - Pad - 250.0f, VX1 = X + W - Pad - 10.0f;   // value column
-	float RowY = Y + TabHeaderH;
-	const FODMenuTab& Tab = Tabs[ActiveTab];
-	for (int32 Row = Tab.First; Row < Tab.First + Tab.Count; ++Row)
-	{
-		FString Label, Value;
-		GetRow(Row, Label, Value);
-		const bool bSel = Row == Selected;
-		const float CY = RowY + TabRowH * 0.5f;
-		if (bSel)
-		{
-			Rect(X + Pad - 12.0f, RowY + 3.0f, W - 2.0f * Pad + 24.0f, TabRowH - 6.0f,
-				FLinearColor(1.0f, 0.68f, 0.25f, 0.14f));
-			Rect(X + Pad - 12.0f, RowY + 3.0f, 4.0f, TabRowH - 6.0f, Accent);
-		}
-		Text(Label, X + Pad + 6.0f, CY, 20.0f, bSel ? FLinearColor::White : TextCol, bSel);
-
-		const FLinearColor ValCol = bSel ? Accent : TextCol;
-		if (Value.IsEmpty())
-		{
-			Arrow(VX1, CY, +1.0f, bSel ? Accent : DimCol);   // action row: opens a sub-screen
-		}
-		else if (const float Pct = ParsePercent(Value); Pct >= 0.0f)
-		{
-			const float TX0 = VX0 + 24.0f, TX1 = VX1 - 76.0f;
-			Rect(TX0, CY - 3.0f, TX1 - TX0, 6.0f, FLinearColor(1, 1, 1, 0.14f));
-			Rect(TX0, CY - 3.0f, (TX1 - TX0) * Pct, 6.0f, bSel ? Accent : Cyan * FLinearColor(1, 1, 1, 0.8f));
-			Rect(TX0 + (TX1 - TX0) * Pct - 2.0f, CY - 9.0f, 4.0f, 18.0f, bSel ? FLinearColor::White : TextCol);
-			Text(Value, VX1 - 32.0f, CY, 18.0f, ValCol, bSel, true);
-		}
-		else
-		{
-			Text(Value, (VX0 + VX1) * 0.5f, CY, 19.0f, ValCol, bSel, true);
-		}
-		if (bSel && !Value.IsEmpty())
-		{
-			Arrow(VX0, CY, -1.0f, Accent);
-			Arrow(VX1, CY, +1.0f, Accent);
-		}
-		RowY += TabRowH;
-	}
-
-	// footer button (Drive / Close) - always visible, pinned to the panel bottom
-	FString FootLabel, FootValue;
-	GetRow(Footer, FootLabel, FootValue);
-	const bool bFootSel = Selected == Footer;
-	const float FootY = Y + H - TabFooterH + 30.0f;
-	Rect(X + Pad - 12.0f, FootY, W - 2.0f * Pad + 24.0f, 54.0f,
-		bFootSel ? Accent : FLinearColor(1, 1, 1, 0.07f));
-	Text(FootLabel.ToUpper(), X + W * 0.5f, FootY + 27.0f, 21.0f,
-		bFootSel ? FLinearColor(0.05f, 0.04f, 0.02f) : TextCol, true, true);
-
-	Text(Hint, X + Pad, Y + H - 32.0f, 14.0f, DimCol);
-}
-
 // ---- Arc 4.2 v3: world map + navigation (next steps.md SS7.37) ----
 
 namespace
 {
-// miles/feet, matching the mph speed readout
-FString FormatNavDist(float Cm)
+// miles/feet or km/m, matching the speedo's units
+FString FormatNavDist(float Cm, bool bMetric)
 {
 	const float M = Cm / 100.0f;
+	if (bMetric)
+	{
+		return M < 1000.0f
+			? FString::Printf(TEXT("%d m"), FMath::Max(10, FMath::RoundToInt(M / 10.0f) * 10))
+			: FString::Printf(TEXT("%.1f km"), M / 1000.0f);
+	}
 	if (M < 305.0f)   // under ~1000 ft
 	{
 		return FString::Printf(TEXT("%d ft"), FMath::Max(50, FMath::RoundToInt(M * 3.28084f / 50.0f) * 50));
@@ -1259,7 +1482,7 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		? FString(TEXT("no road route to there"))
 		: RoadMgr->HasRoute()
 			? FString::Printf(TEXT("route to %s  ·  %s"), *RoadMgr->GetRouteName(),
-				*FormatNavDist(RoadMgr->GetRouteRemainingCm()))
+				*FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric))
 			: FString(TEXT("no destination set"));
 	Text(Status, 260.0f, 22.0f, 1.2f, RealNow - NoRouteMsgTime < 3.0
 		? FLinearColor(1.0f, 0.45f, 0.35f) : FLinearColor(1.0f, 0.55f, 0.9f));
@@ -1326,9 +1549,9 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	const TCHAR* Side2 = TurnDeg > 0.0f ? TEXT("right") : TEXT("left");
 	const FString Line1 = !bTurn ? FString(TEXT("Continue"))
 		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
-			Side2, *FormatNavDist(TurnCm));
+			Side2, *FormatNavDist(TurnCm, bMetric));
 	Text(Line1, X + 80.0f, Y + 10.0f, 1.5f, FLinearColor::White);
-	Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm())),
+	Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
 		X + 80.0f, Y + 44.0f, 1.05f, FLinearColor(1.0f, 0.7f, 0.92f));
 }
 
@@ -1339,6 +1562,7 @@ void AODRaceHUD::DrawHUD()
 	{
 		return;
 	}
+	MenuHits.Reset();   // refilled by whichever menu draws this frame
 
 	// AODRaceManager only exists on stages with a race/checkpoint framework
 	// (Tail of the Dragon) - nullptr on free-roam/open-world levels. Used to
@@ -1396,17 +1620,10 @@ void AODRaceHUD::DrawHUD()
 	{
 		if (It->IsActive())
 		{
-			DrawMainMenu(*It, MapCenterline, MapGates, RoadMgr);
-			// Settings/Credits (Arc 4.4) take over on top of whichever
-			// car-config/map panel DrawMainMenu just drew - same layering as
-			// the pause-menu block below.
-			if (It->IsSettingsOpen())
+			DrawMainMenu(*It, MapCenterline, MapGates, RoadMgr);   // Settings included
+			if (It->GetStage() == EODMenuStage::Menu)
 			{
-				DrawSettingsMenu(It->GetSettingsMenu());
-			}
-			else if (It->IsCreditsOpen())
-			{
-				DrawCreditsMenu(It->GetCreditsMenu());
+				HandleMenuMouse(*It);
 			}
 			return;
 		}
@@ -1541,15 +1758,33 @@ void AODRaceHUD::DrawHUD()
 		break;
 	}
 
-	// ---- speed readout - only needs the owning pawn
-	if (const APawn* Pawn = GetOwningPawn())
+	// ---- gauge cluster (ODGaugeCluster.cpp) - only needs the owning car
+	if (const AODVehiclePawn* Veh = Cast<AODVehiclePawn>(GetOwningPawn()))
 	{
-		const float Mph = Pawn->GetVelocity().Size() * 0.02237f;
-		FCanvasTextItem Speed(FVector2D(Canvas->SizeX - 200.0f, Canvas->SizeY - 80.0f),
-			FText::FromString(FString::Printf(TEXT("%.0f mph"), Mph)),
-			CrispFont(Font, 1.8f), FLinearColor::White);
-		Speed.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(Speed);
+		if (const UODVehicleMovement* Mv = Veh->Movement)
+		{
+			FODGaugeData G;
+			G.SpeedCmS = FMath::Abs(Mv->GetForwardSpeed());
+			// sum of v*dt: frame-rate independent; world dt is 0 while paused
+			TripCm += G.SpeedCmS * GetWorld()->GetDeltaSeconds();
+			G.TripCm = TripCm;
+			G.Rpm = Mv->GetRpm();
+			G.RedlineRpm = Mv->LimiterRpm;
+			G.MaxRpm = Mv->MaxRpm;
+			G.Gear = Mv->GetGear();
+			G.bAbsOff = !Mv->bAbsEnabled;
+			G.bTcOff = Mv->TractionMode == EODTractionMode::Off;
+			G.bTcActive = Mv->IsTractionIntervening();
+			G.bBrake = Mv->IsHandbrakeOn();
+			G.bMetric = bMetric;
+			for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It)
+			{
+				G.bHasAirTemp = true;
+				G.AirTempC = It->AirTempC;
+				break;
+			}
+			ODGaugeCluster::Draw(Canvas, Font, G, Now);
+		}
 	}
 
 	// ---- stage mini-map (Arc 4.2 v1; M toggles, hidden behind the pause
@@ -1579,9 +1814,9 @@ void AODRaceHUD::DrawHUD()
 		DrawNavPanel(NavMgr);   // nearest area's road (2026-10-05, large world)
 	}
 
-	// ---- pause menu (stopgap shell; ESC toggles, AODPauseMenu owns state) -
-	// only needs AODPauseMenu; the full stage map inside it draws from
-	// whichever route source (Race or RoadMgr) is available, same as above.
+	// ---- pause menu (AODPauseMenu owns state): the shared left column, the
+	// full stage map on the right - it draws from whichever route source
+	// (Race or RoadMgr) is available, and no-ops when there's none
 	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
 	{
 		AODPauseMenu* Menu = *It;
@@ -1589,75 +1824,28 @@ void AODRaceHUD::DrawHUD()
 		{
 			break;
 		}
-
-		FCanvasTileItem Dim(FVector2D(0, 0),
-			FVector2D(Canvas->SizeX, Canvas->SizeY),
-			FLinearColor(0, 0, 0, 0.55f));
-		Dim.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(Dim);
-
-		const float Mx = Canvas->SizeX * 0.5f - 220.0f;
-		float My = Canvas->SizeY * 0.5f - 150.0f;
-
-		FCanvasTextItem Title(FVector2D(Mx, My), FText::FromString(TEXT("PAUSED")),
-			CrispFont(Font, 2.2f), FLinearColor::White);
-		Title.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(Title);
-		My += 70.0f;
-
-		for (int32 Row = 0; Row < Menu->NumRows(); ++Row)
+		DrawMenuBackdrop(0.35f, false);
+		if (Menu->IsSettingsOpen())
 		{
-			FString Label, Value;
-			Menu->GetRow(Row, Label, Value);
-			const bool bSel = Row == Menu->GetSelected();
-			const FLinearColor Color = bSel
-				? FLinearColor(1.0f, 0.8f, 0.3f) : FLinearColor(0.85f, 0.85f, 0.85f);
-
-			FCanvasTextItem L(FVector2D(Mx, My),
-				FText::FromString((bSel ? TEXT("> ") : TEXT("  ")) + Label),
-				CrispFont(Font, 1.5f), Color);
-			L.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(L);
-
-			if (!Value.IsEmpty())
-			{
-				FCanvasTextItem V(FVector2D(Mx + 220.0f, My),
-					FText::FromString(Value),
-					CrispFont(Font, 1.5f), Color);
-				V.EnableShadow(FLinearColor::Black);
-				Canvas->DrawItem(V);
-			}
-			My += 42.0f;
+			DrawSettingsPanel(Menu->GetSettingsMenu(), false);
 		}
-
-		FCanvasTextItem Hint(FVector2D(Mx, My + 20.0f),
-			FText::FromString(TEXT("arrows change   enter select   esc resume")),
-			Font, FLinearColor(0.6f, 0.6f, 0.6f));
-		Hint.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(Hint);
-
-		// full stage map beside the menu - DrawStageMap itself no-ops if
-		// there's no route to show (both MapCenterline and MapGates unset)
+		else
 		{
-			const float FullSize = FMath::Min(380.0f, Canvas->SizeY - 160.0f);
-			const float FullMapX = Canvas->SizeX * 0.5f + 80.0f;
-			const float FullMapY = Canvas->SizeY * 0.5f - FullSize * 0.5f;
+			DrawMenuPanel(TEXT("Paused"), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
+			const float S = MenuScale();
+			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),
+				{{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}, {TEXT("Esc"), TEXT("Resume")}});
+
+			const float FullSize = FMath::Min(520.0f * S, Canvas->SizeY - 300.0f * S);
+			const float FullMapX = Canvas->SizeX - ColX * S - FullSize;
+			const float FullMapY = (Canvas->SizeY - FullSize) * 0.5f;
 			DrawPlaceLabel(FullMapX, FullMapY);
 			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
 				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
 				0.55f, 0.0f, false, RoadMgr);
 		}
-
-		// Settings/Credits (Arc 4.4) take over on top of the pause panel just
-		// drawn, same as the front-end menu block above.
-		if (Menu->IsSettingsOpen())
-		{
-			DrawSettingsMenu(Menu->GetSettingsMenu());
-		}
-		else if (Menu->IsCreditsOpen())
-		{
-			DrawCreditsMenu(Menu->GetCreditsMenu());
-		}
+		HandleMenuMouse(Menu);
 		break;
 	}
 }

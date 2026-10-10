@@ -16,7 +16,7 @@
  *
  * Same "plain logic/state object, no independent input binding" shape as
  * AODSettingsMenu (see that class's comment for why): scrolling is driven
- * by whichever parent menu (AODPauseMenu/AODMainMenu) currently has it open,
+ * by AODSettingsMenu (its GAME tab opens it),
  * calling Scroll() from their own already-input-bound Up()/Down().
  */
 UCLASS()
@@ -34,7 +34,7 @@ public:
 
 	/** How many text lines the HUD panel shows at once - GetScrollLine()
 	 *  clamps so the last page never scrolls past the final line. */
-	static constexpr int32 VisibleLines = 22;
+	static constexpr int32 VisibleLines = 20;
 
 private:
 	TArray<FString> Lines;

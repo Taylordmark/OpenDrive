@@ -125,6 +125,8 @@ def build_lines():
     add("Unreal(R) Engine, (C) 1998-2026 Epic Games, Inc. Unreal is a trademark or")
     add("registered trademark of Epic Games, Inc. in the United States of America and")
     add("elsewhere.")
+    add("Menu font: Rajdhani, (C) 2014 Indian Type Foundry. SIL Open Font License 1.1")
+    add("(Content/Slate/Fonts/OFL.txt).")
     add()
     add("=" * 60)
     add("DATA SOURCES")

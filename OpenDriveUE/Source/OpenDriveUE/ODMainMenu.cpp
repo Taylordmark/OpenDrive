@@ -24,13 +24,11 @@
 #include "Serialization/JsonSerializer.h"
 #include "UnrealClient.h"
 
-#include "ODCreditsMenu.h"
 #include "ODDayNightController.h"
 #include "ODEngineSynth.h"
 #include "ODForestManager.h"
 #include "ODGameMode.h"
 #include "ODGarageEnvironment.h"
-#include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODSettingsMenu.h"
@@ -186,15 +184,16 @@ constexpr double VistaCamPitchDeg = -4.0;
 // Row ids: one global GetRow()/Adjust() switch; each screen's tabs show a slice.
 enum ERow : int32
 {
-	RowCar, RowEngine, RowDrivetrain, RowTuning,                   // Garage: CAR
-	RowExhaust, RowLoudness, RowRasp, RowMuffler, RowPop,          // Garage: SOUND
-	RowArea, RowTime, RowSeason, RowWeather, RowDrive,             // Scene: season before the weather it allows
-	RowStart, RowGarage, RowSettings, RowCredits,                  // Main
-	RowBack, RowQuit,                                              // footers
+	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound,   // Garage
+	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
+	RowArea, RowTime, RowSeason, RowWeather,                             // Scene: season before the weather it allows
+	RowStart, RowGarage, RowSettings,                                    // Main ("Drive" opens Scene)
+	RowDrive, RowBack, RowQuit,                                          // footers
 };
-const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowStart, 4}};   // footer Quit
-const FODMenuTab GarageTabs[] = {{TEXT("CAR"), RowCar, 4}, {TEXT("SOUND"), RowExhaust, 5}};   // footer Back
-const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 5}};   // footer Back
+const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowStart, 3}};        // footer Quit
+const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};      // footer Back
+const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};   // footer Back
+const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 4}};       // footer Drive
 
 // same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
 const TCHAR* CarConfigSection = TEXT("OpenDrive.Car");
@@ -653,11 +652,6 @@ void AODMainMenu::Up()
 		if (SettingsMenu) { SettingsMenu->MoveSelection(-1); }
 		return;
 	}
-	if (bCreditsOpen)
-	{
-		if (CreditsMenu) { CreditsMenu->Scroll(-1); }
-		return;
-	}
 	if (Stage == EODMenuStage::Menu)
 	{
 		Selected = ODMenuTabs::Step(GetTabs()[TabIdx], GetFooterRow(), Selected, -1);
@@ -669,11 +663,6 @@ void AODMainMenu::Down()
 	if (bSettingsOpen)
 	{
 		if (SettingsMenu) { SettingsMenu->MoveSelection(+1); }
-		return;
-	}
-	if (bCreditsOpen)
-	{
-		if (CreditsMenu) { CreditsMenu->Scroll(+1); }
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
@@ -689,7 +678,7 @@ void AODMainMenu::SwitchTab(int32 Dir)
 		if (SettingsMenu) { SettingsMenu->SwitchTab(Dir); }
 		return;
 	}
-	if (const int32 N = GetTabs().Num(); Stage == EODMenuStage::Menu && !bCreditsOpen && N > 1)
+	if (const int32 N = GetTabs().Num(); Stage == EODMenuStage::Menu && N > 1)
 	{
 		TabIdx = (TabIdx + Dir + N) % N;
 		Selected = GetTabs()[TabIdx].First;
@@ -701,6 +690,7 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 	switch (Screen)
 	{
 	case EODMenuScreen::Garage: return GarageTabs;
+	case EODMenuScreen::Sound: return SoundTabs;
 	case EODMenuScreen::Scene: return SceneTabs;
 	default: return MainTabs;
 	}
@@ -708,7 +698,7 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 
 int32 AODMainMenu::GetFooterRow() const
 {
-	return Screen == EODMenuScreen::Main ? RowQuit : RowBack;
+	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Scene ? RowDrive : RowBack;
 }
 
 void AODMainMenu::SetScreen(EODMenuScreen NewScreen, int32 Row)
@@ -718,9 +708,36 @@ void AODMainMenu::SetScreen(EODMenuScreen NewScreen, int32 Row)
 	Selected = Row;
 }
 
+void AODMainMenu::SelectRow(int32 Row, int32 Col)
+{
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->SelectRow(Row, Col); }
+		return;
+	}
+	if (Stage == EODMenuStage::Menu && Row >= 0 && Row <= RowQuit)
+	{
+		Selected = Row;
+	}
+}
+
+void AODMainMenu::SetTab(int32 Tab)
+{
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu) { SettingsMenu->SetTab(Tab); }
+		return;
+	}
+	if (Stage == EODMenuStage::Menu && GetTabs().IsValidIndex(Tab))
+	{
+		TabIdx = Tab;
+		Selected = GetTabs()[TabIdx].First;
+	}
+}
+
 void AODMainMenu::Left()
 {
-	if (bSettingsOpen || bCreditsOpen)
+	if (bSettingsOpen)
 	{
 		Adjust(-1);
 		return;
@@ -733,7 +750,7 @@ void AODMainMenu::Left()
 
 void AODMainMenu::Right()
 {
-	if (bSettingsOpen || bCreditsOpen)
+	if (bSettingsOpen)
 	{
 		Adjust(+1);
 		return;
@@ -748,34 +765,10 @@ void AODMainMenu::Activate()
 {
 	if (bSettingsOpen)
 	{
-		if (SettingsMenu)
+		if (SettingsMenu && SettingsMenu->Activate())   // true == its Close row
 		{
-			if (SettingsMenu->IsRebindOpen())
-			{
-				if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu();
-					Rebind && Rebind->ActivateSelected())   // true == "Back" row selected
-				{
-					SettingsMenu->CloseRebind();
-				}
-			}
-			else if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
-			{
-				bSettingsOpen = false;
-			}
-			else if (SettingsMenu->GetSelected() == SettingsMenu->ControlsRowIndex())   // "Controls" row
-			{
-				SettingsMenu->OpenRebind();
-			}
-			else
-			{
-				SettingsMenu->AdjustSelected(+1);
-			}
+			bSettingsOpen = false;
 		}
-		return;
-	}
-	if (bCreditsOpen)
-	{
-		bCreditsOpen = false;   // no rows to activate - Enter also just backs out
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
@@ -784,13 +777,10 @@ void AODMainMenu::Activate()
 		{
 		case RowStart: SetScreen(EODMenuScreen::Scene, RowArea); break;
 		case RowGarage: SetScreen(EODMenuScreen::Garage, RowCar); break;
+		case RowSound: SetScreen(EODMenuScreen::Sound, RowLoudness); break;
 		case RowSettings:
 			EnsureSettingsMenu();
 			bSettingsOpen = true;
-			break;
-		case RowCredits:
-			EnsureCreditsMenu();
-			bCreditsOpen = true;
 			break;
 		case RowQuit:
 			UKismetSystemLibrary::QuitGame(this, UGameplayStatics::GetPlayerController(this, 0),
@@ -822,30 +812,20 @@ void AODMainMenu::Back()
 {
 	if (bSettingsOpen)
 	{
-		if (SettingsMenu && SettingsMenu->IsRebindOpen())
+		if (SettingsMenu && SettingsMenu->Back())   // true == nothing left to back out of
 		{
-			if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu(); Rebind && Rebind->IsCapturing())
-			{
-				Rebind->CancelCapture();
-			}
-			else
-			{
-				SettingsMenu->CloseRebind();
-			}
-			return;
+			bSettingsOpen = false;
 		}
-		bSettingsOpen = false;
-		return;
-	}
-	if (bCreditsOpen)
-	{
-		bCreditsOpen = false;
 		return;
 	}
 	if (Stage == EODMenuStage::MapSelect)
 	{
 		Stage = EODMenuStage::Menu;
 		SetScreen(EODMenuScreen::Scene, RowDrive);
+	}
+	else if (Stage == EODMenuStage::Menu && Screen == EODMenuScreen::Sound)
+	{
+		SetScreen(EODMenuScreen::Garage, RowSound);   // before the garage-mode resume below
 	}
 	else if (Stage == EODMenuStage::Menu && bGarageMode)
 	{
@@ -860,7 +840,7 @@ void AODMainMenu::Back()
 
 void AODMainMenu::OnClick()
 {
-	if (bSettingsOpen || bCreditsOpen)
+	if (bSettingsOpen)
 	{
 		return;
 	}
@@ -876,10 +856,6 @@ void AODMainMenu::Adjust(int32 Dir)
 	{
 		if (SettingsMenu) { SettingsMenu->AdjustSelected(Dir); }
 		return;
-	}
-	if (bCreditsOpen)
-	{
-		return;   // credits has no adjustable rows, only scroll (Up/Down above)
 	}
 	switch (Selected)
 	{
@@ -1525,7 +1501,7 @@ void AODMainMenu::DestroyVistas()
 
 void AODMainMenu::UpdateScene()
 {
-	if (bGarageMode || !bEntered || bSettingsOpen || bCreditsOpen)
+	if (bGarageMode || !bEntered || bSettingsOpen)
 	{
 		return;
 	}
@@ -1680,6 +1656,10 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutLabel = TEXT("Exhaust");
 		OutValue = ExhaustPresets[ExhaustPresetIdx].Name;
 		break;
+	case RowSound:
+		OutLabel = TEXT("Customize Sound");
+		OutValue.Empty();
+		break;
 	case RowLoudness:
 		OutLabel = TEXT("Loudness");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustLoudness * 100.0f));
@@ -1689,11 +1669,12 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustRasp * 100.0f));
 		break;
 	case RowMuffler:
-		OutLabel = TEXT("Muffler");
-		OutValue = FString::Printf(TEXT("%.0f Hz"), ExhaustMufflerCutoff);
+		// muffler cutoff shown as brightness: 200 Hz (muffled) = 0%, 8000 Hz = 100%
+		OutLabel = TEXT("Tone");
+		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt((ExhaustMufflerCutoff - 200.0f) / 78.0f));
 		break;
 	case RowPop:
-		OutLabel = TEXT("Pop");
+		OutLabel = TEXT("Pops");
 		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(ExhaustPop * 100.0f));
 		break;
 	case RowSeason:
@@ -1706,18 +1687,18 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		break;
 	case RowWeather:
 		OutLabel = TEXT("Weather");
-		OutValue = WeatherNames[WeatherIdx];
+		OutValue = FName::NameToDisplayString(WeatherNames[WeatherIdx], false);   // "HeavyRain" -> "Heavy Rain"
 		break;
 	case RowArea:
 		OutLabel = TEXT("Area");
 		OutValue = AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : FString();
 		break;
 	case RowDrive:
-		OutLabel = TEXT("Drive");
+		OutLabel = TEXT("Start Driving");
 		OutValue.Empty();
 		break;
 	case RowStart:
-		OutLabel = TEXT("Start");
+		OutLabel = TEXT("Drive");
 		OutValue.Empty();
 		break;
 	case RowGarage:
@@ -1726,10 +1707,6 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		break;
 	case RowSettings:
 		OutLabel = TEXT("Settings");
-		OutValue.Empty();
-		break;
-	case RowCredits:
-		OutLabel = TEXT("Credits");
 		OutValue.Empty();
 		break;
 	case RowBack:
@@ -1763,22 +1740,4 @@ AODSettingsMenu* AODMainMenu::EnsureSettingsMenu()
 		SettingsMenu = World->SpawnActor<AODSettingsMenu>();
 	}
 	return SettingsMenu;
-}
-
-AODCreditsMenu* AODMainMenu::EnsureCreditsMenu()
-{
-	if (CreditsMenu)
-	{
-		return CreditsMenu;
-	}
-	if (AODCreditsMenu* Found = FindActor<AODCreditsMenu>(GetWorld()))
-	{
-		CreditsMenu = Found;
-		return CreditsMenu;
-	}
-	if (UWorld* World = GetWorld())
-	{
-		CreditsMenu = World->SpawnActor<AODCreditsMenu>();
-	}
-	return CreditsMenu;
 }

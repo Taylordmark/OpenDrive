@@ -6,6 +6,9 @@
 #include "ODSettingsMenu.generated.h"
 
 class AODRebindMenu;
+class AODCreditsMenu;
+class AODRaceHUD;
+class UODVehicleMovement;
 
 /**
  * Release settings shell (Arc 4.4, next steps.md SS4.4/SS7.31): graphics
@@ -54,36 +57,35 @@ public:
 	AODSettingsMenu();
 	virtual void BeginPlay() override;
 
-	// Resolution, Window Mode, Quality, Upscaler, Screen %, VSync,
-	// Asset Detail, Master Volume, Vehicle Volume, Ambient Volume,
-	// Input Device, Controls, Close.
-	int32 NumRows() const { return 13; }
-	/** Row index of "Controls" - the parent menus' Activate() special-cases
-	 *  this exactly like the terminal "Close" row (NumRows()-1) to open the
-	 *  rebind sub-screen instead of cycling a value (Arc 4.1, SS7.32). */
-	int32 ControlsRowIndex() const { return 11; }
+	// DISPLAY, AUDIO, GAME (assists, mini-map, units, Credits), CONTROLS (device,
+	// wheel conditioning, Key Bindings), then the Close footer - see
+	// ESettingsRow in the .cpp.
+	int32 NumRows() const { return 22; }
 	int32 GetSelected() const { return Selected; }
-	/** Forwards to the rebind sub-screen's own MoveSelection while it's open
-	 *  (see IsRebindOpen) - one level of the same "check the sub-screen flag
-	 *  first" idiom AODPauseMenu/AODMainMenu use for THIS menu. */
+	/** Up/Down: rows of the active tab + Close; forwards to the Key Bindings
+	 *  sub-screen, or scrolls Credits, while one of those is open. */
 	void MoveSelection(int32 Dir);
-	/** Display / Audio / Input tabs; Close is the always-visible footer. */
+	/** Q/E: Display / Audio / Game / Controls; Close is the always-visible footer. */
 	void SwitchTab(int32 Dir);
+	void SetTab(int32 Tab);
 	TArrayView<const FODMenuTab> GetTabs() const;
 	int32 GetTab() const { return TabIdx; }
-	/** Left/Right (Dir = -1/+1) on the selected row; Enter also calls this
-	 *  with Dir=+1 for a value row (same "Enter cycles" idiom as the other
-	 *  two menus), except the terminal "Close" row and the "Controls" row -
-	 *  see the parent menus' Activate() for those two special cases. Also
-	 *  forwards to the rebind sub-screen while it's open. */
+	/** Mouse hover: select a visible row (Col = Key Bindings column, -1 = keep). */
+	void SelectRow(int32 Row, int32 Col = -1);
+	/** Left/Right (Dir = -1/+1) on the selected row; forwards to the open sub-screen. */
 	void AdjustSelected(int32 Dir);
+	/** Enter: opens Key Bindings/Credits, cycles a value row, closes a
+	 *  sub-screen. True = the Close row - the parent menu closes Settings. */
+	bool Activate();
+	/** Escape: cancels a key capture / closes a sub-screen first. True = close Settings. */
+	bool Back();
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
-	// ---- Controls sub-screen (Arc 4.1, SS7.32) ----
+	// ---- sub-screens: Key Bindings (Arc 4.1, SS7.32) and Credits ----
 	bool IsRebindOpen() const { return bRebindOpen; }
 	AODRebindMenu* GetRebindMenu() const { return RebindMenu; }
-	void OpenRebind();
-	void CloseRebind() { bRebindOpen = false; }
+	bool IsCreditsOpen() const { return bCreditsOpen; }
+	AODCreditsMenu* GetCreditsMenu() const { return CreditsMenu; }
 
 private:
 	void ApplyResolution(int32 Dir);
@@ -93,6 +95,7 @@ private:
 	void ApplyScreenPercent(int32 Dir);
 	void ApplyVSync();
 	void ApplyAssetDetail(int32 Dir);
+	void ApplyVisualStyle(int32 Dir);
 	void ApplyAudioVolumes() const;   // pushes Master*Vehicle / Master*Ambient to the audio actors
 	void ApplyInputDevice(int32 Dir);
 
@@ -109,6 +112,9 @@ private:
 	int32 CurrentWindowModeIdx() const;
 
 	AODRebindMenu* EnsureRebindMenu();
+	AODCreditsMenu* EnsureCreditsMenu();
+	UODVehicleMovement* FindMovement() const;
+	AODRaceHUD* FindHud() const;
 
 	int32 Selected = 0;
 	int32 TabIdx = 0;
@@ -116,6 +122,9 @@ private:
 	bool bRebindOpen = false;
 	UPROPERTY()
 	TObjectPtr<AODRebindMenu> RebindMenu;
+	bool bCreditsOpen = false;
+	UPROPERTY()
+	TObjectPtr<AODCreditsMenu> CreditsMenu;
 
 	/** 0 = Off (plain TAA), 1 = TSR. FSR isn't offered - no FidelityFX Super
 	 *  Resolution plugin is enabled in OpenDriveUE.uproject (checked, see
@@ -135,6 +144,10 @@ private:
 	 *  loaded, so the row can say so. */
 	int32 AssetDetail = 0;
 	int32 AssetDetailAtLoad = 0;
+
+	/** 0 Stylized / 1 Realistic - see ODVisualStyle.h; next level load, like Asset Detail. */
+	int32 VisualStyle = 0;
+	int32 VisualStyleAtLoad = 0;
 
 	float MasterVolume = 1.0f;
 	float VehicleVolume = 1.0f;

@@ -9,9 +9,14 @@
 
 #include "ODAmbientSoundManager.h"
 #include "ODAssetDetail.h"
+#include "ODCreditsMenu.h"
+#include "ODInputConfig.h"
+#include "ODRaceHUD.h"
 #include "ODRebindMenu.h"
 #include "ODVehicleAudio.h"
+#include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
+#include "ODVisualStyle.h"
 
 namespace
 {
@@ -44,6 +49,7 @@ constexpr int32 NumWindowModes = UE_ARRAY_COUNT(WindowModes);
 
 const TCHAR* QualityNames[] = {TEXT("Low"), TEXT("Medium"), TEXT("High"), TEXT("Epic")};
 const TCHAR* AssetDetailNames[] = {TEXT("Standard"), TEXT("High"), TEXT("Ultra")};
+const TCHAR* VisualStyleNames[] = {TEXT("Stylized"), TEXT("Realistic")};
 constexpr int32 NumQualityLevels = UE_ARRAY_COUNT(QualityNames);
 
 // r.AntiAliasingMethod's own integer values (stable across UE4/5, not an
@@ -73,11 +79,28 @@ T* FindSettingsActor(UWorld* World)
 	return nullptr;
 }
 
-const FODMenuTab SettingsTabs[] = {
-	{TEXT("DISPLAY"), 0, 7},   // Resolution .. Asset Detail
-	{TEXT("AUDIO"), 7, 3},     // Master/Vehicle/Ambient volume
-	{TEXT("INPUT"), 10, 2},    // Input Device, Controls
+// Row ids: one global GetRow()/AdjustSelected() switch; each tab shows a slice.
+enum ESettingsRow : int32
+{
+	RowResolution, RowWindowMode, RowQuality, RowUpscaling, RowRenderScale, RowVSync, RowAssetDetail, RowVisualStyle,
+	RowMaster, RowVehicle, RowAmbient,
+	RowTraction, RowAbs, RowMiniMap, RowUnits, RowCredits,
+	RowInputDevice, RowSteerDeadzone, RowSteerSensitivity, RowPedalDeadzone, RowBindings,
+	RowClose,
+	NumSettingsRows,
 };
+static_assert(NumSettingsRows == 22, "keep AODSettingsMenu::NumRows() in sync");
+const FODMenuTab SettingsTabs[] = {
+	{TEXT("DISPLAY"), RowResolution, 8},
+	{TEXT("AUDIO"), RowMaster, 3},
+	{TEXT("GAME"), RowTraction, 5},
+	{TEXT("CONTROLS"), RowInputDevice, 5},
+};
+
+FString Percent(float V)
+{
+	return FString::Printf(TEXT("%d%%"), FMath::RoundToInt(V * 100.0f));
+}
 }
 
 AODSettingsMenu::AODSettingsMenu()
@@ -91,6 +114,7 @@ void AODSettingsMenu::BeginPlay()
 	Super::BeginPlay();
 	LoadGraphicsConfig();
 	AssetDetailAtLoad = AssetDetail;
+	VisualStyleAtLoad = VisualStyle;
 	LoadAudioConfig();
 	ApplyUpscalerCvars();
 	ApplyAudioVolumes();
@@ -108,23 +132,52 @@ void AODSettingsMenu::MoveSelection(int32 Dir)
 		}
 		return;
 	}
-	Selected = ODMenuTabs::Step(SettingsTabs[TabIdx], NumRows() - 1, Selected, Dir);
+	if (bCreditsOpen)
+	{
+		if (CreditsMenu)
+		{
+			CreditsMenu->Scroll(Dir);
+		}
+		return;
+	}
+	Selected = ODMenuTabs::Step(SettingsTabs[TabIdx], RowClose, Selected, Dir);
 }
 
 void AODSettingsMenu::SwitchTab(int32 Dir)
 {
-	if (bRebindOpen)
+	const int32 N = UE_ARRAY_COUNT(SettingsTabs);
+	SetTab((TabIdx + Dir + N) % N);
+}
+
+void AODSettingsMenu::SetTab(int32 Tab)
+{
+	if (bRebindOpen || bCreditsOpen || Tab < 0 || Tab >= (int32)UE_ARRAY_COUNT(SettingsTabs))
 	{
 		return;   // Q/E may be the key being captured
 	}
-	const int32 N = UE_ARRAY_COUNT(SettingsTabs);
-	TabIdx = (TabIdx + Dir + N) % N;
+	TabIdx = Tab;
 	Selected = SettingsTabs[TabIdx].First;
 }
 
 TArrayView<const FODMenuTab> AODSettingsMenu::GetTabs() const
 {
 	return SettingsTabs;
+}
+
+void AODSettingsMenu::SelectRow(int32 Row, int32 Col)
+{
+	if (bRebindOpen)
+	{
+		if (RebindMenu)
+		{
+			RebindMenu->SelectCell(Row, Col);
+		}
+		return;
+	}
+	if (!bCreditsOpen && Row >= 0 && Row < NumSettingsRows)
+	{
+		Selected = Row;
+	}
 }
 
 void AODSettingsMenu::AdjustSelected(int32 Dir)
@@ -137,57 +190,166 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 		}
 		return;
 	}
+	if (bCreditsOpen)
+	{
+		return;
+	}
 	switch (Selected)
 	{
-	case 0: ApplyResolution(Dir); break;
-	case 1: ApplyWindowMode(Dir); break;
-	case 2: ApplyQuality(Dir); break;
-	case 3: ApplyUpscaler(Dir); break;
-	case 4: ApplyScreenPercent(Dir); break;
-	case 5: ApplyVSync(); break;
-	case 6: ApplyAssetDetail(Dir); break;
-	case 7:
+	case RowResolution: ApplyResolution(Dir); break;
+	case RowWindowMode: ApplyWindowMode(Dir); break;
+	case RowQuality: ApplyQuality(Dir); break;
+	case RowUpscaling: ApplyUpscaler(Dir); break;
+	case RowRenderScale: ApplyScreenPercent(Dir); break;
+	case RowVSync: ApplyVSync(); break;
+	case RowAssetDetail: ApplyAssetDetail(Dir); break;
+	case RowVisualStyle: ApplyVisualStyle(Dir); break;
+	case RowMaster:
 		MasterVolume = FMath::Clamp(MasterVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 8:
+	case RowVehicle:
 		VehicleVolume = FMath::Clamp(VehicleVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 9:
+	case RowAmbient:
 		AmbientVolume = FMath::Clamp(AmbientVolume + Dir * 0.05f, 0.0f, 1.0f);
 		ApplyAudioVolumes();
 		SaveAudioConfig();
 		break;
-	case 10: ApplyInputDevice(Dir); break;
-	default: break;   // row 11 "Controls" / row 12 "Close" - no value, handled by the parent menu's Activate()
+	case RowTraction:   // High -> Low -> Off (moved here from the pause menu, 2026-10-09)
+		if (UODVehicleMovement* D = FindMovement())
+		{
+			D->TractionMode = (EODTractionMode)(((int32)D->TractionMode + Dir + 3) % 3);
+		}
+		break;
+	case RowAbs:
+		if (UODVehicleMovement* D = FindMovement())
+		{
+			D->bAbsEnabled = !D->bAbsEnabled;
+		}
+		break;
+	case RowMiniMap:    // North <-> Travel (heading-up)
+		if (AODRaceHUD* Hud = FindHud())
+		{
+			Hud->SetMiniMapHeadingUp(!Hud->IsMiniMapHeadingUp());
+		}
+		break;
+	case RowUnits:      // Imperial <-> Metric (gauges)
+		if (AODRaceHUD* Hud = FindHud())
+		{
+			Hud->SetMetric(!Hud->IsMetric());
+		}
+		break;
+	case RowInputDevice: ApplyInputDevice(Dir); break;
+	// wheel conditioning (Arc 6) - moved here from the Key Bindings screen
+	case RowSteerDeadzone:
+		FODInputConfig::SetSteeringDeadzone(FODInputConfig::GetSteeringDeadzone() + Dir * 0.05f);
+		break;
+	case RowSteerSensitivity:
+		FODInputConfig::SetSteeringSensitivity(FODInputConfig::GetSteeringSensitivity() + Dir * 0.25f);
+		break;
+	case RowPedalDeadzone:
+		FODInputConfig::SetThrottleBrakeDeadzone(FODInputConfig::GetThrottleBrakeDeadzone() + Dir * 0.05f);
+		break;
+	default: break;   // Credits / Key Bindings / Close: Activate() only
 	}
 }
 
-void AODSettingsMenu::OpenRebind()
+bool AODSettingsMenu::Activate()
 {
-	EnsureRebindMenu();
-	bRebindOpen = true;
+	if (bRebindOpen)
+	{
+		if (RebindMenu && RebindMenu->ActivateSelected())   // true == its Back row
+		{
+			bRebindOpen = false;
+		}
+		return false;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;   // no rows - Enter just backs out
+		return false;
+	}
+	switch (Selected)
+	{
+	case RowClose:
+		return true;
+	case RowBindings:
+		bRebindOpen = EnsureRebindMenu() != nullptr;
+		break;
+	case RowCredits:
+		bCreditsOpen = EnsureCreditsMenu() != nullptr;
+		break;
+	default:
+		AdjustSelected(+1);   // Enter cycles a value row
+		break;
+	}
+	return false;
+}
+
+bool AODSettingsMenu::Back()
+{
+	if (bRebindOpen)
+	{
+		if (RebindMenu && RebindMenu->IsCapturing())
+		{
+			RebindMenu->CancelCapture();
+		}
+		else
+		{
+			bRebindOpen = false;
+		}
+		return false;
+	}
+	if (bCreditsOpen)
+	{
+		bCreditsOpen = false;
+		return false;
+	}
+	return true;
+}
+
+namespace
+{
+// lazy find-or-spawn, same idiom as AODMainMenu::EnsureGarageEnvironment
+template <typename T>
+T* EnsureChild(AActor* Self, TObjectPtr<T>& Cached)
+{
+	if (!Cached)
+	{
+		Cached = FindSettingsActor<T>(Self->GetWorld());
+	}
+	if (!Cached && Self->GetWorld())
+	{
+		Cached = Self->GetWorld()->SpawnActor<T>();
+	}
+	return Cached;
+}
 }
 
 AODRebindMenu* AODSettingsMenu::EnsureRebindMenu()
 {
-	if (RebindMenu)
-	{
-		return RebindMenu;
-	}
-	if (AODRebindMenu* Found = FindSettingsActor<AODRebindMenu>(GetWorld()))
-	{
-		RebindMenu = Found;
-		return RebindMenu;
-	}
-	if (UWorld* World = GetWorld())
-	{
-		RebindMenu = World->SpawnActor<AODRebindMenu>();
-	}
-	return RebindMenu;
+	return EnsureChild(this, RebindMenu);
+}
+
+AODCreditsMenu* AODSettingsMenu::EnsureCreditsMenu()
+{
+	return EnsureChild(this, CreditsMenu);
+}
+
+UODVehicleMovement* AODSettingsMenu::FindMovement() const
+{
+	const APawn* Car = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+	return Car ? Car->FindComponentByClass<UODVehicleMovement>() : nullptr;
+}
+
+AODRaceHUD* AODSettingsMenu::FindHud() const
+{
+	const APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	return PC ? Cast<AODRaceHUD>(PC->GetHUD()) : nullptr;
 }
 
 // ---- graphics ---------------------------------------------------------
@@ -314,6 +476,12 @@ void AODSettingsMenu::ApplyAssetDetail(int32 Dir)
 	SaveGraphicsConfig();
 }
 
+void AODSettingsMenu::ApplyVisualStyle(int32 Dir)
+{
+	VisualStyle = (VisualStyle + Dir + 2) % 2;
+	SaveGraphicsConfig();
+}
+
 // ---- audio --------------------------------------------------------------
 
 void AODSettingsMenu::ApplyAudioVolumes() const
@@ -359,6 +527,7 @@ void AODSettingsMenu::SaveGraphicsConfig() const
 	GConfig->SetInt(GraphicsConfigSection, TEXT("UpscalerIdx"), UpscalerIdx, GGameUserSettingsIni);
 	GConfig->SetInt(GraphicsConfigSection, TEXT("ScreenPercent"), ScreenPercent, GGameUserSettingsIni);
 	GConfig->SetInt(ODAssetDetail::ConfigSection, ODAssetDetail::ConfigKey, AssetDetail, GGameUserSettingsIni);
+	GConfig->SetInt(ODVisualStyle::ConfigSection, ODVisualStyle::ConfigKey, VisualStyle, GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -367,6 +536,7 @@ void AODSettingsMenu::LoadGraphicsConfig()
 	GConfig->GetInt(GraphicsConfigSection, TEXT("UpscalerIdx"), UpscalerIdx, GGameUserSettingsIni);
 	GConfig->GetInt(GraphicsConfigSection, TEXT("ScreenPercent"), ScreenPercent, GGameUserSettingsIni);
 	AssetDetail = ODAssetDetail::Level();
+	VisualStyle = ODVisualStyle::Level();
 	UpscalerIdx = FMath::Clamp(UpscalerIdx, 0, 1);
 	ScreenPercent = FMath::Clamp(ScreenPercent, 50, 100);
 }
@@ -393,16 +563,17 @@ void AODSettingsMenu::LoadAudioConfig()
 
 void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
+	OutValue.Empty();
 	switch (Row)
 	{
-	case 0:
+	case RowResolution:
 	{
 		OutLabel = TEXT("Resolution");
 		const int32 Idx = CurrentResolutionIdx();
 		if (Idx == NativeResIdx)
 		{
 			const FIntPoint Native = NativeResolution();
-			OutValue = FString::Printf(TEXT("Native (%dx%d)"), Native.X, Native.Y);
+			OutValue = FString::Printf(TEXT("Native %dx%d"), Native.X, Native.Y);
 		}
 		else
 		{
@@ -410,13 +581,13 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		}
 		break;
 	}
-	case 1:
+	case RowWindowMode:
 		OutLabel = TEXT("Window Mode");
 		OutValue = WindowModes[CurrentWindowModeIdx()].Name;
 		break;
-	case 2:
+	case RowQuality:
 	{
-		OutLabel = TEXT("Quality");
+		OutLabel = TEXT("Graphics Quality");
 		OutValue = TEXT("Custom");
 		if (const UGameUserSettings* GS = UGameUserSettings::GetGameUserSettings())
 		{
@@ -428,15 +599,15 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		}
 		break;
 	}
-	case 3:
-		OutLabel = TEXT("Upscaler");
-		OutValue = (UpscalerIdx == 1) ? TEXT("TSR") : TEXT("Off (TAA)");
+	case RowUpscaling:
+		OutLabel = TEXT("Upscaling");
+		OutValue = (UpscalerIdx == 1) ? TEXT("TSR") : TEXT("Off");
 		break;
-	case 4:
-		OutLabel = TEXT("Screen %");
+	case RowRenderScale:
+		OutLabel = TEXT("Render Scale");
 		OutValue = FString::Printf(TEXT("%d%%"), ScreenPercent);
 		break;
-	case 5:
+	case RowVSync:
 	{
 		OutLabel = TEXT("VSync");
 		OutValue = TEXT("?");
@@ -446,7 +617,7 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		}
 		break;
 	}
-	case 6:
+	case RowAssetDetail:
 		OutLabel = TEXT("Asset Detail");
 		OutValue = AssetDetailNames[AssetDetail];
 		if (AssetDetail != AssetDetailAtLoad)
@@ -454,19 +625,62 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 			OutValue += TEXT(" (next load)");
 		}
 		break;
-	case 7:
+	case RowVisualStyle:
+		OutLabel = TEXT("Visual Style");
+		OutValue = VisualStyleNames[VisualStyle];
+		if (VisualStyle != VisualStyleAtLoad)
+		{
+			OutValue += TEXT(" (next load)");
+		}
+		break;
+	case RowMaster:
 		OutLabel = TEXT("Master Volume");
-		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(MasterVolume * 100.0f));
+		OutValue = Percent(MasterVolume);
 		break;
-	case 8:
-		OutLabel = TEXT("Vehicle Volume");
-		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(VehicleVolume * 100.0f));
+	case RowVehicle:
+		OutLabel = TEXT("Car Volume");
+		OutValue = Percent(VehicleVolume);
 		break;
-	case 9:
+	case RowAmbient:
 		OutLabel = TEXT("Ambient Volume");
-		OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(AmbientVolume * 100.0f));
+		OutValue = Percent(AmbientVolume);
 		break;
-	case 10:
+	case RowTraction:
+		OutLabel = TEXT("Traction Control");
+		OutValue = TEXT("?");
+		if (const UODVehicleMovement* D = FindMovement())
+		{
+			OutValue = UODVehicleMovement::TractionModeName(D->TractionMode);
+		}
+		break;
+	case RowAbs:
+		OutLabel = TEXT("ABS");
+		OutValue = TEXT("?");
+		if (const UODVehicleMovement* D = FindMovement())
+		{
+			OutValue = D->bAbsEnabled ? TEXT("On") : TEXT("Off");
+		}
+		break;
+	case RowMiniMap:
+		OutLabel = TEXT("Mini-Map");
+		OutValue = TEXT("?");
+		if (const AODRaceHUD* Hud = FindHud())
+		{
+			OutValue = Hud->IsMiniMapHeadingUp() ? TEXT("Travel Up") : TEXT("North Up");
+		}
+		break;
+	case RowUnits:
+		OutLabel = TEXT("Units");
+		OutValue = TEXT("?");
+		if (const AODRaceHUD* Hud = FindHud())
+		{
+			OutValue = Hud->IsMetric() ? TEXT("Metric") : TEXT("Imperial");
+		}
+		break;
+	case RowCredits:
+		OutLabel = TEXT("Credits");
+		break;
+	case RowInputDevice:
 	{
 		OutLabel = TEXT("Input Device");
 		OutValue = TEXT("Auto");
@@ -482,17 +696,26 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		}
 		break;
 	}
-	case 11:
-		OutLabel = TEXT("Controls");
-		OutValue.Empty();
+	case RowSteerDeadzone:
+		OutLabel = TEXT("Steering Deadzone");
+		OutValue = Percent(FODInputConfig::GetSteeringDeadzone());
 		break;
-	case 12:
+	case RowSteerSensitivity:
+		OutLabel = TEXT("Steering Response");
+		OutValue = FString::Printf(TEXT("%.2f"), FODInputConfig::GetSteeringSensitivity());
+		break;
+	case RowPedalDeadzone:
+		OutLabel = TEXT("Pedal Deadzone");
+		OutValue = Percent(FODInputConfig::GetThrottleBrakeDeadzone());
+		break;
+	case RowBindings:
+		OutLabel = TEXT("Key Bindings");
+		break;
+	case RowClose:
 		OutLabel = TEXT("Close");
-		OutValue.Empty();
 		break;
 	default:
 		OutLabel.Empty();
-		OutValue.Empty();
 		break;
 	}
 }

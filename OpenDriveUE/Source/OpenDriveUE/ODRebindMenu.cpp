@@ -78,16 +78,6 @@ const FKey GamepadCandidates[] = {
 	EKeys::Gamepad_DPad_Left, EKeys::Gamepad_DPad_Right,
 };
 
-const TCHAR* SliderLabel(int32 SliderIdx)
-{
-	switch (SliderIdx)
-	{
-	case 0: return TEXT("Steering Deadzone");
-	case 1: return TEXT("Steering Sensitivity");
-	case 2: return TEXT("Throttle/Brake Deadzone");
-	default: return TEXT("?");
-	}
-}
 }
 
 AODRebindMenu::AODRebindMenu()
@@ -103,33 +93,26 @@ void AODRebindMenu::MoveSelection(int32 Dir)
 		return;   // modal while waiting for a key press - see class comment
 	}
 	Selected = (Selected + Dir + NumRows()) % NumRows();
-	EnsureScrollVisible();
 }
 
 void AODRebindMenu::AdjustSelected(int32 Dir)
 {
-	if (bCapturing)
+	if (!bCapturing && IsBindingRow(Selected))
+	{
+		Column = FMath::Clamp(Column + Dir, 0, 1);
+	}
+}
+
+void AODRebindMenu::SelectCell(int32 Row, int32 Col)
+{
+	if (bCapturing || Row < 0 || Row >= NumRows())
 	{
 		return;
 	}
-	if (!IsSliderRow(Selected))
+	Selected = Row;
+	if (Col >= 0)
 	{
-		return;
-	}
-	const int32 SliderIdx = Selected - FODInputConfig::NumActions * 2;
-	switch (SliderIdx)
-	{
-	case 0:
-		FODInputConfig::SetSteeringDeadzone(FODInputConfig::GetSteeringDeadzone() + Dir * 0.05f);
-		break;
-	case 1:
-		FODInputConfig::SetSteeringSensitivity(FODInputConfig::GetSteeringSensitivity() + Dir * 0.25f);
-		break;
-	case 2:
-		FODInputConfig::SetThrottleBrakeDeadzone(FODInputConfig::GetThrottleBrakeDeadzone() + Dir * 0.05f);
-		break;
-	default:
-		break;
+		Column = FMath::Clamp(Col, 0, 1);
 	}
 }
 
@@ -141,12 +124,7 @@ bool AODRebindMenu::ActivateSelected()
 	}
 	if (IsBindingRow(Selected))
 	{
-		BeginCapture(Selected);
-		return false;
-	}
-	if (IsSliderRow(Selected))
-	{
-		AdjustSelected(+1);   // "Enter cycles a value row", same idiom as the other menus
+		BeginCapture(Selected * 2 + Column);
 		return false;
 	}
 	if (Selected == ResetRow())
@@ -155,11 +133,7 @@ bool AODRebindMenu::ActivateSelected()
 		RefreshAllLiveInputBindings(GetWorld());
 		return false;
 	}
-	if (Selected == BackRow())
-	{
-		return true;
-	}
-	return false;
+	return Selected == BackRow();
 }
 
 void AODRebindMenu::CancelCapture()
@@ -170,7 +144,7 @@ void AODRebindMenu::CancelCapture()
 	}
 }
 
-void AODRebindMenu::BeginCapture(int32 Row)
+void AODRebindMenu::BeginCapture(int32 Slot)
 {
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
@@ -185,7 +159,7 @@ void AODRebindMenu::BeginCapture(int32 Row)
 		return;
 	}
 	CaptureInput = InputComponent;
-	CapturingRow = Row;
+	CapturingRow = Slot;
 	bCapturing = true;
 
 	// Escape cancels capture instead of being assignable - bound separately,
@@ -195,7 +169,7 @@ void AODRebindMenu::BeginCapture(int32 Row)
 	EscB.bConsumeInput = true;
 	EscB.bExecuteWhenPaused = true;
 
-	const bool bGamepadSlot = (Row % 2) == 1;
+	const bool bGamepadSlot = (Slot % 2) == 1;
 	if (bGamepadSlot)
 	{
 		for (const FKey& K : GamepadCandidates)
@@ -225,6 +199,7 @@ void AODRebindMenu::EndCapture()
 	CaptureInput = nullptr;
 	bCapturing = false;
 	CapturingRow = -1;
+	CaptureEndFrame = GFrameCounter;
 }
 
 void AODRebindMenu::OnCaptureKey(FKey Key)
@@ -264,61 +239,26 @@ void AODRebindMenu::OnCaptureKey(FKey Key)
 	EndCapture();
 }
 
-void AODRebindMenu::EnsureScrollVisible()
-{
-	if (Selected < ScrollOffset)
-	{
-		ScrollOffset = Selected;
-	}
-	else if (Selected >= ScrollOffset + VisibleLines)
-	{
-		ScrollOffset = Selected - VisibleLines + 1;
-	}
-	ScrollOffset = FMath::Clamp(ScrollOffset, 0, FMath::Max(0, NumRows() - VisibleLines));
-}
-
-void AODRebindMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
+FString AODRebindMenu::GetLabel(int32 Row) const
 {
 	if (IsBindingRow(Row))
 	{
-		const int32 ActionIdx = Row / 2;
-		const bool bGamepadSlot = (Row % 2) == 1;
-		const EODInputAction Action = static_cast<EODInputAction>(ActionIdx);
-		OutLabel = FString::Printf(TEXT("%s (%s)"), FODInputConfig::ActionName(Action),
-			bGamepadSlot ? TEXT("Pad") : TEXT("Key"));
-		const FKey Key = bGamepadSlot ? FODInputConfig::GetGamepadKey(Action) : FODInputConfig::GetKeyboardKey(Action);
-		OutValue = Key.IsValid() ? Key.ToString() : TEXT("(unbound)");
-		if (bCapturing && Row == CapturingRow)
-		{
-			OutValue = TEXT("press a key... (Esc cancels)");
-		}
-		return;
+		return FODInputConfig::ActionName(static_cast<EODInputAction>(Row));
 	}
-	if (IsSliderRow(Row))
+	return Row == ResetRow() ? TEXT("Reset to Defaults") : Row == BackRow() ? TEXT("Back") : TEXT("");
+}
+
+FString AODRebindMenu::GetBinding(int32 Row, int32 Col) const
+{
+	if (!IsBindingRow(Row))
 	{
-		const int32 SliderIdx = Row - FODInputConfig::NumActions * 2;
-		OutLabel = SliderLabel(SliderIdx);
-		switch (SliderIdx)
-		{
-		case 0: OutValue = FString::Printf(TEXT("%.2f"), FODInputConfig::GetSteeringDeadzone()); break;
-		case 1: OutValue = FString::Printf(TEXT("%.2f"), FODInputConfig::GetSteeringSensitivity()); break;
-		case 2: OutValue = FString::Printf(TEXT("%.2f"), FODInputConfig::GetThrottleBrakeDeadzone()); break;
-		default: OutValue.Empty(); break;
-		}
-		return;
+		return FString();
 	}
-	if (Row == ResetRow())
+	if (IsCapturingCell(Row, Col))
 	{
-		OutLabel = TEXT("Reset to Defaults");
-		OutValue.Empty();
-		return;
+		return TEXT("Press a key...");
 	}
-	if (Row == BackRow())
-	{
-		OutLabel = TEXT("Back");
-		OutValue.Empty();
-		return;
-	}
-	OutLabel.Empty();
-	OutValue.Empty();
+	const EODInputAction Action = static_cast<EODInputAction>(Row);
+	const FKey Key = Col == 1 ? FODInputConfig::GetGamepadKey(Action) : FODInputConfig::GetKeyboardKey(Action);
+	return Key.IsValid() ? Key.GetDisplayName(false).ToString() : TEXT("-");
 }
