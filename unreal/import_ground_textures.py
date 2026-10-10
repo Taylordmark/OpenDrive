@@ -42,6 +42,7 @@ MAP_KINDS = {
     "NormalGL":         ("_N", False, unreal.TextureCompressionSettings.TC_NORMALMAP),
     "Roughness":        ("_R", False, unreal.TextureCompressionSettings.TC_MASKS),
     "AmbientOcclusion": ("_AO", False, unreal.TextureCompressionSettings.TC_MASKS),
+    "Displacement":     ("_H", False, unreal.TextureCompressionSettings.TC_GRAYSCALE),
 }
 
 
@@ -65,7 +66,8 @@ for entry in entries:
             f"content_src/textures/ground/download_ground_textures.py first")
         continue
 
-    for suffix, (name_suffix, srgb, compression) in MAP_KINDS.items():
+    for suffix in entry.get("maps") or ("Color", "NormalGL", "Roughness", "AmbientOcclusion"):
+        name_suffix, srgb, compression = MAP_KINDS[suffix]
         png_path = local_dir / f"{asset_id}_2K-PNG_{suffix}.png"
         if not png_path.exists():
             png_path = local_dir / f"{asset_id}_2K-JPG_{suffix}.jpg"

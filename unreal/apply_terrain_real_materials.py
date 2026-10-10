@@ -27,9 +27,15 @@ gravel. The rest is material math:
   - rock strata: world-Z bands (warped by XY noise so they dip) tint the
     triplanar rock on steep terrain, cut walls and boulders.
   - AO goes to the AO pin; boulders get moss on up-facing sides.
-Nanite displacement (plan item D2) is NOT here: terrain, walls and skirts
-are UDynamicMeshComponents (no Nanite), and displaced boulders need _real
-Nanite meshes plus r.Nanite.AllowTessellation (PLAN-VISUALS Track D).
+  - Nanite displacement (plan item D2) on the boulders only: M_Rock030_real
+    is tessellation-enabled with Rock030's height map sampled world
+    triplanar (same projection and tile as its albedo), so it lands on the
+    Nanite SM_RockBoulder*_real_high/_ultra twins
+    (unreal/import_rock_meshes_real.py; run it after this). Non-Nanite
+    meshes ignore displacement. Terrain, walls and skirts are
+    UDynamicMeshComponents and can't be Nanite. UE 5.8 needs no project
+    setting (r.Nanite.Tessellation defaults to 1); `r.Nanite.Tessellation 0`
+    turns it off.
 
 Interface rule: each _real material must expose every parameter its twin
 has, read the twin's vertex-color and data-UV channels, and copy its physical
@@ -63,6 +69,7 @@ GROUND_TEX_DIR = "/Game/OpenDrive/Textures/Ground"
 REAL_TEX_DIR = "/Game/OpenDrive/Realistic/Terrain"
 REAL_SRC_DIR = Path(__file__).resolve().parent.parent / "content_src" / "realistic" / "terrain"
 REAL_SETS = ("Rock051", "Ground076", "Moss002", "Gravel040")   # = REAL_SRC_DIR/manifest.json
+# (that manifest also fetches Rock030's height map alone -> T_Rock030_H there)
 
 # ---- tunables (pipeline/checks/check_terrain_real.py parses these) --------
 # (asset_id, near tile cm) - M_GroundStylized's sets and tiles, except the
@@ -160,6 +167,13 @@ MOSS_UP_LO = 0.45        # normal.z where moss starts ...
 MOSS_UP_HI = 0.8         # ... and where it's full
 MOSS_NOISE_CM = 250.0
 MOSS_MAX = 0.85
+# Nanite displacement: Rock030 has no published real-world size; at the
+# 260 cm boulder tile 8 cm full range (p5-p95 of the height map ~ 5.6 cm) reads as
+# weathered relief without swallowing the 20-50 cm small boulders. Centre =
+# the height map's mean (0.67), so displacement doesn't swell the rock.
+BOULDER_DISP_CM = 8.0
+BOULDER_DISP_CENTER = 0.67
+BOULDER_DISP_FADE_PX = (4.0, 1.0)   # fade out once 8 cm covers < 4 px, gone at 1 px
 
 # embankment skirt (M_Embankment_real)
 EMB_TOE_DARKEN = 0.35    # UV0.V (0 top, 0.6 toe, 1 apron) -> darker toward the toe
@@ -193,6 +207,10 @@ def load_set(asset_id):
 runpy.run_path(str(Path(__file__).resolve().parent / "import_ground_textures.py"),
                init_globals={"SRC_DIR": str(REAL_SRC_DIR), "TEX_DIR": REAL_TEX_DIR})
 SETS = {key: dict(load_set(aid), tile=tile) for key, (aid, tile) in LAYERS.items()}
+SETS["boulder"]["H"] = unreal.load_asset(f"{REAL_TEX_DIR}/Rock030/T_Rock030_H")
+if SETS["boulder"]["H"] is None:
+    raise RuntimeError("T_Rock030_H missing - run download_ground_textures.py on "
+                       f"{REAL_SRC_DIR / 'manifest.json'} first")
 
 
 class G:
@@ -311,7 +329,8 @@ class G:
     def sample(self, tex, uv, kind):
         """kind: A (sRGB colour), N (normal), R/AO (linear masks)."""
         stype = {"A": unreal.MaterialSamplerType.SAMPLERTYPE_COLOR,
-                 "N": unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL}.get(
+                 "N": unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL,
+                 "H": unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE}.get(
             kind, unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
         n = self.node(unreal.MaterialExpressionTextureSample, texture=tex, sampler_type=stype,
                       sampler_source=SHARED_WRAP)
@@ -397,6 +416,8 @@ def triplanar(g, s, world_pos, normal, tile_cm, dist_t=None, far_mul=None):
         rough=blend3([g.mask(g.sample(s["R"], uv, "R"), r=True, a_out="RGB") for uv in uvs]),
         ao=blend3([g.mask(g.sample(s["AO"], uv, "AO"), r=True, a_out="RGB") for uv in uvs]),
     )
+    if "H" in s:
+        out["h"] = blend3([g.mask(g.sample(s["H"], uv, "H"), r=True, a_out="RGB") for uv in uvs])
     if far_mul:
         far = blend3([g.sample(s["A"], uv, "A") for uv in proj(tile_cm * far_mul)], "RGB")
         out["albedo"] = g.lerp(out["albedo"], far, g.mul(dist_t, g.c(FAR_W_AT_DIST)))
@@ -498,32 +519,62 @@ def check_interface(twin_path, real_path, data_uvs):
         problems.append("twin reads vertex color, _real doesn't")
     if not (tuv & data_uvs) <= ruv:
         problems.append(f"twin reads data UV{sorted((tuv & data_uvs) - ruv)}, _real doesn't")
-    for prop in ("phys_material",) + USAGE_FLAGS:
-        if twin.get_editor_property(prop) != real.get_editor_property(prop):
-            problems.append(f"{prop} differs")
-    for prop in (unreal.MaterialProperty.MP_BASE_COLOR, unreal.MaterialProperty.MP_NORMAL,
-                 unreal.MaterialProperty.MP_ROUGHNESS, unreal.MaterialProperty.MP_AMBIENT_OCCLUSION):
-        if MEL.get_material_property_input_node(real, prop) is None:
-            problems.append(f"{prop} unconnected")
+    if twin.get_editor_property("phys_material") != real.get_editor_property("phys_material"):
+        problems.append("phys_material differs")
+    for prop in USAGE_FLAGS:   # _real may add a usage (Nanite boulders), never drop one
+        if twin.get_editor_property(prop) and not real.get_editor_property(prop):
+            problems.append(f"{prop} missing")
+    for name in sorted(set(OUT_PINS.values()) - connected_outputs(real)):
+        problems.append(f"{name} unconnected")
     if problems:
         raise RuntimeError(f"interface rule FAILED for {real_path}: {problems}")
     log(f"interface OK {real_path}: params={sorted(param_names(real))} vertex_color={rvc} uv={sorted(ruv)} "
         f"phys={real.get_editor_property('phys_material')}")
 
 
-def finish(g, path, twin_path, out, data_uvs=frozenset()):
+OUT_PINS = {"albedo": "BaseColor", "normal": "Normal", "rough": "Roughness", "ao": "AmbientOcclusion"}
+_MP = unreal.MaterialProperty
+PIN_PROPS = {"BaseColor": _MP.MP_BASE_COLOR, "Normal": _MP.MP_NORMAL, "Roughness": _MP.MP_ROUGHNESS,
+             "AmbientOcclusion": _MP.MP_AMBIENT_OCCLUSION}
+
+
+def connected_outputs(mat):
+    """Names of the connected main outputs (OUT_PINS values, + Displacement),
+    whether wired directly or through a MakeMaterialAttributes node."""
+    if mat.get_editor_property("use_material_attributes"):
+        mma = MEL.get_material_property_input_node(mat, unreal.MaterialProperty.MP_MATERIAL_ATTRIBUTES)
+        if mma is None:
+            return set()
+        return {str(n) for n, e in zip(MEL.get_material_expression_input_names(mma),
+                                       MEL.get_inputs_for_material_expression(mat, mma)) if e}
+    return {n for n, p in PIN_PROPS.items() if MEL.get_material_property_input_node(mat, p)}
+
+
+def finish(g, path, twin_path, out, data_uvs=frozenset(), props=None):
     """data_uvs: UV channels the C++ writes data into (embankment UV0.V);
-    plain geometry UVs (boulder UV0) may be dropped for world projection."""
-    for key, prop in (("albedo", unreal.MaterialProperty.MP_BASE_COLOR),
-                      ("normal", unreal.MaterialProperty.MP_NORMAL),
-                      ("rough", unreal.MaterialProperty.MP_ROUGHNESS),
-                      ("ao", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION)):
-        G.req(MEL.connect_material_property(out[key], "", prop), f"{path} {key}")
+    plain geometry UVs (boulder UV0) may be dropped for world projection.
+    props: material properties set after the twin's (e.g. tessellation).
+    out["h"] (displacement) goes through MakeMaterialAttributes: UE 5.8's
+    Python hides MP_Displacement from the MaterialProperty enum."""
+    if "h" in out:
+        g.mat.set_editor_property("use_material_attributes", True)
+        mma = g.node(unreal.MaterialExpressionMakeMaterialAttributes)
+        for key, pin in dict(OUT_PINS, h="Displacement").items():
+            G.req(MEL.connect_material_expressions(out[key], "", mma, pin), f"{path} {pin}")
+        G.req(MEL.connect_material_property(mma, "", unreal.MaterialProperty.MP_MATERIAL_ATTRIBUTES),
+              f"{path} attributes")
+    else:
+        for key, pin in OUT_PINS.items():
+            G.req(MEL.connect_material_property(out[key], "", PIN_PROPS[pin]), f"{path} {key}")
     copy_twin_settings(unreal.load_asset(twin_path), g.mat)
+    for k, v in (props or {}).items():
+        g.mat.set_editor_property(k, v)
     MEL.recompile_material(g.mat)
     if not unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False):
         raise RuntimeError(f"save failed (file in use?): {path}")
     check_interface(twin_path, path, data_uvs)
+    if "h" in out and "Displacement" not in connected_outputs(g.mat):
+        raise RuntimeError(f"{path}: Displacement unconnected")
     log(f"saved {path} ({len(MEL.get_material_expressions(g.mat))} nodes)")
 
 
@@ -688,7 +739,16 @@ def build_rock():
     moss_alpha = g.mul(g.mul(up, g.contrast(g.noise_xy(xy, MOSS_NOISE_CM, (43.0, 31.0)), 1.6)), g.c(MOSS_MAX))
     out = blend_layers(g, rock, moss, g.height_blend(moss_alpha, rock["ao"], g.sub(g.c(1.0), rock["ao"])))
     out["albedo"] = g.mul(out["albedo"], g.lerp(g.c(0.8), g.c(1.0), out["ao"]))
-    finish(g, path, f"{MAT_DIR}/M_Rock030", out)
+    out["h"] = rock["h"]
+    disp = unreal.DisplacementScaling()
+    disp.set_editor_property("magnitude", BOULDER_DISP_CM)
+    disp.set_editor_property("center", BOULDER_DISP_CENTER)
+    fade = unreal.DisplacementFadeRange()
+    fade.set_editor_property("start_size_pixels", BOULDER_DISP_FADE_PX[0])
+    fade.set_editor_property("end_size_pixels", BOULDER_DISP_FADE_PX[1])
+    finish(g, path, f"{MAT_DIR}/M_Rock030", out, props=dict(
+        used_with_nanite=True, enable_tessellation=True, displacement_scaling=disp,
+        enable_displacement_fade=True, displacement_fade_range=fade))
 
 
 build_ground()

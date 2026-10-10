@@ -50,8 +50,9 @@ def download_one(entry, force, root=HERE):
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         # Only extract the texture maps this project actually uses - skip
         # the .blend/.mtlx/.tres/.usdc/preview-png ambientCG also bundles.
-        wanted_suffixes = tuple(f"_{m}.{ext}" for ext in ("png", "jpg")
-                                for m in ("Color", "NormalGL", "Roughness", "AmbientOcclusion"))
+        # The entry's "maps" list picks which (Track D adds Displacement).
+        maps = entry.get("maps") or ("Color", "NormalGL", "Roughness", "AmbientOcclusion")
+        wanted_suffixes = tuple(f"_{m}.{ext}" for ext in ("png", "jpg") for m in maps)
         extracted = 0
         for name in zf.namelist():
             if name.endswith(wanted_suffixes):

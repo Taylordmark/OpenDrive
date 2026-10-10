@@ -66,6 +66,19 @@
         "AmbientOcclusion"
       ],
       "notes": "Crushed grey stone - road shoulder in M_GroundStylized_real and the gravel patches of M_Embankment_real."
+    },
+    {
+      "role": "boulder_height",
+      "asset_id": "Rock030",
+      "display_name": "Rock 030 (height map)",
+      "author": "ambientCG",
+      "source_url": "https://ambientcg.com/view?id=Rock030",
+      "download_url": "https://ambientcg.com/get?file=Rock030_2K-PNG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Displacement"
+      ],
+      "notes": "Only the height map of the set content_src/textures/ground/ already uses for the boulders: M_Rock030_real's Nanite tessellated displacement (world triplanar) on the SM_RockBoulder*_real_high/_ultra twins."
     }
   ]
 }

@@ -187,7 +187,10 @@ fewer than seven run at once.
 `main` merged in with the menu work (cbbce1f). Known gaps:
 - The old static Dragon level gets no decals.
 - F has wind (Track F item 4) but no LODs yet.
-- D's Nanite displacement is skipped: it needs a global setting (Taylor's call).
+- D's Nanite displacement is on the boulders only. There was no global-setting
+  blocker: UE 5.8 has no r.Nanite.AllowTessellation, and r.Nanite.Tessellation
+  already defaults to 1. Kill switch: `r.Nanite.Tessellation 0`. Terrain, cut
+  walls and skirts are dynamic meshes, so they can't be Nanite (not done).
 
 ### Track A — Lighting, sky and post-process (small, biggest gain)
 
@@ -263,6 +266,11 @@ in `scratchpad/`, and the same seed gives the same decals twice.
 2. **Rock and cut walls:** Nanite displacement on M_Rock030 and the
    embankment and cut-wall material, so the canyon walls on the Dragon get
    real relief.
+   *Done for boulders:* `M_Rock030_real` displaces (8 cm, world triplanar
+   Rock030 height) on Nanite twins `SM_RockBoulder*_real_high/_ultra`
+   (`unreal/import_rock_meshes_real.py`); the Standard-tier twin stays
+   non-Nanite, so Model Detail Standard has no displacement. Cut walls
+   would need Nanite static meshes instead of dynamic meshes (not done).
 
 **Check:** interface rule passes; compile.
 
