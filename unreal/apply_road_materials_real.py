@@ -124,7 +124,8 @@ for suffix, srgb, comp in (("C", True, unreal.TextureCompressionSettings.TC_DEFA
 decal_path = f"{REAL_DIR}/{DECAL_MAT}"
 if EAL.does_asset_exist(decal_path):
     dm = unreal.load_asset(decal_path)
-    MEL.delete_all_material_expressions(dm)
+    for _e in list(MEL.get_material_expressions(dm)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+        MEL.delete_material_expression(dm, _e)
 else:
     dm = tools.create_asset(DECAL_MAT, REAL_DIR, unreal.Material, unreal.MaterialFactoryNew())
 dm.set_editor_property("material_domain", unreal.MaterialDomain.MD_DEFERRED_DECAL)

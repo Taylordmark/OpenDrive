@@ -260,7 +260,8 @@ def build_material(cat):
     path = f"{CAR_DIR}/{name}"
     mat = unreal.load_asset(path) if unreal.EditorAssetLibrary.does_asset_exist(path) else None
     if mat is not None:
-        MEL.delete_all_material_expressions(mat)
+        for _e in list(MEL.get_material_expressions(mat)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+            MEL.delete_material_expression(mat, _e)
     else:
         mat = tools.create_asset(name, CAR_DIR, unreal.Material, unreal.MaterialFactoryNew())
     if mat is None:
