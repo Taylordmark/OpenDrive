@@ -52,6 +52,7 @@ AODVehiclePawn::AODVehiclePawn()
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 	Body->SetNotifyRigidBodyCollision(true);   // AODVehicleAudio impact hook
+	Body->bReceivesDecals = false;   // road decals (ODRoadDecals) project +-30 cm; the car drives through them
 
 	Movement = CreateDefaultSubobject<UODVehicleMovement>(TEXT("Movement"));
 	CreateDefaultSubobject<UODVehicleFX>(TEXT("VehicleFX"));   // Track E: Realistic-only smoke/dust/spray, reads Movement
@@ -62,6 +63,7 @@ AODVehiclePawn::AODVehiclePawn()
 			*FString::Printf(TEXT("Wheel%d"), i));
 		Wheel->SetupAttachment(Body);
 		Wheel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Wheel->bReceivesDecals = false;
 		WheelVisuals.Add(Wheel);
 	}
 	WheelSpinDeg.Init(0.0f, 4);
