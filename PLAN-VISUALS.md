@@ -352,11 +352,24 @@ stylized meshes; a render of each species turntable from the generator.
   day, some drawn blinds;
 - night windows: the shader takes NightFactor() from the sun
   (SkyAtmosphereLightDirection 0), so up to 35% of rooms switch on through
-  dusk at 2.4-4 nits; `pipeline/check_night_exposure.py` checks them;
+  dusk at 3.2-4 nits; `pipeline/check_night_exposure.py` checks them;
 - shingle roofs split between RoofingTiles007, CC0 RoofingTiles009 and
   painted CorrugatedSteel005 (`content_src/realistic/buildings/manifest.json`).
-Not done: interior-mapped (parallax) rooms and real roof geometry; both
-need new meshes or interiors, out of scope for a material pass.
+
+**Follow-ups (2026-10-09):**
+- wall/roof slot split: Realistic puts roof triangles in a second section
+  with `M_BuildingRoof_real`; facade PS 502 -> 430 instr, 24 -> 15 samples.
+- pitched roofs (Realistic only): `ODBuildingManager` `PitchRoof` gives small
+  near-rectangular footprints (<= 400 m^2, OBB fill >= 0.85, 3-16 m span) a
+  gable or hip roof with windowless gable end walls (vertex A = 0); the rest
+  get flat concrete. Built off-thread per tile (median 0.7 ms, worst 79 ms);
+  42% of buildings, +30% tris. The OSM data has no roof:shape/roof:levels,
+  so the shape is hashed. Mirror + tests: `pipeline/building_roofs.py`,
+  `pipeline/tests/test_building_roofs.py` (watertight, no self-intersection,
+  all 534 tiles).
+- interior-mapped rooms in lit windows: one Custom HLSL node ray-casts a
+  bay x floor x 3-6 m room per window (hashed tint/depth); PS 432 -> 488
+  instr, no extra samples. Unlit windows stay glass.
 
 ### Track H — Guardrails (small)
 
