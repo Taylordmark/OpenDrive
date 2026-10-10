@@ -186,10 +186,12 @@ void UODVehicleMovement::ApplyVehicleDef(const UODVehicleDef& Def)
 	FinalRatio = Def.FinalRatio;
 
 	MuPeak = Def.MuPeak;
+	TireLoadSensitivity = Def.TireLoadSensitivity;
+	RearGripRatio = Def.RearGripRatio;
 	// Floor these two rather than taking Def's value outright (2026-08-24,
 	// Taylor: too much oversteer/slide after braking) - a per-car asset that
 	// already serialized its own SlideFrac/PeakSlipAngleDeg would otherwise
-	// silently undo this the same way tuning presets undo GripScale above.
+	// silently undo this the same way tuning presets undo GripScale.
 	SlideFrac = FMath::Max(Def.SlideFrac, 0.88f);
 	PeakSlipRatio = Def.PeakSlipRatio;
 	PeakSlipAngleDeg = FMath::Max(Def.PeakSlipAngleDeg, 13.0f);
@@ -204,6 +206,7 @@ void UODVehicleMovement::ApplyVehicleDef(const UODVehicleDef& Def)
 
 	DragCoeff = Def.DragCoeff;
 	DownforceCoeff = Def.DownforceCoeff;
+	AeroBalanceFront = Def.AeroBalanceFront;
 
 	MaxSteerAngleDeg = Def.MaxSteerAngleDeg;
 
@@ -1001,6 +1004,12 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 	const FVector Up = Body->GetUpVector();
 	const FVector BodyFwd = Body->GetForwardVector();
 	const float QuarterMassKg = Body->GetMass() * 0.25f;
+	// physical grip (2026-10-09, replaces the flat x4 GripBoost): each tire's
+	// nominal load is its axle's static corner weight (tires are sized for
+	// their axle), plus its share of downforce at the aero balance point
+	const float Frac = FMath::Clamp(FrontWeightFrac, 0.3f, 0.7f);
+	const float AeroFz = DownforceCoeff * FMath::Square(FwdSpeedCmS / 100.0f) * 100.0f;
+	const float AeroBal = FMath::Clamp(AeroBalanceFront, 0.2f, 0.8f);
 	TraceSlip = 0.0f;
 	TraceAlphaF = TraceFyF = TraceFyR = TraceFxR = 0.0f;
 	bAbsActiveThisTick = false;
@@ -1059,10 +1068,15 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			// wrapped past 180). Tires can't use load a real contact patch
 			// never sees: 2.5x static corner weight covers real weight
 			// transfer (a 1g stop puts ~1.7-2x on the front axle) with margin.
-			const float Fz = FMath::Min(
-				W.FzSm, 2.5f * QuarterMassKg * 980.0f);
+			// Downforce isn't transfer, so its corner share rides on top.
+			const float FzStatic = Body->GetMass() * 980.0f * 0.5f
+				* (bFront ? Frac : 1.0f - Frac);
+			const float Fz = FMath::Min(W.FzSm,
+				2.5f * FzStatic + AeroFz * 0.5f * (bFront ? AeroBal : 1.0f - AeroBal));
+			// compound mu x surface x preset trim; RearGripRatio = staggered
+			// rear tires / front roll stiffness (MIRRORED in esc_sim.py)
 			const float Mu = MuPeak * SurfaceGrip(W.Surface.Get())
-				* (bFront ? FrontGripScale : RearGripScale);
+				* (bFront ? FrontGripScale : RearGripScale * RearGripRatio);
 
 			// combined slip, normalized so 1.0 = the peak of the curve.
 			// Denominator is max(|Vx|, |wheel speed|, 1) rather than a bare
@@ -1098,7 +1112,7 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			{
 				// load sensitivity - see TireLoadSensitivity
 				const float LoadSens = FMath::Max(1.0f - TireLoadSensitivity
-					* (Fz / (QuarterMassKg * 980.0f) - 1.0f), 0.4f);
+					* (Fz / FzStatic - 1.0f), 0.4f);
 				const float F = Mu * Fz * LoadSens * Shape;   // friction circle
 				Fx = F * Sx / Sc;
 				Fy = F * Sy / Sc;
@@ -1242,9 +1256,14 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			&& !(bHandbrakeIn && W.MaxHandbrakeNm > 0.0f)
 			&& W.Omega * RoadMs[i] > 0.0f)   // rolling the way the car goes
 		{
+			// ESC's own braked outside-front gets a deeper slip target, like
+			// a real ESC overriding ABS: the cornering-shrunk target let that
+			// wheel roll and gave back the yaw moment ESC asked for (at ~1 g
+			// grip the brake+steer spin needs it; esc_sim.py ESC_ABS_SCALE)
 			const float SyN = SlipAngles[i] / PeakSlipAngleRad;
-			const float Target = AbsSlipTarget
-				* FMath::Sqrt(FMath::Max(1.0f - SyN * SyN, 0.05f));
+			const float Target = (i == EscWheel && EscU > 0.05f)
+				? AbsSlipTarget * EscAbsSlipScale
+				: AbsSlipTarget * FMath::Sqrt(FMath::Max(1.0f - SyN * SyN, 0.05f));
 			Floor = FMath::Min(FMath::Abs(W.Omega),
 				(1.0f - Target) * FMath::Abs(RoadMs[i]) / (W.Radius / 100.0f));
 			bAbsActiveThisTick |= Floor > Braked;
@@ -1324,7 +1343,16 @@ void UODVehicleMovement::TickAero(FODStepBody* Body)
 		Body->AddForce(
 			-Vel / (SpeedMs * 100.0f) * DragCoeff * SpeedMs * SpeedMs * 100.0f);
 	}
+	// downforce at the aero balance point between the axles (0.6125*ClA*v^2),
+	// so a rear-biased balance loads the rear more at speed
 	const float FwdMs = FwdSpeedCmS / 100.0f;
-	Body->AddForce(
-		-Body->GetUpVector() * DownforceCoeff * FwdMs * FwdMs * 100.0f);
+	if (Wheels.Num() >= 4)
+	{
+		const float FrontX = Wheels[0].Attach.X, RearX = Wheels[2].Attach.X;
+		const float Bal = FMath::Clamp(AeroBalanceFront, 0.2f, 0.8f);
+		Body->AddForceAtLocation(
+			-Body->GetUpVector() * DownforceCoeff * FwdMs * FwdMs * 100.0f,
+			Body->GetComponentTransform().TransformPosition(
+				FVector(RearX + Bal * (FrontX - RearX), 0.0f, ComLocalZ)));
+	}
 }

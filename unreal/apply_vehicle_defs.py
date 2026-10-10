@@ -101,6 +101,9 @@ def make_def(name, display, chassis, wheel, props):
 make_def("DA_Vehicle_Coupe", "Coupe", coupe_chassis, coupe_wheel, {
     "front_weight_frac": 0.53,
     "yaw_dynamic_index": 1.0,
+    # performance summer tires, mild stagger; road-car lift-neutral body (ClA ~0.4)
+    "mu_peak": 1.05, "tire_load_sensitivity": 0.25, "rear_grip_ratio": 1.06,
+    "downforce_coeff": 0.25, "aero_balance_front": 0.50,
 })
 
 # GT: faster (lower drag, taller final, more power/rpm, lighter) AND grippier
@@ -113,7 +116,10 @@ make_def("DA_Vehicle_GT", "GT", gt_chassis, gt_wheel, {
     "max_rpm": 7800.0,
     "limiter_rpm": 7650.0,
     "final_ratio": 2.50,
-    "mu_peak": 1.32,
+    # semi-slicks (the old 1.32 sat on top of a x4 grip multiplier)
+    "mu_peak": 1.25,
+    "tire_load_sensitivity": 0.20,
+    "rear_grip_ratio": 1.08,
     "slide_frac": 0.80,
     "peak_slip_ratio": 0.13,
     "peak_slip_angle_deg": 8.0,
@@ -121,7 +127,8 @@ make_def("DA_Vehicle_GT", "GT", gt_chassis, gt_wheel, {
     "damping_ratio": 0.95,
     "com_local_z": 6.0,
     "drag_coeff": 0.32,
-    "downforce_coeff": 2.40,
+    "downforce_coeff": 1.20,       # ClA ~2 (splitter + wing), ~0.4x weight at 150 mph
+    "aero_balance_front": 0.49,
     "max_steer_angle_deg": 36.0,
     "front_brake_nm": 5200.0,
     "rear_brake_nm": 3600.0,

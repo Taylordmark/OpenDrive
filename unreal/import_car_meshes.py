@@ -330,11 +330,14 @@ def make_def(name, props):
 # split (front_weight_frac), yaw_dynamic_index (Iz = DI*m*a*b), COM height,
 # drive layout, torque and brakes (total scaled with mass x wheel radius,
 # front share ~ split + 0.1; handbrake 2x rear). Validated in
-# pipeline/checks/esc_sim.py (Street, High/Low brake-into-turn + snap). Tire and
-# suspension stay at UODVehicleDef's defaults; aero too except
-# downforce_coeff (N per (m/s)^2) on the aero cars, sized at 150 mph
-# (67.06 m/s, the usual real-world quote point): Concept = 1.0x its weight
-# (Taylor, 2026-09-28), LMP 1.5x, Super 0.5x - coeff = k*m*9.81/67.06^2.
+# pipeline/checks/esc_sim.py (Street, High/Low brake-into-turn + snap).
+# Physical grip (2026-10-09, no global multiplier): each car names a tire
+# compound (mu_peak + tire_load_sensitivity, table in ODVehicleDef.h), a
+# rear_grip_ratio (rear stagger / roll stiffness) and aero: downforce_coeff =
+# 0.6125*ClA N per (m/s)^2, aero_balance_front ~ weight split - 0.03. The aero
+# cars are sized at 150 mph (67.06 m/s): Concept = 1.0x its weight (Taylor,
+# 2026-09-28), LMP 1.5x, Super 0.5x - coeff = k*m*9.81/67.06^2. Resulting
+# g per car is asserted in esc_sim.py (road ~1.0, sports 1.2-1.5+, LMP 1.7 -> 2.9).
 make_def("DA_Vehicle_Muscle", {
     "display_name": "Muscle",
     "chassis_mesh": meshes["SM_Car_Muscle"],
@@ -345,6 +348,9 @@ make_def("DA_Vehicle_Muscle", {
     "front_weight_frac": 0.55, "yaw_dynamic_index": 1.05, "com_local_z": 12.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 560.0,
     "front_brake_nm": 5550.0, "rear_brake_nm": 3000.0, "handbrake_nm": 6000.0,
+    # street all-seasons on a heavy cruiser; no aero to speak of
+    "mu_peak": 1.00, "tire_load_sensitivity": 0.25, "rear_grip_ratio": 1.05,
+    "downforce_coeff": 0.05, "aero_balance_front": 0.52,
 })
 make_def("DA_Vehicle_JDM", {
     "display_name": "JDM",
@@ -357,6 +363,9 @@ make_def("DA_Vehicle_JDM", {
     "front_weight_frac": 0.52, "yaw_dynamic_index": 1.05, "com_local_z": 4.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 450.0,
     "front_brake_nm": 4300.0, "rear_brake_nm": 2200.0, "handbrake_nm": 4400.0,
+    # performance summer tires; small lip + wing (ClA ~0.3)
+    "mu_peak": 1.05, "tire_load_sensitivity": 0.25, "rear_grip_ratio": 1.05,
+    "downforce_coeff": 0.20, "aero_balance_front": 0.49,
 })
 make_def("DA_Vehicle_Super", {
     "display_name": "Super",
@@ -368,7 +377,10 @@ make_def("DA_Vehicle_Super", {
     "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 650.0,
     "front_brake_nm": 3950.0, "rear_brake_nm": 3650.0, "handbrake_nm": 7300.0,
-    "downforce_coeff": 1.56,
+    # sport tires (Cup-style), wide staggered rears on a rear-biased mid-engine;
+    # 0.5x weight at 150 mph (ClA ~2.5), balance behind the 42% weight split
+    "mu_peak": 1.15, "tire_load_sensitivity": 0.22, "rear_grip_ratio": 1.10,
+    "downforce_coeff": 1.56, "aero_balance_front": 0.39,
 })
 make_def("DA_Vehicle_Pickup", {
     "display_name": "Pickup",
@@ -380,6 +392,9 @@ make_def("DA_Vehicle_Pickup", {
     "front_weight_frac": 0.57, "yaw_dynamic_index": 1.1, "com_local_z": 20.0,
     "drive_layout": unreal.ODDriveLayout.AWD, "peak_torque_nm": 650.0,
     "front_brake_nm": 9850.0, "rear_brake_nm": 4850.0, "handbrake_nm": 9700.0,
+    # all-terrain tires (less road grip); a brick - no downforce
+    "mu_peak": 0.90, "tire_load_sensitivity": 0.25, "rear_grip_ratio": 1.06,
+    "downforce_coeff": 0.0, "aero_balance_front": 0.54,
 })
 make_def("DA_Vehicle_Rally", {
     "display_name": "Rally",
@@ -393,6 +408,10 @@ make_def("DA_Vehicle_Rally", {
     "front_weight_frac": 0.56, "yaw_dynamic_index": 1.1, "com_local_z": 6.0,
     "drive_layout": unreal.ODDriveLayout.AWD, "peak_torque_nm": 440.0,
     "front_brake_nm": 4800.0, "rear_brake_nm": 1350.0, "handbrake_nm": 5000.0,
+    # performance tarmac tires (gravel tread is the Rally preset's OffRoadGrip);
+    # roof + rear wing (ClA ~0.5)
+    "mu_peak": 1.05, "tire_load_sensitivity": 0.25, "rear_grip_ratio": 1.05,
+    "downforce_coeff": 0.30, "aero_balance_front": 0.53,
 })
 make_def("DA_Vehicle_Concept", {
     "display_name": "Concept",
@@ -404,7 +423,9 @@ make_def("DA_Vehicle_Concept", {
     "front_weight_frac": 0.42, "yaw_dynamic_index": 0.88, "com_local_z": 5.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 500.0,
     "front_brake_nm": 3100.0, "rear_brake_nm": 2850.0, "handbrake_nm": 5700.0,
-    "downforce_coeff": 2.51,
+    # semi-slicks, staggered; 1.0x weight at 150 mph (ClA ~4.1)
+    "mu_peak": 1.25, "tire_load_sensitivity": 0.20, "rear_grip_ratio": 1.10,
+    "downforce_coeff": 2.51, "aero_balance_front": 0.39,
 })
 make_def("DA_Vehicle_LMP", {
     "display_name": "LMP",
@@ -416,7 +437,9 @@ make_def("DA_Vehicle_LMP", {
     "front_weight_frac": 0.45, "yaw_dynamic_index": 0.85, "com_local_z": 3.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 600.0,
     "front_brake_nm": 2850.0, "rear_brake_nm": 2300.0, "handbrake_nm": 4600.0,
-    "downforce_coeff": 3.37,
+    # racing slicks (low load sensitivity); 1.5x weight at 150 mph (ClA ~5.5)
+    "mu_peak": 1.60, "tire_load_sensitivity": 0.15, "rear_grip_ratio": 1.06,
+    "downforce_coeff": 3.37, "aero_balance_front": 0.42,
 })
 
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)

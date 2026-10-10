@@ -44,7 +44,9 @@ PRESETS = {
         rear_tire_width_scale=1.2),
     "Drift": dict(
         damping_ratio=0.85, spring_rate_scale=1.15, ride_height_delta=-1.0,
-        front_friction_scale=1.05, rear_friction_scale=0.72, torque_scale=1.30,
+        # rear 0.80 (was 0.72 on top of the old x4 grip): now a trim on the
+        # physical tire, still loose enough to hold a slide (esc_sim.py)
+        front_friction_scale=1.05, rear_friction_scale=0.80, torque_scale=1.30,
         downforce=0.6, center_of_mass_z=40.0,
         off_road_grip=0.5, slide_frac_min=0.95, default_traction_mode=L,
         esc_slide_allow_low_deg=25.0, steer_lock_scale=1.3,
