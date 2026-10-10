@@ -192,7 +192,8 @@ def build_material(cat, mat_name, roughness, metallic, two_sided, opacity, clear
     if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
         mat = unreal.load_asset(mat_path)
         if mat is not None:
-            MEL.delete_all_material_expressions(mat)
+            for _e in list(MEL.get_material_expressions(mat)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+                MEL.delete_material_expression(mat, _e)
     if mat is None:
         mat = tools.create_asset(mat_name, CAR_DIR, unreal.Material,
                                   unreal.MaterialFactoryNew())

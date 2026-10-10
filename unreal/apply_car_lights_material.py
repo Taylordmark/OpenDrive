@@ -60,7 +60,8 @@ for name, roughness in LIGHT_MATS.items():
     if mat is None:   # the _Hi set only exists once import_car_meshes.py's Hi pass has run
         log(f"{name} missing - skipped (run import_car_meshes.py, then this)")
         continue
-    MEL.delete_all_material_expressions(mat)
+    for _e in list(MEL.get_material_expressions(mat)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+        MEL.delete_material_expression(mat, _e)
 
     ts = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -800, 0)
     ts.set_editor_property("texture", palette)

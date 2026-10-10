@@ -354,7 +354,8 @@ if unreal.EditorAssetLibrary.does_asset_exist(mat_path):
     except Exception as exc:
         log(f"  (inspection failed, proceeding with rebuild anyway: {exc})")
     log("--- end pre-edit graph ---")
-    MEL.delete_all_material_expressions(mat)
+    for _e in list(MEL.get_material_expressions(mat)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+        MEL.delete_material_expression(mat, _e)
 else:
     mat = tools.create_asset(MAT_NAME, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
 

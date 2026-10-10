@@ -43,7 +43,8 @@ def log(msg):
 parent_path = f"{MAT_DIR}/M_Furniture"
 if unreal.EditorAssetLibrary.does_asset_exist(parent_path):
     parent = unreal.load_asset(parent_path)
-    MEL.delete_all_material_expressions(parent)
+    for _e in list(MEL.get_material_expressions(parent)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+        MEL.delete_material_expression(parent, _e)
 else:
     parent = tools.create_asset("M_Furniture", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
 parent.set_editor_property("two_sided", True)
