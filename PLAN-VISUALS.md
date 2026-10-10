@@ -188,6 +188,21 @@ by style at spawn time, and nothing new is spawned.
 
 **Check:** compile; render values dumped to a log at four times of day.
 
+**Status (2026-10-09):** first pass is in `ODAtmosphereController.cpp` and compiles.
+- Grade: done with color-grading fields, not a LUT, so there's no asset.
+  Highlight gain 1.04/1.0/0.94, cool shadow gamma, contrast 1.12, FilmToe
+  0.6, bloom 0.7 at threshold 0.8, vignette 0.3, grain 0.
+- Haze: aerial perspective 0.9 (Stylized 0.8), fog density 0.0013.
+- The spawn log line prints style, bloom and vignette.
+- Motion blur is already the engine default (on) in both styles, so it's
+  unchanged.
+- Not done:
+  - TSR sharpness: it's a global cvar, so it belongs with the settings
+    session.
+  - Cloud material: it needs a new asset.
+  - Per-time-of-day grade: the night volume only lifts exposure, so wait
+    for T5 drive feedback.
+
 ### Track B — Car paint, glass and lights (small)
 
 Only the materials change, never the models (V2). Build on the existing
