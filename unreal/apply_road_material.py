@@ -222,6 +222,37 @@ RealRutWetStart = 0.35
 RealRutRough = 0.04
 RealRutDarken = 0.85
 RealWetFlatten = 0.35           # normal flattened toward up at Wetness 1
+# Road-edge blend (PLAN-VISUALS join J). The pavement used to stop in a hard
+# line against the terrain's gravel shoulder (M_GroundStylized_real's
+# road_edge_blend, which starts right at the pavement edge). Now the outer
+# decimetres break up into that same shoulder: Gravel040 + Ground037 sampled
+# in WORLD XY at the terrain's tiles, tint and 150 cm dirt-mix noise, so the
+# gravel pattern runs on across the seam. The fringe width wanders along the
+# road (RealEdgeCellM) and crumbles (RealEdgeCrumble*); the wrap lip (no
+# pavement left, d_in 0) is always fringe, so the slab side reads as gravel
+# instead of an asphalt rim. A grime band darkens the outer RealEdgeGrimeM.
+# Junction pads keep |meterPos| <= 2 m, so d_in >= 2.5 m: never touched.
+# pipeline/checks/check_terrain_real.py mirrors this and checks the
+# terrain-matching constants against apply_terrain_real_materials.py.
+RealEdgeSet = ("Gravel040", "/Game/OpenDrive/Realistic/Terrain")   # = terrain LAYERS["shoulder"]
+RealEdgeTileCm = 300.0
+RealEdgeTint = (1.05, 0.98, 0.9)                                   # = terrain SHOULDER_TINT
+RealEdgeDirtSet = ("Ground037", "/Game/OpenDrive/Textures/Ground")  # = terrain LAYERS["dirt"]
+RealEdgeDirtTileCm = 850.0
+RealEdgeDirtNoiseCm = 150.0     # = road_edge_blend's `fine` noise
+RealEdgeDirtSeed = (5.0, 67.0)
+RealEdgeMinM = 0.1              # fringe width range (m of pavement eaten) ...
+RealEdgeMaxM = 0.3
+RealEdgeCellM = 6.0             # ... wandering over this length
+RealEdgeCrumbleM = 0.06         # +- jagged crumble on top
+RealEdgeCrumbleCellM = 0.25
+RealEdgeSoftM = 0.03            # fringe edge softness up close ...
+RealEdgeFarSoftM = 0.2          # ... and past the detail fade (no shimmer)
+RealEdgeLipM = 0.02             # always fringe within this of the edge (lip)
+RealEdgeGrimeM = 0.7
+RealEdgeDarken = 0.82
+RealEdgeGrimeRough = 0.06
+RealEdgeRough = 0.9             # = road_edge_blend's shoulder roughness
 
 
 def log(msg):
@@ -657,6 +688,54 @@ if REAL:
 
 dry_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
 dry_rough = g.lerp(base_rough, paint_rough, final_paint_mask)
+
+if REAL:   # road-edge blend into the terrain shoulder (see RealEdge*)
+    wxy = g.mask(g.node(unreal.MaterialExpressionWorldPosition), r=True, gg=True)
+
+    def world_noise(cell_cm, seed):
+        """= apply_terrain_real_materials.G.noise_xy (wrap, then seed, then
+        the dot-hash lattice), so the dirt mix lines up with the terrain's."""
+        uv = g.add(g.mul(g.fracv(g.mul(wxy, g.const(1.0 / (cell_cm * 97.0)))), g.const(97.0)), g.const2(*seed))
+        i, f = g.floorv(uv), g.fracv(uv)
+
+        def h(v):
+            return g.fracv(g.mul(g.sinev(g.dotp(v, g.const2(12.9898, 78.233))), g.const(43758.5453)))
+
+        fx = g.mask(f, r=True)
+        top = g.lerp(h(i), h(g.add(i, g.const2(1.0, 0.0))), fx)
+        bot = g.lerp(h(g.add(i, g.const2(0.0, 1.0))), h(g.add(i, g.const2(1.0, 1.0))), fx)
+        return g.lerp(top, bot, g.mask(f, gg=True))
+
+    d_in = g.maxv(g.sub(half_width_eff, abs_meter_pos), g.const(0.0))   # m of pavement left to the edge
+    crumble = value_noise2(g.mul(meter_pos, g.const(1.0 / RealEdgeCrumbleCellM)),
+                           g.mul(v0, g.const(1.0 / RealEdgeCrumbleCellM)))
+    edge_w = g.add(g.lerp(g.const(RealEdgeMinM), g.const(RealEdgeMaxM), road_noise(RealEdgeCellM, 83.0)),
+                   g.mul(g.sub(crumble, g.const(0.5)), g.const(2.0 * RealEdgeCrumbleM)))
+    edge_soft = g.lerp(g.const(RealEdgeFarSoftM), g.const(RealEdgeSoftM), detail_fade)
+    fringe = g.maxv(g.clamp01(g.div(g.sub(edge_w, d_in), edge_soft)),
+                    g.clamp01(g.sub(g.const(1.0), g.mul(d_in, g.const(1.0 / RealEdgeLipM)))))
+    grime = g.clamp01(g.sub(g.const(1.0), g.mul(d_in, g.const(1.0 / RealEdgeGrimeM))))
+
+    e_set = load_asphalt(*RealEdgeSet)
+    e_ao_tex = unreal.load_asset(f"{RealEdgeSet[1]}/{RealEdgeSet[0]}/T_{RealEdgeSet[0]}_AO")
+    if e_ao_tex is None:
+        raise RuntimeError(f"T_{RealEdgeSet[0]}_AO missing - run unreal/apply_terrain_real_materials.py first")
+    uv_e = g.mul(wxy, g.const(1.0 / RealEdgeTileCm))
+    e_ao = g.sample(e_ao_tex, uv_e)
+    e_ao.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
+    gravel_e = g.mul(g.mask(g.sample(e_set["albedo"], uv_e), r=True, gg=True, b=True, a_out="RGB"),
+                     g.const3(*RealEdgeTint))
+    dirt_e = g.mul(g.mask(g.sample(load_asphalt(*RealEdgeDirtSet)["albedo"], g.mul(wxy, g.const(1.0 / RealEdgeDirtTileCm))),
+                          r=True, gg=True, b=True, a_out="RGB"), g.const(0.9))
+    dirt_mix = g.clamp01(g.mul(g.sub(world_noise(RealEdgeDirtNoiseCm, RealEdgeDirtSeed), g.const(0.3)), g.const(2.5)))
+    edge_albedo = g.mul(g.lerp(gravel_e, dirt_e, dirt_mix),
+                        g.lerp(g.const(0.85), g.const(1.0), g.mask(e_ao, r=True)))   # terrain's cavity darkening
+
+    dry_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(RealEdgeDarken), grime))
+    dry_rough = g.clamp01(g.add(dry_rough, g.mul(grime, g.const(RealEdgeGrimeRough))))
+    dry_albedo = g.lerp(dry_albedo, edge_albedo, fringe)
+    dry_rough = g.lerp(dry_rough, g.const(RealEdgeRough), fringe)
+    base_normal = g.lerp(base_normal, g.sample(e_set["normal"], uv_e, is_normal=True), fringe, b_out="RGB")
 
 # ---------------------------------------------------------------- weather wetness (W2)
 wetness = g.scalar_param("Wetness", 0.0)

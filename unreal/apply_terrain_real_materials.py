@@ -34,7 +34,9 @@ Nanite meshes plus r.Nanite.AllowTessellation (PLAN-VISUALS Track D).
 Interface rule: each _real material must expose every parameter its twin
 has, read the twin's vertex-color and data-UV channels, and copy its physical
 material and usage flags - check_interface() fails the run otherwise.
-Road-edge RVT blend (Join step J) plugs in at road_edge_blend() below.
+Road-edge blend (Join step J) is done on the road side: M_Road*_real's
+fringe samples road_edge_blend()'s shoulder (set, tile, tint, dirt noise)
+in world XY, so keep the two in step (check_terrain_real.py asserts it).
 
 pipeline/checks/check_terrain_real.py mirrors the anti-tiling and strata math
 offline (it parses the constants out of this file).
@@ -616,7 +618,7 @@ def build_ground():
 
 def road_edge_blend(g, base, xy, flat_w, dirt):
     """Gravel/dirt shoulder from the C++ RoadDistTex field (contract identical
-    to M_GroundStylized). Join step J adds the RVT road-colour feather here."""
+    to M_GroundStylized). apply_road_material.py's RealEdge* fringe mirrors it."""
     white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
     origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="RoadDistOrigin")
     cov = g.c(ROAD_DIST_COVERAGE_CM)

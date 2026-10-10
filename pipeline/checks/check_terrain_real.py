@@ -6,6 +6,10 @@ Track D). Ports the material math 1:1 (constants parsed from the script):
    self-correlation (1.0 for the stylized single sample) must drop.
 2. height_blend: exact at alpha 0/1, same mean coverage as a lerp.
 3. strata: bands span dark..light and don't repeat at one band.
+4. road-edge blend (join J, unreal/apply_road_material.py RealEdge*): the
+   road's fringe uses this script's shoulder set, tile, tint and dirt-mix
+   noise; it always covers the pavement edge/lip, never reaches the lane
+   interior or junction pads, rarely eats the edge line, and wanders.
 
 Writes scratchpad/terrain_real_tiling.png (stylized | real near | real far).
 Run from repo root:  python pipeline/checks/check_terrain_real.py
@@ -31,6 +35,60 @@ for node in ast.parse(src).body:   # every top-level literal constant
             C[node.targets[0].id] = ast.literal_eval(node.value)
         except ValueError:
             pass
+
+
+ROAD_SRC = (ROOT / "unreal/apply_road_material.py").read_text(encoding="utf-8")
+R = {}
+for node in ast.parse(ROAD_SRC).body:
+    if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id.startswith("Real"):
+        R[node.targets[0].id] = ast.literal_eval(node.value)
+    if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "EdgeLineInsetM":
+        R["EdgeLineInsetM"] = ast.literal_eval(node.value)
+
+
+def road_value_noise2(x, y):
+    """apply_road_material.value_noise2 (UE Sine = sin(2 pi x))."""
+    def h(v):
+        s_ = np.sin(2 * np.pi * v * 127.1) * 43758.5453
+        return s_ - np.floor(s_)
+    ix, iy = np.floor(x), np.floor(y)
+    fx, fy = x - ix, y - iy
+    fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    hh = lambda dx, dy: h(ix + dx + (iy + dy) * 57.0)
+    return (hh(0, 0) + (hh(1, 0) - hh(0, 0)) * fx) * (1 - fy) + (hh(0, 1) + (hh(1, 1) - hh(0, 1)) * fx) * fy
+
+
+def check_road_edge():
+    assert R["RealEdgeSet"][0] == C["LAYERS"]["shoulder"][0] and R["RealEdgeTileCm"] == C["LAYERS"]["shoulder"][1],         "road fringe gravel != terrain shoulder set/tile"
+    assert R["RealEdgeDirtSet"][0] == C["LAYERS"]["dirt"][0] and R["RealEdgeDirtTileCm"] == C["LAYERS"]["dirt"][1],         "road fringe dirt != terrain dirt set/tile"
+    assert tuple(R["RealEdgeTint"]) == tuple(C["SHOULDER_TINT"]), "road fringe tint != SHOULDER_TINT"
+    assert f"g.noise_xy(xy, {R['RealEdgeDirtNoiseCm']}, {tuple(R['RealEdgeDirtSeed'])})" in src,         "road fringe dirt-mix noise != road_edge_blend's fine noise"
+
+    v0 = np.arange(0.0, 5000.0, 0.02) + 12345.0          # 5 km of road, 2 cm steps
+    rng = np.random.default_rng(3)
+    for half_w in (3.0, 4.5, 6.0):
+        for side in (-1.0, 1.0):
+            seed = rng.random()
+            meter_edge = side * half_w                       # crumble noise sampled at the edge
+            long_n = road_value_noise2(np.full_like(v0, meter_edge / R["RealEdgeCellM"]),
+                                       v0 / R["RealEdgeCellM"] + seed * 83.0)
+            crumble = road_value_noise2(np.full_like(v0, meter_edge / R["RealEdgeCrumbleCellM"]),
+                                        v0 / R["RealEdgeCrumbleCellM"])
+            w = R["RealEdgeMinM"] + (R["RealEdgeMaxM"] - R["RealEdgeMinM"]) * long_n + (crumble - 0.5) * 2 * R["RealEdgeCrumbleM"]
+
+            def fringe(d_in, soft):
+                return np.maximum(np.clip((w - d_in) / soft, 0, 1), np.clip(1 - d_in / R["RealEdgeLipM"], 0, 1))
+
+            for soft in (R["RealEdgeSoftM"], R["RealEdgeFarSoftM"]):
+                assert np.all(fringe(0.0, soft) == 1.0), "pavement edge / wrap lip not fully fringed"
+            reach = R["RealEdgeMaxM"] + R["RealEdgeCrumbleM"]
+            assert np.all(fringe(reach + R["RealEdgeSoftM"], R["RealEdgeSoftM"]) == 0)
+            assert reach + R["RealEdgeFarSoftM"] < 2.5, "fringe would reach junction pads (|meterPos| <= 2 m)"
+            line_eaten = float(np.mean(fringe(R["EdgeLineInsetM"], R["RealEdgeSoftM"]) > 0.5))
+            assert line_eaten < 0.1, f"fringe eats the edge line on {line_eaten:.0%} of the road"
+            assert 0.12 < w.mean() < 0.3 and w.std() > 0.04, f"fringe width mean {w.mean():.2f} std {w.std():.2f}"
+    print(f"road edge: fringe width {w.mean():.2f} +- {w.std():.2f} m, edge line eaten {line_eaten:.1%}, "
+          f"matches terrain shoulder ({R['RealEdgeSet'][0]} @ {R['RealEdgeTileCm']:.0f} cm)")
 
 
 def tex_root():
@@ -115,6 +173,7 @@ def main():
     print(f"strata: min {band.min():.2f} max {band.max():.2f} one-band self-correlation {b_corr:.2f}")
     assert band.min() < 0.15 and band.max() > 0.85, "strata bands don't span dark..light"
     assert b_corr < 0.5, "strata repeat at one band"
+    check_road_edge()
     print(f"OK - wrote {out / 'terrain_real_tiling.png'}")
 
 

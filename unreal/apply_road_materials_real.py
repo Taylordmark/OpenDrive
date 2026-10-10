@@ -26,7 +26,9 @@ download_ground_textures.py <that manifest>) to /Game/OpenDrive/Realistic/
 Road/ via import_ground_textures.py; apply_road_material.py's RealCrack*
 layer samples it.
 
-Needs import_road_textures.py + import_ground_textures.py to have run.
+Needs import_road_textures.py + import_ground_textures.py to have run, and
+apply_terrain_real_materials.py (imports Gravel040, which the RealEdge*
+road-edge blend samples).
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
