@@ -31,8 +31,14 @@ it expects them to already exist, same as the old M_Foliage dependency did.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
+
+Realistic twins (PLAN-VISUALS.md Track F): OD_FLORA_REAL=1 imports the
+make_tree_meshes.py --real set (<slot>_real{,_high,_ultra}) beside the
+stylized meshes with the M_*_real materials (build_flora_materials.py with
+the same variable first), and saves only those assets.
 """
 
+import os
 from pathlib import Path
 
 import unreal
@@ -63,6 +69,15 @@ FLORA = {
 FLORA = {n + sfx: v for sfx in ("", "_high", "_ultra") for n, v in FLORA.items()}
 FOLIAGE_TEXTURES = ("T_FoliageAtlas.png", "T_BarkConifer.png", "T_BarkAspen.png",
                      "T_BarkWillow.png")
+REAL = os.environ.get("OD_FLORA_REAL") == "1"
+SFX = "_real" if REAL else ""
+if REAL:   # species with a realistic twin; the rest fall back via Pick()
+    FLORA = {f"{n}_real{t}": ("M_Bark_Aspen_real" if n in ("tree_blob", "tree_scrub_oak")
+                              else "M_Bark_Conifer_real", None)
+             for t in ("", "_high", "_ultra")
+             for n in ("tree_conifer", "tree_canyon_oak", "tree_olive", "tree_yucca",
+                       "tree_blob", "tree_scrub_oak")}
+    FOLIAGE_TEXTURES = ()   # build_flora_materials.py imported the _real textures
 
 tools = unreal.AssetToolsHelpers.get_asset_tools()
 
@@ -83,7 +98,8 @@ for fname in FOLIAGE_TEXTURES:
     ti.save = False
     ti.replace_existing = True
     tex_tasks.append(ti)
-tools.import_asset_tasks(tex_tasks)
+if tex_tasks:
+    tools.import_asset_tasks(tex_tasks)
 for fname in FOLIAGE_TEXTURES:
     asset_name = fname.rsplit(".", 1)[0]
     if unreal.load_asset(f"{TEX_DIR}/{asset_name}") is None:
@@ -107,7 +123,7 @@ if missing:
     raise RuntimeError(f"foliage mesh import failed for: {missing}")
 log(f"imported {len(fol)} flora meshes")
 
-m_foliage = unreal.load_asset(f"{MAT_DIR}/M_Foliage")
+m_foliage = unreal.load_asset(f"{MAT_DIR}/M_Foliage{SFX}")
 if m_foliage is None:
     raise RuntimeError(
         f"{MAT_DIR}/M_Foliage not found - build it first (M_Foliage needs "
@@ -138,6 +154,13 @@ for name, mesh in fol.items():
         mesh.set_material(FOLIAGE_SLOT, m_foliage)
 log(f"assigned bark/foliage materials to {len(fol)} meshes")
 
-unreal.EditorAssetLibrary.save_directory("/Game/OpenDrive", only_if_is_dirty=False)
-unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved")
+if REAL:   # only the new twins - never re-save the stylized content
+    for name, mesh in fol.items():
+        if mesh.get_num_sections(0) != 2 or mesh.get_material(BARK_SLOT) != bark_mats[FLORA[name][0]]:
+            raise RuntimeError(f"{name}: expected 2 sections, bark at slot {BARK_SLOT}")
+        unreal.EditorAssetLibrary.save_asset(f"{TREE_DIR}/{name}", only_if_is_dirty=False)
+    log(f"DONE - saved {len(fol)} realistic meshes")
+else:
+    unreal.EditorAssetLibrary.save_directory("/Game/OpenDrive", only_if_is_dirty=False)
+    unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+    log("DONE - saved")

@@ -21,8 +21,18 @@ leaving the mask disconnected and the material fully opaque).
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
+
+Realistic twins (PLAN-VISUALS.md Track F): set OD_FLORA_REAL=1 to build
+M_Bark_Conifer_real / M_Bark_Aspen_real / M_Foliage_real instead, from the
+build_flora_textures.py --real textures (imported to /Game/OpenDrive/
+Realistic/Flora). Same graph and parameter names as the stylized twin plus:
+bark normal maps and luminance roughness, per-instance foliage tint, leaf-
+coloured subsurface, and fall colour that keeps the leaf texture. The
+stylized path is unchanged with the variable unset, and the real path
+fails if a twin's scalar parameter list differs (the interface rule).
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -30,6 +40,10 @@ import unreal
 
 STAGE_DIR = Path(__file__).resolve().parents[1] / "data" / "stages" / "tail_of_the_dragon"
 TEX_DIR = "/Game/OpenDrive/Textures"
+REAL = os.environ.get("OD_FLORA_REAL") == "1"
+SFX = "_real" if REAL else ""
+if REAL:
+    TEX_DIR = "/Game/OpenDrive/Realistic/Flora"
 MAT_DIR = "/Game/OpenDrive/Materials"
 
 MEL = unreal.MaterialEditingLibrary
@@ -43,6 +57,9 @@ def log(msg):
 # ------------------------------------------------------------------ textures
 TEXTURES = ("T_BarkConifer.png", "T_BarkAspen.png", "T_BarkWillow.png",
             "T_FoliageAtlas.png")
+if REAL:
+    TEXTURES = ("T_BarkConifer_real.png", "T_BarkConifer_real_N.png", "T_BarkAspen_real.png",
+                "T_BarkAspen_real_N.png", "T_FoliageAtlas_real.png")
 tex_tasks = []
 for fname in TEXTURES:
     ti = unreal.AssetImportTask()
@@ -62,6 +79,19 @@ for fname in TEXTURES:
         raise RuntimeError(f"{asset_name} import failed - run "
                             f"pipeline/build_flora_textures.py first")
     tex[asset_name] = t
+if REAL:
+    for name, t in tex.items():
+        if name.endswith("_N"):
+            t.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_NORMALMAP)
+            t.set_editor_property("srgb", False)
+        elif name.startswith("T_FoliageAtlas"):
+            # keep cutout coverage in the mips so distant crowns don't thin out
+            try:
+                t.set_editor_property("do_scale_mips_for_alpha_coverage", True)
+                t.set_editor_property("alpha_coverage_thresholds", unreal.Vector4(0.0, 0.0, 0.0, 0.35))
+            except Exception as e:  # property names moved between engine versions
+                log(f"  alpha-coverage mips not set: {e}")
+        unreal.EditorAssetLibrary.save_asset(f"{TEX_DIR}/{name}", only_if_is_dirty=False)
 log(f"imported {len(tex)} flora textures")
 
 
@@ -259,6 +289,9 @@ BARK_MATS = {
     "M_Bark_Aspen":   ("T_BarkAspen", 0.70),
     "M_Bark_Willow":  ("T_BarkWillow", 0.75),
 }
+if REAL:   # willow (bush) has no realistic twin yet - Pick falls back to it
+    BARK_MATS = {"M_Bark_Conifer_real": ("T_BarkConifer_real", 0.80),
+                 "M_Bark_Aspen_real": ("T_BarkAspen_real", 0.70)}
 for mat_name, (tex_name, roughness) in BARK_MATS.items():
     mat = new_material(mat_name)
     ts = MEL.create_material_expression(
@@ -271,6 +304,13 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
     rough = MEL.create_material_expression(
         mat, unreal.MaterialExpressionConstant, -400, 250)
     rough.set_editor_property("r", roughness)
+    if REAL:   # rougher in the dark fissures, plus the derived normal map
+        rough = _lerp(mat, _const(mat, min(1.0, roughness + 0.12)), _const(mat, roughness - 0.15),
+                      _mask(mat, ts, r=True))
+        nrm = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureSample, -400, -250)
+        nrm.set_editor_property("texture", tex[tex_name + "_N"])
+        nrm.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+        must_connect_property(nrm, "RGB", unreal.MaterialProperty.MP_NORMAL)
     must_connect_property(_lerp(mat, rough, _const(mat, WET_BARK_ROUGHNESS), wet),
                           "", unreal.MaterialProperty.MP_ROUGHNESS)
 
@@ -293,7 +333,7 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
     # zero-regression for bark_conifer/bark_willow and for tree_scrub_oak
     # (also M_Bark_Aspen, also left static). SnowCover=0 reproduces the
     # plain sampled bark color exactly (Lerp alpha 0 = A unchanged).
-    if mat_name == "M_Bark_Aspen":
+    if mat_name == "M_Bark_Aspen" + SFX:
         snow_cover_bark = MEL.create_material_expression(
             mat, unreal.MaterialExpressionScalarParameter, -700, 700)
         snow_cover_bark.set_editor_property("parameter_name", "SnowCover")
@@ -324,10 +364,10 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
     log(f"built {mat_name} (opaque, roughness {roughness})")
 
 # ----------------------------------------------------- M_Foliage (masked, 2S)
-m_fol = new_material("M_Foliage")
+m_fol = new_material("M_Foliage" + SFX)
 ts = MEL.create_material_expression(
     m_fol, unreal.MaterialExpressionTextureSample, -400, 0)
-ts.set_editor_property("texture", tex["T_FoliageAtlas"])
+ts.set_editor_property("texture", tex["T_FoliageAtlas" + SFX])
 # blend mode must be Masked BEFORE connecting to the opacity-mask pin, or
 # the connection can be rejected/ignored (the property pin is only "live"
 # for the matching blend mode).
@@ -546,6 +586,10 @@ fall_amount = _clamp01(m_fol, _div(m_fol, _sub(m_fol, fall_blend_param, thr_lo),
 drop_amount = _clamp01(m_fol, _div(m_fol, _sub(m_fol, leaf_drop_param, thr_lo), _const(m_fol, TURN_BAND)))
 
 fall_color = _const3(m_fol, 0.86, 0.42, 0.07)   # stylized aspen-gold/orange
+if REAL:   # aspen gold to orange by patch, keeping the leaf texture's light/dark
+    lum = _dotp(m_fol, ts, _const3(m_fol, 0.3, 0.59, 0.11), a_out="RGB")
+    gold = _lerp(m_fol, _const3(m_fol, 0.95, 0.66, 0.14), _const3(m_fol, 0.88, 0.38, 0.08), patch_noise)
+    fall_color = _mul(m_fol, gold, _mul(m_fol, lum, _const(m_fol, 2.6)))
 base_after_fall = _lerp(m_fol, ts, fall_color, fall_amount, a_out="RGB")
 # Re-point the canopy-snow Lerp's "before snow" input at the fall-blended
 # color instead of the raw sampled atlas color (was `ts` "RGB" - see the
@@ -596,8 +640,16 @@ must_connect_property(_mul(m_fol, opacity_after_drop, _lerp(m_fol, _const(m_fol,
 must_connect_property(_mul(m_fol, snowed_base_color, shade), "", unreal.MaterialProperty.MP_BASE_COLOR)
 must_connect_property(_mul(m_fol, snowed_subsurface, shade), "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
 
+if REAL:
+    # per-tree tint (no two crowns quite the same green) and leaf-coloured
+    # transmission instead of the fixed dark-green subsurface constant
+    tint = _lerp(m_fol, _const3(m_fol, 0.84, 0.86, 0.80), _const3(m_fol, 1.10, 1.08, 1.0), per_instance_random)
+    must_connect_property(_mul(m_fol, _mul(m_fol, snowed_base_color, shade), tint), "",
+                          unreal.MaterialProperty.MP_BASE_COLOR)
+    _must_connect(_mul(m_fol, base_after_fall, _const(m_fol, 0.75)), "", snowed_subsurface, "A")
+
 MEL.recompile_material(m_fol)
-unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage", only_if_is_dirty=False)
+unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage{SFX}", only_if_is_dirty=False)
 log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_FoliageAtlas, "
     "seasons params SnowCover [wired, boosted+clamped uniform per-instance tint x "
     "PerInstanceRandom desync [0.82,1.0], drives BaseColor AND MP_SUBSURFACE_COLOR] / "
@@ -605,6 +657,19 @@ log("built M_Foliage (masked, two-sided-foliage shading, alpha-cutout from T_Fol
     "per-patch value-noise turn-threshold drives orange BaseColor blend and "
     "opacity-mask leaf-drop dissolve])")
 
-unreal.EditorAssetLibrary.save_directory(MAT_DIR, only_if_is_dirty=False)
-unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved 3 bark materials + M_Foliage")
+if REAL:
+    # interface rule: each _real twin exposes exactly its stylized twin's
+    # scalar parameters (C++ MIDs push SnowCover/FallBlend/LeafDrop/Wetness)
+    for name in [*BARK_MATS, "M_Foliage_real"]:
+        twin = unreal.load_asset(f"{MAT_DIR}/{name[:-5]}")
+        mine = unreal.load_asset(f"{MAT_DIR}/{name}")
+        want = sorted(str(n) for n in MEL.get_scalar_parameter_names(twin))
+        got = sorted(str(n) for n in MEL.get_scalar_parameter_names(mine))
+        if want != got:
+            raise RuntimeError(f"interface rule: {name} params {got} != {name[:-5]} {want}")
+        log(f"interface ok: {name} {got}")
+    log("DONE - saved realistic flora materials")   # saved one by one: stylized assets untouched
+else:
+    unreal.EditorAssetLibrary.save_directory(MAT_DIR, only_if_is_dirty=False)
+    unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+    log("DONE - saved 3 bark materials + M_Foliage")
