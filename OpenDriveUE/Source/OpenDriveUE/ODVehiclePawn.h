@@ -115,7 +115,7 @@ public:
 
 	/** Seconds of holding A/D to go from center to the full (speed-capped) lock. */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerRampInSec = 0.6f;
+	float KbSteerRampInSec = 0.4f;
 
 	/** Seconds to return from full lock to center on release (and to unwind
 	 *  before ramping the other way on a reversal) - faster than ramp-in so
@@ -124,19 +124,21 @@ public:
 	float KbSteerReturnSec = 0.2f;
 
 	/** Response curve on the ramp: steer = ramp^Exp. >1 makes short taps
-	 *  tiny (0.1 s tap = 0.17 ramp -> 0.07 steer) while a held key still
+	 *  small (0.1 s tap = 0.25 ramp -> 0.17 steer) while a held key still
 	 *  reaches full lock at KbSteerRampInSec. */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerCurveExp = 1.5f;
+	float KbSteerCurveExp = 1.3f;
 
 	/** Speed-sensitive keyboard lock: full lock up to this speed, then the
 	 *  cap falls as (V/speed)^2 - kinematic lateral accel v^2*delta/L stays
-	 *  roughly constant, so a held key means "corner at ~1 g" at any speed
-	 *  instead of "spin" at highway speed. 715 cm/s = 16 mph; cap (x the
-	 *  movement's own MaxSteer*Taper) -> 30 mph 0.28 (~9 deg road wheel),
-	 *  60 mph 0.07 (~1.8 deg), 80 mph 0.04 (~0.9 deg). */
+	 *  roughly constant, so a held key asks for ~2 g kinematic at any speed
+	 *  (tyres + understeer turn that into the ~1 g limit; a 1 g kinematic
+	 *  target under the physical grip model felt far too slow - Taylor
+	 *  2026-10-09) instead of "spin" at highway speed. 1000 cm/s = 22 mph;
+	 *  cap (x MaxSteer*Taper) -> 30 mph 0.56 (~18 deg road wheel),
+	 *  60 mph 0.14 (~3.5 deg), 80 mph 0.08 (~1.8 deg). */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerFullLockSpeedCmS = 715.0f;
+	float KbSteerFullLockSpeedCmS = 1000.0f;
 
 	/** Throttle/brake keys: seconds 0 -> full on press, full -> 0 on release. */
 	UPROPERTY(EditAnywhere, Category = "Input")
