@@ -75,9 +75,11 @@ Join:                 └──J───┘   road-edge blend (needs C and D)
 
 ### File ownership (so parallel tracks don't collide)
 
-Each track writes only its own files. Realistic assets go in
-`Content/OpenDrive/Realistic/<Track>/` and sources in
-`content_src/realistic/<track>/`. `Content/` isn't in git (it's rebuilt by
+Each track writes only its own files. A `_real` twin is saved **beside
+its stylized asset** (same folder; `ODVisualStyle::Pick` looks there),
+e.g. `/Game/OpenDrive/Materials/M_Road_real`. New Realistic-only helpers
+(textures, functions) go in `Content/OpenDrive/Realistic/<Track>/`.
+Sources go in `content_src/realistic/<track>/`. `Content/` isn't in git (it's rebuilt by
 the pipeline), so tracks collide only through source files and the import
 scripts.
 
