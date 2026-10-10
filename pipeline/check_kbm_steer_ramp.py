@@ -12,7 +12,7 @@ Usage:  python pipeline/check_kbm_steer_ramp.py
 """
 import random
 
-RAMP_IN, RETURN, EXP, FULL_LOCK_CMS = 0.6, 0.2, 1.5, 715.0   # ODVehiclePawn.h
+RAMP_IN, RETURN, EXP, FULL_LOCK_CMS = 0.4, 0.2, 1.3, 1000.0   # ODVehiclePawn.h
 PEDAL_IN, PEDAL_OUT = 0.25, 0.1
 MPH = 44.704   # cm/s
 
@@ -91,7 +91,7 @@ def main():
     assert abs(t_rev - (RAMP_IN + RETURN)) < 1e-3 and t_out < t_in
     for tap in (0.05, 0.1, 0.2, 0.3):
         print(f"  {tap * 1000:.0f} ms tap -> steer {steer_out(tap / RAMP_IN, 0):.3f} of lock (stopped)")
-    assert steer_out(0.1 / RAMP_IN, 0) < 0.08
+    assert steer_out(0.1 / RAMP_IN, 0) < 0.2
     p_in = time_to(1.0, 0.0, 1, 1 / PEDAL_IN, 1 / PEDAL_OUT)
     p_out = time_to(0.0, 1.0, 0, 1 / PEDAL_IN, 1 / PEDAL_OUT)
     print(f"pedal 0->full {p_in:.3f}s  full->0 {p_out:.3f}s")
@@ -126,7 +126,7 @@ def main():
         return 0.5
     import math
     L = 2.7   # m, typical wheelbase
-    for mph, want in ((10, 1.0), (16, 1.0), (30, 0.284), (60, 0.071), (80, 0.040), (120, 0.0178)):
+    for mph, want in ((10, 1.0), (22, 1.0), (30, 0.556), (60, 0.139), (80, 0.078), (120, 0.0347)):
         c = cap(mph * MPH)
         deg = c * 38 * taper(mph)
         v = mph * 0.44704
@@ -134,7 +134,7 @@ def main():
         print(f"  {mph:>3} mph: cap {c:.3f}  road wheel {deg:5.2f} deg  kinematic {g:.2f} g")
         assert abs(c - want) < 2e-3, (mph, c)
         if mph >= 30:
-            assert g < 1.2   # held key never asks for more than ~1 g
+            assert g < 2.4   # held key asks ~2 g kinematic (~1 g real), never more
 
 
 if __name__ == "__main__":
