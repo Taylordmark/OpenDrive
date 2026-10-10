@@ -82,11 +82,19 @@ if not coupe_chassis or not coupe_wheel:
 
 def make_def(name, display, chassis, wheel, props):
     path = f"{CAR_DIR}/{name}"
+    a = None
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         unreal.EditorAssetLibrary.delete_asset(path)
-    factory = unreal.DataAssetFactory()
-    factory.set_editor_property("data_asset_class", unreal.ODVehicleDef)
-    a = tools.create_asset(name, CAR_DIR, unreal.ODVehicleDef, factory)
+        if unreal.EditorAssetLibrary.does_asset_exist(path):
+            # still referenced (same fallback as import_car_meshes.py)
+            log(f"{name}: delete_asset did not remove it - updating in place instead")
+            a = unreal.load_asset(path)
+    if a is None:
+        factory = unreal.DataAssetFactory()
+        factory.set_editor_property("data_asset_class", unreal.ODVehicleDef)
+        a = tools.create_asset(name, CAR_DIR, unreal.ODVehicleDef, factory)
+    if a is None:
+        raise RuntimeError(f"could not create or load {path}")
     a.set_editor_property("display_name", display)
     a.set_editor_property("chassis_mesh", chassis)
     a.set_editor_property("wheel_mesh", wheel)
