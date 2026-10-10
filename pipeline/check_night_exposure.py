@@ -73,7 +73,9 @@ def check_windows(mid, tail):
         min(max((b["NIGHT_ELEV_HI"] - e) / b["NIGHT_ELEV_SPAN"], 0.0), 1.0))
     for hour in [h / 4 for h in range(96)]:
         assert abs(shader_night(elevation(hour)) - night_factor(elevation(hour))) < 1e-9, "window night = grade night"
-    lo, hi = b["LIT_NITS"] * b["LIT_JITTER_MIN"] / mid, b["LIT_NITS"] / mid
+    # dimmest = low jitter x the darkest interior-mapped room face (floor)
+    lo = b["LIT_NITS"] * b["LIT_JITTER_MIN"] * b.get("INTERIOR_SHADE_MIN", 1.0) / mid
+    hi = b["LIT_NITS"] / mid
     u0, u1 = b["WINDOW_MARGIN_U"]
     v0, v1 = b["WINDOW_MARGIN_V_UPPER"]
     glass_share = (u1 - u0) * (v1 - v0)

@@ -25,7 +25,12 @@ What's added over the stylized graph:
     normals on glass and trim. Glass is dark and glossy by day (sky
     reflections), some windows show drawn blinds. At night a hash-picked share
     of rooms lights up (LIT_MAX_FRACTION), switching on progressively as the
-    sun sets, warm/neutral/cool, LIT_NITS each.
+    sun sets, warm/neutral/cool, LIT_NITS each. Lit windows show the room
+    behind them: a parallax interior map (one Custom node, no textures) ray-
+    casts a bay x floor x ROOM_DEPTH_M box per window - back wall, side walls,
+    ceiling, floor shaded INTERIOR_SHADE_MIN..1, wall/floor tint and depth
+    hashed per window, luma renormalised so the exposure check stays exact.
+    Unlit windows stay glass.
   - roofs (M_BuildingRoof_real): shingle roofs pick RoofingTiles007 (stylized), RoofingTiles009
     (dark asphalt shingle) or CorrugatedSteel005 painted red/green/grey per
     building; flat roofs stay concrete, darker.
@@ -81,8 +86,9 @@ ROOF_MASK_THRESHOLD = 0.55
 NIGHT_ELEV_HI = 2.0      # AODDayNightController::NightFactor: smoothstep((2 - elev) / 8)
 NIGHT_ELEV_SPAN = 8.0
 LIT_MAX_FRACTION = 0.35  # share of windows lit at full night
-LIT_NITS = 4.0           # lit window luminance (cd/m^2) before the per-room 0.6-1.0 jitter
-LIT_JITTER_MIN = 0.6
+LIT_NITS = 4.0           # lit window luminance (cd/m^2) before the per-room 0.8-1.0 jitter
+LIT_JITTER_MIN = 0.8
+INTERIOR_SHADE_MIN = 0.75   # darkest room face (floor) seen through a lit window, x LIT_NITS
 
 # ---- look ------------------------------------------------------------------
 WINDOW_MARGIN_U = (0.15, 0.85)
@@ -112,6 +118,7 @@ PAINT_FRACTION = 0.7     # painted share of siding/plaster buildings (the rest k
 PAINTS = [(0.70, 0.70, 0.66), (0.62, 0.55, 0.40), (0.30, 0.36, 0.28), (0.28, 0.33, 0.38), (0.30, 0.07, 0.05)]
 LIT_COLORS = [(1.0, 0.66, 0.34), (1.0, 0.86, 0.66), (0.80, 0.88, 1.0)]   # warm, neutral, cool (TV)
 LIT_COLOR_SPLIT = (0.7, 0.9)
+ROOM_DEPTH_M = (3.0, 6.0)  # interior-mapped room box behind each lit window: bay x floor x depth
 ROOF_SPLIT = (0.4, 0.7)  # RoofingTiles007 | RoofingTiles009 | CorrugatedSteel005
 SHINGLE_009_GAIN = 6.0   # RoofingTiles009 is near-black (0.012) -> ~0.07, weathered asphalt
 STEEL_MEAN = 0.335
@@ -195,6 +202,18 @@ class G:
 
     def absv(self, a):
         return self.unary(unreal.MaterialExpressionAbs, a)
+
+    def custom(self, code, out_type, **ins):
+        n = self.node(unreal.MaterialExpressionCustom, code=code, output_type=out_type)
+        pins = []
+        for name in ins:
+            i = unreal.CustomInput()
+            i.set_editor_property("input_name", name)
+            pins.append(i)
+        n.set_editor_property("inputs", pins)
+        for name, src in ins.items():
+            self.req(MEL.connect_material_expressions(self.k(src), "", n, name), f"Custom.{name}")
+        return n
 
     def mask(self, a, r=False, gg=False, b=False, a_out=""):
         n = self.node(unreal.MaterialExpressionComponentMask, r=r, g=gg, b=b, a=False)
@@ -395,7 +414,16 @@ def build_facade(mat):
     lit = g.sat(g.mul(g.sub(g.mul(night, LIT_MAX_FRACTION), h_lit), 50.0))
     lit_col = g.select(h_col, [g.c3(luma_normalised(c)) for c in LIT_COLORS], list(LIT_COLOR_SPLIT))
     nits = g.mul(g.lerp(LIT_NITS * LIT_JITTER_MIN, LIT_NITS, h_var), g.mul(lit, glass))
-    emissive = g.mul(lit_col, nits)
+    # interior mapping: ray from the glass into a bay x floor x depth room box
+    # (tangent along +U, sign from screen derivatives so mirrored rings work)
+    room = g.custom(INTERIOR_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT3,
+                    Cell=g.append(bay_f, floor_f),
+                    D=g.node(unreal.MaterialExpressionCameraVectorWS),
+                    N=g.node(unreal.MaterialExpressionVertexNormalWS),
+                    P=g.node(unreal.MaterialExpressionWorldPosition, world_position_shader_offset=
+                             unreal.WorldPositionIncludedOffsets.WPT_CAMERA_RELATIVE),
+                    U=u, H=g.frac_hash(h_lit, 5.1, 0.11), Col=lit_col)
+    emissive = g.mul(room, nits)
 
     return {
         unreal.MaterialProperty.MP_BASE_COLOR: facade_a,
@@ -403,6 +431,30 @@ def build_facade(mat):
         unreal.MaterialProperty.MP_ROUGHNESS: facade_r,
         unreal.MaterialProperty.MP_EMISSIVE_COLOR: emissive,
     }
+
+
+INTERIOR_HLSL = f"""
+float3 T = cross(float3(0, 0, 1), N);
+T /= max(length(T), 1e-4);
+float s = dot(ddx(P), T) * ddx(U) + dot(ddy(P), T) * ddy(U);
+T *= s < 0 ? -1.0 : 1.0;
+float3 V = -D;
+float depth = lerp({ROOM_DEPTH_M[0]}, {ROOM_DEPTH_M[1]}, frac(H * 7.7));
+float3 d = float3(dot(V, T) / {BAY_WIDTH_M}, V.z / {FLOOR_HEIGHT_M}, max(-dot(V, N), 0.05) / depth);
+d += (abs(d) < 1e-4) * 1e-4;
+float3 p = float3(Cell, 0);
+float3 t3 = (step(0, d) - p) / d;
+float t = min(min(t3.x, t3.y), t3.z);
+float3 h = p + d * t;
+float3 wall = lerp(float3(0.95, 0.9, 0.8), float3(0.75, 0.85, 0.95), frac(H * 3.3));
+float3 c; float sh;
+if (t == t3.z) {{ c = wall; sh = 1.0 - 0.15 * (abs(h.x - 0.5) + abs(h.y - 0.5)); }}
+else if (t == t3.x) {{ c = wall; sh = 0.95 - 0.2 * h.z; }}
+else if (d.y > 0) {{ c = float3(1, 1, 1); sh = 1.0 - 0.1 * h.z; }}
+else {{ c = lerp(float3(0.8, 0.55, 0.35), float3(0.55, 0.55, 0.6), frac(H * 5.9)); sh = {INTERIOR_SHADE_MIN}; }}
+float3 rgb = Col * c;
+return rgb * (clamp(sh, {INTERIOR_SHADE_MIN}, 1.0) / max(dot(rgb, float3(0.2126, 0.7152, 0.0722)), 1e-3));
+"""
 
 
 def build_roof(mat):
