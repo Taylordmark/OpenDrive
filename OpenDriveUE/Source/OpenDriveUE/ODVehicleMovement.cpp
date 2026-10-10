@@ -505,12 +505,7 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 
 	// steering angle: raw input times a mild high-speed taper (the tires are
 	// the real limit; this only keeps 120 mph lane-keeping humane)
-	const float Mph = FMath::Abs(FwdSpeedCmS) * 0.0223694f;
-	const float Taper =
-		Mph <= 30.0f ? FMath::Lerp(1.0f, 0.85f, Mph / 30.0f)
-		: Mph <= 60.0f ? FMath::Lerp(0.85f, 0.65f, (Mph - 30.0f) / 30.0f)
-		: Mph <= 120.0f ? FMath::Lerp(0.65f, 0.5f, (Mph - 60.0f) / 60.0f)
-		: 0.5f;
+	const float Taper = SteerTaper(FwdSpeedCmS);
 
 	for (FODWheel& W : Wheels)
 	{
@@ -1355,4 +1350,13 @@ void UODVehicleMovement::TickAero(FODStepBody* Body)
 			Body->GetComponentTransform().TransformPosition(
 				FVector(RearX + Bal * (FrontX - RearX), 0.0f, ComLocalZ)));
 	}
+}
+
+float UODVehicleMovement::SteerTaper(float FwdSpeedCmS)
+{
+	const float Mph = FMath::Abs(FwdSpeedCmS) * 0.0223694f;
+	return Mph <= 30.0f ? FMath::Lerp(1.0f, 0.85f, Mph / 30.0f)
+		: Mph <= 60.0f ? FMath::Lerp(0.85f, 0.65f, (Mph - 30.0f) / 30.0f)
+		: Mph <= 120.0f ? FMath::Lerp(0.65f, 0.5f, (Mph - 60.0f) / 60.0f)
+		: 0.5f;
 }

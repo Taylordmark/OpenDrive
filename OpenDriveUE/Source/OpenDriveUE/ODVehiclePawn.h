@@ -104,41 +104,52 @@ public:
 	float LookRecenterSpeed = 4.0f;
 
 	// ---- Keyboard driving (2026-10-09 rework; Taylor: "the current inputs
-	// make it difficult to stay on the road"). ALL keyboard steer/pedal
-	// tuning lives here. The old ramp (2.5/s in, 5/s out, lock cap 0.52 at
-	// 60 mph) still reached ~13 deg of road wheel at 60 mph in 0.4 s - a
-	// 0.1 s tap was ~1.5 g kinematic. Now: a linear ramp state (time held)
-	// -> response curve -> speed cap. Exact piecewise integration
-	// (RampKeyAxis in the .cpp), so the trace is identical at any fps;
+	// make it difficult to stay on the road", then "still not turning enough -
+	// keyboard users fast-tap to set steering"). ALL keyboard steer/pedal
+	// tuning lives here. Usual sim/arcade practice: hold ramps in, the
+	// opposite key unwinds fast, but RELEASE decays slowly and exponentially,
+	// so a tap rhythm settles at a partial lock set by its duty cycle (a
+	// linear fast return cancelled every tap). The held-key lock at speed is
+	// what puts the front tyres at their peak: kinematic angle for
+	// KbSteerTargetG plus the tyre's own peak slip angle (~7 deg at any
+	// speed) - a pure 1/v^2 cap left ~3 deg at 60 mph. Exact piecewise
+	// integration (KbSteerStep in the .cpp), identical at any fps;
 	// pipeline/check_kbm_steer_ramp.py mirrors the math. Gamepad/wheel never
 	// touch any of these.
 
 	/** Seconds of holding A/D to go from center to the full (speed-capped) lock. */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerRampInSec = 0.4f;
+	float KbSteerRampInSec = 0.35f;
 
-	/** Seconds to return from full lock to center on release (and to unwind
-	 *  before ramping the other way on a reversal) - faster than ramp-in so
-	 *  corrections are quick. */
+	/** Seconds to unwind full lock to center when the OPPOSITE key is held
+	 *  (then it ramps out the other way at KbSteerRampInSec). */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerReturnSec = 0.2f;
+	float KbSteerCounterSec = 0.12f;
 
-	/** Response curve on the ramp: steer = ramp^Exp. >1 makes short taps
-	 *  small (0.1 s tap = 0.25 ramp -> 0.17 steer) while a held key still
-	 *  reaches full lock at KbSteerRampInSec. */
+	/** Release time constant (s): with no key the ramp decays as
+	 *  exp(-t/Tau). 8 Hz taps at 50% duty settle near 0.5 of the speed lock,
+	 *  30% duty near 0.2; full lock -> 5% in ~0.6 s with no key. */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerCurveExp = 1.3f;
+	float KbSteerReleaseTau = 0.2f;
 
-	/** Speed-sensitive keyboard lock: full lock up to this speed, then the
-	 *  cap falls as (V/speed)^2 - kinematic lateral accel v^2*delta/L stays
-	 *  roughly constant, so a held key asks for ~2 g kinematic at any speed
-	 *  (tyres + understeer turn that into the ~1 g limit; a 1 g kinematic
-	 *  target under the physical grip model felt far too slow - Taylor
-	 *  2026-10-09) instead of "spin" at highway speed. 1000 cm/s = 22 mph;
-	 *  cap (x MaxSteer*Taper) -> 30 mph 0.56 (~18 deg road wheel),
-	 *  60 mph 0.14 (~3.5 deg), 80 mph 0.08 (~1.8 deg). */
+	/** Response curve on the ramp: steer = ramp^Exp (>1 = finer near center). */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	float KbSteerFullLockSpeedCmS = 1000.0f;
+	float KbSteerCurveExp = 1.2f;
+
+	/** Held-key lock at speed, in road-wheel degrees:
+	 *  deg(L * TargetG*g / v^2) + SlipFrac * the car's PeakSlipAngleDeg,
+	 *  as a fraction of MaxSteer*SteerLockScale*Taper (clamped to 1).
+	 *  Defaults (9 deg peak slip, 38 deg lock): full lock below ~25 mph,
+	 *  30 mph ~0.62 (~20 deg), 60 mph ~0.42 (~10 deg), 120 mph ~0.40. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerTargetG = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerSlipFrac = 0.8f;
+
+	/** Wheelbase used for the kinematic term (input shaping only). */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	float KbSteerWheelbaseCm = 270.0f;
 
 	/** Throttle/brake keys: seconds 0 -> full on press, full -> 0 on release. */
 	UPROPERTY(EditAnywhere, Category = "Input")

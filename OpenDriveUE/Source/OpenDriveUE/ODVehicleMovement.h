@@ -579,6 +579,10 @@ public:
 	 *  the whole time. */
 	void PrimeSuspension();
 
+	/** High-speed steering taper (1 at rest -> 0.5 at 120 mph) applied to
+	 *  every steer input; the pawn's keyboard cap reads it too. */
+	static float SteerTaper(float FwdSpeedCmS);
+
 private:
 	// (re)build the 4-wheel array for a wheelbase/track/radius + drive layout;
 	// called from the constructor (the placeholder-coupe defaults) and from
