@@ -21,7 +21,11 @@ NIGHT_MIN_EV = 1.0        # AODDayNightController::NightMinEV
 EXPOSURE_BIAS = -1.0      # AODAtmosphereController grade AutoExposureBias
 MOON_LUX = 0.15           # AODDayNightController::MoonIntensity
 REAR_CONE, TAIL_LM, BRAKE_LM, REVERSE_LM = 70.0, 30.0, 200.0, 400.0   # rear spot
-STAR_PEAK = 3.0 * 4.15    # M_NightSky Brightness x brightest-star magnitude
+STAR_GAIN = 8.0           # STARS_HLSL "mag * 8.0 * core"
+STAR_PEAK = 3.0 * 4.5 * STAR_GAIN   # M_NightSky Brightness x brightest-star magnitude
+STAR_MEDIAN = 3.0 * (0.5 + 4.0 * 0.5 ** 6) * STAR_GAIN   # median star (mag = 0.5 + 4 u^6)
+STAR_CELLS, STAR_CORE = 150.0, 0.25          # STARS_HLSL cells per unit dir, core radius (cells)
+SCREEN_W, SCREEN_PCT, HFOV = 1920, 0.67, 90.0   # worst case: lowest render scale
 HEAD_GLOW, TAIL_GLOW, BRAKE_DAY = 300.0, 25.0, 400.0   # AODDayNightController lamp glow, nits
 DAY_EV = 12.0             # bright day exposure (Grade volume max)
 PRESETS = {"Golden Hour": 17.5, "Dusk": 18.3, "Night": 22.0, "Noon": 12.0}
@@ -50,6 +54,11 @@ def main():
     road10, road30 = float(head_road(10.0, 0.0)), float(head_road(30.0, 0.0))   # grazing, both lamps
     moonlit = lambert(MOON_LUX, 0.2) / mid
     star = STAR_PEAK / mid
+    # a star is smaller than a pixel: what shows is its linear-core energy (pi R^2 / 3)
+    # spread over the pixel's solid angle
+    pix_sr = (2 * math.tan(math.radians(HFOV / 2)) / (SCREEN_W * SCREEN_PCT)) ** 2
+    cover = min(1.0, math.pi * (STAR_CORE / STAR_CELLS) ** 2 / 3 / pix_sr)
+    median_star = STAR_MEDIAN * cover / mid
     rear_cd = lambda lm: lm / (2 * math.pi * (1 - math.cos(math.radians(REAR_CONE))))
     behind = {n: lambert(rear_cd(lm) / 3 ** 2, 0.1) / mid
               for n, lm in (("tail", TAIL_LM), ("brake", BRAKE_LM), ("reverse", REVERSE_LM))}
@@ -59,7 +68,7 @@ def main():
     print(f"lamps x mid grey: head {HEAD_GLOW / mid:.0f}  tail {tail:.0f}  brake night {brake_night:.0f}  "
           f"brake day {brake_day:.2f}")
     print(f"night mid grey {mid:.2f} nits | x mid grey: road@10m {road10:.2f}  road@30m {road30:.3f}  "
-          f"moonlit grass {moonlit:.3f}  brightest star {star:.0f}")
+          f"moonlit grass {moonlit:.3f}  brightest star {star:.0f}  median star on screen {median_star:.2f}")
     for name, hour in PRESETS.items():
         e = elevation(hour)
         print(f"{name:12s} {hour:5.1f} h  sun {e:+6.1f} deg  night {night_factor(e):.2f}")
@@ -71,6 +80,7 @@ def main():
     assert road30 > 5 * moonlit, "headlights clearly beat the moon even at 30 m"
     assert 0.005 < moonlit < 0.05, "moonlit ground: very faint, not black, not lit"
     assert star > 10.0, "bright stars read white"
+    assert median_star > 4.0, "a typical star reads clearly at low render scale (1x / 0.5 was invisible in game)"
     assert 10.0 < tail < 200.0 and brake_night < 500.0, "tails glow red at night without flooding bloom"
     assert brake_day > 0.1, "brake lights still read in daylight"
     assert behind["tail"] < 0.1 < behind["brake"] < behind["reverse"] < 1.5, "faint tail wash, visible brake and reverse"

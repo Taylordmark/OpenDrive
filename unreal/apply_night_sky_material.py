@@ -2,7 +2,7 @@
 moon"): builds M_NightSky, the star field AODDayNightController draws on a
 500 km inverted sphere that follows the camera. Unlit, additive, two-sided;
 a Custom node hashes the view direction into 3D cells and lights a small dot
-in ~0.4% of them, most faint and a few bright, tinted warm to cool.
+in ~1.5% of them, most faint and a few bright, tinted warm to cool.
 
 Fogging stays on (per pixel) with cloud fogging, so height fog, weather fog
 and the cloud deck dim or hide the stars instead of them showing through.
@@ -22,16 +22,16 @@ MAT_NAME = "M_NightSky"
 
 STARS_HLSL = """
 float3 d = -normalize(CamVec);
-float3 p = d * 300.0;
+float3 p = d * 150.0;
 float3 c = floor(p);
 float h = frac(sin(dot(c, float3(127.1, 311.7, 74.7))) * 43758.5453);
-if (h < 0.996) return float3(0, 0, 0);
+if (h < 0.985) return float3(0, 0, 0);
 float3 o = (frac(h * float3(13.13, 71.71, 37.37)) - 0.5) * 0.5;
 float r = length(frac(p) - 0.5 - o);
-float core = saturate(1.0 - r / 0.3);
-float mag = 0.15 + 4.0 * pow(frac(h * 911.7), 6.0);
+float core = saturate(1.0 - r / 0.25);
+float mag = 0.5 + 4.0 * pow(frac(h * 911.7), 6.0);
 float3 tint = lerp(float3(1.0, 0.85, 0.7), float3(0.75, 0.85, 1.0), frac(h * 53.3));
-return tint * mag * core * core;
+return tint * mag * 8.0 * core;   // 8x, linear core: a diag pass at 20x proved 1x invisible in game
 """
 
 
