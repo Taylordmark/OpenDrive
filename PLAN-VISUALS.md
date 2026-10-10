@@ -182,7 +182,7 @@ fewer than seven run at once.
 | F | trees for 6 of 7 slots + flora materials | d321c3c |
 | G | first pass: `M_BuildingFacade_real` (paint, trim, grime, glass, night windows, 3 roof types) | see Track G |
 | H | first pass: `_real` W-beam and Jersey, W6x9 posts, delineators | see Track H |
-| J | first pass (shader shoulder blend, no RVT); agent still working on it | 5cbf1ee |
+| J | shader shoulder blend, no RVT; junction pad rims + aprons fringe too (UV3.y edge code from ODRoadManager, Realistic only; `check_pad_edge.py`) | 5cbf1ee, this commit |
 | K | first pass: tall grass, weeds, low shrubs, pebbles on the grass cells | see Track K |
 
 `main` merged in with the menu work (cbbce1f). Known gaps:

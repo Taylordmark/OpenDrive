@@ -45,15 +45,20 @@ uint16 ReadU16LE(const uint8* P)
 // junction-pad verts appended after them (u0 strictly inside 0..1) get 0.
 // Mirrored in pipeline/check_puddle_sag.py.
 constexpr int32 PuddleSagHalfWindow = 4;   // +-20 m at 5 m stations
+int32 RibbonVertCount(const TArray<float>& Uvs, int32 VCount)
+{
+	int32 N = 0;
+	while (N < VCount && !(Uvs[N * 2] > 1e-3f && Uvs[N * 2] < 1.0f - 1e-3f))
+	{
+		++N;
+	}
+	return N;
+}
 TArray<float> RoadSagCm(const TArray<float>& Verts, const TArray<float>& Uvs, int32 VCount)
 {
 	TArray<float> Sag;
 	Sag.Init(0.0f, VCount);
-	int32 NRibbon = 0;
-	while (NRibbon < VCount && !(Uvs[NRibbon * 2] > 1e-3f && Uvs[NRibbon * 2] < 1.0f - 1e-3f))
-	{
-		++NRibbon;
-	}
+	const int32 NRibbon = RibbonVertCount(Uvs, VCount);
 	const int32 NSt = NRibbon / 7;
 	TArray<float> Z;
 	Z.SetNumUninitialized(NSt);
@@ -76,6 +81,406 @@ TArray<float> RoadSagCm(const TArray<float>& Verts, const TArray<float>& Uvs, in
 		}
 	}
 	return Sag;
+}
+
+// Junction road-edge signal (PLAN-VISUALS join J, Realistic only), UV3.y per
+// triangle corner. M_Road*_real's fringe turns the outer decimetres of
+// pavement into the terrain's gravel shoulder; ribbons get that from u0/u1,
+// but a junction pad sits at |meterPos| <= 2 m and so had a hard edge.
+//   pad corner:    1 + metres to the pad's visible edge (uncovered rim), 0 on
+//                  that rim and on the apron (always gravel, like the
+//                  ribbon's wrap lip); exact across each rim triangle
+//   ribbon vertex: min(s, cap) - cap, s = metres along the road from the
+//                  nearest pad-rim crossing of its pavement edge, negative
+//                  inside a pad, so a ribbon end tucked under a pad drops its
+//                  own fringe inside the junction (0 = far from any pad)
+// A rim vertex inside another road surface (the ribbon it tucks under, an
+// overlapping fill disc) is covered: no fringe there. Pads are found by their
+// apron, an edge PAD_APRON_OUT_M out and PAD_APRON_DROP_M down from the rim
+// (pipeline/experimental_junction_pads.py). Sees this tile only; a surface
+// from a neighbouring tile is missed (a ribbon over a pad sits 1.5 cm above
+// it anyway). Mirrored in pipeline/checks/check_pad_edge.py. The cap is
+// longer than any station gap so the ribbon code stays linear (exact)
+// through a crossing; UV3 is full-precision float (MeshRenderBufferSet).
+constexpr float EdgeCodeCapM = 1000.0f;
+constexpr float PadApronOutCm = 250.0f;
+constexpr float PadApronDropCm = 100.0f;
+constexpr float PadApronTolCm = 2.0f;
+constexpr float EdgeCoverMarginCm = 5.0f;   // rim vertex this far inside another surface = covered
+constexpr float EdgeSameLevelCm = 150.0f;   // surfaces further apart in Z are other levels
+constexpr float EdgeGridCm = 1000.0f;
+
+struct FEdgeTri
+{
+	FVector3f A, B, C;
+	FVector2f Lo, Hi;
+	bool bPad = false;
+};
+
+// P inside T's XY footprint by more than Margin cm (either winding), with
+// T's surface at P within EdgeSameLevelCm of P.Z.
+bool EdgeInTri(const FEdgeTri& T, const FVector3f& P, float Margin)
+{
+	if (P.X < T.Lo.X || P.X > T.Hi.X || P.Y < T.Lo.Y || P.Y > T.Hi.Y)
+	{
+		return false;
+	}
+	auto Side = [&P](const FVector3f& U, const FVector3f& V)
+	{
+		const FVector2f N(V.Y - U.Y, U.X - V.X);
+		const float L = N.Size();
+		return L > 1e-3f ? ((P.X - U.X) * N.X + (P.Y - U.Y) * N.Y) / L : 0.0f;
+	};
+	const float S0 = Side(T.A, T.B), S1 = Side(T.B, T.C), S2 = Side(T.C, T.A);
+	if (!((S0 > Margin && S1 > Margin && S2 > Margin) || (S0 < -Margin && S1 < -Margin && S2 < -Margin)))
+	{
+		return false;
+	}
+	const FVector2f E1(T.B.X - T.A.X, T.B.Y - T.A.Y), E2(T.C.X - T.A.X, T.C.Y - T.A.Y), Q(P.X - T.A.X, P.Y - T.A.Y);
+	const float D = E1.X * E2.Y - E2.X * E1.Y;
+	if (FMath::Abs(D) < 1e-3f)
+	{
+		return false;
+	}
+	const float L1 = (Q.X * E2.Y - E2.X * Q.Y) / D, L2 = (E1.X * Q.Y - Q.X * E1.Y) / D;
+	return FMath::Abs(T.A.Z + L1 * (T.B.Z - T.A.Z) + L2 * (T.C.Z - T.A.Z) - P.Z) < EdgeSameLevelCm;
+}
+
+// bRunA/bRunB: the edge runs on as its line past that end (affine, so exact
+// when interpolated over a triangle)
+float EdgeSegDistM(const FVector3f& P, const FVector3f& A, const FVector3f& B, bool bRunA = false, bool bRunB = false)
+{
+	const FVector2f AB(B.X - A.X, B.Y - A.Y), AP(P.X - A.X, P.Y - A.Y);
+	const float T0 = (AP | AB) / FMath::Max(AB | AB, 1e-6f);
+	const float T = FMath::Clamp(T0, bRunA ? -UE_BIG_NUMBER : 0.0f, bRunB ? UE_BIG_NUMBER : 1.0f);
+	return (AP - AB * T).Size() / 100.0f;
+}
+
+void ComputeEdgeCodes(TArray<FParsedChunk>& Chunks)
+{
+	struct FChunkPads
+	{
+		int32 NRib = 0;
+		TArray<bool> bRim, bApron, bCovered;
+		TArray<FIntPoint> Segs;   // uncovered rim edges
+	};
+	TArray<FChunkPads> Info;
+	Info.SetNum(Chunks.Num());
+	TArray<FEdgeTri> Tris;
+	auto Vert = [](const FParsedChunk& C, int32 V)
+	{
+		return FVector3f(C.Verts[V * 3], C.Verts[V * 3 + 1], C.Verts[V * 3 + 2]);
+	};
+	auto AddTri = [&](const FParsedChunk& C, uint32 I0, uint32 I1, uint32 I2, bool bPad)
+	{
+		FEdgeTri T;
+		T.A = Vert(C, I0);
+		T.B = Vert(C, I1);
+		T.C = Vert(C, I2);
+		T.Lo = FVector2f(FMath::Min3(T.A.X, T.B.X, T.C.X), FMath::Min3(T.A.Y, T.B.Y, T.C.Y));
+		T.Hi = FVector2f(FMath::Max3(T.A.X, T.B.X, T.C.X), FMath::Max3(T.A.Y, T.B.Y, T.C.Y));
+		T.bPad = bPad;
+		Tris.Add(T);
+	};
+
+	// pads (rim/apron) and the road surfaces: pad tops + ribbon pavement
+	bool bAnyPad = false;
+	for (int32 c = 0; c < Chunks.Num(); ++c)
+	{
+		const FParsedChunk& C = Chunks[c];
+		FChunkPads& I = Info[c];
+		const int32 VCount = C.Verts.Num() / 3;
+		I.NRib = RibbonVertCount(C.Uvs, VCount);
+		I.bRim.Init(false, VCount);
+		I.bApron.Init(false, VCount);
+		I.bCovered.Init(false, VCount);
+		for (int32 t = 0; t * 3 < C.Tris.Num(); ++t)
+		{
+			for (int32 k = 0; k < 3; ++k)
+			{
+				const int32 A = C.Tris[t * 3 + k], B = C.Tris[t * 3 + (k + 1) % 3];
+				if (A < I.NRib || B < I.NRib || A >= VCount || B >= VCount)
+				{
+					continue;
+				}
+				const float Dxy = FVector2f(C.Verts[B * 3] - C.Verts[A * 3], C.Verts[B * 3 + 1] - C.Verts[A * 3 + 1]).Size();
+				const float Dz = C.Verts[B * 3 + 2] - C.Verts[A * 3 + 2];
+				if (FMath::Abs(Dxy - PadApronOutCm) < PadApronTolCm && FMath::Abs(FMath::Abs(Dz) - PadApronDropCm) < PadApronTolCm)
+				{
+					I.bRim[Dz < 0.0f ? A : B] = true;
+					I.bApron[Dz < 0.0f ? B : A] = true;
+					bAnyPad = true;
+				}
+			}
+		}
+		for (int32 t = 0; t * 3 < C.Tris.Num(); ++t)
+		{
+			const uint32 I0 = C.Tris[t * 3], I1 = C.Tris[t * 3 + 1], I2 = C.Tris[t * 3 + 2];
+			if ((int32)FMath::Max3(I0, I1, I2) >= VCount)
+			{
+				continue;
+			}
+			if ((int32)FMath::Min3(I0, I1, I2) >= I.NRib)
+			{
+				if (!I.bApron[I0] && !I.bApron[I1] && !I.bApron[I2])
+				{
+					AddTri(C, I0, I1, I2, true);
+				}
+			}
+			else if ((int32)FMath::Max3(I0, I1, I2) < I.NRib
+				&& (I0 % 7 == 2 || I0 % 7 == 3) && (I1 % 7 == 2 || I1 % 7 == 3) && (I2 % 7 == 2 || I2 % 7 == 3))
+			{
+				AddTri(C, I0, I1, I2, false);
+			}
+		}
+	}
+	if (!bAnyPad)
+	{
+		return;
+	}
+	TMap<FIntPoint, TArray<int32>> Grid;
+	for (int32 i = 0; i < Tris.Num(); ++i)
+	{
+		for (int32 gx = FMath::FloorToInt(Tris[i].Lo.X / EdgeGridCm); gx <= FMath::FloorToInt(Tris[i].Hi.X / EdgeGridCm); ++gx)
+		{
+			for (int32 gy = FMath::FloorToInt(Tris[i].Lo.Y / EdgeGridCm); gy <= FMath::FloorToInt(Tris[i].Hi.Y / EdgeGridCm); ++gy)
+			{
+				Grid.FindOrAdd(FIntPoint(gx, gy)).Add(i);
+			}
+		}
+	}
+	auto Inside = [&](const FVector3f& P, float Margin, bool bPadsOnly)
+	{
+		if (const TArray<int32>* Cell = Grid.Find(FIntPoint(FMath::FloorToInt(P.X / EdgeGridCm), FMath::FloorToInt(P.Y / EdgeGridCm))))
+		{
+			for (int32 i : *Cell)
+			{
+				if ((Tris[i].bPad || !bPadsOnly) && EdgeInTri(Tris[i], P, Margin))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
+	for (int32 c = 0; c < Chunks.Num(); ++c)
+	{
+		FParsedChunk& C = Chunks[c];
+		FChunkPads& I = Info[c];
+		const int32 VCount = C.Verts.Num() / 3;
+		const int32 TCount = C.Tris.Num() / 3;
+		TArray<float> Code;
+		Code.Init(0.0f, VCount);
+		bool bAny = false;
+
+		// pad: covered rim, uncovered rim edges, metres to the nearest one
+		for (int32 v = I.NRib; v < VCount; ++v)
+		{
+			I.bCovered[v] = I.bRim[v] && Inside(Vert(C, v), EdgeCoverMarginCm, false);
+		}
+		auto Open = [&I](int32 V) { return I.bRim[V] && !I.bCovered[V]; };
+		for (int32 t = 0; t < TCount; ++t)
+		{
+			for (int32 k = 0; k < 3; ++k)
+			{
+				const int32 A = C.Tris[t * 3 + k], B = C.Tris[t * 3 + (k + 1) % 3], X = C.Tris[t * 3 + (k + 2) % 3];
+				if (A < VCount && B < VCount && X < VCount && FMath::Min3(A, B, X) >= I.NRib
+					&& !I.bApron[X] && Open(A) && Open(B))
+				{
+					I.Segs.Add(FIntPoint(A, B));
+				}
+			}
+		}
+		TArray<int32> Near;   // each pad vertex's nearest uncovered rim edge
+		Near.Init(INDEX_NONE, VCount);
+		for (int32 v = I.NRib; v < VCount; ++v)
+		{
+			float E = EdgeCodeCapM;
+			for (int32 i = 0; i < I.Segs.Num(); ++i)
+			{
+				const float D = EdgeSegDistM(Vert(C, v), Vert(C, I.Segs[i].X), Vert(C, I.Segs[i].Y));
+				if (D < E)
+				{
+					E = D;
+					Near[v] = i;
+				}
+			}
+			Code[v] = I.bApron[v] ? 1.0f : 1.0f + E;
+			bAny = true;
+		}
+
+		// ribbon: where each pavement edge crosses into a pad, along the road
+		const int32 NSt = I.NRib / 7;
+		if (NSt >= 2 && I.NRib % 7 == 0)
+		{
+			for (int32 Col = 2; Col <= 3; ++Col)
+			{
+				TArray<bool> In;
+				TArray<float> Len, Cross;
+				TArray<int32> Gap;
+				In.SetNum(NSt);
+				Len.SetNum(NSt);
+				for (int32 s = 0; s < NSt; ++s)
+				{
+					In[s] = Inside(Vert(C, s * 7 + Col), 0.0f, true);
+					Len[s] = s == 0 ? 0.0f
+						: Len[s - 1] + FVector3f::Dist(Vert(C, s * 7 + Col), Vert(C, (s - 1) * 7 + Col)) / 100.0f;
+				}
+				for (int32 s = 0; s + 1 < NSt; ++s)
+				{
+					if (In[s] != In[s + 1])
+					{
+						const FVector3f P0 = Vert(C, s * 7 + Col), P1 = Vert(C, (s + 1) * 7 + Col);
+						float Lo = 0.0f, Hi = 1.0f;   // In[s] holds at Lo, In[s + 1] at Hi
+						for (int32 It = 0; It < 12; ++It)
+						{
+							const float Mid = 0.5f * (Lo + Hi);
+							(Inside(FMath::Lerp(P0, P1, Mid), 0.0f, true) == In[s] ? Lo : Hi) = Mid;
+						}
+						Cross.Add(FMath::Lerp(Len[s], Len[s + 1], 0.5f * (Lo + Hi)));
+						Gap.Add(s);
+					}
+				}
+				// pave column + the lip/underside columns on its side
+				// (under-L, lip-L, pave-L, pave-R, lip-R, under-R, under-L)
+				// an inside station between two crossings takes the further one of
+				// its own gaps: the ribbon fringe then never reaches into the pad
+				// (it stops short outside instead)
+				static const int32 SideCols[2][4] = {{0, 1, 2, 6}, {3, 4, 5, 5}};
+				for (int32 s = 0; s < NSt; ++s)
+				{
+					float D = EdgeCodeCapM;
+					for (float X : Cross)
+					{
+						D = FMath::Min(D, FMath::Abs(Len[s] - X));
+					}
+					for (int32 x = 0; x < Cross.Num(); ++x)
+					{
+						if (In[s] && (Gap[x] == s || Gap[x] + 1 == s))
+						{
+							D = FMath::Max(D, FMath::Abs(Len[s] - Cross[x]));
+						}
+					}
+					const float Sc = (In[s] ? -D : D) - EdgeCodeCapM;
+					bAny |= Sc != 0.0f;
+					for (int32 k : SideCols[Col - 2])
+					{
+						Code[s * 7 + k] = Sc;
+					}
+				}
+			}
+		}
+		if (!bAny)
+		{
+			continue;
+		}
+
+		// per corner: apron triangles all gravel. A rim triangle measures to its
+		// own edge, run on as the line past an end where the visible rim carries
+		// on (exact under interpolation). Any other keeps its corners' nearest-
+		// edge distances unless those lie on different rim chains (overlapping
+		// pads; min-of-distances interpolates low there), then it measures to the
+		// one closest to its centre (convex, so never low: no fringe leak inward)
+		TArray<int32> NSeg, Chain;
+		NSeg.Init(0, VCount);
+		Chain.SetNumUninitialized(VCount);
+		for (int32 v = 0; v < VCount; ++v)
+		{
+			Chain[v] = v;
+		}
+		auto Root = [&Chain](int32 V)
+		{
+			while (Chain[V] != V)
+			{
+				V = Chain[V] = Chain[Chain[V]];
+			}
+			return V;
+		};
+		for (const FIntPoint& S : I.Segs)
+		{
+			++NSeg[S.X];
+			++NSeg[S.Y];
+			Chain[Root(S.X)] = Root(S.Y);
+		}
+		C.EdgeCode.SetNumUninitialized(TCount * 3);
+		for (int32 t = 0; t < TCount; ++t)
+		{
+			const int32 V3[3] = {(int32)C.Tris[t * 3], (int32)C.Tris[t * 3 + 1], (int32)C.Tris[t * 3 + 2]};
+			bool bPadTri = true;
+			for (int32 k = 0; k < 3; ++k)
+			{
+				C.EdgeCode[t * 3 + k] = V3[k] < VCount ? Code[V3[k]] : 0.0f;
+				bPadTri &= V3[k] >= I.NRib && V3[k] < VCount;
+			}
+			if (!bPadTri)
+			{
+				continue;
+			}
+			bool bApronTri = false, bRimOrApron = true;
+			for (int32 V : V3)
+			{
+				bApronTri |= I.bApron[V];
+				bRimOrApron &= I.bApron[V] || I.bRim[V];
+			}
+			if (bApronTri)
+			{
+				if (bRimOrApron)
+				{
+					C.EdgeCode[t * 3] = C.EdgeCode[t * 3 + 1] = C.EdgeCode[t * 3 + 2] = 1.0f;
+				}
+				continue;
+			}
+			int32 A = INDEX_NONE, B = INDEX_NONE;
+			for (int32 k = 0; k < 3 && A == INDEX_NONE; ++k)
+			{
+				if (Open(V3[k]) && Open(V3[(k + 1) % 3]))
+				{
+					A = V3[k];
+					B = V3[(k + 1) % 3];
+				}
+			}
+			if (A == INDEX_NONE)
+			{
+				const int32 N0 = Near[V3[0]], N1 = Near[V3[1]], N2 = Near[V3[2]];
+				int32 R = INDEX_NONE;
+				bool bSplit = false;
+				for (int32 Ni : {N0, N1, N2})
+				{
+					if (Ni != INDEX_NONE)
+					{
+						const int32 Ri = Root(I.Segs[Ni].X);
+						bSplit |= R != INDEX_NONE && Ri != R;
+						R = Ri;
+					}
+				}
+				if (!bSplit)
+				{
+					continue;
+				}
+				const FVector3f Ctr = (Vert(C, V3[0]) + Vert(C, V3[1]) + Vert(C, V3[2])) / 3.0f;
+				float Best = UE_BIG_NUMBER;
+				for (int32 Ni : {N0, N1, N2})
+				{
+					if (Ni != INDEX_NONE)
+					{
+						const float D = EdgeSegDistM(Ctr, Vert(C, I.Segs[Ni].X), Vert(C, I.Segs[Ni].Y));
+						if (D < Best)
+						{
+							Best = D;
+							A = I.Segs[Ni].X;
+							B = I.Segs[Ni].Y;
+						}
+					}
+				}
+			}
+			for (int32 j = 0; j < 3; ++j)
+			{
+				C.EdgeCode[t * 3 + j] = 1.0f + FMath::Min(EdgeCodeCapM,
+					EdgeSegDistM(Vert(C, V3[j]), Vert(C, A), Vert(C, B), NSeg[A] > 1, NSeg[B] > 1));
+			}
+		}
+	}
 }
 
 bool ReadPascalUtf8(const uint8*& Cur, const uint8* End, FString& Out)
@@ -969,7 +1374,8 @@ void AODRoadManager::RequestTileLoad(const FIntPoint& Key)
 	// touch Tiles/PendingTiles/MissingTiles or any other actor state, which
 	// isn't synchronized for cross-thread access.
 	TWeakObjectPtr<AODRoadManager> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, PathV2, PathV3]()
+	const bool bEdgeCodes = ODVisualStyle::IsRealistic();   // read here: GConfig is game-thread
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, PathV2, PathV3, bEdgeCodes]()
 	{
 		FParsedRoadTile Parsed;
 		// ODR3 preferred when present (worn-asphalt/lane-marking data) -
@@ -980,6 +1386,10 @@ void AODRoadManager::RequestTileLoad(const FIntPoint& Key)
 		if (!bOk)
 		{
 			bOk = ParseRoadTileFileV2(PathV2, Parsed);
+		}
+		if (bOk && bEdgeCodes)
+		{
+			ComputeEdgeCodes(Parsed.Chunks);
 		}
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
@@ -1193,13 +1603,15 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 		// Always 3 layers (2026-10-06): M_Road reads TexCoord[1]/[2] and must
 		// see zeros on a non-V3 chunk, not a clamped-to-UV0 read. UV2 = snow
-		// berm direction, see BermDir below. UV3.x = puddle sag (RoadSagCm).
+		// berm direction, see BermDir below. UV3.x = puddle sag (RoadSagCm),
+		// UV3.y = Realistic edge code (Chunk.EdgeCode, else 0).
 		Mesh.Attributes()->SetNumUVLayers(4);
 		FDynamicMeshUVOverlay* UV1 = Mesh.Attributes()->GetUVLayer(1);
 		FDynamicMeshUVOverlay* UV2 = Mesh.Attributes()->GetUVLayer(2);
 		FDynamicMeshUVOverlay* UV3 = Mesh.Attributes()->GetUVLayer(3);
 		const TArray<float> SagCm = RoadSagCm(Chunk.Verts, Chunk.Uvs, (int32)VCount);
 		TArray<int32> Uv3Ids; Uv3Ids.SetNumUninitialized(VCount);
+		TMap<TPair<uint32, float>, int32> EdgeIds;   // (vertex, EdgeCode) -> UV3 element
 		for (uint32 v = 0; v < VCount; ++v)
 		{
 			Uv3Ids[v] = UV3->AppendElement(FVector2f(SagCm[v], 0.0f));
@@ -1310,7 +1722,22 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
 				UV1->SetTriangle(Tid, FIndex3i(Uv1Ids[I0], Uv1Ids[I1], Uv1Ids[I2]));
 				UV2->SetTriangle(Tid, FIndex3i(Uv2Ids[I0], Uv2Ids[I1], Uv2Ids[I2]));
-				UV3->SetTriangle(Tid, FIndex3i(Uv3Ids[I0], Uv3Ids[I1], Uv3Ids[I2]));
+				FIndex3i E3(Uv3Ids[I0], Uv3Ids[I1], Uv3Ids[I2]);
+				if (Chunk.EdgeCode.Num() == (int32)TCount * 3)
+				{
+					for (int32 k = 0; k < 3; ++k)
+					{
+						const float Code = Chunk.EdgeCode[t * 3 + k];
+						if (Code != 0.0f)
+						{
+							const uint32 V = Chunk.Tris[t * 3 + k];
+							const TPair<uint32, float> Id(V, Code);
+							const int32* Found = EdgeIds.Find(Id);
+							E3[k] = Found ? *Found : EdgeIds.Add(Id, UV3->AppendElement(FVector2f(SagCm[V], Code)));
+						}
+					}
+				}
+				UV3->SetTriangle(Tid, E3);
 				if (Colors)
 				{
 					Colors->SetTriangle(Tid, FIndex3i(ColorIds[I0], ColorIds[I1], ColorIds[I2]));

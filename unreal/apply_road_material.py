@@ -231,9 +231,18 @@ RealWetFlatten = 0.35           # normal flattened toward up at Wetness 1
 # road (RealEdgeCellM) and crumbles (RealEdgeCrumble*); the wrap lip (no
 # pavement left, d_in 0) is always fringe, so the slab side reads as gravel
 # instead of an asphalt rim. A grime band darkens the outer RealEdgeGrimeM.
-# Junction pads keep |meterPos| <= 2 m, so d_in >= 2.5 m: never touched.
+# Junction pads keep |meterPos| <= 2 m, so d_in >= 2.5 m: never touched by
+# that. Their edge comes from UV3.y instead (ODRoadManager.cpp's
+# ComputeEdgeCodes, Realistic only; the stylized graph reads UV3.x only):
+# >= 1 on a pad = 1 + metres to its visible rim (apron 0), <= 0 on a ribbon =
+# metres along the road from a pad-rim crossing minus the cap, negative inside
+# the pad - the ribbon's tucked-in end keeps no fringe inside the junction.
+# Pads sample the fringe noise in world XY (their UVs fold, see
+# experimental_junction_pads._pad_uv). 0 everywhere (Stylized mesh, Dragon OBJ)
+# = no pads, the plain ribbon fringe.
 # pipeline/checks/check_terrain_real.py mirrors this and checks the
-# terrain-matching constants against apply_terrain_real_materials.py.
+# terrain-matching constants against apply_terrain_real_materials.py;
+# pipeline/checks/check_pad_edge.py checks the pad/junction side on real tiles.
 RealEdgeSet = ("Gravel040", "/Game/OpenDrive/Realistic/Terrain")   # = terrain LAYERS["shoulder"]
 RealEdgeTileCm = 300.0
 RealEdgeTint = (1.05, 0.98, 0.9)                                   # = terrain SHOULDER_TINT
@@ -253,6 +262,9 @@ RealEdgeGrimeM = 0.7
 RealEdgeDarken = 0.82
 RealEdgeGrimeRough = 0.06
 RealEdgeRough = 0.9             # = road_edge_blend's shoulder roughness
+RealEdgeCodeCapM = 1000.0       # = ODRoadManager.cpp EdgeCodeCapM
+RealPadRibFadeM = 0.3           # ribbon fringe fades out over this at a pad rim
+RealEdgeOffM = 100.0            # d_in that means "no edge here"
 
 
 def log(msg):
@@ -707,10 +719,25 @@ if REAL:   # road-edge blend into the terrain shoulder (see RealEdge*)
         bot = g.lerp(h(g.add(i, g.const2(0.0, 1.0))), h(g.add(i, g.const2(1.0, 1.0))), fx)
         return g.lerp(top, bot, g.mask(f, gg=True))
 
-    d_in = g.maxv(g.sub(half_width_eff, abs_meter_pos), g.const(0.0))   # m of pavement left to the edge
-    crumble = value_noise2(g.mul(meter_pos, g.const(1.0 / RealEdgeCrumbleCellM)),
-                           g.mul(v0, g.const(1.0 / RealEdgeCrumbleCellM)))
-    edge_w = g.add(g.lerp(g.const(RealEdgeMinM), g.const(RealEdgeMaxM), road_noise(RealEdgeCellM, 83.0)),
+    edge_code = g.mask(g.tex_coord(3), gg=True)   # junction edge code (see RealEdgeCodeCapM)
+    on_pad = g.clamp01(g.mul(g.sub(edge_code, g.const(0.5)), g.const(1000.0)))
+    rib_keep = g.clamp01(g.add(g.mul(g.add(edge_code, g.const(RealEdgeCodeCapM)), g.const(1.0 / RealPadRibFadeM)),
+                               g.const(0.5)))
+    d_rib = g.add(g.maxv(g.sub(half_width_eff, abs_meter_pos), g.const(0.0)),   # m of pavement left to the edge
+                  g.mul(g.sub(g.const(1.0), rib_keep), g.const(RealEdgeOffM)))
+    d_in = g.minv(d_rib, g.lerp(g.const(RealEdgeOffM), g.sub(edge_code, g.const(1.0)), on_pad))
+
+    def edge_noise(cell_m, seed_mul):
+        """road_noise on a ribbon; on a pad, world XY wrapped like world_noise."""
+        w = g.mul(g.fracv(g.mul(wxy, g.const(1.0 / (cell_m * 100.0 * 97.0)))), g.const(97.0))
+        y = g.mul(v0, g.const(1.0 / cell_m))
+        if seed_mul:
+            y = g.add(y, g.mul(wear_seed, g.const(seed_mul)))
+        return value_noise2(g.lerp(g.mul(meter_pos, g.const(1.0 / cell_m)), g.mask(w, r=True), on_pad),
+                            g.lerp(y, g.mask(w, gg=True), on_pad))
+
+    crumble = edge_noise(RealEdgeCrumbleCellM, 0.0)
+    edge_w = g.add(g.lerp(g.const(RealEdgeMinM), g.const(RealEdgeMaxM), edge_noise(RealEdgeCellM, 83.0)),
                    g.mul(g.sub(crumble, g.const(0.5)), g.const(2.0 * RealEdgeCrumbleM)))
     edge_soft = g.lerp(g.const(RealEdgeFarSoftM), g.const(RealEdgeSoftM), detail_fade)
     fringe = g.maxv(g.clamp01(g.div(g.sub(edge_w, d_in), edge_soft)),

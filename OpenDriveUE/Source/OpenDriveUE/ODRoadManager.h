@@ -50,6 +50,11 @@ struct FParsedChunk
 	                            // CreateChunkMeshComponent so an ODR2 fallback
 	                            // chunk doesn't fabricate class/lane data it
 	                            // doesn't have.
+
+	// Realistic only (PLAN-VISUALS J): UV3.y road-edge code per triangle
+	// corner (Tris order) - junction pad edge distance / ribbon-in-pad, see
+	// ComputeEdgeCodes in the .cpp. Empty = all 0 (Stylized, no pads near).
+	TArray<float> EdgeCode;
 };
 
 /** One parsed tile file's worth of chunks - the off-thread output of
