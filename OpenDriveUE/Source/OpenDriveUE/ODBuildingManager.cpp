@@ -5,6 +5,7 @@
 #include "ODRoadManager.h"
 #include "ODTerrainManager.h"
 #include "ODVehiclePawn.h"
+#include "Algo/Reverse.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -87,6 +88,633 @@ namespace
 		constexpr uint8 NumWallSets = 5;
 		const float R = (FMath::Min<uint8>(B.WallSet, NumWallSets - 1) + 0.5f) / NumWallSets;
 		return FVector4f(R, HashToUnitFloat(H2), B.FlatRoof ? 1.0f : 0.0f, 1.0f);
+	}
+
+	// ---- Realistic pitched roofs (PLAN-VISUALS Track G) --------------------
+	// C++ twin of pipeline/building_roofs.py pitch_roof(): same steps, same
+	// constants, same hash (see that file for the why of each step);
+	// pipeline/tests/test_building_roofs.py checks the geometry - the faces
+	// tile the footprint, roof + end walls are watertight - on shapes and on
+	// every real tile, and ProfileRoofTile() compares the counts. Runs on
+	// the tile-parse worker thread, never on the game thread.
+	namespace Roof
+	{
+		constexpr double EpsZ = 1.0, EpsDup = 1.0, CollinearSin = 0.02, EpsSnap = 0.01, EpsWeld = 1e-3;
+		constexpr double MaxAreaM2 = 400.0, MinFill = 0.85, MinSpanM = 3.0, MaxSpanM = 16.0, MaxLengthM = 40.0;
+		constexpr double HipFraction = 0.45, PitchMinDeg = 25.0, PitchMaxDeg = 35.0, FacadeTileCm = 400.0;
+
+		double Cross(double Ax, double Ay, double Bx, double By) { return Ax * By - Ay * Bx; }
+
+		double Dist(double Ax, double Ay, double Bx, double By)
+		{
+			return FMath::Sqrt((Ax - Bx) * (Ax - Bx) + (Ay - By) * (Ay - By));
+		}
+
+		uint32 Hash(int32 Ix, int32 Iy)
+		{
+			uint32 H = ((uint32)Ix * 73856093u) ^ ((uint32)Iy * 19349663u);
+			H ^= H >> 16; H *= 0x7FEB352Du;
+			H ^= H >> 15; H *= 0x846CA68Bu;
+			H ^= H >> 16;
+			return H;
+		}
+
+		// the line an edge lies on: ring vertices I < J, or a crease A*l + B*s = C
+		struct FLine
+		{
+			bool bCrease = false;
+			int32 I = 0, J = 0;
+			double A = 0.0, B = 0.0, C = 0.0;
+			bool operator<(const FLine& O) const
+			{
+				if (bCrease != O.bCrease) return bCrease;
+				if (bCrease) return A != O.A ? A < O.A : B != O.B ? B < O.B : C < O.C;
+				return I != O.I ? I < O.I : J < O.J;
+			}
+		};
+
+		// a piece corner in OBB-local (l, s); Line = the edge arriving at it
+		struct FPt
+		{
+			double L, S;
+			FLine Line;
+		};
+
+		bool FootprintRing(const FParsedBuilding& B, double Top, TArray<FVector2d>& Ring, TArray<bool>& IsCap)
+		{
+			const int32 TCount = B.Tris.Num() / 3;
+			auto AtTop = [&](uint32 V) { return FMath::Abs((double)B.Verts[V * 3 + 2] - Top) < EpsZ; };
+			auto Key = [](uint32 A, uint32 Bv) { return ((uint64)FMath::Min(A, Bv) << 32) | FMath::Max(A, Bv); };
+			IsCap.Init(false, TCount);
+			TMap<uint64, int32> Count;
+			int32 NumCap = 0;
+			for (int32 t = 0; t < TCount; ++t)
+			{
+				const uint32* T = &B.Tris[t * 3];
+				if (AtTop(T[0]) && AtTop(T[1]) && AtTop(T[2]))
+				{
+					IsCap[t] = true;
+					++NumCap;
+					for (int32 k = 0; k < 3; ++k) ++Count.FindOrAdd(Key(T[k], T[(k + 1) % 3]));
+				}
+			}
+			if (NumCap == 0) return false;
+			TMap<uint32, uint32> Next;
+			for (int32 t = 0; t < TCount; ++t)
+			{
+				if (!IsCap[t]) continue;
+				const uint32* T = &B.Tris[t * 3];
+				for (int32 k = 0; k < 3; ++k)
+				{
+					if (Count[Key(T[k], T[(k + 1) % 3])] != 1) continue;
+					if (Next.Contains(T[k])) return false;
+					Next.Add(T[k], T[(k + 1) % 3]);
+				}
+			}
+			if (Next.Num() < 3) return false;
+			uint32 Start = MAX_uint32;
+			for (const TPair<uint32, uint32>& P : Next) Start = FMath::Min(Start, P.Key);
+			TArray<uint32> Loop = {Start};
+			uint32 Cur = Next[Start];
+			while (Cur != Start)
+			{
+				const uint32* Nx = Next.Find(Cur);
+				if (!Nx || Loop.Num() > Next.Num()) return false;
+				Loop.Add(Cur);
+				Cur = *Nx;
+			}
+			if (Loop.Num() != Next.Num()) return false;
+			for (uint32 V : Loop) Ring.Emplace(B.Verts[V * 3 + 0], B.Verts[V * 3 + 1]);
+			double Area2 = 0.0;
+			for (int32 i = 0; i < Ring.Num(); ++i)
+			{
+				const FVector2d& P = Ring[i];
+				const FVector2d& Q = Ring[(i + 1) % Ring.Num()];
+				Area2 += Cross(P.X, P.Y, Q.X, Q.Y);
+			}
+			if (Area2 <= 0.0) Algo::Reverse(Ring);
+			return true;
+		}
+
+		void CleanRing(TArray<FVector2d>& Ring)
+		{
+			bool bChanged = true;
+			while (bChanged && Ring.Num() >= 3)
+			{
+				bChanged = false;
+				const int32 N = Ring.Num();
+				for (int32 i = 0; i < N; ++i)
+				{
+					const FVector2d P = Ring[(i + N - 1) % N], Q = Ring[i], R = Ring[(i + 1) % N];
+					const double Ax = Q.X - P.X, Ay = Q.Y - P.Y, Bx = R.X - Q.X, By = R.Y - Q.Y;
+					const double La = FMath::Sqrt(Ax * Ax + Ay * Ay), Lb = FMath::Sqrt(Bx * Bx + By * By);
+					if (La < EpsDup || (FMath::Abs(Cross(Ax, Ay, Bx, By)) <= CollinearSin * La * Lb && Ax * Bx + Ay * By > 0.0))
+					{
+						Ring.RemoveAt(i);
+						bChanged = true;
+						break;
+					}
+				}
+			}
+		}
+
+		// ear clipping, fattest ear first (see building_roofs.triangulate)
+		bool Triangulate(const TArray<FVector2d>& Ring, TArray<FIntVector3>& Ears)
+		{
+			TArray<int32> Idx;
+			for (int32 i = 0; i < Ring.Num(); ++i) Idx.Add(i);
+			auto DistSq = [](const FVector2d& P, const FVector2d& Q) { return (P.X - Q.X) * (P.X - Q.X) + (P.Y - Q.Y) * (P.Y - Q.Y); };
+			while (Idx.Num() > 3)
+			{
+				const int32 M = Idx.Num();
+				int32 BestK = -1;
+				double BestFat = 0.0;
+				for (int32 k = 0; k < M; ++k)
+				{
+					const int32 A = Idx[(k + M - 1) % M], Bi = Idx[k], C = Idx[(k + 1) % M];
+					const FVector2d& Pa = Ring[A];
+					const FVector2d& Pb = Ring[Bi];
+					const FVector2d& Pc = Ring[C];
+					if (Cross(Pb.X - Pa.X, Pb.Y - Pa.Y, Pc.X - Pb.X, Pc.Y - Pb.Y) <= 0.0) continue;
+					bool bBlocked = false;
+					for (int32 j : Idx)
+					{
+						if (j == A || j == Bi || j == C) continue;
+						const FVector2d& Q = Ring[j];
+						if (Cross(Pb.X - Pa.X, Pb.Y - Pa.Y, Q.X - Pa.X, Q.Y - Pa.Y) >= 0.0
+							&& Cross(Pc.X - Pb.X, Pc.Y - Pb.Y, Q.X - Pb.X, Q.Y - Pb.Y) >= 0.0
+							&& Cross(Pa.X - Pc.X, Pa.Y - Pc.Y, Q.X - Pc.X, Q.Y - Pc.Y) >= 0.0)
+						{
+							bBlocked = true;
+							break;
+						}
+					}
+					if (bBlocked) continue;
+					const double Fat = Cross(Pb.X - Pa.X, Pb.Y - Pa.Y, Pc.X - Pa.X, Pc.Y - Pa.Y)
+						/ (DistSq(Pa, Pb) + DistSq(Pb, Pc) + DistSq(Pc, Pa));
+					if (BestK < 0 || Fat > BestFat)
+					{
+						BestFat = Fat;
+						BestK = k;
+					}
+				}
+				if (BestK < 0) return false;
+				Ears.Add(FIntVector3(Idx[(BestK + M - 1) % M], Idx[BestK], Idx[(BestK + 1) % M]));
+				Idx.RemoveAt(BestK);
+			}
+			Ears.Add(FIntVector3(Idx[0], Idx[1], Idx[2]));
+			return true;
+		}
+
+		// minimum-area rectangle over the edge directions; l = long axis
+		void Obb(const TArray<FVector2d>& Ring, double& Cx, double& Cy, double& Dx, double& Dy, double& HL, double& HS)
+		{
+			double LMin, LMax, SMin, SMax;
+			auto Extent = [&](double Ux, double Uy)
+			{
+				LMin = SMin = DBL_MAX;
+				LMax = SMax = -DBL_MAX;
+				for (const FVector2d& P : Ring)
+				{
+					const double L = P.X * Ux + P.Y * Uy, S = -P.X * Uy + P.Y * Ux;
+					LMin = FMath::Min(LMin, L); LMax = FMath::Max(LMax, L);
+					SMin = FMath::Min(SMin, S); SMax = FMath::Max(SMax, S);
+				}
+			};
+			const int32 N = Ring.Num();
+			double BestArea = -1.0;
+			Dx = 1.0; Dy = 0.0;
+			for (int32 i = 0; i < N; ++i)
+			{
+				const double Ex = Ring[(i + 1) % N].X - Ring[i].X, Ey = Ring[(i + 1) % N].Y - Ring[i].Y;
+				const double Le = FMath::Sqrt(Ex * Ex + Ey * Ey);
+				if (Le <= 0.0) continue;
+				Extent(Ex / Le, Ey / Le);
+				const double Area = (LMax - LMin) * (SMax - SMin);
+				if (BestArea < 0.0 || Area < BestArea)
+				{
+					BestArea = Area;
+					Dx = Ex / Le;
+					Dy = Ey / Le;
+				}
+			}
+			Extent(Dx, Dy);
+			if (LMax - LMin < SMax - SMin)
+			{
+				const double T = Dx;
+				Dx = -Dy;
+				Dy = T;
+				Extent(Dx, Dy);
+			}
+			const double Lm = (LMax + LMin) / 2.0, Sm = (SMax + SMin) / 2.0;
+			Cx = Lm * Dx - Sm * Dy;
+			Cy = Lm * Dy + Sm * Dx;
+			HL = (LMax - LMin) / 2.0;
+			HS = (SMax - SMin) / 2.0;
+		}
+
+		// Sutherland-Hodgman against A*l + B*s <= C; crossings from Meet(line,
+		// line) so two ears cutting one crease make the identical point;
+		// points within EpsSnap of the plane are on it
+		template <typename FMeet>
+		void Clip(TArray<FPt>& Poly, double A, double B, double C, const FMeet& Meet)
+		{
+			FLine Cl;
+			Cl.bCrease = true; Cl.A = A; Cl.B = B; Cl.C = C;
+			const double Snap = EpsSnap * FMath::Sqrt(A * A + B * B);
+			auto Side = [&](const FPt& P)
+			{
+				const double D = A * P.L + B * P.S - C;
+				return FMath::Abs(D) < Snap ? 0.0 : D;
+			};
+			TArray<FPt> Out;
+			const int32 N = Poly.Num();
+			for (int32 i = 0; i < N; ++i)
+			{
+				const FPt& P = Poly[(i + N - 1) % N];
+				FPt Q = Poly[i];
+				const double Dp = Side(P), Dq = Side(Q);
+				if (Dq <= 0.0)
+				{
+					if (Dp > 0.0 && Dq == 0.0)
+					{
+						Q.Line = Cl;   // q on the plane is the crossing
+					}
+					else if (Dp > 0.0)
+					{
+						const FVector2d X = Meet(Q.Line, Cl);
+						Out.Add({X.X, X.Y, Cl});
+					}
+					Out.Add(Q);
+				}
+				else if (Dp < 0.0)
+				{
+					const FVector2d X = Meet(Q.Line, Cl);
+					Out.Add({X.X, X.Y, Q.Line});
+				}
+			}
+			Poly = MoveTemp(Out);
+		}
+
+		/** Replaces B's flat cap with a gable or hip roof plus gable end walls
+		 *  (vertices from B.NumSolidVerts on); false = keep the flat cap. */
+		bool PitchRoof(FParsedBuilding& B)
+		{
+			const int32 VCount = B.Verts.Num() / 3;
+			if (B.FlatRoof || VCount == 0) return false;
+			double Top = -DBL_MAX, Base = DBL_MAX, MinX = DBL_MAX, MinY = DBL_MAX;
+			for (int32 v = 0; v < VCount; ++v)
+			{
+				MinX = FMath::Min(MinX, (double)B.Verts[v * 3 + 0]);
+				MinY = FMath::Min(MinY, (double)B.Verts[v * 3 + 1]);
+				Top = FMath::Max(Top, (double)B.Verts[v * 3 + 2]);
+				Base = FMath::Min(Base, (double)B.Verts[v * 3 + 2]);
+			}
+			TArray<FVector2d> Ring;
+			TArray<bool> IsCap;
+			if (!FootprintRing(B, Top, Ring, IsCap)) return false;
+			CleanRing(Ring);
+			const int32 N = Ring.Num();
+			if (N < 3) return false;
+			double Area = 0.0;
+			for (int32 i = 0; i < N; ++i) Area += Cross(Ring[i].X, Ring[i].Y, Ring[(i + 1) % N].X, Ring[(i + 1) % N].Y);
+			Area /= 2.0;
+			if (Area > MaxAreaM2 * 1e4) return false;
+			double Cx, Cy, Dx, Dy, HL, HS;
+			Obb(Ring, Cx, Cy, Dx, Dy, HL, HS);
+			if (Area < MinFill * 4.0 * HL * HS || 2.0 * HS < MinSpanM * 100.0
+				|| 2.0 * HS > MaxSpanM * 100.0 || 2.0 * HL > MaxLengthM * 100.0)
+			{
+				return false;
+			}
+			TArray<FIntVector3> Ears;
+			if (!Triangulate(Ring, Ears)) return false;
+
+			const uint32 H = Hash((int32)FMath::FloorToDouble(MinX), (int32)FMath::FloorToDouble(MinY));
+			const bool bHip = (H & 0xFFFFu) / 65536.0 < HipFraction;
+			const double Pitch = FMath::DegreesToRadians(PitchMinDeg + (PitchMaxDeg - PitchMinDeg) * (H >> 16) / 65536.0);
+			const double K = FMath::Tan(Pitch), SlopeCm = FMath::Cos(Pitch) * FacadeTileCm;
+			const double D = HL - HS;
+			// one height field for every face (a crease point gets one height)
+			auto Height = [&](double L, double S)
+			{
+				return FMath::Max(K * (bHip ? FMath::Min(HS - FMath::Abs(S), HL - FMath::Abs(L)) : HS - FMath::Abs(S)), 0.0);
+			};
+			struct FFace { int32 NumPlanes; double P[3][3]; bool bLong; };
+			TArray<FFace> Faces;
+			if (bHip)
+			{
+				Faces.Add({3, {{0, -1, 0}, {1, -1, D}, {-1, -1, D}}, true});
+				Faces.Add({3, {{0, 1, 0}, {1, 1, D}, {-1, 1, D}}, true});
+				Faces.Add({2, {{-1, 1, -D}, {-1, -1, -D}, {0, 0, 0}}, false});
+				Faces.Add({2, {{1, 1, -D}, {1, -1, -D}, {0, 0, 0}}, false});
+			}
+			else
+			{
+				Faces.Add({1, {{0, -1, 0}, {0, 0, 0}, {0, 0, 0}}, true});
+				Faces.Add({1, {{0, 1, 0}, {0, 0, 0}, {0, 0, 0}}, true});
+			}
+
+			TArray<FVector2d> Local;
+			for (const FVector2d& P : Ring)
+			{
+				Local.Emplace((P.X - Cx) * Dx + (P.Y - Cy) * Dy, -(P.X - Cx) * Dy + (P.Y - Cy) * Dx);
+			}
+			auto Implicit = [&](const FLine& Ln, double& A, double& Bc, double& C)
+			{
+				if (Ln.bCrease)
+				{
+					A = Ln.A; Bc = Ln.B; C = Ln.C;
+					return;
+				}
+				const FVector2d& Pi = Local[Ln.I];
+				const FVector2d& Pj = Local[Ln.J];
+				A = Pi.Y - Pj.Y; Bc = Pj.X - Pi.X; C = A * Pi.X + Bc * Pi.Y;
+			};
+			auto Meet = [&](const FLine& M, const FLine& Kl)
+			{
+				const bool bSwap = Kl < M;
+				double A1, B1, C1, A2, B2, C2;
+				Implicit(bSwap ? Kl : M, A1, B1, C1);
+				Implicit(bSwap ? M : Kl, A2, B2, C2);
+				const double Det = A1 * B2 - A2 * B1;
+				return Det == 0.0 ? FVector2d::ZeroVector : FVector2d((C1 * B2 - C2 * B1) / Det, (A1 * C2 - A2 * C1) / Det);
+			};
+			auto IsFootprint = [&](const FLine& Ln) { return !Ln.bCrease && (Ln.J - Ln.I == 1 || (Ln.I == 0 && Ln.J == N - 1)); };
+
+			// each ear clipped to each face -> convex pieces
+			struct FPiece { TArray<FPt> Poly; bool bLong; };
+			TArray<FPiece> Pieces;
+			for (const FIntVector3& Ear : Ears)
+			{
+				const int32 E[3] = {Ear.X, Ear.Y, Ear.Z};
+				for (const FFace& F : Faces)
+				{
+					TArray<FPt> Poly;
+					for (int32 k = 0; k < 3; ++k)
+					{
+						const int32 i = E[k], j = E[(k + 2) % 3];
+						FLine Ln;
+						Ln.I = FMath::Min(i, j);
+						Ln.J = FMath::Max(i, j);
+						Poly.Add({Local[i].X, Local[i].Y, Ln});
+					}
+					for (int32 p = 0; p < F.NumPlanes && Poly.Num() >= 3; ++p)
+					{
+						Clip(Poly, F.P[p][0], F.P[p][1], F.P[p][2], Meet);
+					}
+					// a clip through a corner repeats it: drop the zero-length edge
+					TArray<FPt> Kept;
+					for (int32 j = 0; j < Poly.Num(); ++j)
+					{
+						const FPt& Pr = Poly[(j + Poly.Num() - 1) % Poly.Num()];
+						if (Dist(Poly[j].L, Poly[j].S, Pr.L, Pr.S) >= EpsWeld) Kept.Add(Poly[j]);
+					}
+					if (Kept.Num() >= 3) Pieces.Add({MoveTemp(Kept), F.bLong});
+				}
+			}
+
+			// a crease end on a diagonal can be a corner on one side of it
+			// only: put it on the other side's edge too (no T-junction crack)
+			TArray<FVector2d> Points;
+			for (const FPiece& Pc : Pieces)
+			{
+				for (const FPt& Q : Pc.Poly) Points.AddUnique(FVector2d(Q.L, Q.S));
+			}
+			struct FFixed { TArray<FPt> Ring; bool bCentre = false; FVector2d Centre = FVector2d::ZeroVector; TArray<FIntVector3> Fan; bool bLong = false; };
+			TArray<FFixed> Fixed;
+			for (const FPiece& Pc : Pieces)
+			{
+				FFixed& Fx = Fixed.AddDefaulted_GetRef();
+				Fx.bLong = Pc.bLong;
+				const int32 M = Pc.Poly.Num();
+				for (int32 j = 0; j < M; ++j)
+				{
+					const FPt& P = Pc.Poly[(j + M - 1) % M];
+					const FPt& Q = Pc.Poly[j];
+					const double Ex = Q.L - P.L, Ey = Q.S - P.S, Ll = Ex * Ex + Ey * Ey;
+					TArray<TPair<double, FVector2d>> On;
+					for (const FVector2d& R : Points)
+					{
+						const double T = ((R.X - P.L) * Ex + (R.Y - P.S) * Ey) / Ll;
+						if (T > 0.0 && T < 1.0 && FMath::Abs(Cross(Ex, Ey, R.X - P.L, R.Y - P.S)) < EpsWeld * FMath::Sqrt(Ll)
+							&& Dist(R.X, R.Y, P.L, P.S) >= EpsWeld && Dist(R.X, R.Y, Q.L, Q.S) >= EpsWeld)
+						{
+							On.Emplace(T, R);
+						}
+					}
+					On.Sort([](const TPair<double, FVector2d>& X, const TPair<double, FVector2d>& Y) { return X.Key < Y.Key; });
+					for (const TPair<double, FVector2d>& O : On) Fx.Ring.Add({O.Value.X, O.Value.Y, Q.Line});
+					Fx.Ring.Add(Q);
+				}
+				Fx.bCentre = Fx.Ring.Num() > M;
+				if (Fx.bCentre)
+				{
+					// fan from the centre: the corners now have collinear neighbours
+					for (const FPt& Q : Pc.Poly) Fx.Centre += FVector2d(Q.L, Q.S);
+					Fx.Centre /= M;
+					const int32 F = Fx.Ring.Num();
+					for (int32 j = 1; j <= F; ++j) Fx.Fan.Add(FIntVector3(0, j, j % F + 1));
+				}
+				else
+				{
+					for (int32 j = 1; j < M - 1; ++j) Fx.Fan.Add(FIntVector3(0, j, j + 1));
+				}
+			}
+			auto FanPt = [](const FFixed& Fx, int32 i)
+			{
+				if (Fx.bCentre) return i == 0 ? Fx.Centre : FVector2d(Fx.Ring[i - 1].L, Fx.Ring[i - 1].S);
+				return FVector2d(Fx.Ring[i].L, Fx.Ring[i].S);
+			};
+
+			// near-degenerate footprints can still leave a crack or a folded
+			// sliver: the pieces must tile the footprint edge to edge (ends
+			// within EpsWeld), else keep the flat cap
+			double Tiled = 0.0;
+			for (const FFixed& Fx : Fixed)
+			{
+				const int32 M = Fx.Ring.Num();
+				for (int32 j = 0; j < M; ++j)
+				{
+					const FPt& P = Fx.Ring[(j + M - 1) % M];
+					const FPt& Q = Fx.Ring[j];
+					if (!IsFootprint(Q.Line))
+					{
+						bool bMatched = false;
+						for (const FFixed& Gx : Fixed)
+						{
+							const int32 G = Gx.Ring.Num();
+							for (int32 g = 0; g < G && !bMatched; ++g)
+							{
+								const FPt& P2 = Gx.Ring[(g + G - 1) % G];
+								const FPt& Q2 = Gx.Ring[g];
+								bMatched = Dist(Q.L, Q.S, P2.L, P2.S) < EpsWeld && Dist(P.L, P.S, Q2.L, Q2.S) < EpsWeld;
+							}
+							if (bMatched) break;
+						}
+						if (!bMatched) return false;
+					}
+					Tiled += Cross(P.L, P.S, Q.L, Q.S) / 2.0;
+				}
+				for (const FIntVector3& T : Fx.Fan)
+				{
+					const FVector2d P0 = FanPt(Fx, T.X), P1 = FanPt(Fx, T.Y), P2 = FanPt(Fx, T.Z);
+					if (Cross(P1.X - P0.X, P1.Y - P0.Y, P2.X - P0.X, P2.Y - P0.Y) < -1e-6) return false;
+				}
+			}
+			if (FMath::Abs(Tiled - Area) > 1.0 + 1e-6 * Area) return false;
+
+			// walls kept (vertex order kept), cap dropped
+			const int32 TCount = B.Tris.Num() / 3;
+			TArray<int32> Remap;
+			Remap.Init(-1, VCount);
+			for (int32 t = 0; t < TCount; ++t)
+			{
+				if (IsCap[t]) continue;
+				for (int32 k = 0; k < 3; ++k) Remap[B.Tris[t * 3 + k]] = 0;
+			}
+			TArray<float> OutV, OutUv;
+			TArray<uint32> OutT;
+			int32 NextId = 0;
+			for (int32 v = 0; v < VCount; ++v)
+			{
+				if (Remap[v] < 0) continue;
+				Remap[v] = NextId++;
+				OutV.Append({B.Verts[v * 3 + 0], B.Verts[v * 3 + 1], B.Verts[v * 3 + 2]});
+				OutUv.Append({B.Uvs[v * 2 + 0], B.Uvs[v * 2 + 1]});
+			}
+			struct FTopEdge { double Ax, Ay, Bx, By, Ua, Ub; };
+			TArray<FTopEdge> TopEdges;
+			for (int32 t = 0; t < TCount; ++t)
+			{
+				if (IsCap[t]) continue;
+				uint32 AtTop[3];
+				int32 NumAtTop = 0;
+				for (int32 k = 0; k < 3; ++k)
+				{
+					const uint32 V = B.Tris[t * 3 + k];
+					OutT.Add((uint32)Remap[V]);
+					if (FMath::Abs((double)B.Verts[V * 3 + 2] - Top) < EpsZ) AtTop[NumAtTop++] = V;
+				}
+				if (NumAtTop == 2)
+				{
+					const uint32 A = AtTop[0], Bv = AtTop[1];
+					TopEdges.Add({B.Verts[A * 3], B.Verts[A * 3 + 1], B.Verts[Bv * 3], B.Verts[Bv * 3 + 1], B.Uvs[A * 2], B.Uvs[Bv * 2]});
+				}
+			}
+
+			auto World = [&](double L, double S) { return FVector2d(Cx + L * Dx - S * Dy, Cy + L * Dy + S * Dx); };
+			struct FSkirt { FVector2d P0, P1; double H0, H1; };
+			TArray<FSkirt> Skirts;
+			for (const FFixed& Fx : Fixed)
+			{
+				const int32 First = OutV.Num() / 3;
+				const int32 NumPts = Fx.Ring.Num() + (Fx.bCentre ? 1 : 0);
+				for (int32 i = 0; i < NumPts; ++i)
+				{
+					const FVector2d P = FanPt(Fx, i);
+					const FVector2d W = World(P.X, P.Y);
+					OutV.Append({(float)W.X, (float)W.Y, (float)(Top + Height(P.X, P.Y))});
+					// shingle rows along the eave, V down the slope
+					if (Fx.bLong)
+					{
+						OutUv.Append({(float)(P.X / FacadeTileCm), (float)((FMath::Abs(P.Y) - HS) / SlopeCm)});
+					}
+					else
+					{
+						OutUv.Append({(float)(P.Y / FacadeTileCm), (float)((FMath::Abs(P.X) - HL) / SlopeCm)});
+					}
+				}
+				for (const FIntVector3& T : Fx.Fan)
+				{
+					const FVector2d P0 = FanPt(Fx, T.X), P1 = FanPt(Fx, T.Y), P2 = FanPt(Fx, T.Z);
+					if (FMath::Abs(Cross(P1.X - P0.X, P1.Y - P0.Y, P2.X - P0.X, P2.Y - P0.Y)) > 1e-6)
+					{
+						OutT.Append({(uint32)(First + T.X), (uint32)(First + T.Y), (uint32)(First + T.Z)});
+					}
+				}
+				const int32 M = Fx.Ring.Num();
+				for (int32 j = 0; j < M; ++j)
+				{
+					const FPt& P = Fx.Ring[(j + M - 1) % M];
+					const FPt& Q = Fx.Ring[j];
+					if (IsFootprint(Q.Line))
+					{
+						Skirts.Add({World(P.L, P.S), World(Q.L, Q.S), Height(P.L, P.S), Height(Q.L, Q.S)});
+					}
+				}
+			}
+
+			// gable end walls under the roof, the wall's U continued
+			const int32 NumSolid = OutV.Num() / 3;
+			for (FSkirt Sk : Skirts)
+			{
+				const double Len = Dist(Sk.P0.X, Sk.P0.Y, Sk.P1.X, Sk.P1.Y);
+				if (FMath::Max(Sk.H0, Sk.H1) < EpsWeld || Len < EpsWeld) continue;
+				const double Mx = (Sk.P0.X + Sk.P1.X) / 2.0, My = (Sk.P0.Y + Sk.P1.Y) / 2.0;
+				double Best = -1.0, U0 = 0.0, U1 = Len / FacadeTileCm;
+				for (const FTopEdge& E : TopEdges)
+				{
+					const double Ex = E.Bx - E.Ax, Ey = E.By - E.Ay, Ll = Ex * Ex + Ey * Ey;
+					if (Ll <= 0.0) continue;
+					const double T = FMath::Clamp(((Mx - E.Ax) * Ex + (My - E.Ay) * Ey) / Ll, 0.0, 1.0);
+					const double Dd = Dist(E.Ax + Ex * T, E.Ay + Ey * T, Mx, My);
+					if (Best < 0.0 || Dd < Best)
+					{
+						Best = Dd;
+						U0 = E.Ua + (E.Ub - E.Ua) * ((Sk.P0.X - E.Ax) * Ex + (Sk.P0.Y - E.Ay) * Ey) / Ll;
+						U1 = E.Ua + (E.Ub - E.Ua) * ((Sk.P1.X - E.Ax) * Ex + (Sk.P1.Y - E.Ay) * Ey) / Ll;
+					}
+				}
+				if (U1 < U0)   // wind like the wall below (U increasing along the edge)
+				{
+					Swap(Sk.P0, Sk.P1);
+					Swap(Sk.H0, Sk.H1);
+					Swap(U0, U1);
+				}
+				struct FCorner { FVector2d P; double Z, U; };
+				TArray<FCorner, TInlineAllocator<4>> Corners;
+				Corners.Add({Sk.P0, Top, U0});
+				Corners.Add({Sk.P1, Top, U1});
+				if (Sk.H1 >= EpsWeld) Corners.Add({Sk.P1, Top + Sk.H1, U1});
+				if (Sk.H0 >= EpsWeld) Corners.Add({Sk.P0, Top + Sk.H0, U0});
+				const int32 First = OutV.Num() / 3;
+				for (const FCorner& C : Corners)
+				{
+					OutV.Append({(float)C.P.X, (float)C.P.Y, (float)C.Z});
+					OutUv.Append({(float)C.U, (float)((C.Z - Base) / FacadeTileCm)});
+				}
+				for (int32 j = 1; j < Corners.Num() - 1; ++j)
+				{
+					OutT.Append({(uint32)First, (uint32)(First + j), (uint32)(First + j + 1)});
+				}
+			}
+
+			B.Verts = MoveTemp(OutV);
+			B.Uvs = MoveTemp(OutUv);
+			B.Tris = MoveTemp(OutT);
+			B.NumSolidVerts = NumSolid;
+			return true;
+		}
+	}
+
+	/** Realistic only: pitch what qualifies; whatever keeps its flat cap
+	 *  reads as a concrete flat roof (no flat shingles). Worker thread. */
+	int32 ApplyRealisticRoofs(FParsedBuildingTile& Tile)
+	{
+		int32 NumPitched = 0;
+		for (FParsedBuilding& B : Tile.Buildings)
+		{
+			if (Roof::PitchRoof(B))
+			{
+				++NumPitched;
+			}
+			else
+			{
+				B.FlatRoof = 1;
+			}
+		}
+		return NumPitched;
 	}
 }
 
@@ -235,6 +863,24 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 	return true;
 }
 
+void AODBuildingManager::ProfileRoofTile(const FString& Path, int32& Buildings, int32& Pitched,
+	int32& TrisBefore, int32& TrisAfter, float& RoofMs)
+{
+	Buildings = Pitched = TrisBefore = TrisAfter = 0;
+	RoofMs = 0.0f;
+	FParsedBuildingTile Parsed;
+	if (!ParseBuildingTileFile(Path, Parsed))
+	{
+		return;
+	}
+	Buildings = Parsed.Buildings.Num();
+	for (const FParsedBuilding& B : Parsed.Buildings) TrisBefore += B.Tris.Num() / 3;
+	const double T0 = FPlatformTime::Seconds();
+	Pitched = ApplyRealisticRoofs(Parsed);
+	RoofMs = (float)((FPlatformTime::Seconds() - T0) * 1000.0);
+	for (const FParsedBuilding& B : Parsed.Buildings) TrisAfter += B.Tris.Num() / 3;
+}
+
 void AODBuildingManager::RequestTileLoad(const FIntPoint& Key)
 {
 	PendingTiles.Add(Key);
@@ -242,10 +888,15 @@ void AODBuildingManager::RequestTileLoad(const FIntPoint& Key)
 		/ FString::Printf(TEXT("%s_tile_%d_%d.bin"), *BuildingTilePrefix, Key.X, Key.Y);
 
 	TWeakObjectPtr<AODBuildingManager> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
+	const bool bRealistic = ODVisualStyle::IsRealistic();
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path, bRealistic]()
 	{
 		FParsedBuildingTile Parsed;
 		const bool bOk = ParseBuildingTileFile(Path, Parsed);
+		if (bOk && bRealistic)
+		{
+			ApplyRealisticRoofs(Parsed);   // pitched roofs, off the game thread
+		}
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
 			{
@@ -550,7 +1201,9 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 				// [0,1) selector/seed values the material reads back
 				// directly (default linear-in/linear-out, no
 				// SetVertexColorSpaceTransformMode).
-				ColorIds[v] = Color->AppendElement(FacadeColor);
+				// A = 0 on gable end walls: no windows there
+				ColorIds[v] = Color->AppendElement(FVector4f(FacadeColor.X, FacadeColor.Y, FacadeColor.Z,
+					(int32)v < B.NumSolidVerts ? 1.0f : 0.0f));
 			}
 			for (uint32 t = 0; t < TCount; ++t)
 			{

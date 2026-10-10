@@ -11,8 +11,10 @@ twin's single material.
 Same interface as the twin: UV0 (U = perimeter / 4 m, V = height / 4 m from
 pipeline/build_building_mesh.py, planar XY / 4 m on the roof cap), vertex
 color R = wall set bucket (WallSet encoding, (idx + 0.5) / 5), G = per-
-building seed, B = flat roof. No parameters (the twin has none), same
-physical material, two-sidedness and usage flags (copied from the twin).
+building seed, B = flat roof, A = 0 on pitched-roof gable end walls (no
+windows; ODBuildingManager PitchRoof, Realistic only). No parameters (the
+twin has none), same physical material, two-sidedness and usage flags
+(copied from the twin).
 
 What's added over the stylized graph:
   - walls: the same five CC0 sets, but painted siding and plaster get a per-
@@ -348,23 +350,26 @@ def build_facade(mat):
     lo_v = g.lerp(WINDOW_MARGIN_V_UPPER[0], WINDOW_MARGIN_V_GROUND[0], ground)
     hi_v = g.lerp(WINDOW_MARGIN_V_UPPER[1], WINDOW_MARGIN_V_GROUND[1], ground)
     lo_u, hi_u = WINDOW_MARGIN_U
+    # vertex alpha 0 = a pitched roof's gable end wall (ODBuildingManager
+    # PitchRoof): plain wall, no windows, frames, sills or streaks
+    solid = g.mask(vc, r=True, a_out="A")
 
-    opening = g.mul(g.rect(bay_f, lo_u, hi_u), g.rect(floor_f, lo_v, hi_v))
-    outer = g.mul(g.rect(bay_f, lo_u - FRAME_U, hi_u + FRAME_U),
-                  g.rect(floor_f, g.sub(lo_v, FRAME_V), g.add(hi_v, FRAME_V)))
+    opening = g.mul(g.mul(g.rect(bay_f, lo_u, hi_u), g.rect(floor_f, lo_v, hi_v)), solid)
+    outer = g.mul(g.mul(g.rect(bay_f, lo_u - FRAME_U, hi_u + FRAME_U),
+                        g.rect(floor_f, g.sub(lo_v, FRAME_V), g.add(hi_v, FRAME_V))), solid)
     bars = g.mul(g.sat(g.add(g.rect(bay_f, 0.5 - BAR_HALF_U, 0.5 + BAR_HALF_U),
                              g.rect(floor_f, TRANSOM_V - BAR_HALF_V, TRANSOM_V + BAR_HALF_V))), upper)
     glass = g.mul(opening, g.sub(1.0, bars))
     frame = g.sat(g.sub(outer, glass))
     sill = g.mul(g.mul(g.rect(bay_f, lo_u - SILL_OVERHANG_U, hi_u + SILL_OVERHANG_U),
-                       g.rect(floor_f, g.sub(lo_v, FRAME_V + SILL_V), g.sub(lo_v, FRAME_V))), upper)
+                       g.rect(floor_f, g.sub(lo_v, FRAME_V + SILL_V), g.sub(lo_v, FRAME_V))), g.mul(upper, solid))
     trim = g.sat(g.add(frame, sill))
 
     # rain streaks under each sill, in columns
     below = g.sub(g.sub(lo_v, FRAME_V + SILL_V), floor_f)   # > 0 under the sill
     streak_fade = g.mul(g.sat(g.mul(below, 50.0)), g.sat(g.sub(1.0, g.div(below, STREAK_LEN_V))))
     columns = g.value_noise(g.append(g.mul(bay_u, STREAK_COLUMNS), g.mul(floor_idx, 3.1)))
-    streak = g.mul(g.mul(g.mul(streak_fade, columns), g.rect(bay_f, lo_u, hi_u, 40.0)), upper)
+    streak = g.mul(g.mul(g.mul(streak_fade, columns), g.rect(bay_f, lo_u, hi_u, 40.0)), g.mul(upper, solid))
     wall_a = g.mul(wall_a, g.sub(1.0, g.mul(streak, STREAK_DARK)))
 
     # per-window hashes, decorrelated per building (same cell as the twin)
