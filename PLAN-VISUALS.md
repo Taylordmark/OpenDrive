@@ -175,7 +175,7 @@ fewer than seven run at once.
 |---|---|---|
 | A | first pass (see below) | 7f66ba7 |
 | B | first pass: `_real` car paint, glass, lamps | 69e33be |
-| C | first pass: `M_Road*_real` + deterministic decals; cars don't receive decals; tire marks cut to braking zones | b6ed029, 940da35, b81c856 |
+| C | first pass: `M_Road*_real` + deterministic decals; cars don't receive decals; tire marks cut to braking zones | b6ed029, 940da35, e8872d0 |
 | D | first pass: `_real` ground, embankment, boulders | 0079ca4 |
 | C/D | CC0 ambientCG cracks, rock, litter, moss, gravel | d85478b |
 | E | first pass: tire smoke, dust, spray | de561e9 |
@@ -247,8 +247,8 @@ passes for each `_real` car material.
    that reads the existing wetness input.
 2. **Decals**, deterministic from the road seed (decision 2): cracks,
    patches, tar seams, worn lane paint and tire marks at corner entries
-   and junctions. They're
-   spawned only in Realistic. Textures from ambientCG or generated.
+   and junctions. They're spawned only in Realistic. Textures from
+   ambientCG or generated.
 
 **Check:** a plot of decal density along the Tail of the Dragon centerline
 in `scratchpad/`, and the same seed gives the same decals twice.
