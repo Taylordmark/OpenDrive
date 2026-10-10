@@ -246,6 +246,25 @@ Only the materials change, never the models (V2). Build on the existing
 **Check:** the material build script runs headless and the interface rule
 passes for each `_real` car material.
 
+**Grounding (2026-10-10, Realistic only, no model changes):**
+- `UODContactShadow` (new `ODContactShadow.*`, on the pawn) puts 5 deferred
+  decals on the ground: a rounded-rect blob under the body and an ellipse
+  under each tyre. The material is `Realistic/CarShadow/M_CarContactShadow`,
+  built by `unreal/build_car_contact_shadow_material.py`. It darkens albedo
+  and removes specular, so it works in overcast and at night.
+- Each blob traces down from its anchor every post-physics tick and sits on
+  the hit normal. It fades by gap and by tilt, as a pure function of the
+  state. The mirror is `pipeline/checks/check_contact_shadow.py`.
+- The car doesn't receive decals, so the blobs never draw on it.
+- Cost: 5 line traces and 5 small decals for the player car.
+- Car meshes cast two-sided shadows, against light leaks through open
+  shells and wheel wells.
+- The sun gets 30 cm world-space contact shadows (`ODDayNightController`).
+- Not done: capsule shadows (skeletal meshes only); reflections. Lumen
+  reflections plus the real-time sky capture already cover the paint at
+  High/Epic. At Medium, SSR is capped by the scalability tier, so a PP
+  override can't help.
+
 ### Track C — Roads (medium)
 
 1. **`M_Road_real`:** the higher-res ambientCG asphalt sets

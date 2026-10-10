@@ -20,6 +20,7 @@
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "ODTuningManager.h"
+#include "ODContactShadow.h"
 #include "ODVehicleDef.h"
 #include "ODVehicleFX.h"
 #include "ODVehicleMovement.h"
@@ -56,6 +57,7 @@ AODVehiclePawn::AODVehiclePawn()
 
 	Movement = CreateDefaultSubobject<UODVehicleMovement>(TEXT("Movement"));
 	CreateDefaultSubobject<UODVehicleFX>(TEXT("VehicleFX"));   // Track E: Realistic-only smoke/dust/spray, reads Movement
+	CreateDefaultSubobject<UODContactShadow>(TEXT("ContactShadow"));   // Realistic-only ground blobs under body + tyres
 
 	for (int32 i = 0; i < 4; ++i)
 	{
