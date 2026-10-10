@@ -314,6 +314,11 @@ void AODForestManager::BeginPlay()
 		ScrubMeshBaseOffsetCm = Mesh->GetBoundingBox().Min.Z;
 	}
 
+	if (ODVisualStyle::IsRealistic())
+	{
+		GroundCover.Load(this);
+	}
+
 	Pool.Reserve(PoolSize);
 	for (int32 i = 0; i < PoolSize; ++i)
 	{
@@ -2351,6 +2356,35 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		Hism->AddInstances(Xf, false, /*bWorldSpace*/false);
 	}
 	GrassCells.Add(Key, Hism);
+
+	if (GroundCover.bOn)   // Realistic only
+	{
+		TArray<int32> Near;   // stations out to the road band's far edge
+		if (bUseStationExclusion)
+		{
+			const float Pad = 6000.0f + 1500.0f;
+			RoadStationHash.QueryBox(X0 - Pad, Y0 - Pad, X0 + GrassCellCm + Pad, Y0 + GrassCellCm + Pad, Near);
+		}
+		auto RoadEdge = [&](double X, double Y)
+		{
+			float D = 1e9f;
+			for (const int32 i : Near)
+			{
+				const TArray<FRoadStation>& S = RoadStationHash.Stations;
+				D = FMath::Min(D, SegmentEdgeDistCm(S[i], S[NextRunStation(S, i)], X, Y));
+			}
+			return D;
+		};
+		const ODGroundCover::FCell Cell{Key, X0, Y0, Step, N, &Z[0][0], &bGood[0][0], (uint8)Biome,
+			ODAssetDetail::Level(), (uint32)RandomSeed, GrassShoulderClearCm, RoadEdge};
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Comps;
+		GroundCover.BuildCell(Cell, RootComponent, (GrassRadiusCm + GrassLeadCm) * (0.6f + 0.2f * ODAssetDetail::Level()),
+			WpoDisableCm, [this](UHierarchicalInstancedStaticMeshComponent* H) { UseSeasonFoliage(H); }, Comps);
+		for (UHierarchicalInstancedStaticMeshComponent* C : Comps)
+		{
+			GroundCoverCells.Add(Key, C);
+		}
+	}
 	return true;
 }
 
@@ -2379,6 +2413,7 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 	const FVector Loc = CarLoc + Vel2D.GetSafeNormal() * GrassLeadCm;
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / GrassCellCm), FMath::FloorToInt(Loc.Y / GrassCellCm));
 	const int32 Reach = FMath::CeilToInt(GrassRadiusCm / GrassCellCm);
+	GroundCover.SyncSeason(FoliageSeasonMID);   // snow / wet on the Realistic ground cover cards
 
 	// missing cells inside the radius, nearest first
 	TArray<TPair<double, FIntPoint>> Want;
@@ -2412,6 +2447,11 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 			if (It.Value())
 			{
 				It.Value()->DestroyComponent();
+			}
+			for (auto G = GroundCoverCells.CreateKeyIterator(It.Key()); G; ++G)
+			{
+				G.Value()->DestroyComponent();
+				G.RemoveCurrent();
 			}
 			It.RemoveCurrent();
 		}
