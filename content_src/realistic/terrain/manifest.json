@@ -1,0 +1,71 @@
+{
+  "_comment": "PLAN-VISUALS Track D: ambientCG CC0 PBR sets used only by the Realistic terrain twins (unreal/apply_terrain_real_materials.py). Whole site CC0 1.0 (public domain, no login; see https://ambientcg.com/about). Fetched at 2K-JPG by `python content_src/textures/ground/download_ground_textures.py content_src/realistic/terrain/manifest.json` into <asset_id>/ (gitignored); imported to /Game/OpenDrive/Realistic/Terrain/<asset_id>/ by apply_terrain_real_materials.py.",
+  "resolution": "2K",
+  "format": "JPG (Color/Roughness/AmbientOcclusion), JPG NormalGL",
+  "textures": [
+    {
+      "role": "cliff_rock_bedded",
+      "asset_id": "Rock051",
+      "display_name": "Rock 051",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Rock051",
+      "download_url": "https://ambientcg.com/get?file=Rock051_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Grey bedded (sedimentary-looking) cliff rock - triplanar steep terrain and road-cut walls in M_GroundStylized_real, under the procedural strata tint. Replaces Rock030 there."
+    },
+    {
+      "role": "forest_floor_litter",
+      "asset_id": "Ground076",
+      "display_name": "Ground 076",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Ground076",
+      "download_url": "https://ambientcg.com/get?file=Ground076_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Leaf litter, needles and roots - forest-floor layer of M_GroundStylized_real (replaces the mossy-stone Ground068)."
+    },
+    {
+      "role": "boulder_moss",
+      "asset_id": "Moss002",
+      "display_name": "Moss 002",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Moss002",
+      "download_url": "https://ambientcg.com/get?file=Moss002_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Real moss for the up-facing sides of the boulders in M_Rock030_real (replaces the Ground068 stand-in)."
+    },
+    {
+      "role": "shoulder_gravel",
+      "asset_id": "Gravel040",
+      "display_name": "Gravel 040",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Gravel040",
+      "download_url": "https://ambientcg.com/get?file=Gravel040_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Crushed grey stone - road shoulder in M_GroundStylized_real and the gravel patches of M_Embankment_real."
+    }
+  ]
+}

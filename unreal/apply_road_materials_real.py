@@ -20,6 +20,12 @@ Also imports the generated decal atlas (pipeline/make_road_decal_textures.py
 DecalColor.R picks the 2x2 atlas cell (crack, patch, manhole, tire marks),
 DecalColor.G is the opacity, and "Wetness" darkens/glosses it like the road.
 
+Imports the downloaded CC0 crack set (Asphalt026B, content_src/realistic/
+road/manifest.json, fetched by content_src/textures/ground/
+download_ground_textures.py <that manifest>) to /Game/OpenDrive/Realistic/
+Road/ via import_ground_textures.py; apply_road_material.py's RealCrack*
+layer samples it.
+
 Needs import_road_textures.py + import_ground_textures.py to have run.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
@@ -47,6 +53,15 @@ tools = unreal.AssetToolsHelpers.get_asset_tools()
 
 def log(msg):
     unreal.log_warning(f"ROADREAL {msg}")
+
+
+def save(path):
+    if not EAL.save_asset(path, only_if_is_dirty=False):
+        raise RuntimeError(f"save failed (file in use?): {path}")
+
+
+runpy.run_path(str(HERE / "import_ground_textures.py"),
+               init_globals={"SRC_DIR": str(SRC_DIR), "TEX_DIR": REAL_DIR})
 
 
 def param_names(mat):
@@ -77,7 +92,7 @@ for base, surface in (("M_Road", "paved"), ("M_Road_OneWay", "paved"),
     pm_twin, pm_real = twin.get_editor_property("phys_material"), real.get_editor_property("phys_material")
     if pm_twin != pm_real:
         real.set_editor_property("phys_material", pm_twin)
-        EAL.save_asset(real_path, only_if_is_dirty=False)
+        save(real_path)
     log(f"{base}_real: params {sorted(param_names(real))}, phys {pm_twin.get_name() if pm_twin else None}")
 
 # ------------------------------------------------------------ decal atlas
@@ -99,7 +114,8 @@ for suffix, srgb, comp in (("C", True, unreal.TextureCompressionSettings.TC_DEFA
     tex.set_editor_property("compression_settings", comp)
     tex.set_editor_property("address_x", unreal.TextureAddress.TA_CLAMP)
     tex.set_editor_property("address_y", unreal.TextureAddress.TA_CLAMP)
-    EAL.save_loaded_asset(tex, only_if_is_dirty=False)
+    if not EAL.save_loaded_asset(tex, only_if_is_dirty=False):
+        raise RuntimeError(f"save failed (file in use?): {REAL_DIR}/{name}")
     TEX[suffix] = tex
 
 # ------------------------------------------------------------ decal material
@@ -143,7 +159,7 @@ MEL.connect_material_property(normal, "", unreal.MaterialProperty.MP_NORMAL)
 MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
 MEL.connect_material_property(opacity, "", unreal.MaterialProperty.MP_OPACITY)
 MEL.recompile_material(dm)
-EAL.save_asset(decal_path, only_if_is_dirty=False)
+save(decal_path)
 
 re = unreal.load_asset(decal_path)
 for prop in ("MP_BASE_COLOR", "MP_NORMAL", "MP_ROUGHNESS", "MP_OPACITY"):

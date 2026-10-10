@@ -182,6 +182,17 @@ BermLipDropCm = 60.0            # road_mesh_common.WRAP_LIP_DROP_M
 # chips away with the wear noise and where wheels cross it. Fine detail
 # fades out past RealDetailFadeCm so it doesn't shimmer. Wet: ruts hold a
 # water film (scaled by PuddleAmount, so the Dragon's static road is off).
+# Cracks: a photographic CC0 crack set (Asphalt026B, content_src/realistic/
+# road) multiplies its luminance ratio into the base albedo (so each road
+# class keeps its own asphalt tone) and lends its normal and roughness, in
+# noise-picked damaged stretches, strongest in the wheel paths.
+RealCrackSet = ("Asphalt026B", "/Game/OpenDrive/Realistic/Road")
+RealCrackTileM = 4.1            # incommensurate with the 2.6-3.2 m base tiles
+RealCrackLinMean = 0.0532       # the set's mean linear luminance (ratio = 1 there)
+RealCrackContrast = 0.75        # share of that ratio applied
+RealCrackRegionCellM = 31.0
+RealCrackCover = 0.55           # fraction of the road that's cracked
+RealCrackOffTrack = 0.55        # damage between the wheel paths, vs 1 in them
 RealMacroCellM = 23.0
 RealMesoCellM = 5.3
 RealMacroAlbedo = 0.14
@@ -612,6 +623,17 @@ if REAL:
         base_albedo = g.mul(base_albedo, g.mul(g.lerp(g.const(1.0), g.const(RealPolishBright), wheel),
                                                g.lerp(g.const(1.0), g.const(RealOilDarken), oil)))
         base_rough = g.sub(base_rough, g.add(g.mul(wheel, g.const(RealPolishRough)), g.mul(oil, g.const(0.05))))
+        # photographic cracks (see RealCrack*); tar snakes and joints go over them
+        crack_tex = load_asphalt(*RealCrackSet)
+        uv_crack = uv_for(RealCrackTileM)
+        c_alb = g.mask(g.sample(crack_tex["albedo"], uv_crack), r=True, gg=True, b=True, a_out="RGB")
+        c_ratio = g.mul(g.dotp(c_alb, g.const3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)), g.const(1.0 / RealCrackLinMean))
+        c_ratio = g.minv(g.lerp(g.const(1.0), c_ratio, g.const(RealCrackContrast)), g.const(1.2))
+        crack_region = g.clamp01(g.mul(g.sub(road_noise(RealCrackRegionCellM, 41.0), g.const(1.0 - RealCrackCover)), g.const(4.0)))
+        damage = g.mul(g.mul(crack_region, g.lerp(g.const(RealCrackOffTrack), g.const(1.0), wheel)), on_pave)
+        base_albedo = g.mul(base_albedo, g.lerp(g.const(1.0), c_ratio, damage))
+        base_normal = g.lerp(base_normal, g.sample(crack_tex["normal"], uv_crack, is_normal=True), damage, b_out="RGB")
+        base_rough = g.lerp(base_rough, g.mask(g.sample(crack_tex["rough"], uv_crack), r=True), damage)
         # tar snakes: the 0.5 isoline of value noise, in patches; joints on lane boundaries
         tar_n = road_noise(RealTarCellM, 17.0)
         tar_iso = g.sub(g.const(1.0), g.clamp01(g.mul(
@@ -705,7 +727,8 @@ MEL.connect_material_property(final_rough, "", unreal.MaterialProperty.MP_ROUGHN
 MEL.connect_material_property(berm_wpo, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
 
 MEL.recompile_material(mat)
-unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
+if not unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False):
+    raise RuntimeError(f"save failed (file in use?): {mat_path}")
 
 # ---- VERIFY (2026-08-27+ convention, see apply_ground_material.py's
 # identical block) - reload the just-saved asset fresh and confirm every

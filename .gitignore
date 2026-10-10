@@ -87,3 +87,8 @@ desktop.ini
 # pipeline/make_road_decal_textures.py + manifest.json are tracked, the
 # generated PNGs are not.
 content_src/realistic/road/*.png
+
+# Same convention, Realistic-only ambientCG sets (PLAN-VISUALS Tracks C/D) -
+# manifest.json is tracked; download_ground_textures.py <manifest> re-fetches.
+content_src/realistic/road/*/
+content_src/realistic/terrain/*/

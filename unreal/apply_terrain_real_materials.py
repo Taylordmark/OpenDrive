@@ -7,9 +7,13 @@ saved BESIDE the stylized ones so ODVisualStyle::Pick finds them:
   /Game/OpenDrive/Materials/M_Embankment_real       embankment skirts
   /Game/OpenDrive/Materials/M_Rock030_real          boulder scatter (HISM)
 
-Same CC0 ambientCG sets the stylized versions already import (no new
-textures - see content_src/textures/ground/manifest.json); everything new is
-material math:
+Mostly the CC0 ambientCG sets the stylized versions already import
+(content_src/textures/ground/manifest.json), plus four Realistic-only CC0
+ambientCG sets (content_src/realistic/terrain/manifest.json, imported here to
+/Game/OpenDrive/Realistic/Terrain/): Rock051 bedded cliff rock for steep
+ground and cut walls, Ground076 leaf litter for the forest floor, Moss002 for
+boulder moss, Gravel040 crushed stone for the road shoulder and embankment
+gravel. The rest is material math:
   - anti-tiling: every planar layer is sampled twice, at its own tile and at
     a FAR_MUL-times larger, ROT_DEG-rotated, offset copy; a 17 m noise mixes
     the two up close and the far copy takes over with distance (DIST_*), so
@@ -43,6 +47,7 @@ UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
 """
 
 import math
+import runpy
 import sys
 from pathlib import Path
 
@@ -53,17 +58,25 @@ from test_areas import ORIGIN_HEIGHT_M
 
 MAT_DIR = "/Game/OpenDrive/Materials"
 GROUND_TEX_DIR = "/Game/OpenDrive/Textures/Ground"
+REAL_TEX_DIR = "/Game/OpenDrive/Realistic/Terrain"
+REAL_SRC_DIR = Path(__file__).resolve().parent.parent / "content_src" / "realistic" / "terrain"
+REAL_SETS = ("Rock051", "Ground076", "Moss002", "Gravel040")   # = REAL_SRC_DIR/manifest.json
 
 # ---- tunables (pipeline/checks/check_terrain_real.py parses these) --------
-# (asset_id, near tile cm) - same sets and tiles as M_GroundStylized
+# (asset_id, near tile cm) - M_GroundStylized's sets and tiles, except the
+# REAL_SETS ones
 LAYERS = {
     "grass": ("Grass001", 700.0),
-    "forest": ("Ground068", 750.0),
+    "forest": ("Ground076", 400.0),
     "dirt": ("Ground037", 850.0),
-    "rock": ("Rock030", 1400.0),
+    "rock": ("Rock051", 1400.0),
     "scree": ("Gravel030", 1000.0),
     "snow": ("Snow006", 1800.0),
+    "boulder": ("Rock030", 260.0),
+    "moss": ("Moss002", 300.0),
+    "shoulder": ("Gravel040", 300.0),
 }
+ROCK_TINT = (0.68, 0.67, 0.72)   # Rock051 -> Rock030's mean albedo (0.31), a touch cooler
 FAR_MUL = 3.7            # far copy's tile = near tile * this (incommensurate on purpose)
 ROT_DEG = 37.0           # far copy's rotation
 FAR_OFFSET = (0.31, 0.67)
@@ -134,15 +147,13 @@ SHOULDER_MIN_M = 1.5
 SHOULDER_MAX_M = 3.0
 SHOULDER_JITTER_M = 0.5
 SHOULDER_SOFT_M = 0.35
-SHOULDER_GRAVEL_TILE_CM = 300.0
-SHOULDER_TINT = (0.85, 0.78, 0.66)
+SHOULDER_TINT = (1.05, 0.98, 0.9)   # Gravel040 (mean 0.39) - slightly warm grey
 SHOULDER_EDGE_FADE_CM = 8000.0
 
 # boulders (M_Rock030_real) - world-space triplanar, so the spherical UV0
 # seam of make_rock_meshes.py's boulders disappears
-BOULDER_TILE_CM = 260.0
 BOULDER_STRATA_BAND_CM = 35.0
-MOSS_TILE_CM = 300.0
+MOSS_TINT = (0.9, 0.88, 0.9)
 MOSS_UP_LO = 0.45        # normal.z where moss starts ...
 MOSS_UP_HI = 0.8         # ... and where it's full
 MOSS_NOISE_CM = 250.0
@@ -167,7 +178,7 @@ SHARED_WRAP = unreal.SamplerSourceMode.SSM_WRAP_WORLD_GROUP_SETTINGS
 
 
 def load_set(asset_id):
-    base = f"{GROUND_TEX_DIR}/{asset_id}"
+    base = f"{REAL_TEX_DIR if asset_id in REAL_SETS else GROUND_TEX_DIR}/{asset_id}"
     out = {k: unreal.load_asset(f"{base}/T_{asset_id}_{k}") for k in ("A", "N", "R", "AO")}
     missing = [k for k, v in out.items() if v is None]
     if missing:
@@ -176,6 +187,9 @@ def load_set(asset_id):
     return out
 
 
+# the Realistic-only sets, same importer as the stylized ground sets
+runpy.run_path(str(Path(__file__).resolve().parent / "import_ground_textures.py"),
+               init_globals={"SRC_DIR": str(REAL_SRC_DIR), "TEX_DIR": REAL_TEX_DIR})
 SETS = {key: dict(load_set(aid), tile=tile) for key, (aid, tile) in LAYERS.items()}
 
 
@@ -505,7 +519,8 @@ def finish(g, path, twin_path, out, data_uvs=frozenset()):
         G.req(MEL.connect_material_property(out[key], "", prop), f"{path} {key}")
     copy_twin_settings(unreal.load_asset(twin_path), g.mat)
     MEL.recompile_material(g.mat)
-    unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+    if not unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False):
+        raise RuntimeError(f"save failed (file in use?): {path}")
     check_interface(twin_path, path, data_uvs)
     log(f"saved {path} ({len(MEL.get_material_expressions(g.mat))} nodes)")
 
@@ -569,7 +584,7 @@ def build_ground():
     # steep: triplanar cliff rock with strata, scree above treeline
     rock = triplanar(g, SETS["rock"], wp, nrm, SETS["rock"]["tile"], dist_t=dist_t, far_mul=ROCK_FAR_MUL)
     strata_mul, band = strata(g, wp, xy, STRATA_BAND_CM, (5.0, 9.0))
-    rock["albedo"] = g.mul(rock["albedo"], strata_mul)
+    rock["albedo"] = g.mul(g.mul(rock["albedo"], g.c3(*ROCK_TINT)), strata_mul)
     rock["rough"] = g.sat(g.add(rock["rough"], g.mul(g.sub(band, g.c(0.5)), g.c(-0.12))))
     steep = blend_layers(g, rock, scree, treeline_t)
 
@@ -619,14 +634,15 @@ def road_edge_blend(g, base, xy, flat_w, dirt):
                   g.mul(g.sub(fine, g.c(0.5)), g.c(2.0 * SHOULDER_JITTER_M)))
     m = g.sat(g.div(g.sub(g.add(width, g.c(SHOULDER_SOFT_M)), road_d), g.c(2.0 * SHOULDER_SOFT_M)))
     m = g.mul(g.mul(m, edge), g.sat(g.mul(flat_w, g.c(2.0))))
-    uv = g.mul(xy, g.c(1.0 / SHOULDER_GRAVEL_TILE_CM))
-    gravel = g.sample(SETS["scree"]["A"], uv, "A")
+    s = SETS["shoulder"]
+    uv = g.mul(xy, g.c(1.0 / s["tile"]))
+    gravel = g.sample(s["A"], uv, "A")
     sh = dict(
         albedo=g.lerp(g.mul(gravel, g.c3(*SHOULDER_TINT), a_out="RGB"), g.mul(dirt["albedo"], g.c(0.9)),
                       g.sat(g.mul(g.sub(fine, g.c(0.3)), g.c(2.5)))),
-        normal=g.sample(SETS["scree"]["N"], uv, "N"),
+        normal=g.sample(s["N"], uv, "N"),
         rough=g.c(0.9),
-        ao=g.mask(g.sample(SETS["scree"]["AO"], uv, "AO"), r=True, a_out="RGB"),
+        ao=g.mask(g.sample(s["AO"], uv, "AO"), r=True, a_out="RGB"),
     )
     return {k: g.lerp(base[k], sh[k], m, b_out="RGB" if k == "normal" else "") for k in base}
 
@@ -637,7 +653,7 @@ def build_embankment():
     g = G(mat)
     wp, xy, nrm, depth, dist_t, var_w = shared_signals(g)
     dirt = planar_layer(g, SETS["dirt"], xy, var_w, dist_t)
-    gravel = mul_albedo(g, planar_layer(g, SETS["scree"], xy, var_w, dist_t, tile_cm=450.0), g.c3(*SCREE_TINT))
+    gravel = mul_albedo(g, planar_layer(g, SETS["shoulder"], xy, var_w, dist_t, tile_cm=450.0), g.c3(*SHOULDER_TINT))
     grass = planar_layer(g, SETS["grass"], xy, var_w, dist_t)
     v = g.mask(g.node(unreal.MaterialExpressionTextureCoordinate, coordinate_index=0), gg=True)
 
@@ -656,12 +672,12 @@ def build_rock():
     mat, path = new_material("M_Rock030_real")
     g = G(mat)
     wp, xy, nrm, depth, dist_t, var_w = shared_signals(g)
-    rock = triplanar(g, SETS["rock"], wp, nrm, BOULDER_TILE_CM)
+    rock = triplanar(g, SETS["boulder"], wp, nrm, SETS["boulder"]["tile"])
     strata_mul, band = strata(g, wp, xy, BOULDER_STRATA_BAND_CM, (3.0, 13.0))
     rock["albedo"] = g.mul(rock["albedo"], strata_mul)
-    moss_uv = g.mul(xy, g.c(1.0 / MOSS_TILE_CM))
-    s = SETS["forest"]
-    moss = dict(albedo=g.mul(g.sample(s["A"], moss_uv, "A"), g.c3(0.8, 0.95, 0.7), a_out="RGB"),
+    s = SETS["moss"]
+    moss_uv = g.mul(xy, g.c(1.0 / s["tile"]))
+    moss = dict(albedo=g.mul(g.sample(s["A"], moss_uv, "A"), g.c3(*MOSS_TINT), a_out="RGB"),
                 normal=g.sample(s["N"], moss_uv, "N"),
                 rough=g.mask(g.sample(s["R"], moss_uv, "R"), r=True, a_out="RGB"),
                 ao=g.mask(g.sample(s["AO"], moss_uv, "AO"), r=True, a_out="RGB"))
