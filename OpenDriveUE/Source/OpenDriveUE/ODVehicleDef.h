@@ -93,8 +93,26 @@ public:
 	float FinalRatio = 2.81f;
 
 	// ---- tires ----
+	/** Peak dry-asphalt friction of the tire compound - the car's real grip
+	 *  (no global multiplier on top). Pick a compound:
+	 *    all-terrain 0.90 (k 0.25) | street 1.00 (0.25) | performance 1.05 (0.25)
+	 *    sport 1.15 (0.22) | semi-slick 1.25 (0.20) | slick 1.60 (0.15)
+	 *  with k = TireLoadSensitivity. Cornering/braking g then emerges from
+	 *  mu, load sensitivity, weight transfer and downforce. */
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float MuPeak = 1.05f;
+
+	/** Grip per unit load falls as load rises: mu *= 1 - k*(Fz/Fz_static - 1),
+	 *  Fz_static = that axle's static corner load. Softer/racier compounds
+	 *  are less load-sensitive (see the MuPeak table). */
+	UPROPERTY(EditAnywhere, Category = "Tires", meta = (ClampMin = 0.0, ClampMax = 0.5))
+	float TireLoadSensitivity = 0.25f;
+
+	/** Rear/front axle grip ratio: wider rear tires and front-biased roll
+	 *  stiffness that keep a real car stable under brake + steer. 1.05-1.10
+	 *  is typical; 1.0 = square setup (looser). */
+	UPROPERTY(EditAnywhere, Category = "Tires", meta = (ClampMin = 0.8, ClampMax = 1.3))
+	float RearGripRatio = 1.06f;
 
 	UPROPERTY(EditAnywhere, Category = "Tires")
 	float SlideFrac = 0.88f;
@@ -125,9 +143,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aero")
 	float DragCoeff = 0.45f;
 
-	/** N per (m/s)^2. Tuning presets scale this by Preset->Downforce / 1.1. */
+	/** Downforce, N per (m/s)^2 = 0.6125 * ClA (rho/2 * lift area). Road car
+	 *  ClA ~0-0.5, GT ~2, prototype ~5+. Tuning presets scale this by
+	 *  Preset->Downforce / 1.1. */
 	UPROPERTY(EditAnywhere, Category = "Aero")
-	float DownforceCoeff = 1.1f;
+	float DownforceCoeff = 0.25f;
+
+	/** Fraction of downforce on the front axle (center of pressure between
+	 *  the axles). A few points behind the weight distribution keeps the car
+	 *  more stable as speed rises. */
+	UPROPERTY(EditAnywhere, Category = "Aero", meta = (ClampMin = 0.2, ClampMax = 0.8))
+	float AeroBalanceFront = 0.50f;
 
 	// ---- steering ----
 	UPROPERTY(EditAnywhere, Category = "Steering")

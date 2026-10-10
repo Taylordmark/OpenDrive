@@ -64,17 +64,17 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 	Move->SpringRateScale = Preset->SpringRateScale;
 	Move->RideHeightDelta = Preset->RideHeightDelta;
 	Move->TorqueScale = Preset->TorqueScale;
-	// x4 grip (2026-08-24, Taylor: exploring the map faster needs a car that
-	// doesn't lose the rear at every corner) stacked on top of whatever the
-	// active preset dials in, since presets overwrite these fields outright.
-	constexpr float GripBoost = 4.0f;
-	Move->FrontGripScale = Preset->FrontFrictionScale * GripBoost;
-	Move->RearGripScale = Preset->RearFrictionScale * GripBoost;
+	// Relative axle trims over the car's physical tire grip (compound MuPeak,
+	// load sensitivity, weight, aero - see TickTires). The old flat x4
+	// GripBoost is gone: it hid tire-unlimited brakes and spun-up rears.
+	Move->FrontGripScale = Preset->FrontFrictionScale;
+	Move->RearGripScale = Preset->RearFrictionScale;
 
 	// Preset downforce is relative to the street 1.1 baseline, scaled onto
 	// the active car's own UODVehicleDef::DownforceCoeff (2026-09-28: per-car
 	// aero - Concept/LMP/Super carry more; replaces the old GT-only x4 hack).
 	float CarDownforce = 1.1f;
+	float CarComZ = 10.0f;
 	if (const AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Car))
 	{
 		const auto& Defs = VehiclePawn->GetVehicleDefs();
@@ -82,12 +82,13 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 		if (Defs.IsValidIndex(Idx) && Defs[Idx])
 		{
 			CarDownforce = Defs[Idx]->DownforceCoeff;
+			CarComZ = Defs[Idx]->ComLocalZ;
 		}
 	}
 	Move->DownforceCoeff = CarDownforce * Preset->Downforce / 1.1f;
 	// preset COM heights were tuned around the template's 42 cm street value;
-	// map them as deltas onto the new body's 10 cm default (stage 3 retunes)
-	Move->ComLocalZ = 10.0f + (Preset->CenterOfMassZ - 42.0f);
+	// map them as deltas onto the active car's own COM height
+	Move->ComLocalZ = CarComZ + (Preset->CenterOfMassZ - 42.0f);
 
 	Move->OnRoadGrip = Preset->OnRoadGrip;
 	Move->OffRoadGrip = Preset->OffRoadGrip;

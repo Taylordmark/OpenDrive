@@ -1282,6 +1282,31 @@ void AODVehiclePawn::UpdateFreeLook(float DeltaSeconds)
 	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg + LookPitchDeg, LookYawDeg, 0.0f));
 }
 
+namespace
+{
+// Keyboard axis ramp, exact over Dt: away from zero at InRate, toward zero
+// (release, or a smaller same-sign target) at OutRate, both 1/s. A reversal
+// spends only the time it needs to reach zero at OutRate, then ramps out the
+// other way at InRate for the rest of Dt - piecewise-exact, so the result is
+// the same however Dt is sliced (pipeline/check_kbm_steer_ramp.py).
+float RampKeyAxis(float R, float Target, float Dt, float InRate, float OutRate)
+{
+	const bool bSameSide = Target != 0.0f && FMath::Sign(Target) == FMath::Sign(R);
+	if (R != 0.0f && !(bSameSide && FMath::Abs(Target) >= FMath::Abs(R)))
+	{
+		const float Stop = bSameSide ? Target : 0.0f;
+		const float Need = FMath::Abs(R - Stop) / OutRate;
+		if (Dt <= Need)
+		{
+			return R + FMath::Sign(Stop - R) * OutRate * Dt;
+		}
+		R = Stop;
+		Dt -= Need;
+	}
+	return FMath::FInterpConstantTo(R, Target, Dt, InRate);
+}
+}
+
 void AODVehiclePawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
@@ -1349,28 +1374,30 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 			SetVCmS);
 	}
 
-	// keyboard keys -> smoothed axes; the ONLY input shaping in the game
-	float SteerTarget =
-		(bRightKey ? 1.0f : 0.0f) - (bLeftKey ? 1.0f : 0.0f);
-	// speed-sensitive scale (see the UPROPERTY comment): both the lock the
-	// key can command AND the rate it ramps there shrink with speed; the
-	// return-to-center rate is deliberately left at full strength.
+	// keyboard keys -> ramped axes (tuning + rationale: "Keyboard driving"
+	// block in ODVehiclePawn.h). Steer: time-held ramp -> curve -> speed cap.
+	const float SpeedCmS = FMath::Abs(Movement->GetForwardSpeed());
+	KbSteerRamp = RampKeyAxis(KbSteerRamp,
+		(bRightKey ? 1.0f : 0.0f) - (bLeftKey ? 1.0f : 0.0f), DeltaSeconds,
+		1.0f / FMath::Max(KbSteerRampInSec, 0.01f),
+		1.0f / FMath::Max(KbSteerReturnSec, 0.01f));
+	const float FullLockCmS = FMath::Max(KbSteerFullLockSpeedCmS, 1.0f);
+	const float KbSteerCap = FMath::Square(FullLockCmS / FMath::Max(SpeedCmS, FullLockCmS));
+	SmSteer = FMath::Sign(KbSteerRamp)
+		* FMath::Pow(FMath::Abs(KbSteerRamp), FMath::Max(KbSteerCurveExp, 0.1f)) * KbSteerCap;
+	const float PedalIn = 1.0f / FMath::Max(PedalRampInSec, 0.01f);
+	const float PedalOut = 1.0f / FMath::Max(PedalReleaseSec, 0.01f);
+	SmThrottle = RampKeyAxis(SmThrottle, bThrottleKey ? HookThrottle : 0.0f,
+		DeltaSeconds, PedalIn, PedalOut);
+	SmBrake = RampKeyAxis(SmBrake, bBrakeKey ? 1.0f : 0.0f, DeltaSeconds, PedalIn, PedalOut);
+
+	// gamepad stick lock cap (unchanged; see SteerFadeStartCmS)
 	const float FadeT = FMath::Clamp(
-		(FMath::Abs(Movement->GetForwardSpeed()) - SteerFadeStartCmS) /
+		(SpeedCmS - SteerFadeStartCmS) /
 			FMath::Max(SteerFadeEndCmS - SteerFadeStartCmS, 1.0f),
 		0.0f, 1.0f);
 	const float FadeS = FadeT * FadeT * (3.0f - 2.0f * FadeT);
 	const float SteerScale = FMath::Lerp(1.0f, HighSpeedSteerFrac, FadeS);
-	SteerTarget *= SteerScale;
-	const float Rate = FMath::Abs(SteerTarget) > 0.01f &&
-		FMath::Sign(SteerTarget) != FMath::Sign(SmSteer)
-			? SteerRate * SteerScale + SteerReturnRate
-			: (FMath::Abs(SteerTarget) > 0.01f ? SteerRate * SteerScale : SteerReturnRate);
-	SmSteer = FMath::FInterpConstantTo(SmSteer, SteerTarget, DeltaSeconds, Rate);
-	SmThrottle = FMath::FInterpConstantTo(
-		SmThrottle, bThrottleKey ? HookThrottle : 0.0f, DeltaSeconds, PedalRate);
-	SmBrake = FMath::FInterpConstantTo(
-		SmBrake, bBrakeKey ? 1.0f : 0.0f, DeltaSeconds, PedalRate);
 	if (SteerAt > 0.0f && Now > SteerAt)   // half steer (tire lateral tests)
 	{
 		SmSteer = 0.5f;
@@ -1383,7 +1410,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// SmSteer/SmThrottle/SmBrake, which stay exactly the keyboard path.
 	if (ActiveDevice == EODInputDevice::Gamepad)
 	{
-		// same speed-sensitive lock as the keyboard (2026-09-25): a firm stick
+		// speed-sensitive stick lock (2026-09-25; keyboard has its own): a firm stick
 		// flick at 70 mph was ~24 deg of road wheel, enough to spin the car
 		// under braking with every assist on (planar sim, see SteerFadeStartCmS)
 		Movement->SetSteeringInput(GamepadSteerRaw * SteerScale);

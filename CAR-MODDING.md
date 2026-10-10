@@ -55,3 +55,26 @@ bottom of the car at z=0 is axle height).
 - If an import comes in looking broken (inside-out faces, wrong materials),
   re-export with the settings above; the usual culprit is a changed
   forward/up axis or untriangulated n-gons.
+
+## Handling fields (grip)
+
+Grip is physical: there is no global multiplier. Each car's `UODVehicleDef`
+(set in `unreal/import_car_meshes.py` / `apply_vehicle_defs.py`) sets:
+
+- **`mu_peak` + `tire_load_sensitivity`**: the tire compound. Use
+  all-terrain 0.90/0.25, street 1.00/0.25, performance 1.05/0.25,
+  sport 1.15/0.22, semi-slick 1.25/0.20 or slick 1.60/0.15.
+- **`rear_grip_ratio`**: rear/front grip (wider rears). 1.05-1.10 is
+  stable under brake + steer; 1.0 is looser.
+- **`downforce_coeff`**: N per (m/s)^2, = 0.6125 x ClA. Road car 0-0.3,
+  GT ~1.2, prototype ~3.4.
+- **`aero_balance_front`**: front share of downforce. About the front
+  weight fraction minus 0.03.
+- **`mass_kg`, `front_weight_frac`, `com_local_z`**: normal load and weight
+  transfer.
+
+Cornering and braking g come out of these: about 1.0 g for road cars and
+1.7 g for the LMP at low speed, rising to about 2.9 g at 60 m/s. Tuning
+presets are relative trims on top. After changing a car, run
+`python pipeline/checks/esc_sim.py`. It prints every car's lateral and
+brake g and asserts the bands and spin checks.

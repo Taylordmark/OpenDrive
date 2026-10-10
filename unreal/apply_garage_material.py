@@ -65,7 +65,8 @@ def get_or_create(name):
     if unreal.EditorAssetLibrary.does_asset_exist(path):
         mat = unreal.load_asset(path)
         log(f"{name}: existing asset found, clearing expressions in place")
-        MEL.delete_all_material_expressions(mat)
+        for _e in list(MEL.get_material_expressions(mat)):  # not delete_all_material_expressions: UE 5.8 leaves half the nodes
+            MEL.delete_material_expression(mat, _e)
     else:
         mat = tools.create_asset(name, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
         log(f"{name}: created new asset")
