@@ -181,6 +181,7 @@ fewer than seven run at once.
 | E | first pass: tire smoke, dust, spray | de561e9 |
 | F | trees for 6 of 7 slots + flora materials | d321c3c |
 | G | first pass: `M_BuildingFacade_real` (paint, trim, grime, glass, night windows, 3 roof types) | see Track G |
+| H | first pass: `_real` W-beam and Jersey, W6x9 posts, delineators | see Track H |
 | J | first pass (shader shoulder blend, no RVT); agent still working on it | 5cbf1ee |
 
 `main` merged in with the menu work (cbbce1f). Known gaps:
@@ -347,6 +348,33 @@ stylized meshes; a render of each species turntable from the generator.
   painted CorrugatedSteel005 (`content_src/realistic/buildings/manifest.json`).
 Not done: interior-mapped (parallax) rooms and real roof geometry; both
 need new meshes or interiors, out of scope for a material pass.
+
+### Track H — Guardrails (small)
+
+1. `M_Guardrail_WBeam_real` / `M_Guardrail_Jersey_real`, picked by
+   `AODGuardrailManager` like any twin.
+2. A real W-beam post in Realistic only.
+
+**Status (2026-10-09):** first pass. `unreal/apply_guardrail_assets_real.py`
+builds both twins, a reflector material and the post mesh:
+- the ribbon's UV0.U is station index, so all texturing is world triplanar
+  (CC0 ambientCG Metal038 and Concrete035,
+  `content_src/realistic/guardrails/manifest.json`); UV0.V (profile layer)
+  only drives the height bands;
+- W-beam: galvanized tint, zinc spangle that fades before it aliases,
+  roughness breakup, grime along the bottom, light rust streaks, scrapes on
+  the bulge;
+- Jersey: weathered concrete, dirt and tire scuffs on the lower slope,
+  run-off stains;
+- `SM_GuardrailPost_real` (`pipeline/make_guardrail_post_mesh.py`): W6x9
+  I-beam 1.8 m, a blockout and a clip-on white delineator that glows toward
+  the camera at night. `AODGuardrailManager` puts it behind the rail, yawed
+  and unscaled, and gives the rail real normals; both only in Realistic.
+  Stylized keeps the cylinder.
+Not done: amber delineators (the run data has no one-way flag to say which
+side is the median), end treatments.
+
+**Drive check:** a W-beam road and a motorway, day and night.
 
 ---
 

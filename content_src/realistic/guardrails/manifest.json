@@ -1,0 +1,29 @@
+{
+  "_comment": "PLAN-VISUALS Track H (guardrails): ambientCG CC0 PBR sets used only by M_Guardrail_WBeam_real / M_Guardrail_Jersey_real (unreal/apply_guardrail_assets_real.py). Whole site CC0 1.0 (public domain, no login; see https://ambientcg.com/about). Fetched at 2K-JPG by `python content_src/textures/ground/download_ground_textures.py content_src/realistic/guardrails/manifest.json` into <asset_id>/ (gitignored); imported to /Game/OpenDrive/Realistic/Guardrails/<asset_id>/ by apply_guardrail_assets_real.py.",
+  "resolution": "2K",
+  "format": "JPG (Color/Roughness), JPG NormalGL",
+  "textures": [
+    {
+      "role": "wbeam_steel",
+      "asset_id": "Metal038",
+      "display_name": "Metal 038",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Metal038",
+      "download_url": "https://ambientcg.com/get?file=Metal038_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": ["Color", "NormalGL", "Roughness"],
+      "notes": "Scratched steel - fine scratches and roughness breakup under the galvanized tint; spangle, grime, rust streaks and scrapes are added in the shader."
+    },
+    {
+      "role": "jersey_concrete",
+      "asset_id": "Concrete035",
+      "display_name": "Concrete 035",
+      "author": "ambientCG (Lennart Demes)",
+      "source_url": "https://ambientcg.com/view?id=Concrete035",
+      "download_url": "https://ambientcg.com/get?file=Concrete035_2K-JPG.zip",
+      "license": "CC0 1.0 (ambientCG)",
+      "maps": ["Color", "NormalGL", "Roughness"],
+      "notes": "Old rough cast concrete - Jersey barrier base; dirt, tire scuffs and stains are added in the shader."
+    }
+  ]
+}
