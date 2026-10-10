@@ -461,6 +461,9 @@ public:
 	bool IsIgnitionCut() const { return bIgnitionCut; }
 	/** Signed forward speed, cm/s. */
 	float GetForwardSpeed() const { return FwdSpeedCmS; }
+	/** TC cutting torque or ESC braking - the flashing dash TC lamp. */
+	bool IsTractionIntervening() const { return TcScale < 0.99f || EscU > 0.05f; }
+	bool IsHandbrakeOn() const { return bHandbrakeIn || bParkHold; }
 
 	int32 NumWheels() const { return Wheels.Num(); }
 	bool IsWheelInContact(int32 i) const { return Wheels[i].bInContact; }

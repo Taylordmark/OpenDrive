@@ -9,9 +9,20 @@
 class AODRaceManager;
 class AODRoadManager;
 class AODMainMenu;
+class AODPauseMenu;
 class AODSettingsMenu;
 class AODCreditsMenu;
 class AODRebindMenu;
+
+/** One clickable rect recorded while a menu draws (AODRaceHUD::MenuHits). */
+struct FODMenuHit
+{
+	enum EKind : uint8 { Row, Prev, Next, Tab, Cell };
+	EKind Kind;
+	int32 Id;    // row (Tab: tab index)
+	int32 Col;   // Cell: 0 keyboard / 1 gamepad, else -1
+	float X0, Y0, X1, Y1;
+};
 
 /**
  * Canvas race HUD: timer, best, gate progress, speed — plus the stage map
@@ -56,6 +67,10 @@ public:
 	bool IsMiniMapHeadingUp() const { return bMiniMapHeadingUp; }
 	void SetMiniMapHeadingUp(bool bOn);
 
+	/** Gauges + nav distances in km/h, km, m, C. Settings row; [OpenDrive.HUD]. */
+	bool IsMetric() const { return bMetric; }
+	void SetMetric(bool bOn);
+
 	/** Re-derives ToggleMap/ZoomMapIn/ZoomMapOut's keys from FODInputConfig
 	 *  and rebuilds them - called at BeginPlay and again live by
 	 *  AODRebindMenu after a rebind (Arc 4.1, SS7.32). */
@@ -92,6 +107,8 @@ private:
 
 	TArray<FKey> LastODManagedKeys;
 	bool bMiniMapHeadingUp = false;
+	bool bMetric = false;
+	double TripCm = 0.0;   // gauge trip odometer, this level
 
 	/**
 	 * Draw the stage map into a panel. ZoomRadiusM <= 0 fits the whole route
@@ -123,26 +140,31 @@ private:
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
 
-	/** Settings/Credits panels (Arc 4.4) - drawn full-screen over whatever's
-	 *  behind them (pause menu or front-end), same dim-and-panel shape as
-	 *  DrawMainMenu's car-config panel above; generic over AODSettingsMenu's/
-	 *  AODCreditsMenu's own row-list APIs so both AODPauseMenu and AODMainMenu
-	 *  share one drawing implementation each regardless of which parent has
-	 *  them open. */
-	void DrawSettingsMenu(AODSettingsMenu* Menu) const;
-	void DrawCreditsMenu(AODCreditsMenu* Menu) const;
-	/** Arc 4.1 (SS7.32) rebind sub-screen - drawn ON TOP of the Settings
-	 *  panel (not instead of it) when AODSettingsMenu::IsRebindOpen(), same
-	 *  as DrawSettingsMenu/DrawCreditsMenu's "generic over whichever parent
-	 *  has it open" shape. */
-	void DrawRebindMenu(AODRebindMenu* Menu) const;
+	// ---- menus (2026-10-09 redesign, see the comment above DrawMenuPanel in the .cpp)
+	/** One menu column: title, tab strip (when >1 tab), the active tab's rows
+	 *  (value between clickable arrows, % values as sliders) and the footer
+	 *  button. bRight mirrors it to the right edge (Scene vista). */
+	void DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight) const;
+	/** Settings, or its Key Bindings / Credits sub-screen - drawn INSTEAD of
+	 *  the parent menu's panel, never stacked on it. */
+	void DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const;
+	void DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const;
+	void DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const;
+	/** The one dim layer plus the dark edge gradient the column sits on. */
+	void DrawMenuBackdrop(float Dim, bool bRight) const;
+	/** Title + tab strip; returns the Y the rows start at. */
+	float DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X) const;
+	void DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float X, float Y, float W) const;
+	void AddMenuHit(FODMenuHit::EKind Kind, int32 Id, int32 Col, float X, float Y, float W, float H) const;
+	float MenuScale() const;                  // Canvas height / 1080
+	float MenuX(bool bRight, float W) const;  // column left edge
+	/** Hover selects, click activates / changes / switches tab, right-click
+	 *  backs out, wheel moves - against this frame's MenuHits. */
+	void HandleMenuMouse(AODMainMenu* Menu);
+	void HandleMenuMouse(AODPauseMenu* Menu);
 
-	/** Shared car-config / settings panel (2026-09-28): title, Q/E tab bar,
-	 *  the active tab's rows (value between arrows, % values as a slider bar)
-	 *  and the footer button row. Sized to the tallest tab so switching tabs
-	 *  doesn't resize it. X,Y is the panel's top-left. */
-	void DrawTabbedPanel(float X, float Y, float W, const TCHAR* Title,
-		TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, int32 Footer, int32 Selected,
-		TFunctionRef<void(int32, FString&, FString&)> GetRow, const TCHAR* Hint) const;
-	static float TabbedPanelHeight(TArrayView<const FODMenuTab> Tabs);
+	mutable TArray<FODMenuHit> MenuHits;
+	FVector2D LastMenuMouse = FVector2D::ZeroVector;
+	uint64 LastMenuMouseFrame = 0;
 };

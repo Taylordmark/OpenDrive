@@ -10,7 +10,6 @@ class AODVehiclePawn;
 class UODVehicleMovement;
 class AODGarageEnvironment;
 class AODSettingsMenu;
-class AODCreditsMenu;
 class AODForestManager;
 
 /** One area's garage-menu car spot (2026-10-05), from
@@ -39,17 +38,18 @@ enum class EODMenuStage : uint8
 	Playing,     // menu dismissed, normal driving
 };
 
-/** Screen within EODMenuStage::Menu. Settings/Credits are overlays (AODSettingsMenu/AODCreditsMenu). */
+/** Screen within EODMenuStage::Menu. Settings is an overlay (AODSettingsMenu; Credits live inside it). */
 enum class EODMenuScreen : uint8
 {
-	Main,     // Start, Garage, Settings, Credits, Quit - garage-room backdrop
+	Main,     // Drive, Garage, Settings, Quit - garage-room backdrop
 	Garage,   // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
-	Scene,    // Area, Time of Day, Season, Weather, Drive - always the picked area's vista
+	Sound,    // exhaust sliders, opened from the Garage's "Customize Sound" row - garage room
+	Scene,    // Area, Time of Day, Season, Weather, Start Driving - always the picked area's vista
 };
 
 /**
  * Front-end menu, drawn on canvas by AODRaceHUD (no UMG). Sequential screens:
- * Main -> Garage / Scene Select (Start) / Settings / Credits / Quit; Esc or
+ * Main -> Garage (-> Sound) / Scene Select (Drive) / Settings / Quit; Esc or
  * Back returns to Main. The backdrop follows the SCREEN, never the row: Main
  * and Garage show the car in the garage room (ShowroomLocationCm), Scene
  * shows the selected area's preloaded vista (Spots, AODGameMode::SpawnVistaSet).
@@ -111,9 +111,7 @@ public:
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
-	bool IsCreditsOpen() const { return bCreditsOpen; }
 	AODSettingsMenu* GetSettingsMenu() const { return SettingsMenu; }
-	AODCreditsMenu* GetCreditsMenu() const { return CreditsMenu; }
 
 	/** Loading-screen progress numbers (2026-08-27, spawn-loading-screen task) -
 	 *  ODRaceHUD reads these while Stage == Loading to draw a "terrain N/M ·
@@ -143,16 +141,19 @@ public:
 	/** Cursor + input mode for a menu/map (also used by AODRaceHUD's world map). */
 	void SetCursorVisible(bool bVisible);
 
-private:
-	// input
+	// keyboard handlers, also the HUD's mouse entry points
 	void Up();
 	void Down();
+	void Activate();     // Enter / left click
+	void Back();         // Escape / right click
+	void Adjust(int32 Dir);
+	void SelectRow(int32 Row, int32 Col = -1);
+	void SetTab(int32 Tab);
+
+private:
 	void Left();
 	void Right();
-	void Activate();     // Enter
-	void Back();         // Escape
 	void OnClick();      // left mouse (map select)
-	void Adjust(int32 Dir);
 	void PrevTab() { SwitchTab(-1); }   // Q / left shoulder
 	void NextTab() { SwitchTab(+1); }   // E / right shoulder
 	void SwitchTab(int32 Dir);
@@ -213,13 +214,9 @@ private:
 	// as EnsureGarageEnvironment() above - see AODSettingsMenu's class
 	// comment for why these aren't independent input-owning actors.
 	AODSettingsMenu* EnsureSettingsMenu();
-	AODCreditsMenu* EnsureCreditsMenu();
 	bool bSettingsOpen = false;
-	bool bCreditsOpen = false;
 	UPROPERTY()
 	TObjectPtr<AODSettingsMenu> SettingsMenu;
-	UPROPERTY()
-	TObjectPtr<AODCreditsMenu> CreditsMenu;
 
 	EODMenuStage Stage = EODMenuStage::Menu;
 	EODMenuScreen Screen = EODMenuScreen::Main;

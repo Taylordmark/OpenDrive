@@ -1420,6 +1420,16 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		Movement->SetBrakeInput(SmBrake);
 		// handbrake already applied directly by HandbrakePressed/Released
 	}
+	// the front-end menu runs unpaused (AODMainMenu::OpenMenu) and shares the
+	// arrow keys, so menu navigation lit the brake lamps and turned the
+	// wheels - the showroom car takes no driving input from any device
+	if (bInShowroom)
+	{
+		Movement->SetSteeringInput(0.0f);
+		Movement->SetThrottleInput(0.0f);
+		Movement->SetBrakeInput(0.0f);
+		Movement->SetHandbrakeInput(false);
+	}
 
 	// wheel visuals: suspension travel + steer + spin from our sim, plus the
 	// garage setup's tire diameter/width and camber (no new art - the one

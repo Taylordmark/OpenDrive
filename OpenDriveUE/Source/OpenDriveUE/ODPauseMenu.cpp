@@ -8,11 +8,10 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/CommandLine.h"
 #include "UnrealClient.h"
-#include "ODCreditsMenu.h"
 #include "ODInputConfig.h"
 #include "ODMainMenu.h"
+#include "ODMenuTabs.h"
 #include "ODRaceHUD.h"
-#include "ODRebindMenu.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
 
@@ -138,6 +137,11 @@ void AODPauseMenu::RefreshPauseKeyBinding()
 	}
 }
 
+namespace
+{
+const FODMenuTab PauseTab = {TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume};
+}
+
 void AODPauseMenu::Toggle()
 {
 	// world map (SS7.37) is its own full-screen layer - Escape closes it first
@@ -149,32 +153,9 @@ void AODPauseMenu::Toggle()
 			return;
 		}
 	}
-	// Settings/Credits back out one level first (Escape), same as any other
-	// modal-inside-a-modal convention - see this class's header comment.
-	// Rebind (Arc 4.1, SS7.32) is a further level under Settings: Escape
-	// cancels an in-progress key capture first, then backs out of the rebind
-	// screen, then out of Settings, matching the same one-level-at-a-time
-	// convention.
-	if (bSettingsOpen)
+	if (bOpen)
 	{
-		if (SettingsMenu && SettingsMenu->IsRebindOpen())
-		{
-			if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu(); Rebind && Rebind->IsCapturing())
-			{
-				Rebind->CancelCapture();
-			}
-			else
-			{
-				SettingsMenu->CloseRebind();
-			}
-			return;
-		}
-		bSettingsOpen = false;
-		return;
-	}
-	if (bCreditsOpen)
-	{
-		bCreditsOpen = false;
+		Back();
 		return;
 	}
 	// the front-end menu owns Escape while it's up (it also binds Escape); don't
@@ -184,9 +165,37 @@ void AODPauseMenu::Toggle()
 	{
 		return;
 	}
-	bOpen = !bOpen;
-	Selected = 0;
+	SetOpen(true);
+}
+
+void AODPauseMenu::SetOpen(bool bInOpen)
+{
+	bOpen = bInOpen;
+	bSettingsOpen = false;
+	Selected = RowResume;
 	UGameplayStatics::SetGamePaused(this, bOpen);
+	// before 2026-10-09 the cursor was never shown here, so the mouse did
+	// nothing on this menu - same capture switch the front-end uses
+	if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
+	{
+		Main->SetCursorVisible(bOpen);
+	}
+}
+
+void AODPauseMenu::Back()
+{
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu && SettingsMenu->Back())   // true == nothing left to back out of
+		{
+			bSettingsOpen = false;
+		}
+		return;
+	}
+	if (bOpen)
+	{
+		SetOpen(false);   // resume
+	}
 }
 
 void AODPauseMenu::Up()
@@ -199,17 +208,9 @@ void AODPauseMenu::Up()
 		}
 		return;
 	}
-	if (bCreditsOpen)
-	{
-		if (CreditsMenu)
-		{
-			CreditsMenu->Scroll(-1);
-		}
-		return;
-	}
 	if (bOpen)
 	{
-		Selected = (Selected + NumRows() - 1) % NumRows();
+		Selected = ODMenuTabs::Step(PauseTab, RowResume, Selected, -1);
 	}
 }
 
@@ -223,17 +224,33 @@ void AODPauseMenu::Down()
 		}
 		return;
 	}
-	if (bCreditsOpen)
+	if (bOpen)
 	{
-		if (CreditsMenu)
+		Selected = ODMenuTabs::Step(PauseTab, RowResume, Selected, +1);
+	}
+}
+
+void AODPauseMenu::SelectRow(int32 Row, int32 Col)
+{
+	if (bSettingsOpen)
+	{
+		if (SettingsMenu)
 		{
-			CreditsMenu->Scroll(+1);
+			SettingsMenu->SelectRow(Row, Col);
 		}
 		return;
 	}
-	if (bOpen)
+	if (bOpen && Row >= 0 && Row < NumPauseRows)
 	{
-		Selected = (Selected + 1) % NumRows();
+		Selected = Row;
+	}
+}
+
+void AODPauseMenu::SetTab(int32 Tab)
+{
+	if (bSettingsOpen && SettingsMenu)
+	{
+		SettingsMenu->SetTab(Tab);
 	}
 }
 
@@ -253,119 +270,15 @@ void AODPauseMenu::NextTab()
 	}
 }
 
-void AODPauseMenu::Left()
-{
-	Adjust(-1);
-}
-
-void AODPauseMenu::Right()
-{
-	Adjust(+1);
-}
-
 void AODPauseMenu::Activate()
 {
 	if (bSettingsOpen)
 	{
-		if (SettingsMenu)
+		if (SettingsMenu && SettingsMenu->Activate())   // true == its Close row
 		{
-			if (SettingsMenu->IsRebindOpen())
-			{
-				if (AODRebindMenu* Rebind = SettingsMenu->GetRebindMenu();
-					Rebind && Rebind->ActivateSelected())   // true == "Back" row selected
-				{
-					SettingsMenu->CloseRebind();
-				}
-			}
-			else if (SettingsMenu->GetSelected() == SettingsMenu->NumRows() - 1)   // "Close" row
-			{
-				bSettingsOpen = false;
-			}
-			else if (SettingsMenu->GetSelected() == SettingsMenu->ControlsRowIndex())   // "Controls" row
-			{
-				SettingsMenu->OpenRebind();
-			}
-			else
-			{
-				SettingsMenu->AdjustSelected(+1);   // Enter cycles a value row, like the row list below
-			}
+			bSettingsOpen = false;
 		}
 		return;
-	}
-	if (bCreditsOpen)
-	{
-		bCreditsOpen = false;   // no rows to activate - Enter also just backs out
-		return;
-	}
-	if (!bOpen)
-	{
-		return;
-	}
-	if (Selected == 0)                    // Resume
-	{
-		Toggle();
-	}
-	else if (Selected == 1)               // World Map (SS7.37)
-	{
-		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
-		{
-			if (AODRaceHUD* Hud = Cast<AODRaceHUD>(PC->GetHUD()))
-			{
-				Hud->OpenWorldMap();      // hides this overlay, stays paused
-			}
-		}
-	}
-	else if (Selected == 5)               // Garage (car/engine/drivetrain/tuning, in place)
-	{
-		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
-		{
-			bOpen = false;                // hand the screen to the garage
-			Main->OpenGarage();           // keeps the game paused; Back/esc resumes here
-		}
-	}
-	else if (Selected == 6)               // Settings
-	{
-		EnsureSettingsMenu();
-		bSettingsOpen = true;
-	}
-	else if (Selected == 7)               // Credits
-	{
-		EnsureCreditsMenu();
-		bCreditsOpen = true;
-	}
-	else if (Selected == 8)               // Main Menu (front-end Main screen)
-	{
-		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
-		{
-			bOpen = false;                // hand the screen to the front-end
-			Main->OpenMenu();             // unpauses, like a fresh boot
-		}
-	}
-	else if (Selected == 9)               // Quit Game
-	{
-		UKismetSystemLibrary::QuitGame(this,
-			UGameplayStatics::GetPlayerController(this, 0),
-			EQuitPreference::Quit, false);
-	}
-	else
-	{
-		Adjust(+1);                       // Enter cycles the assist rows too
-	}
-}
-
-void AODPauseMenu::Adjust(int32 Dir)
-{
-	if (bSettingsOpen)
-	{
-		if (SettingsMenu)
-		{
-			SettingsMenu->AdjustSelected(Dir);
-		}
-		return;
-	}
-	if (bCreditsOpen)
-	{
-		return;   // credits has no adjustable rows, only scroll (Up/Down above)
 	}
 	if (!bOpen)
 	{
@@ -373,37 +286,52 @@ void AODPauseMenu::Adjust(int32 Dir)
 	}
 	switch (Selected)
 	{
-	case 2:  // traction: High -> Low -> Off
-		if (UODVehicleMovement* D = FindMovement())
+	case RowResume:
+		SetOpen(false);
+		break;
+	case RowWorldMap:   // SS7.37
+		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
 		{
-			D->TractionMode = (EODTractionMode)(((int32)D->TractionMode + Dir + 3) % 3);
-			UE_LOG(LogTemp, Display, TEXT("ODPauseMenu: traction '%s'"),
-				UODVehicleMovement::TractionModeName(D->TractionMode));
+			if (AODRaceHUD* Hud = Cast<AODRaceHUD>(PC->GetHUD()))
+			{
+				Hud->OpenWorldMap();      // hides this overlay, stays paused
+			}
 		}
 		break;
-	case 3:  // ABS on/off
-		if (UODVehicleMovement* D = FindMovement())
+	case RowGarage:     // car/engine/drivetrain/tuning, in place
+		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
-			D->bAbsEnabled = !D->bAbsEnabled;
-			UE_LOG(LogTemp, Display, TEXT("ODPauseMenu: ABS %s"),
-				D->bAbsEnabled ? TEXT("on") : TEXT("off"));
+			bOpen = false;                // hand the screen to the garage
+			Main->OpenGarage();           // keeps the game paused; Back/esc resumes here
 		}
 		break;
-	case 4:  // mini-map orientation: North <-> Travel (heading-up)
-		if (AODRaceHUD* Hud = FindHud())
+	case RowSettings:
+		bSettingsOpen = EnsureSettingsMenu() != nullptr;
+		break;
+	case RowMainMenu:   // front-end Main screen
+		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 		{
-			Hud->SetMiniMapHeadingUp(!Hud->IsMiniMapHeadingUp());
+			bOpen = false;                // hand the screen to the front-end
+			Main->OpenMenu();             // unpauses, like a fresh boot
 		}
+		break;
+	case RowQuit:
+		UKismetSystemLibrary::QuitGame(this,
+			UGameplayStatics::GetPlayerController(this, 0),
+			EQuitPreference::Quit, false);
 		break;
 	default:
 		break;
 	}
 }
 
-AODRaceHUD* AODPauseMenu::FindHud() const
+void AODPauseMenu::Adjust(int32 Dir)
 {
-	const APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
-	return PC ? Cast<AODRaceHUD>(PC->GetHUD()) : nullptr;
+	// only Settings has value rows now
+	if (bSettingsOpen && SettingsMenu)
+	{
+		SettingsMenu->AdjustSelected(Dir);
+	}
 }
 
 UODVehicleMovement* AODPauseMenu::FindMovement() const
@@ -428,99 +356,21 @@ void AODPauseMenu::ApplyGearbox()
 
 void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
-	switch (Row)
-	{
-	case 0:
-		OutLabel = TEXT("Resume");
-		OutValue.Empty();
-		break;
-	case 1:
-		OutLabel = TEXT("World Map");
-		OutValue.Empty();
-		break;
-	case 2:
-		OutLabel = TEXT("Traction");
-		OutValue = TEXT("?");
-		if (const UODVehicleMovement* D = FindMovement())
-		{
-			OutValue = UODVehicleMovement::TractionModeName(D->TractionMode);
-		}
-		break;
-	case 3:
-		OutLabel = TEXT("ABS");
-		OutValue = TEXT("?");
-		if (const UODVehicleMovement* D = FindMovement())
-		{
-			OutValue = D->bAbsEnabled ? TEXT("On") : TEXT("Off");
-		}
-		break;
-	case 4:
-		OutLabel = TEXT("Mini-Map");
-		OutValue = TEXT("?");
-		if (const AODRaceHUD* Hud = FindHud())
-		{
-			OutValue = Hud->IsMiniMapHeadingUp() ? TEXT("Travel") : TEXT("North");
-		}
-		break;
-	case 5:
-		OutLabel = TEXT("Garage");
-		OutValue.Empty();
-		break;
-	case 6:
-		OutLabel = TEXT("Settings");
-		OutValue.Empty();
-		break;
-	case 7:
-		OutLabel = TEXT("Credits");
-		OutValue.Empty();
-		break;
-	case 8:
-		OutLabel = TEXT("Main Menu");
-		OutValue.Empty();
-		break;
-	case 9:
-		OutLabel = TEXT("Quit Game");
-		OutValue.Empty();
-		break;
-	default:
-		OutLabel.Empty();
-		OutValue.Empty();
-		break;
-	}
+	static const TCHAR* const Labels[NumPauseRows] = {
+		TEXT("World Map"), TEXT("Garage"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
+	OutLabel = (Row >= 0 && Row < NumPauseRows) ? Labels[Row] : TEXT("");
+	OutValue.Empty();
 }
 
 AODSettingsMenu* AODPauseMenu::EnsureSettingsMenu()
 {
-	if (SettingsMenu)
+	if (!SettingsMenu)
 	{
-		return SettingsMenu;
+		SettingsMenu = FindManager<AODSettingsMenu>(GetWorld());
 	}
-	if (AODSettingsMenu* Found = FindManager<AODSettingsMenu>(GetWorld()))
+	if (!SettingsMenu && GetWorld())
 	{
-		SettingsMenu = Found;
-		return SettingsMenu;
-	}
-	if (UWorld* World = GetWorld())
-	{
-		SettingsMenu = World->SpawnActor<AODSettingsMenu>();
+		SettingsMenu = GetWorld()->SpawnActor<AODSettingsMenu>();
 	}
 	return SettingsMenu;
-}
-
-AODCreditsMenu* AODPauseMenu::EnsureCreditsMenu()
-{
-	if (CreditsMenu)
-	{
-		return CreditsMenu;
-	}
-	if (AODCreditsMenu* Found = FindManager<AODCreditsMenu>(GetWorld()))
-	{
-		CreditsMenu = Found;
-		return CreditsMenu;
-	}
-	if (UWorld* World = GetWorld())
-	{
-		CreditsMenu = World->SpawnActor<AODCreditsMenu>();
-	}
-	return CreditsMenu;
 }
