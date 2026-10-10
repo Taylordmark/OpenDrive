@@ -16,8 +16,12 @@ constexpr float DecalSlotJitter = 0.25f;    // +- fraction of a slot along the r
 constexpr float CrackPerKm[3] = {8.0f, 12.0f, 16.0f};
 constexpr float PatchPerKm[3] = {3.0f, 6.0f, 10.0f};
 constexpr float ManholePerKm[3] = {0.0f, 0.5f, 2.0f};   // ponytail: class-only, no urban/rural input
-constexpr float TireMarkChance = 0.1f;      // per slot, in a corner
-constexpr float CornerRadiusM = 120.0f;     // tighter than this counts as a corner
+// Tire marks only in braking zones: within BrakeZoneM of a corner entry/exit
+// or a junction approach. Real skid marks are a few per km on twisty roads;
+// this gives ~0.7/km over the Dragon area, 4-8/km on its tightest stretches.
+constexpr float TireMarkChance = 0.03f;     // per slot, in a braking zone
+constexpr float CornerRadiusM = 60.0f;      // tighter than this counts as a corner
+constexpr float BrakeZoneM = 20.0f;
 constexpr float TrackOffsetM = 0.8f;        // wheel path off lane center (M_Road's TrackOffsetM)
 constexpr float EdgeMarginM = 0.15f;        // decals stay this far inside the pavement edge
 constexpr float MinHalfWidthM = 1.5f;
@@ -104,21 +108,35 @@ void UODRoadDecals::PlaceSpots(const FParsedChunk& Chunk, TArray<FODRoadDecalSpo
 		return Turn * CornerRadiusM > SpanM;
 	};
 
+	auto InJunction = [&](int32 S) { return Junction(S) > 0.01f || Junction(S + 1) > 0.01f; };
+	// arc lengths where corner or junction state changes = braking zones
+	TArray<float> Edges;
+	bool bPrevC = IsCorner(0);
+	for (int32 S = 1; S + 1 < NSt; ++S)
+	{
+		const bool bC = IsCorner(S);
+		if (bC != bPrevC || InJunction(S) != InJunction(S - 1))
+		{
+			Edges.Add(Arc(S));
+		}
+		bPrevC = bC;
+	}
+
 	for (int32 S = 0; S + 1 < NSt; ++S)
 	{
 		const float V0 = Arc(S), V1 = Arc(S + 1);
-		if (Junction(S) > 0.01f || Junction(S + 1) > 0.01f || FMath::Abs(V1 - V0) < 0.01f)
+		if (InJunction(S) || FMath::Abs(V1 - V0) < 0.01f)
 		{
 			continue;
 		}
 		const float Lo = FMath::Min(V0, V1), Hi = FMath::Max(V0, V1);
-		const bool bCorner = IsCorner(S);
 		const FVector C0 = Ctr(S), C1 = Ctr(S + 1);
 		const FVector Fwd = (C1 - C0).GetSafeNormal();
 		for (int32 K = FMath::CeilToInt(Lo / DecalSlotM); K * DecalSlotM < Hi; ++K)
 		{
 			const float R = DecalRand(Seed, K, 1);
-			const int32 Kind = R < PCrack ? 0 : R < PPatch ? 1 : R < PManhole ? 2 : (bCorner && R < PTire) ? 3 : -1;
+			const bool bBrake = Edges.ContainsByPredicate([&](float E) { return FMath::Abs(K * DecalSlotM - E) < BrakeZoneM; });
+			const int32 Kind = R < PCrack ? 0 : R < PPatch ? 1 : R < PManhole ? 2 : (bBrake && R < PTire) ? 3 : -1;
 			if (Kind < 0)
 			{
 				continue;

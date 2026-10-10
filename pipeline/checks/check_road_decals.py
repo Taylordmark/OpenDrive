@@ -4,7 +4,8 @@ constants are parsed from it so the mirror can't drift) and asserts:
   - same chunk -> same decals (seed comes from the chunk's own data)
   - at most one decal per slot, slots >= DecalSlotM*(1-2*Jitter) apart
   - every decal sits inside the pavement minus EdgeMarginM
-  - no tire marks on a straight road, some in a tight corner
+  - no tire marks on a straight road; on a serpentine, some, all near
+    corner entries/exits (braking zones) and under 8/km
   - long synthetic road density ~ the per-km constants
 then runs it over the area's ODR3 road tiles (default deals_gap_test, the
 Tail of the Dragon) and writes a scatter + per-chunk density plot.
@@ -37,6 +38,7 @@ def _c3(name):
 SLOT, JIT = _c("DecalSlotM"), _c("DecalSlotJitter")
 CRACK, PATCH, MANHOLE = _c3("CrackPerKm"), _c3("PatchPerKm"), _c3("ManholePerKm")
 TIRE, CORNER_R, TRACK = _c("TireMarkChance"), _c("CornerRadiusM"), _c("TrackOffsetM")
+BRAKE = _c("BrakeZoneM")
 MARGIN, MIN_HALF = _c("EdgeMarginM"), _c("MinHalfWidthM")
 COND_MIN, COND_RANGE = _c("CondMin"), _c("CondRange")
 M32 = 0xFFFFFFFF
@@ -91,18 +93,21 @@ def place(v, uv, uv1, surface, cls, lanes):
         turn = math.acos(max(-1.0, min(1.0, float(i @ o) / (li * lo))))
         return turn * CORNER_R > (0.5 * li + lm + 0.5 * lo) / 100
 
+    in_j = [junc[s] > 0.01 or junc[s + 1] > 0.01 for s in range(nst - 1)]
+    is_c = [corner(s) for s in range(nst - 1)]
+    edges = [arc[s] for s in range(1, nst - 1) if is_c[s] != is_c[s - 1] or in_j[s] != in_j[s - 1]]
     out = []
     for s in range(nst - 1):
         v0, v1 = arc[s], arc[s + 1]
-        if junc[s] > 0.01 or junc[s + 1] > 0.01 or abs(v1 - v0) < 0.01:
+        if in_j[s] or abs(v1 - v0) < 0.01:
             continue
         lo, hi = min(v0, v1), max(v0, v1)
-        is_corner = corner(s)
         k = math.ceil(lo / SLOT)
         while k * SLOT < hi:
             r = rand(seed, k, 1)
+            brake = any(abs(k * SLOT - e) < BRAKE for e in edges)
             kind = 0 if r < p_crack else 1 if r < p_patch else 2 if r < p_man else \
-                3 if (is_corner and r < p_tire) else -1
+                3 if (brake and r < p_tire) else -1
             if kind >= 0:
                 a = k * SLOT + (rand(seed, k, 2) - 0.5) * 2 * JIT * SLOT
                 t = (a - v0) / (v1 - v0)
@@ -192,13 +197,26 @@ def self_test():
         assert abs(kinds[kind] - want) < 4 * math.sqrt(want) + 2, (kind, kinds[kind], want)
     assert place(v, uv, uv1, 1, 6, 2) == [], "decals on gravel"
     assert place(*synthetic(straight, junction=np.ones(len(x))), 0, 6, 2) == [], "decals in a junction"
-    th = np.linspace(0, math.pi, 400)                              # r = 60 m hairpin
-    curve = np.stack([6000 * np.cos(th), 6000 * np.sin(th), np.zeros_like(th)], -1)
-    c = place(*synthetic(curve), 0, 6, 2)
+    # serpentine: 100 m straights between 25 m-radius hairpins (5 m stations)
+    head, pts, ends, a = 0.0, [np.array([0.0, 0.0])], [], 0.0
+    for i in range(60):
+        for length, k in ((100, 0.0), (25 * math.pi, (1 if i % 2 else -1) / 25)):
+            for _ in range(int(length / 5)):
+                head += k * 5
+                pts.append(pts[-1] + 500 * np.array([math.cos(head), math.sin(head)]))
+            a += int(length / 5) * 5
+            ends.append(a)
+    serp = np.concatenate([np.array(pts), np.zeros((len(pts), 1))], 1) + [5e6, 3e6, 0]
+    c = place(*synthetic(serp), 0, 6, 2)
     check(c)
-    assert any(d["kind"] == 3 for d in c), "no tire marks in a 60 m hairpin"
+    tire = [d["arc"] for d in c if d["kind"] == 3]
+    assert tire, "no tire marks at serpentine corner entries"
+    far = [t for t in tire if min(abs(t - e) for e in ends) > BRAKE + 3 * SLOT]   # corner flag ~1 station off
+    assert not far, f"tire marks away from corner entries: {far}"
+    per_km = len(tire) / (a / 1000)
+    assert per_km < 8, f"{per_km:.1f} tire marks/km on a serpentine"
     print(f"self-test ok: straight 10 km -> {kinds.tolist()} (cond {cond:.2f}), "
-          f"hairpin -> {np.bincount([d['kind'] for d in c], minlength=4).tolist()}")
+          f"serpentine {a / 1000:.1f} km -> {len(tire)} tire marks ({per_km:.1f}/km)")
 
 
 def main():
@@ -207,7 +225,7 @@ def main():
     out_png = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(tempfile.gettempdir()) / "road_decals.png"
     tiles = sorted((ROOT / "OpenDriveUE/Content/OpenDrive/MasksV2").glob(f"roadv3_{area}_tile_*.bin"))
     assert tiles, f"no ODR3 tiles for {area}"
-    roads, spots, dens = [], [], []
+    roads, spots, dens, dens_len = [], [], [], []
     for p in tiles:
         for v, uv, uv1, surf, cls, lanes in chunks(p):
             s = place(v, uv, uv1, surf, cls, lanes)
@@ -217,9 +235,13 @@ def main():
             spots += s
             roads.append(v[2::7, :2] / 100)
             length = np.ptp(uv[:, 1]) / 1000 if len(uv) else 0
+            dens_len.append(length if surf == 0 else 0)
             if length > 0.2 and surf == 0:
                 dens.append(len(s) / length)
     kinds = np.bincount([d["kind"] for d in spots], minlength=4)
+    paved_km = sum(dens_len)
+    print(f"{area}: tire marks {kinds[3] / paved_km:.2f}/km over {paved_km:.0f} paved km")
+    assert kinds[3] / paved_km < 2, "too many tire marks"   # real roads: a few per km on twisty ones only
     print(f"{area}: {len(tiles)} tiles, {len(spots)} decals (crack/patch/manhole/tire {kinds.tolist()}), "
           f"median {np.median(dens):.1f}/km over {len(dens)} paved chunks > 200 m")
 

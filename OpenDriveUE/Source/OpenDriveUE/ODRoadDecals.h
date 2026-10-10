@@ -23,7 +23,7 @@ struct FODRoadDecalSpot
 
 /**
  * Realistic-only road wear decals (PLAN-VISUALS Track C): cracks, patches,
- * manholes and tire marks in corners, all from one atlas material
+ * manholes and tire marks at corner entries and junctions, all from one atlas material
  * (/Game/OpenDrive/Realistic/Road/M_RoadDecal_real, built by
  * unreal/apply_road_materials_real.py). AODRoadManager creates this only
  * when ODVisualStyle::IsRealistic() and feeds it each chunk as it's built.
