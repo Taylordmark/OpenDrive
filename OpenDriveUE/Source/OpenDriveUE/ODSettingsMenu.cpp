@@ -587,7 +587,7 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		break;
 	case RowQuality:
 	{
-		OutLabel = TEXT("Graphics Quality");
+		OutLabel = TEXT("Graphics");
 		OutValue = TEXT("Custom");
 		if (const UGameUserSettings* GS = UGameUserSettings::GetGameUserSettings())
 		{
@@ -618,7 +618,7 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		break;
 	}
 	case RowAssetDetail:
-		OutLabel = TEXT("Asset Detail");
+		OutLabel = TEXT("Model Detail");   // ODAssetDetail
 		OutValue = AssetDetailNames[AssetDetail];
 		if (AssetDetail != AssetDetailAtLoad)
 		{
