@@ -265,6 +265,49 @@ passes for each `_real` car material.
   High/Epic. At Medium, SSR is capped by the scalability tier, so a PP
   override can't help.
 
+**Pass 2 (2026-10-10): tires, rims, grime, weather, detail. Realistic only, no model changes:**
+- **Projection:** all detail comes from car-local position and slot category. The car UV0 is only a palette lookup, so this survives the incoming Blender meshes. Wheel proportions (rim, shoulder, tread, spoke-gap and hub radii) are scalar params, not hard-coded.
+- **Tires:** `M_CarTire*_real` gets an analytic round normal (tread, shoulder, sidewall bulge) plus a tiling tread normal and raised sidewall lettering. Roughness differs between tread and sidewall.
+- **Rims:** `M_CarRim*_real` adds lathe rings, a polished lip, a dark hub, and brake dust that follows the car's grime.
+- **Chrome:** stays near-mirror (roughness 0.1).
+- **Textures:** `content_src/realistic/cars/make_car_detail.py` generates CC0 `T_TireTread`, `T_TireSidewall` and `T_CarRainDrops`, and self-checks them.
+- **Grime:** `ODCarGrime.h` defines the model. `UODVehicleMovement` integrates it per fixed physics step from distance rolled on each surface:
+  - gravel and dirt fastest, then off-road, then wet asphalt, with dry asphalt nearly clean;
+  - an exact exponential step, so the result does not depend on step rate;
+  - capped at `MaxDirt`;
+  - reset on respawn, reset and car change.
+- **Weather and state to the materials:** `UODVehicleFX::PushCarState` writes custom primitive data, but only when a value changes:
+  - Dirt, Wetness and SnowCover to every car mesh;
+  - the axles and wheel radius to the chassis.
+- **What the materials do with it:**
+  - Grime collects low on the body and behind the wheel arches.
+  - Wet weather darkens the grime to mud and adds rain beads on paint and glass.
+  - Snow settles on up-facing panels.
+  - Clear-coat roughness stays at 0.05–0.15. Dirt raises it locally, and wet lowers it.
+- **Detail:** panel gaps from axle positions, a hex grille on the front-facing plastic, darkened wheel arches and underbody, and AO from local height.
+- **Check:** `pipeline/checks/check_car_dirt.py` covers:
+  - accumulation per distance;
+  - nothing added while parked;
+  - the same result from 30 to 500 Hz;
+  - the cap and the reset.
+- **Cost (Hi pixel-shader instructions, `_real` before → after):**
+
+  | Material | Before | After |
+  |---|---|---|
+  | Body | 361 | 497 |
+  | Plastic | 201 | 334 |
+  | Glass | 1842 | 1907 |
+  | Chrome | 201 | 309 |
+  | Tire | 206 | 298 |
+  | Rim | 203 | 253 |
+  | Lights | 228 | 228 |
+
+  Vertex shaders are unchanged.
+- **Not verified, because no game run:**
+  - the rendered look;
+  - door-gap placement on every car (it is heuristic);
+  - the new meshes' wheel proportions.
+
 ### Track C — Roads (medium)
 
 1. **`M_Road_real`:** the higher-res ambientCG asphalt sets
