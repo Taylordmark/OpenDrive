@@ -169,6 +169,25 @@ gate passes on all current manifests (30 records in the main checkout,
 Ordered by visual gain per hour, which is also the suggested order if
 fewer than seven run at once.
 
+**Status (2026-10-09, from the branch log):**
+
+| Track | State | Commits |
+|---|---|---|
+| A | first pass (see below) | 7f66ba7 |
+| B | first pass: `_real` car paint, glass, lamps | 69e33be |
+| C | first pass: `M_Road*_real` + deterministic decals; cars don't receive decals; tire marks cut to braking zones | b6ed029, 940da35, b81c856 |
+| D | first pass: `_real` ground, embankment, boulders | 0079ca4 |
+| C/D | CC0 ambientCG cracks, rock, litter, moss, gravel | d85478b |
+| E | first pass: tire smoke, dust, spray | de561e9 |
+| F | trees for 6 of 7 slots + flora materials | d321c3c |
+| G | not started | |
+| J | first pass (shader shoulder blend, no RVT); agent still working on it | 5cbf1ee |
+
+`main` merged in with the menu work (cbbce1f). Known gaps:
+- The old static Dragon level gets no decals.
+- F has no wind or LODs yet and several slots are missing (flora agent on it).
+- D's Nanite displacement is skipped: it needs a global setting (Taylor's call).
+
 ### Track A — Lighting, sky and post-process (small, biggest gain)
 
 `AODAtmosphereController` already spawns the sky atmosphere, volumetric
@@ -227,7 +246,8 @@ passes for each `_real` car material.
    (`content_src/textures/road`), macro variation, and a wet-puddle mask
    that reads the existing wetness input.
 2. **Decals**, deterministic from the road seed (decision 2): cracks,
-   patches, tar seams, worn lane paint and tire marks in corners. They're
+   patches, tar seams, worn lane paint and tire marks at corner entries
+   and junctions. They're
    spawned only in Realistic. Textures from ambientCG or generated.
 
 **Check:** a plot of decal density along the Tail of the Dragon centerline
@@ -259,7 +279,7 @@ drive gives the same smoke at any fps.
 **Check:** compile; a small runnable check of the slip/surface → spawn
 rate mapping.
 
-**Status (2026-10-09):** first pass written, not yet compiled.
+**Status (2026-10-09):** first pass in de561e9, compiles.
 - `UODVehicleFX` (one line in `AODVehiclePawn`'s constructor). Not Niagara:
   a 512-sphere instanced pool animated in C++, like the snowfall, drawn
   with `Realistic/FX/M_FXPuff` (`unreal/build_vehicle_fx_material.py`).
