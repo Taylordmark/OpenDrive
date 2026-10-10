@@ -185,7 +185,7 @@ fewer than seven run at once.
 
 `main` merged in with the menu work (cbbce1f). Known gaps:
 - The old static Dragon level gets no decals.
-- F has no wind or LODs yet and several slots are missing (flora agent on it).
+- F has wind (Track F item 4) but no LODs yet.
 - D's Nanite displacement is skipped: it needs a global setting (Taylor's call).
 
 ### Track A — Lighting, sky and post-process (small, biggest gain)
@@ -312,6 +312,12 @@ procedurally.
    (T4) replace them if they turn out better.
 3. Keep the seasonal MID interface (FallBlend) on the leaf material.
 4. Wind via world-position offset that stays cheap at distance.
+   *Done:* whole-tree sway on the `_real` meshes. A UV1 sway weight is baked at
+   import (U = height^2 bend, V = radial tip bob; `flora_common.sway_uv`).
+   `M_Foliage_real` and the `_real` bark use the same Time-only WPO, so leaves
+   stay on their branches: ~6 cm crown bend for a 15 m tree, scaled by
+   instance height. Bound 33 cm bark, 44 cm foliage. WPO is off past 100 m
+   (`WpoDisableCm`). Collision unaffected (HISMs are NoCollision).
 5. **Perf:** frame time at the densest Dragon tile, Realistic vs Stylized,
    at each Asset Detail level, from a CSV profile capture. Taylor runs the
    capture (T2); the numbers are read from the CSV, not by eye.

@@ -153,6 +153,69 @@ for name, mesh in fol.items():
         mesh.set_material(FOLIAGE_SLOT, m_foliage)
 log(f"assigned bark/foliage materials to {len(fol)} meshes")
 
+if REAL:
+    # Whole-tree wind weights into UV channel 1 (OBJ carries one UV set, so
+    # they go in here, after import). U = trunk bend, V = branch-tip extra,
+    # both from the vertex rest position (pipeline/flora_common.sway_uv);
+    # M_Foliage_real / M_Bark_*_real read them as world position offset.
+    # The reimport above starts from a clean mesh, so this is idempotent.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pipeline"))
+    from flora_common import SWAY_U_MAX, SWAY_V_MAX, sway_uv
+
+    def _gs(fn):   # GeometryScript library class names move between versions
+        for n in dir(unreal):
+            if "GeometryScript" in n and hasattr(getattr(unreal, n), fn):
+                return getattr(getattr(unreal, n), fn)
+        raise RuntimeError(f"no GeometryScript function {fn}")
+
+    OK = unreal.GeometryScriptOutcomePins.SUCCESS
+    read_lod = unreal.GeometryScriptMeshReadLOD()
+    read_lod.lod_type = unreal.GeometryScriptLODType.SOURCE_MODEL
+    to_opts = unreal.GeometryScriptCopyMeshToAssetOptions()
+    to_opts.enable_recompute_tangents = True   # OBJ has none; the import computed them too
+    to_opts.emit_transaction = False
+    to_opts.generate_lightmap_u_vs = next(   # lightmap UVs would land on UV1
+        getattr(unreal.GeometryScriptGenerateLightmapUVOptions, n)
+        for n in dir(unreal.GeometryScriptGenerateLightmapUVOptions) if n.startswith("DO_NOT"))
+    render_lod = unreal.GeometryScriptMeshReadLOD()
+    render_lod.lod_type = unreal.GeometryScriptLODType.RENDER_DATA
+    for name, mesh in fol.items():
+        dm, res = _gs("copy_mesh_from_static_mesh")(
+            mesh, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), read_lod)
+        if res != OK:
+            raise RuntimeError(f"{name}: copy_mesh_from_static_mesh failed")
+        _, plist, vgaps = _gs("get_all_vertex_positions")(dm, False)
+        _, tlist, tgaps = _gs("get_all_triangle_indices")(dm, False)
+        if vgaps or tgaps:
+            raise RuntimeError(f"{name}: dynamic mesh has id gaps")
+        pos = _gs("convert_vector_list_to_array")(plist)
+        tris = _gs("convert_triangle_list_to_array")(tlist)
+        H = max(p.z for p in pos)
+        R = max((p.x * p.x + p.y * p.y) ** 0.5 for p in pos)
+        if min(p.z for p in pos) < -30 or H <= 0:   # cards sink ~12% below their attach point
+            raise RuntimeError(f"{name}: not z-up from the trunk base (z {min(p.z for p in pos)}..{H})")
+        _gs("set_num_uv_sets")(dm, 2)
+        add, umax, vmax, elem = _gs("add_uv_element_to_mesh"), 0.0, 0.0, []
+        for p in pos:
+            u, v = sway_uv(p.x, p.y, p.z, H, R)
+            umax, vmax = max(umax, u), max(vmax, v)
+            elem.append(add(dm, 1, unreal.Vector2D(u, v), True)[1])
+        if umax > SWAY_U_MAX or vmax > SWAY_V_MAX:
+            raise RuntimeError(f"{name}: sway U {umax:.2f} / V {vmax:.2f} over the material's WPO bound")
+        set_ids = _gs("set_mesh_triangle_uv_element_i_ds")
+        for tid, t in enumerate(tris):
+            set_ids(dm, 1, tid, unreal.IntVector(elem[t.x], elem[t.y], elem[t.z]), True)
+        _, res = _gs("copy_mesh_to_static_mesh")(dm, mesh, to_opts, unreal.GeometryScriptMeshWriteLOD())
+        # read the built render mesh back (Nanite fallback): UV1 must hold the weights
+        rd, res2 = _gs("copy_mesh_from_static_mesh")(
+            mesh, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), render_lod)
+        box, valid, empty = _gs("get_uv_set_bounding_box")(rd, 1)
+        if res != OK or res2 != OK or not valid or empty or box.min.x < -0.01 or box.max.x < 0.5 * umax:
+            raise RuntimeError(f"{name}: sway UV1 not in the built mesh ({valid} {empty} {box})")
+        unreal.log_warning(f"FLORA {name}: sway UV1 baked, H {H:.0f} R {R:.0f} cm, U max {umax:.2f} "
+                           f"V max {vmax:.2f}, render UV1 max ({box.max.x:.2f}, {box.max.y:.2f})")
+
 if REAL:   # only the new twins - never re-save the stylized content
     for name, mesh in fol.items():
         bark = FLORA[name][0]

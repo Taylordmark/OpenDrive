@@ -150,6 +150,10 @@ constexpr float TreelineLowM = 3350.0f, TreelineHighM = 3550.0f; // TREELINE_LOW
 // noise mask agree, inside the montane aspen elevation window.
 constexpr float AspenLowM = 2450.0f, AspenHighM = 3350.0f, AspenFadeM = 150.0f;
 constexpr float AspenNoiseScaleCm = 50000.0f;   // 500 m lattice -> grove-sized patches
+// Realistic flora wind (build_flora_materials.py) is a few cm: past 100 m it
+// can't be seen, so stop evaluating it there (Nanite WPO cost, VSM cache
+// invalidation). No effect on the stylized materials, which have no WPO.
+constexpr int32 WpoDisableCm = 10000;
 constexpr float AspenMaxShare = 0.75f;          // max fraction of the tree mix turned to aspen
 
 FBiomeRecipe LerpRecipe(const FBiomeRecipe& A, const FBiomeRecipe& B, float T)
@@ -2109,6 +2113,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(!bLowVeg);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
@@ -2339,6 +2344,7 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances((GrassRadiusCm + GrassLeadCm) * 0.5f, GrassRadiusCm + GrassLeadCm);   // fade band, see M_Foliage PerInstanceFadeAmount
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();

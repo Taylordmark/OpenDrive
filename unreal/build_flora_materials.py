@@ -285,6 +285,58 @@ def _wet_darken(mat, color, w, a_out=""):
     return _mul(mat, color, _lerp(mat, _const(mat, 1.0), _const(mat, WET_DARKEN), w), a_out=a_out)
 
 
+# Wind (PLAN-VISUALS.md Track F 4, realistic twins only). Every term is
+# driven by the Time node (game seconds), so it's frame-rate independent.
+# Sine nodes run in cycles (period 1). Whole-tree sway reads the weights
+# import_biome_flora.py bakes into UV1 (pipeline/flora_common.sway_uv):
+# U = trunk bend, 0 at the base, 1 at the crown of a 15 m tree; V = branch-
+# tip extra, 1 at the rim of a 4 m crown. Both are functions of the rest
+# position, so bark and the leaf cards on it get the same offset and stay
+# attached. Instance scale (trees are yaw-only, so it is the Z of local up
+# in world space) makes a 2x tree sway 2x. A mesh without UV1 would read
+# garbage here, but every slot has a _real mesh (verify_flora_real_slots).
+WIND_BEND_CM = 6.0      # crown bend of a 15 m tree at full gust
+WIND_BEND_HZ = 0.22     # trunk sway rate
+WIND_TIP_CM = 4.0       # extra branch-tip bob at the rim of a 4 m crown
+WIND_TIP_HZ = 0.7
+WIND_GUST_HZ = 0.09     # slow gust wave rolling across the forest
+WIND_SCALE_MAX = 2.2    # ODForestManager's largest tree instance scale
+
+
+def _gust(mat, t, wxy):
+    """0.3..1.0 gust strength, a slow wave across world XY (period ~4 km)."""
+    return _add(mat, _const(mat, 0.65), _mul(mat, _const(mat, 0.35), _sine(mat, _add(
+        mat, _mul(mat, t, _const(mat, WIND_GUST_HZ)), _dotp(mat, wxy, _const2(mat, 0.00025, 0.00016))))))
+
+
+def _tree_sway(mat, t, wxy, pir, gust):
+    """World offset of the whole-tree bend + branch-tip bob (~25 ALU ops)."""
+    uv1 = _node(mat, unreal.MaterialExpressionTextureCoordinate)
+    uv1.set_editor_property("coordinate_index", 1)
+    up = _node(mat, unreal.MaterialExpressionTransform)
+    up.set_editor_property("transform_source_type", unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+    up.set_editor_property("transform_type", unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    _must_connect(_const3(mat, 0.0, 0.0, 1.0), "", up, "")
+    scale_gust = _mul(mat, _mask(mat, up, b=True), gust)
+    # bend: a downwind lean that breathes, 0.1..1.0 of WIND_BEND_CM x U
+    bend = _mul(mat, _mask(mat, uv1, r=True), _add(mat, _const(mat, 0.55), _mul(mat, _const(mat, 0.45), _sine(
+        mat, _add(mat, _mul(mat, t, _const(mat, WIND_BEND_HZ)), pir)))))
+    bend_v = _mul(mat, _const3(mat, 0.89 * WIND_BEND_CM, 0.46 * WIND_BEND_CM, 0.0), bend)
+    # tips: faster bob, phase by world position so neighbouring limbs differ
+    tip = _mul(mat, _mask(mat, uv1, gg=True), _sine(mat, _add(mat, _mul(mat, t, _const(mat, WIND_TIP_HZ)), _add(
+        mat, pir, _dotp(mat, wxy, _const2(mat, 0.0037, 0.0029))))))
+    tip_v = _mul(mat, _const3(mat, 0.5 * WIND_TIP_CM, 0.26 * WIND_TIP_CM, 0.83 * WIND_TIP_CM), tip)
+    return _mul(mat, _add(mat, bend_v, tip_v), scale_gust)
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pipeline"))
+from flora_common import SWAY_U_MAX, SWAY_V_MAX
+# Worst-case sway offset (direction vectors are ~unit, sines and gust <= 1),
+# for max_world_position_offset_displacement: Nanite pads the bounds by it.
+# ODForestManager also stops evaluating WPO past 100 m.
+SWAY_BOUND_CM = (WIND_BEND_CM * SWAY_U_MAX + WIND_TIP_CM * SWAY_V_MAX) * WIND_SCALE_MAX * 1.01
+
+
 # ----------------------------------------------------------- M_Bark_* (opaque)
 BARK_MATS = {
     "M_Bark_Conifer": ("T_BarkConifer", 0.80),
@@ -314,6 +366,12 @@ for mat_name, (tex_name, roughness) in BARK_MATS.items():
         nrm.set_editor_property("texture", tex[tex_name + "_N"])
         nrm.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
         must_connect_property(nrm, "RGB", unreal.MaterialProperty.MP_NORMAL)
+        t = _node(mat, unreal.MaterialExpressionTime)
+        wxy = _world_xy(mat)
+        pir = _node(mat, unreal.MaterialExpressionPerInstanceRandom)
+        must_connect_property(_tree_sway(mat, t, wxy, pir, _gust(mat, t, wxy)), "",
+                              unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+        mat.set_editor_property("max_world_position_offset_displacement", SWAY_BOUND_CM)
     must_connect_property(_lerp(mat, rough, _const(mat, WET_BARK_ROUGHNESS), wet),
                           "", unreal.MaterialProperty.MP_ROUGHNESS)
 
@@ -657,10 +715,11 @@ if REAL:
     # 1 - OBJ v, so frac(2V) runs 0.92 at a card's attached base to 0.08 at
     # its tip: bases stay on their branch / in the ground, tips sway. No
     # local-position height (it reads 0 in this HISM vertex factory - see the
-    # snow notes above), no trunk bend, no new parameter (the interface rule
-    # wants M_Foliage's exact scalar list). Phase: PerInstanceRandom plus a
-    # slow world-space gust wave rolling across the forest. Bark is static.
-    # ~20 vertex-shader ALU ops; same graph sways the trees, bushes and grass.
+    # snow notes above), no new parameter (the interface rule wants
+    # M_Foliage's exact scalar list). Phase: PerInstanceRandom plus a slow
+    # world-space gust wave rolling across the forest. ~20 vertex-shader ALU
+    # ops; same graph sways the trees, bushes and grass. On top of it, the
+    # whole-tree bend from UV1 (_tree_sway, shared with the bark).
     WIND_CM = 6.0                                       # tip sway amplitude
     wind_dir = _const3(m_fol, 0.86, 0.45, 0.24)         # downwind, slight lift
     t = _node(m_fol, unreal.MaterialExpressionTime)
@@ -670,18 +729,18 @@ if REAL:
                                 _const(m_fol, 0.84)))
     phase = _add(m_fol, per_instance_random,
                  _dotp(m_fol, wxy, _const2(m_fol, 0.0011, 0.0007)))        # Sine period 1 = cycles
-    gust = _add(m_fol, _const(m_fol, 0.65), _mul(m_fol, _const(m_fol, 0.35), _sine(m_fol, _add(
-        m_fol, _mul(m_fol, t, _const(m_fol, 0.09)), _dotp(m_fol, wxy, _const2(m_fol, 0.00025, 0.00016))))))
+    gust = _gust(m_fol, t, wxy)
     sway = _add(m_fol, _add(m_fol, _const(m_fol, 0.35),
                             _mul(m_fol, _const(m_fol, 0.7), _sine(m_fol, _add(m_fol, _mul(m_fol, t, _const(m_fol, 0.45)), phase)))),
                 _mul(m_fol, _const(m_fol, 0.3), _sine(m_fol, _add(m_fol, _mul(m_fol, t, _const(m_fol, 1.3)),
                                                                    _mul(m_fol, phase, _const(m_fol, 1.7))))))
     amount = _mul(m_fol, _mul(m_fol, tip, gust), _mul(m_fol, sway, _const(m_fol, WIND_CM)))
-    must_connect_property(_mul(m_fol, wind_dir, amount), "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
-    try:   # bounds/culling headroom for the offset (max ~1.65 x WIND_CM)
-        m_fol.set_editor_property("max_world_position_offset_displacement", WIND_CM * 2.0)
-    except Exception as e:
-        log(f"  max WPO displacement not set: {e}")
+    # + the whole-tree sway the bark gets (same inputs), so cards ride their branch
+    must_connect_property(_add(m_fol, _mul(m_fol, wind_dir, amount),
+                               _tree_sway(m_fol, t, wxy, per_instance_random, gust)),
+                          "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    # bounds headroom: card flutter (max ~1.65 x WIND_CM) + tree sway
+    m_fol.set_editor_property("max_world_position_offset_displacement", WIND_CM * 1.7 + SWAY_BOUND_CM)
 
 MEL.recompile_material(m_fol)
 unreal.EditorAssetLibrary.save_asset(f"{MAT_DIR}/M_Foliage{SFX}", only_if_is_dirty=False)

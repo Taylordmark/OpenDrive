@@ -3,10 +3,13 @@
      (sha256 prefixes below, recorded from commit 2b65727's script), and
   2. every --real mesh stays inside its tier's triangle budget, has the
      stylized twin's exact usemtl slot list (bark first, foliage second, or
-     foliage only), sits on the ground, and only references _real textures.
+     foliage only), sits on the ground, only references _real textures,
+     and its wind sway weights (flora_common.sway_uv) are 0 at the base
+     and inside the materials' WPO bound.
 
 Run:  python pipeline/tests/test_real_tree_meshes.py"""
 import hashlib
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +87,7 @@ for name, want in STYLIZED_SHA.items():
     assert got == want, f"stylized {name} changed ({got} != {want})"
 
 subprocess.run([sys.executable, str(PIPE / "make_tree_meshes.py"), "--real"], check=True, capture_output=True)
+import flora_common as fc
 import make_tree_meshes as mt
 for slot in mt.REAL_SPECIES:
     twin_mats = list(dict.fromkeys(l.split()[1] for l in (OBJ / f"{slot}.obj").read_text().splitlines()
@@ -97,6 +101,11 @@ for slot in mt.REAL_SPECIES:
         assert mats == twin_mats, f"{name}: slots {mats} != stylized {twin_mats}"
         min_z = min(float(l.split()[3]) for l in text.splitlines() if l.startswith("v "))
         assert slot not in mt.REAL_TRI_BUDGET_SLOT or min_z > -6, f"{name}: min z {min_z} (ground cover is planted by its min Z)"
+        pts = [tuple(map(float, l.split()[1:4])) for l in text.splitlines() if l.startswith("v ")]
+        H, R = max(z for _, _, z in pts), max(math.hypot(x, y) for x, y, _ in pts)
+        u, v = zip(*(fc.sway_uv(x, y, z, H, R) for x, y, z in pts))   # import_biome_flora's UV1 bake
+        assert fc.sway_uv(0, 0, 0, H, R) == (0, 0), name
+        assert max(u) <= fc.SWAY_U_MAX and max(v) <= fc.SWAY_V_MAX, f"{name}: sway {max(u):.2f}/{max(v):.2f} over the WPO bound"
         mtl = (OBJ / f"{name}.mtl").read_text()
         assert all("_real" in l for l in mtl.splitlines() if l.startswith("map_")), name
         print(f"{name:28s} {tris:5d} tris (budget {budget})")

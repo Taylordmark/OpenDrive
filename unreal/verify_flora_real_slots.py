@@ -4,7 +4,9 @@ stylized twin's material slots. For each <slot>_real{,_high,_ultra} in
 flag, LOD count and LOD0 triangles, and fails unless:
   - slot count and slot names match the stylized <slot>{,_high,_ultra}, and
   - slot i's material is what ODVisualStyle::Pick would give for the
-    twin's slot i (the twin's material + "_real" when that exists).
+    twin's slot i (the twin's material + "_real" when that exists), and
+  - its render mesh carries the UV1 wind sway weights, and the _real
+    foliage/bark materials have their wind world position offset.
 Read-only: saves nothing.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
@@ -35,6 +37,8 @@ def slots(mesh):
 
 
 fails, missing = [], []
+render_lod = unreal.GeometryScriptMeshReadLOD()
+render_lod.lod_type = unreal.GeometryScriptLODType.RENDER_DATA
 for slot in SLOTS:
     for tier in ("", "_high", "_ultra"):
         real_p, twin_p = f"{TREE_DIR}/{slot}_real{tier}", f"{TREE_DIR}/{slot}{tier}"
@@ -50,6 +54,12 @@ for slot in SLOTS:
         lods = real.get_num_lods()
         desc = ", ".join(f"{i}:{n}={m.get_name() if m else None}" for i, (n, m) in enumerate(rs))
         log(f"{slot}_real{tier:7s} nanite={nanite} (twin {twin_nanite}) lods={lods} slots[{desc}]")
+        rd, _ = unreal.GeometryScript_AssetUtils.copy_mesh_from_static_mesh(
+            real, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), render_lod)
+        box, valid, empty = unreal.GeometryScript_MeshQueries.get_uv_set_bounding_box(rd, 1)
+        log(f"{slot}_real{tier:7s} UV1 sway max ({box.max.x:.2f}, {box.max.y:.2f})" if valid and not empty else "no UV1")
+        if not valid or empty or box.max.x <= 0:   # UV1 = wind sway weights (import_biome_flora.py)
+            fails.append(f"{real_p}: no UV1 sway weights in the render mesh")
         if nanite != twin_nanite:
             fails.append(f"{real_p}: nanite {nanite} != twin {twin_nanite}")
         if [n for n, _ in rs] != [n for n, _ in ts]:
@@ -60,13 +70,15 @@ for slot in SLOTS:
             if got != want:
                 fails.append(f"{real_p}: slot {i} material {got} != Pick(twin) {want}")
 
-fol = unreal.load_asset("/Game/OpenDrive/Materials/M_Foliage_real")
-wpo = unreal.MaterialEditingLibrary.get_material_property_input_node(
-    fol, unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
-log(f"M_Foliage_real wind WPO input: {wpo.get_class().get_name() if wpo else None}, "
-    f"{unreal.MaterialEditingLibrary.get_num_material_expressions(fol)} nodes")
-if wpo is None:
-    fails.append("M_Foliage_real: world position offset (wind) not connected")
+for mname in ("M_Foliage_real", "M_Bark_Conifer_real", "M_Bark_Aspen_real", "M_Bark_Willow_real"):
+    mat = unreal.load_asset(f"/Game/OpenDrive/Materials/{mname}")
+    wpo = unreal.MaterialEditingLibrary.get_material_property_input_node(
+        mat, unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    log(f"{mname} wind WPO input: {wpo.get_class().get_name() if wpo else None}, "
+        f"max displacement {mat.get_editor_property('max_world_position_offset_displacement'):.1f} cm, "
+        f"{unreal.MaterialEditingLibrary.get_num_material_expressions(mat)} nodes")
+    if wpo is None:
+        fails.append(f"{mname}: world position offset (wind) not connected")
 
 for m in missing:
     log(f"MISSING {m}")
