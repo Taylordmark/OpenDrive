@@ -1,4 +1,4 @@
-﻿"""Realistic car meshes (PLAN-VISUALS Track B, models pass), built headless
+"""Realistic car meshes (PLAN-VISUALS Track B, models pass), built headless
 in Blender from the same seven presets as pipeline/make_car_meshes.py.
 
     blender.exe -b --factory-startup --python pipeline/make_car_meshes_real.py -- [Car ...] [--preview]
@@ -32,13 +32,14 @@ Body, per car:
             diffuser, wheel-arch liners, a dark interior (tub, dash, seats,
             steering wheel) and the pickup bed, all bevelled.
 
-Wheels: one mesh per car (SM_CarWheel_<Car>_real): tyre with a rounded
-profile, sidewall and real tread grooves (slick on the LMP), a modelled
-alloy (a different spoke design per car) on BOTH faces - the pawn mounts the
-same unmirrored mesh on left and right, so either face can be the outboard
-one - and a brake disc on the centre plane. The caliper must not spin, so it
-is its own mesh (SM_CarCaliper_<Car>_real) that the pawn places without the
-spin. Wheels are authored at REF_WHEEL_RADIUS_CM like the stylized one.
+Shape (CHAR, per car): plan taper to nose and tail with rounded corners, a
+waist between the arches, lower flank flared over the arches, rear-arch hips,
+shoulder character line, tumblehome and a crowned roof/hood.
+
+Wheel: one shared mesh (SM_CarWheel_real): tyre with grooves and shoulder
+blocks, a 6-spoke dished alloy on BOTH faces (the pawn mounts the same mesh
+left and right), lug nuts, brake disc. No caliper: it must not spin with the
+wheel, so it needs its own pawn component. Authored at REF_WHEEL_RADIUS_CM.
 
 Contract (unchanged from the stylized set, see make_car_meshes.py): pivot at
 the wheelbase centre at axle height z=0, cm, +x forward; axle x / half-track
@@ -55,7 +56,7 @@ afterwards: collapse interpolates UVs across cell borders).
 
 Outputs (data/cars/real/, gitignored like the rest of data/):
     fbx/SM_Car_<Car>_real{,_high,_ultra}.fbx
-    fbx/SM_CarWheel_<Car>_real{,_high,_ultra}.fbx, fbx/SM_CarCaliper_<Car>_real.fbx
+    fbx/SM_CarWheel_real{,_high,_ultra}.fbx
     real_manifest.json   (triangle counts, axles, wheel shape params)
     LICENSE.txt
 """
@@ -132,7 +133,7 @@ SUBDIV = 2               # Catmull-Clark levels on the body cage
 GAP = 0.5                # panel gap width, cm
 LIP = 1.2                # turned-in panel edge depth, cm
 TIER_RATIO = {"_ultra": 1.0, "_high": 0.5, "": 0.22}   # Decimate ratio per tier suffix
-CREASE = {0: 1.0, 1: 0.15, 2: 0.35, 3: 0.75, 4: 0.6, 5: 0.6}   # section point -> edge crease
+CREASE = {0: 1.0, 1: 0.0, 2: 0.8, 3: 0.45, 4: 0.6, 5: 0.6}   # section point -> edge crease
 
 # panel ids (face attribute "panel"); 0 = never split
 P_NONE, P_SHELL, P_HOOD, P_TRUNK, P_BUMF, P_BUMR = 0, 1, 2, 3, 4, 5
@@ -413,18 +414,55 @@ def sections(car, xs):
     zb = np.minimum(zb, belt - 8.0)
     H = belt - zb
     cabin = (xs <= car.gs) & (xs >= car.ge)
+    # plan shape (CHAR): nose/tail taper, rounded corners, a waist between
+    # the arches; then scaled back so the widest point is the stylized one
+    c = CHAR[car.name]
+    end = np.maximum(np.clip((xs - car.fx) / (car.x0 - car.fx), 0, 1),
+                     np.clip((car.rx - xs) / (car.rx - car.x1), 0, 1))
+    corner = np.clip(1.0 - np.minimum(car.x0 - xs, xs - car.x1) / 45.0, 0, 1)
+    arch_f, arch_r = (np.cos(0.5 * np.pi * np.clip(np.abs(xs - ax) / (r + 25.0), 0, 1)) ** 2
+                      for ax in (car.fx, car.rx))
+    arch = np.maximum(arch_f, arch_r)
+    between = np.clip((xs - car.rx) / (car.fx - car.rx), 0, 1)
+    waist = c["waist"] * np.sin(np.pi * between) * (1.0 - arch)
+    wb = w * (1.0 - c["taper"] * end ** 2 - 0.15 * corner ** 2.5 - waist)
+    wb *= w.max() / wb.max()
+    over_tyre = np.min([np.abs(xs - ax) for ax in (car.fx, car.rx)], axis=0) < car.wr
+    wb = np.where(over_tyre, np.maximum(wb, np.minimum(w, car.ht + WHEEL_HW + 1.0)), wb)   # never bare a tyre
+    # side section: tucked rocker, lower flank curving out to the shoulder
+    # (character line, the widest point), shoulder top rolling in to the
+    # belt; the lower flank and the belt flare out over the arches
+    fl = c["flare"] * arch
+    hips = c["hips"] * arch_r
     # roof-edge width ramps over ~24 cm at the glass ends (the stylized step
-    # pinches once subdivided)
+    # pinches once subdivided); tumblehome pulls the greenhouse in further
     ramp = np.clip(np.minimum(car.gs - xs, xs - car.ge) / 24.0 + 0.5, 0.0, 1.0)
-    top_w = w * (st["hood_top_frac"] + (st["roof_top_frac"] - st["hood_top_frac"]) * ramp)
-    Y = [0.80 * w, 0.97 * w, w, 0.97 * w, top_w]
-    Z = [zb, zb + 0.3 * H, zb + 0.75 * H, belt, zt]
+    roof = st["roof_top_frac"] * (1.0 - c["tumble"])
+    top_w = wb * (st["hood_top_frac"] + (roof - st["hood_top_frac"]) * ramp)
+    crown = 0.0 if car.center else 0.06 * top_w
+    Y = [wb * (0.82 + 0.17 * fl), wb * (0.93 + 0.07 * fl), wb, wb * (0.88 + 0.08 * hips), top_w]
+    Z = [zb, zb + 0.32 * H, zb + 0.78 * H, belt, zt - 0.6 * crown]
+    w = wb
     if car.center:
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
         Y.append(np.interp(xs, cx, cw))
         Z.append(np.interp(xs, cx, cz))
     return dict(Y=np.stack(Y, 1), Z=np.stack(Z, 1), zb=zb, zb_floor=zb_floor, w=w, belt=belt,
-                cabin=cabin, H=H)
+                cabin=cabin, H=H, crown=crown)
+
+
+# per-car body character (sections): plan taper at nose/tail, waist between
+# the arches (coke bottle), lower-flank flare over the arches, rear-arch hips,
+# extra tumblehome on the greenhouse
+CHAR = {
+    "Muscle":  dict(taper=0.07, waist=0.08, flare=0.9, hips=1.0, tumble=0.04),
+    "JDM":     dict(taper=0.10, waist=0.06, flare=0.8, hips=0.3, tumble=0.06),
+    "Super":   dict(taper=0.16, waist=0.08, flare=1.0, hips=0.6, tumble=0.10),
+    "Pickup":  dict(taper=0.04, waist=0.03, flare=0.6, hips=0.0, tumble=0.0),
+    "Rally":   dict(taper=0.08, waist=0.06, flare=1.0, hips=0.4, tumble=0.05),
+    "Concept": dict(taper=0.14, waist=0.07, flare=0.9, hips=0.5, tumble=0.06),
+    "LMP":     dict(taper=0.12, waist=0.08, flare=1.0, hips=0.5, tumble=0.0),
+}
 
 
 def stations(car):
@@ -446,7 +484,7 @@ def stations(car):
     return np.array([nose] + sorted(free + ks, reverse=True) + [tail])
 
 
-BULGE = 6.0      # nose/tail cap bulge: last ring set back this much, cap centre at the old end
+BULGE = 10.0     # nose/tail cap bulge: last ring set back this much, cap centre at the old end
 CAP_FR = [0.82, 0.55, 0.27, 0.0, -0.27, -0.55, -0.82]   # top-cap points, fraction of the cap half width
 WELL_CLEAR = 17.0    # wheel-well inner wall this far inboard of the half-track (wheel half width 13)
 
@@ -475,7 +513,7 @@ def build_cage(car):
         y0, zf = Y[i, 0], S["zb_floor"][i]
         w1y, w2y = min(0.93 * y0, w_in), min(0.86 * y0, w_in - 4.0)
         w1z = min(S["zb"][i], zc[i] - 4.0)
-        crown = 1.5 if not car.center else 0.8
+        crown = 0.8 if car.center else float(S["crown"][i])
         pts = [(x, Y[i, k], Z[i, k]) for k in range(ns)]
         pts += [(x, f * Y[i, -1], zc[i] + crown * (1 - f * f)) for f in CAP_FR]
         pts += [(x, -Y[i, k], Z[i, k]) for k in range(ns - 1, -1, -1)]
@@ -822,6 +860,9 @@ def lamp_layout(car):
         out.append(("grille" if sgn > 0 else "valance", sgn, -0.44 * hw, 0.44 * hw, lo + 0.12 * h, lo + 0.5 * h))
         for s in (1, -1):
             y0, y1 = sorted((s * ly[0] * hw, s * ly[1] * hw))
+            over = max(abs(y0), abs(y1)) - 0.8 * hw      # keep off the rounded corner
+            if over > 0:
+                y0, y1 = y0 - s * over, y1 - s * over
             out.append(("head" if sgn > 0 else "tail", sgn, y0, y1, lo + lz[0] * h, lo + lz[1] * h))
     return out
 
@@ -997,6 +1038,35 @@ def airfoil(part, x, z0, half_span, chord, thick, cell):
     prism(part, poly, -half_span, half_span, mat, cell, cell, cell)
 
 
+def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell, rear_axle_x, arch_r,
+               n_seg=24):
+    """The stylized bed (make_car_meshes.build_pickup_bed) as solid bevelled
+    parts: 5 cm side walls arch-cut over the rear wheel with a rounded rail,
+    floor, wheel-well humps, tailgate and bumper."""
+    x1 = x0 - length
+    xs = np.linspace(x0, x1, n_seg + 1)
+    d2 = arch_r ** 2 - (xs - rear_axle_x) ** 2
+    bot = np.where(d2 > 0, np.maximum(z_bottom, np.sqrt(np.maximum(d2, 0.0))), z_bottom)
+    wi = w - 5.0
+    side = frame_matrix(Vector((0, 0, 0)), Vector((1, 0, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)))
+    poly = [(float(x), float(z)) for x, z in zip(xs[::-1], bot[::-1])] + [(x0, rail_z), (x1, rail_z)]
+    for s in (1, -1):
+        sub = Part()
+        # local z = -y: outer face at y = s*w, inner at s*wi
+        prism(sub, poly, *sorted((-s * w, -s * wi)), side, body_cell,
+              *((body_cell, dark_cell) if s > 0 else (dark_cell, body_cell)))
+        bmesh.ops.recalc_face_normals(sub.bm, faces=sub.bm.faces)
+        bmesh.ops.bevel(sub.bm, geom=list(sub.bm.edges), offset=1.6, segments=3, profile=0.5,
+                        affect='EDGES', clamp_overlap=True)
+        merge(p, sub)
+        rbox(p, rear_axle_x - arch_r, rear_axle_x + arch_r, *sorted((s * wi * 0.62, s * wi)),
+             floor_z, arch_r + 2, dark_cell, r=3.0)
+    rbox(p, x1 + 1.0, x0, -wi, wi, floor_z - 3.0, floor_z, dark_cell, r=0.5)
+    rbox(p, x1, x1 + 4.0, -w, w, z_bottom, rail_z, body_cell, r=1.6)                 # tailgate
+    rbox(p, x1 - 1.0, x1 + 0.5, -12, 12, rail_z - 16, rail_z - 12, dark_cell, r=0.4)   # handle
+    rbox(p, x1 - 3.0, x1 + 6.0, -w, w, z_bottom - 2.0, z_bottom + 12, PLASTIC, r=3.0)   # bumper
+
+
 def build_parts(car):
     """Everything the preset adds on top of its hull, rebuilt rounded."""
     p = Part()
@@ -1006,7 +1076,7 @@ def build_parts(car):
         if name == "mirrors":
             x, lwf, cell = a[:3]
             _, belt, _ = lwf.z(x)
-            y = lwf(x) * 0.88
+            y = float(sections(car, np.array([x]))["Y"][0, 3]) - 1.0   # on the shaped belt line
             for s in (1, -1):
                 ya, yb = sorted((s * (y + 6), s * (y + 20)))
                 rbox(p, x - 12, x, ya, yb, belt + 3, belt + 11, cell, r=3.0)
@@ -1049,19 +1119,7 @@ def build_parts(car):
             ya, yb = sorted((y0, y1))
             rbox(p, x - 0.5, x + 0.5, ya, yb, z0, z1, cell, r=0.4)
         elif name == "build_pickup_bed":
-            # ponytail: the bed reuses the stylized flat geometry (it is a box
-            # anyway); a lofted/bevelled bed is the upgrade if it reads too flat
-            m = mcm.Mesh()
-            mcm.build_pickup_bed(m, *a, **k)
-            vmap = {}
-            for t in m.tris:
-                vs = []
-                for q in t[:3]:
-                    key = tuple(np.round(q, 4))
-                    if key not in vmap:
-                        vmap[key] = p.v(key)
-                    vs.append(vmap[key])
-                p.f(vs, t[3])
+            pickup_bed(p, *a, **k)
     if fins:   # shark fin: the stepped fin boxes as one rounded-top blade
         cell = fins[0][4]
         fins.sort(key=lambda f: -f[1])
@@ -1256,7 +1314,7 @@ def export_fbx(ob, path):
     ob.select_set(True)
     bpy.context.view_layer.objects.active = ob
     bpy.ops.export_scene.fbx(filepath=str(path), use_selection=True, apply_unit_scale=True,
-                             apply_scale_options="FBX_SCALE_UNITS", mesh_smooth_type="OFF",
+                             apply_scale_options="FBX_SCALE_UNITS", mesh_smooth_type="FACE",
                              use_mesh_modifiers=False, add_leaf_bones=False, bake_anim=False,
                              colors_type="NONE", use_tspace=False)
 
@@ -1371,9 +1429,9 @@ def main():
         if DO_PREVIEW:
             PREVIEW.mkdir(parents=True, exist_ok=True)
             ws = place_wheels(car, wheel)
-            length = car.x0 - car.x1
+            length = ultra.dimensions.x     # the bed / wing count too
             render_views([ultra] + ws, -car.wr, length, PREVIEW / f"SM_Car_{name}_real")
-            if name == (cars[0]):
+            if True:   # old-vs-new for every car
                 old = stylized_object(f"SM_Car_{name}")
                 old.location.y = -2.6 * car.ht
                 ultra.location.y = 1.3 * car.ht

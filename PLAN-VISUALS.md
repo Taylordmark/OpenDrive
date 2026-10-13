@@ -326,9 +326,16 @@ the wheel as `_real` twins with the same proportions and pivot contract:
   does `Upgrade(Pick(mesh))` for chassis and wheel.
 - **Check:** `pipeline/checks/check_car_meshes_real.py` (axles = physics,
   bbox within 4 cm of the stylized twin, tri budgets, files).
+- **Shape pass (same day):** per-car `CHAR` in the generator:
+  - plan taper to the nose and tail, with rounded corners;
+  - a waist between the arches, with flared lower flanks over the arches (Muscle gets hips);
+  - a shoulder character line, tumblehome, and a crowned roof and hood;
+  - the tyres always stay covered;
+  - the Pickup bed is rebuilt as solid bevelled walls;
+  - FBX exports smoothing groups.
 - **Open:** the body material's painted gap lines may double the real ones;
-  the Pickup bed reuses the flat stylized panels; one shared rim design, no
-  calipers.
+  one shared rim design; no calipers (they would need a non-spinning pawn
+  component).
 
 ### Track C — Roads (medium)
 
