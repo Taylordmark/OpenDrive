@@ -28,7 +28,7 @@ Taylor in a **drive check** per track, A/B against Stylized.
 | # | Question | Decision |
 |---|---|---|
 | V1 | Standing decision 1 (stylized art) | **Suspended on the branch while the trial runs.** Main keeps decision 1 until the branch is merged. |
-| V2 | Car models | **Keep the current CC0 low-poly cars.** Only their materials change (Track B). Bought or commissioned cars are out of scope. |
+| V2 | Car models | **Realistic gets its own generated `_real` car meshes** (revised 2026-10-13, was "materials only"): same identities and proportions, more detail, built in Blender by our own script (Track B). Stylized keeps the low-poly cars. Bought or commissioned cars are out of scope. |
 | V3 | How to switch | **A separate "Visual Style" setting**, not a fourth Asset Detail tier. Detail is polygon count, style is the look. They're independent. |
 | V4 | Reverting | **Additive only, on branch `visuals-realistic`.** Stylized assets are never edited. Bad result → set the style back to Stylized. Abandon → delete the branch. |
 | V5 | Asset licensing | **Free, open, and safe to sell.** Every third-party asset must allow commercial use with no fee or royalty, and be downloadable by the pipeline without an account. When nothing fits, **we make it ourselves** (procedural generator or Blender) rather than buy or license it. |
@@ -307,6 +307,28 @@ passes for each `_real` car material.
   - the rendered look;
   - door-gap placement on every car (it is heuristic);
   - the new meshes' wheel proportions.
+
+**Realistic meshes (2026-10-13, V2 revised):** `pipeline/make_car_meshes_real.py`
+(Blender 5.2.2 headless, our own badge-free designs) rebuilds all 7 cars and
+the wheel as `_real` twins with the same proportions and pivot contract:
+- A subdivided cage hull with geometric panel gaps (doors, hood, trunk,
+  bumpers, fenders), inset sealed glass, recessed grille, lamp housings with
+  chrome reflectors and projector lenses in the `lights` slot (the reverse
+  lamp keeps its own palette cell, so Head/Tail/ReverseGlow still split),
+  mirrors, wing, exhausts and a basic interior (dash, seats, steering wheel).
+- Wheel: grooved tyre with shoulder blocks, 6-spoke dished face, lug nuts,
+  brake disc. Authored at r 34 / half width 13 like the stylized wheel.
+- Tiers: `_ultra` 57-88k tris, `_high` half, Standard 0.22. UV0 = palette
+  cell, UV1 = unique unwrap. FBX in `data/cars/real/fbx/`.
+- `unreal/import_car_meshes_real.py` imports them ADD-only (staging folder,
+  then moved beside the stylized meshes) with the stylized `M_Car*` slot
+  materials, so `PickSlots` swaps in `M_Car*_real` as before. The pawn now
+  does `Upgrade(Pick(mesh))` for chassis and wheel.
+- **Check:** `pipeline/checks/check_car_meshes_real.py` (axles = physics,
+  bbox within 4 cm of the stylized twin, tri budgets, files).
+- **Open:** the body material's painted gap lines may double the real ones;
+  the Pickup bed reuses the flat stylized panels; one shared rim design, no
+  calipers.
 
 ### Track C — Roads (medium)
 
