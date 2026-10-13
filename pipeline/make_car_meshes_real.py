@@ -42,12 +42,12 @@ start/end, side-glass end and a beltline rising toward the tail, in place of
 the stylized one. Nose / tail x and floor are the stylized ones, so the
 bounding box holds.
 
-Arches: the lip is a circle ARCH_GAP above the tyre at the IN-GAME static
-wheel centre (static_axle_z(): the strut sag from mass and spring rate in
-make_def), with a rolled turned-in lip; the well roof clears the tyre at full
-bump (wheel centre at z = 0) and the fender stands FENDER_OUT outboard of the
-tyre. arch_clearance() ray-tests static / bump / full lock into the manifest.
-Change the suspension or mass and these meshes must be regenerated.
+Arches: the lip is a circle ARCH_GAP above the tyre at the in-game static
+wheel centre - the authored axle, z = 0, since UODVehicleMovement derives the
+strut tops from the sag (2026-10-13) - with a rolled turned-in lip; the well
+roof clears the tyre at the bump stop (tyre top BUMP_TRAVEL over the authored
+one, body-fixed, = BumpTravelCm) and the fender stands FENDER_OUT outboard of
+the tyre. arch_clearance() ray-tests static / bump / full lock into the manifest.
 
 Wheel: one shared mesh (SM_CarWheel_real): tyre with grooves and shoulder
 blocks, a 6-spoke dished alloy on BOTH faces (the pawn mounts the same mesh
@@ -76,7 +76,6 @@ Outputs (data/cars/real/, gitignored like the rest of data/):
 
 import json
 import math
-import re
 import sys
 import time
 import types
@@ -376,10 +375,10 @@ class Car:
         self.profile, self.gs, self.ge = pr["profile"], pr["gs"], pr["ge"]
         self.sge = pr.get("sge", self.ge)             # side glass ends here (C-pillar / sail behind)
         self.belt_fr, self.hood_crown = pr["belt"], pr.get("hood_crown", 0.06)
-        # arches: the lip is a circle round the IN-GAME static wheel centre
-        # (ARCH_GAP above the tyre); the well roof clears the tyre at full
-        # bump, where the strut is at zero length and the wheel centre is at z = 0
-        self.zs = static_axle_z(name)
+        # arches: the lip is a circle round the in-game static wheel centre
+        # (ARCH_GAP above the tyre); the well roof clears the tyre at the
+        # bump stop, wheel centre BUMP_TRAVEL up
+        self.zs = (0.0, 0.0)
         self.r_arch = self.wr + ARCH_GAP
         self.r_bump = self.wr + BUMP_CLEAR
         self.tyre_out = self.ht + WHEEL_HW * self.wr / R_REF
@@ -425,26 +424,10 @@ class Car:
 DOORS = {"Pickup": [(115.0, 18.0), (18.0, -38.0)]}   # crew cab: two doors a side
 
 ARCH_GAP = 3.0       # arch lip radius = wheel radius + this, round the static wheel centre
-BUMP_CLEAR = 2.5     # well roof radius = wheel radius + this, round the full-bump wheel centre (z = 0)
+BUMP_CLEAR = 2.5     # well roof radius = wheel radius + this, round the full-bump wheel centre
+BUMP_TRAVEL = 8.0    # UODVehicleMovement::BumpTravelCm: the bump stop, tyre top over the authored one
 FENDER_OUT = 3.0     # fender skin this far outboard of the tyre face over the arches (tyre tucks under at bump)
 WELL_CLEAR = 34.0    # well inner wall this far inboard of the half-track: clears the front tyre at full lock
-
-
-def static_axle_z(name):
-    """In-game wheel-centre z at rest, (front, rear): UODVehicleMovement puts
-    the strut tops at z = 0 and the wheel SpringLen below, which settles at
-    RestLength - corner load / SpringRate (g = 980 cm/s^2, no anti-roll).
-    Mass / split from unreal/import_car_meshes.py, spring defaults from
-    ODVehicleDef.h unless the def overrides them."""
-    src = (ROOT / "unreal" / "import_car_meshes.py").read_text()
-    blk = src.split(f'make_def("DA_Vehicle_{name}"', 1)[1].split("})", 1)[0]
-
-    def num(k, default=None):
-        m = re.search(rf'"{k}":\s*([-\d.]+)', blk)
-        return float(m.group(1)) if m else default
-    mass, ff = num("mass_kg"), num("front_weight_frac")
-    rest, k = num("rest_length_cm", 20.0), num("spring_rate", 61000.0)
-    return tuple(-(rest - mass * f / 2.0 * 980.0 / k) for f in (ff, 1.0 - ff))
 
 
 # per-car side silhouette (x, floor z, top z), glass start / end, where the
@@ -511,7 +494,7 @@ def sections(car, xs):
         # well roof: half-ellipse r_bump high and wider than the lip opening,
         # so the station chords at its ends still clear the bumped tyre
         e = 1.0 - ((xs - ax) / (r + 4.0)) ** 2
-        well = np.maximum(well, np.where(np.abs(xs - ax) <= r, car.r_bump * np.sqrt(np.maximum(e, 0.0)), -1e9))
+        well = np.maximum(well, np.where(np.abs(xs - ax) <= r, BUMP_TRAVEL + car.r_bump * np.sqrt(np.maximum(e, 0.0)), -1e9))
     well = np.maximum(well, zb)
     # the fender top clears the well roof (the tyre at full bump): a
     # fender hump where the silhouette is lower than that
@@ -561,8 +544,11 @@ def sections(car, xs):
     Z = [zb, zb + 0.32 * H, zb + 0.78 * H, belt, zt - 0.6 * crown]
     w = wb
     if car.center:
+        # fender pods: over the arches the pod top reaches in past the
+        # steering sweep, so its inner wall drops inboard of the well
+        Y[4] = Y[4] + (np.minimum(Y[4], car.ht - WELL_CLEAR + 2.0) - Y[4]) * t
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
-        Y.append(np.interp(xs, cx, cw))
+        Y.append(np.minimum(np.interp(xs, cx, cw), Y[4] - 2.0))
         Z.append(np.interp(xs, cx, cz))
     return dict(Y=np.stack(Y, 1), Z=np.stack(Z, 1), zb=zb, zb_floor=zb_floor, w=w, belt=belt,
                 cabin=cabin, H=H, crown=crown, well=well)
@@ -1192,7 +1178,7 @@ def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell
         # walls, open underneath (the floor stops at the inner wall)
         xa, xb = rear_axle_x - arch_r, rear_axle_x + arch_r
         yi = wi * 0.62
-        top = car.r_bump
+        top = BUMP_TRAVEL + car.r_bump
         rbox(p, xa, xb, *sorted((s * yi, s * wi)), top, top + 4.0, dark_cell, r=1.5)
         rbox(p, xa, xb, *sorted((s * yi, s * (yi + 3.0))), floor_z - 3.0, top + 4.0, dark_cell, r=1.0)
         for xe in (xa, xb - 3.0):
@@ -1526,7 +1512,7 @@ def arch_clearance(car, ob):
     the tyre at static ride height (horizontal rays from outside find the
     lip's underside over the axle), and the smallest body clearance around
     the tyre (rays from the wheel centre through tread / shoulder points;
-    < 0 = intersection) at static, at full bump (wheel centre z = 0) and,
+    < 0 = intersection) at static, at the bump stop (wheel centre BUMP_TRAVEL) and,
     for the front, at static with full steering lock both ways."""
     bm = bm_of(ob)
     bvh = BVHTree.FromBMesh(bm)
@@ -1544,10 +1530,11 @@ def arch_clearance(car, ob):
             for px, py, pz in pts:
                 d = Vector((px * c - py * sn, px * sn + py * c, pz))
                 n = d.length
-                hit = bvh.ray_cast(C, d / n, n + 40.0)[0]
+                hit, _, fi, _ = bvh.ray_cast(C, d / n, n + 40.0)
                 if hit is not None and (hit - C).length - n < best:
                     best = (hit - C).length - n
-                    worst = (round(hit.x - ax, 1), round(abs(hit.y), 1), round(hit.z, 1))
+                    worst = (round(hit.x - ax, 1), round(abs(hit.y), 1), round(hit.z, 1),
+                             ob.data.materials[ob.data.polygons[fi].material_index].name)
         if best < 1.0:
             log(car.name, "arch closest", round(best, 2), "at dx/|y|/z", worst, "wheel z", zc, "steer", steer)
         return round(best, 2)
@@ -1561,10 +1548,10 @@ def arch_clearance(car, ob):
             if hit is not None and hit.y > car.tyre_out - 1.0:
                 lip = round(float(z - top), 2)
                 break
-        r = dict(static_axle_z=round(zs, 2), lip_gap=lip, static=clear(ax, zs, 0.0), bump=clear(ax, 0.0, 0.0))
+        r = dict(static_axle_z=round(zs, 2), lip_gap=lip, static=clear(ax, zs, 0.0), bump=clear(ax, BUMP_TRAVEL, 0.0))
         if tag == "front":
             r["lock"] = min(clear(ax, zs, MAX_STEER), clear(ax, zs, -MAX_STEER))
-            r["bump_lock"] = min(clear(ax, 0.0, MAX_STEER), clear(ax, 0.0, -MAX_STEER))
+            r["bump_lock"] = min(clear(ax, BUMP_TRAVEL, MAX_STEER), clear(ax, BUMP_TRAVEL, -MAX_STEER))
         out[tag] = r
     log(car.name, "arches", json.dumps(out))
     return out

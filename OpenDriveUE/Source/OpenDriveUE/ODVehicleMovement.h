@@ -284,11 +284,25 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Suspension")
 	float DampingRatio = 0.9f;
 
-	/** Ride height delta, cm (presets; + = taller). */
+	/** Ride height delta, cm (presets; + = taller). The static wheel centre
+	 *  sits RideHeightDelta below the authored axle (body z = 0): the strut
+	 *  tops are derived from the static sag (UpdateMounts), not fixed. */
 	UPROPERTY(EditAnywhere, Category = "Suspension")
 	float RideHeightDelta = 0.0f;
 
+	/** Bump stop, body-fixed (2026-10-13): the tyre top may rise this far
+	 *  above the authored tyre top (wheel centre z = 0 at the def radius),
+	 *  then a stop 4x the spring rate takes over. Lowering or a taller tyre
+	 *  eats travel like on a real car; the _real arches are built to clear
+	 *  exactly this (pipeline/make_car_meshes_real.py BUMP_TRAVEL). */
+	UPROPERTY(EditAnywhere, Category = "Suspension")
+	float BumpTravelCm = 8.0f;
+
 	/** Local-space COM height the body is nudged to (cm; axle plane = -14).
+	 *  2026-10-13: the body now rests at the authored axle instead of the old
+	 *  fixed strut tops' 9-16 cm too high, so InitBody adds back that drop
+	 *  (RestLength - static sag, per car and preset) - the COM keeps its height above
+	 *  the ground and every car/preset keeps its weight transfer and roll.
 	 *  Dropped 10 -> 4 (2026-08-27): the car rolled onto its side in fast
 	 *  corners; most of the fix is speed-sensitive steering in the pawn, but
 	 *  a lower COM buys roll margin for every input device, not just the
@@ -530,19 +544,30 @@ public:
 		return FVector2D(Wheels[i].Attach.X, Wheels[i].Attach.Y);
 	}
 
-	/** Nominal (unloaded) wheel-to-ground clearance below the body pivot, cm -
-	 *  RestLengthCm + RideHeightDelta (strut extension from the pivot) + wheel
-	 *  radius. Garage/showroom placement (AODMainMenu::EnterCarConfig) uses
-	 *  this instead of a live SpringLen sample: physics is frozen there (no
-	 *  suspension settling ever happens), so the pivot's actor-origin Z is NOT
-	 *  ground level - it sits this far above it. */
+	/** Static ground clearance below the body pivot, cm: the wheel centre
+	 *  rests RideHeightDelta below the authored axle (UpdateMounts), plus the
+	 *  wheel radius. Garage/showroom placement (AODMainMenu::EnterCarConfig)
+	 *  uses this instead of a live SpringLen sample: physics is frozen there,
+	 *  so the pivot's actor-origin Z is NOT ground level - it sits this far
+	 *  above it. */
 	float GetRestGroundClearanceCm() const
 	{
-		return RestLengthCm + RideHeightDelta + (Wheels.Num() > 0 ? GetWheelRadius(0) : 34.0f);
+		return RideHeightDelta + (Wheels.Num() > 0 ? GetWheelRadius(0) : 34.0f);
 	}
 
-	/** Re-derive mass/COM (after mesh swap or ComLocalZ preset change). */
-	void MarkBodyDirty() { bBodyInit = false; }
+	/** Re-derive mass/COM (after mesh swap or ComLocalZ preset change) and
+	 *  the strut tops (mass, springs or ride height may have changed). */
+	void MarkBodyDirty() { bBodyInit = false; UpdateMounts(); }
+
+	/** Static spring compression of a front/rear wheel, cm, at SpringScale x
+	 *  the car's spring rate: axle mass share x g / rate. */
+	float StaticSagCm(bool bFront, float SpringScale) const;
+
+	/** Strut tops from the static sag, so each wheel rests at the authored
+	 *  axle minus RideHeightDelta (2026-10-13: fixed strut tops at z = 0 left
+	 *  the body 9-16 cm high on its wheels). With physics frozen (garage) it
+	 *  also poses the wheels at that static length. */
+	void UpdateMounts();
 
 	/** Rebuild the wheel array + baseline stat fields from a car definition
 	 *  (used on spawn and on a live vehicle swap). Tuning presets still scale
@@ -643,6 +668,7 @@ private:
 	float EscSlipRate = 0.0f;        // filtered growth rate, deg/s
 
 	bool bBodyInit = false;
+	float ComZEff = 4.0f;            // ComLocalZ + the old strut drop (InitBody)
 	static constexpr int32 StepHistory = 16;   // fixed steps, ~0.13 s at 120 Hz
 	FVector StepV[StepHistory];                // body velocity at each step's start, cm/s
 	FVector StepWDeg[StepHistory];             // and angular, deg/s
