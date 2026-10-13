@@ -29,7 +29,9 @@ public class OpenDriveUE : ModuleRules
 			"SlateCore",
 			"RenderCore",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
-			"Json"
+			"Json",
+			// ODTileSource: -ODTileServer live tile fetch.
+			"HTTP"
 		});
 	}
 }

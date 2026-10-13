@@ -2,6 +2,7 @@
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "ODRoadManager.h"
 #include "ODTerrainManager.h"
 #include "ODVehiclePawn.h"
@@ -892,16 +893,24 @@ void AODBuildingManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path, bRealistic]()
 	{
 		FParsedBuildingTile Parsed;
-		const bool bOk = ParseBuildingTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseBuildingTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		if (bOk && bRealistic)
 		{
 			ApplyRealisticRoofs(Parsed);   // pitched roofs, off the game thread
 		}
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));

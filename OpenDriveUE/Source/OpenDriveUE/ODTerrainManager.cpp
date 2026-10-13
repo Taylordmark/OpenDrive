@@ -2,6 +2,7 @@
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "ODForestManager.h" // EODBiome only, for BiomeGroundTintTable below - no calls into AODForestManager itself
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -1310,9 +1311,16 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		// prefix, and that's most of the tiles in VisualRadius, so
 		// avoiding LoadFileToArray's own "failed to read file" warning
 		// spam here (LogStreaming) actually matters.
-		const bool bUseFallback = !FallbackPath.IsEmpty()
-			&& !FPlatformFileManager::Get().GetPlatformFile().FileExists(*PrimaryPath);
-		const bool bOk = ParseTerrainTileFile(bUseFallback ? FallbackPath : PrimaryPath, Parsed);
+		// (ODTileSource::Resolve does that existence check, and fetches from
+		// -ODTileServer when one is set.)
+		FString ReadPath;
+		EODTileSource Src = ODTileSource::Resolve(PrimaryPath, ReadPath);
+		if (Src == EODTileSource::Missing && !FallbackPath.IsEmpty())
+		{
+			Src = ODTileSource::Resolve(FallbackPath, ReadPath);
+		}
+		const bool bPending = Src == EODTileSource::Pending;
+		const bool bOk = Src == EODTileSource::Ready && ParseTerrainTileFile(ReadPath, Parsed);
 
 		// Outlier-vertex safety net (2026-08-27, phantom-shard investigation)
 		// - runs on the RAW parsed tile, before the carve below ever reads
@@ -1407,10 +1415,16 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		}
 
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, Fidelity, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, Fidelity, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(),
+						Fidelity == ETileFidelity::Near ? WeakThis->PendingNearTiles : WeakThis->PendingCoarseTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, Fidelity, bOk, MoveTemp(Parsed));

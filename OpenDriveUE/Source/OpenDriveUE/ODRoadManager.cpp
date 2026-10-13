@@ -3,6 +3,7 @@
 #include "ODRoadDecals.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Algo/Reverse.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -1382,23 +1383,32 @@ void AODRoadManager::RequestTileLoad(const FIntPoint& Key)
 		// falls back to the plain ODR2 tile otherwise so nothing regresses
 		// on areas that haven't been re-baked through
 		// export_road_mesh_bin_v2.py yet (see RoadTilePrefix's comment).
-		bool bOk = ParseRoadTileFileV3(PathV3, Parsed);
-		if (!bOk)
+		FString ReadPath;
+		EODTileSource Src = ODTileSource::Resolve(PathV3, ReadPath);
+		bool bOk = Src == EODTileSource::Ready && ParseRoadTileFileV3(ReadPath, Parsed);
+		if (!bOk && Src != EODTileSource::Pending)
 		{
-			bOk = ParseRoadTileFileV2(PathV2, Parsed);
+			Src = ODTileSource::Resolve(PathV2, ReadPath);
+			bOk = Src == EODTileSource::Ready && ParseRoadTileFileV2(ReadPath, Parsed);
 		}
+		const bool bPending = Src == EODTileSource::Pending;
 		if (bOk && bEdgeCodes)
 		{
 			ComputeEdgeCodes(Parsed.Chunks);
 		}
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				// a queued GameThread task can in principle run a frame or
 				// two after world teardown starts even if the actor object
 				// itself hasn't been GC'd yet - check both.
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));

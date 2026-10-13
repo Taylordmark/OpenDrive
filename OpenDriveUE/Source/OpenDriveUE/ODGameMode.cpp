@@ -1,4 +1,5 @@
 #include "ODGameMode.h"
+#include "ODTileSource.h"
 
 #include "Dom/JsonObject.h"
 #include "EngineUtils.h"
@@ -40,6 +41,7 @@ AODGameMode::AODGameMode()
 void AODGameMode::BeginPlay()
 {
 	Super::BeginPlay();
+	ODTileSource::Init();
 
 	// AODRoadManager is the same actor ODMainMenu's -odpick hook reads
 	// (GetTownNodes()) and is placed once per open-world map with its
