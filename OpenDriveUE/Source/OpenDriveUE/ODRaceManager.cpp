@@ -1,6 +1,8 @@
 #include "ODRaceManager.h"
 
+#include "Algo/BinarySearch.h"
 #include "Components/InputComponent.h"
+#include "Dom/JsonObject.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/Pawn.h"
@@ -12,6 +14,9 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "ODGhost.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/MemoryWriter.h"
 
 AODRaceManager::AODRaceManager()
 {
@@ -23,6 +28,97 @@ FString AODRaceManager::SaveSlot() const
 	return TrackName.IsEmpty()
 		? FString::Printf(TEXT("OpenDrive_%s"), *GetWorld()->GetMapName())
 		: FString::Printf(TEXT("OpenDrive_track_%s"), *TrackName);
+}
+
+FString AODRaceManager::SaveTrack(const FString& Area, const TArray<FVector2D>& XY,
+	const TArray<float>& Z, bool bLoop)
+{
+	// gates mirror pipeline/build_track.py's place_gates + main
+	constexpr double SpacingCm = 30000.0, StartCm = 20000.0, LookCm = 1000.0;
+	TArray<double> Cum = {0.0};
+	for (int32 i = 1; i < XY.Num(); ++i)
+	{
+		Cum.Add(Cum.Last() + FVector2D::Distance(XY[i - 1], XY[i]));
+	}
+	const double L = Cum.Last();
+	if (XY.Num() < 2 || XY.Num() != Z.Num() || L < 10000.0)
+	{
+		return FString();   // under 100 m isn't a track
+	}
+	const double Start = FMath::Min(StartCm, 0.25 * L), End = bLoop ? Start + L : L;
+	TArray<double> S;
+	for (double s = Start; s < End; s += SpacingCm)
+	{
+		S.Add(s);
+	}
+	if (S.Num() > 1 && End - S.Last() < 0.5 * SpacingCm)
+	{
+		S.Pop();   // no sliver sector before the finish
+	}
+	S.Add(End);
+	auto At = [&](double s)
+	{
+		s = bLoop ? s - FMath::FloorToDouble(s / L) * L : FMath::Clamp(s, 0.0, L);
+		const int32 j = FMath::Clamp((int32)Algo::UpperBound(Cum, s), 1, Cum.Num() - 1);
+		const double A = (s - Cum[j - 1]) / FMath::Max(Cum[j] - Cum[j - 1], 1e-6);
+		return FVector(FMath::Lerp(XY[j - 1], XY[j], A), FMath::Lerp((double)Z[j - 1], (double)Z[j], A));
+	};
+
+	// ponytail: writes into Content/ - fine for dev builds; a packaged build
+	// wants FPaths::ProjectSavedDir() (and LoadTrack/LoadTracks reading both)
+	const FString Masks = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks");
+	const FString ManifestPath = Masks / TEXT("tracks.json");
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	if (!FFileHelper::LoadFileToString(Text, *ManifestPath)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
+	{
+		Root = MakeShared<FJsonObject>();
+	}
+	int32 Num = 1;
+	while (Root->HasField(FString::Printf(TEXT("custom_%d"), Num)))
+	{
+		++Num;
+	}
+	const FString Name = FString::Printf(TEXT("custom_%d"), Num);
+
+	TArray<uint8> Bin;
+	FMemoryWriter Ar(Bin);
+	uint32 Flags = bLoop ? 1 : 0, G = S.Num(), N = XY.Num();
+	Ar.Serialize((void*)"ODK1", 4);
+	Ar << Flags << G;
+	for (const double s : S)
+	{
+		const FVector P = At(s), D = At(s + LookCm) - At(s - LookCm);
+		float V[4] = {(float)P.X, (float)P.Y, (float)P.Z, (float)FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X))};
+		Ar.Serialize(V, sizeof(V));
+	}
+	Ar << N;
+	for (const FVector2D& P : XY)
+	{
+		float V[2] = {(float)P.X, (float)P.Y};
+		Ar.Serialize(V, sizeof(V));
+	}
+	if (!FFileHelper::SaveArrayToFile(Bin, *(Masks / FString::Printf(TEXT("track_%s.bin"), *Name))))
+	{
+		return FString();
+	}
+
+	const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+	Entry->SetStringField(TEXT("area"), Area);
+	Entry->SetStringField(TEXT("title"), FString::Printf(TEXT("Custom %d"), Num));
+	Entry->SetBoolField(TEXT("loop"), bLoop);
+	Entry->SetNumberField(TEXT("km"), FMath::RoundToDouble(L / 1000.0) / 100.0);
+	Root->SetObjectField(Name, Entry);
+	Text.Reset();
+	FJsonSerializer::Serialize(Root.ToSharedRef(), TJsonWriterFactory<>::Create(&Text));
+	if (!FFileHelper::SaveStringToFile(Text, *ManifestPath))
+	{
+		return FString();
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODRaceManager: saved track '%s' (%s) - %.2f km, %d gates, %s"),
+		*Name, *Area, L / 1e5, S.Num(), bLoop ? TEXT("loop") : TEXT("point to point"));
+	return Name;
 }
 
 bool AODRaceManager::LoadTrack()
@@ -150,6 +246,16 @@ void AODRaceManager::BeginPlay()
 				&AODRaceManager::RespawnAtLastGate);
 		}
 	}
+}
+
+void AODRaceManager::EndPlay(const EEndPlayReason::Type Reason)
+{
+	// the menu swaps tracks by destroying this actor - the PB ghost goes with it
+	if (Ghost.IsValid())
+	{
+		Ghost->Destroy();
+	}
+	Super::EndPlay(Reason);
 }
 
 float AODRaceManager::ElapsedTime() const

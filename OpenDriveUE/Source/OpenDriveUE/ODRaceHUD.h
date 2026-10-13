@@ -101,6 +101,16 @@ private:
 	float WorldMapDragPx = 0.0f;
 	uint64 WorldMapOpenFrame = 0;   // ignore the key press that opened it
 	double NoRouteMsgTime = -100.0;
+	// Track editor (2026-10-13): T on the world map. Clicks drop waypoints,
+	// routed over the roads like build_track.py; F saves + drives it.
+	void RebuildEditTrack(const AODRoadManager* RoadMgr);
+	bool bTrackEdit = false;
+	bool bEditLoop = false;
+	TArray<FVector2D> EditWaypoints;   // world XY cm, as clicked
+	TArray<FVector2D> EditXY;          // routed line
+	TArray<float> EditZ;
+	int32 EditFailLeg = INDEX_NONE;    // waypoint whose leg has no road
+	bool bEditSaveFailed = false;
 	void ToggleMiniMap() { bShowMiniMap = !bShowMiniMap; }
 	void ZoomIn() { MiniMapZoomM = FMath::Max(20.0f, MiniMapZoomM * 0.8f); }
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }

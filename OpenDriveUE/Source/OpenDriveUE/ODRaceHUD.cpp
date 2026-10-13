@@ -1282,9 +1282,30 @@ void AODRaceHUD::CloseWorldMap()
 
 void AODRaceHUD::ClearRouteKey()
 {
+	if (bWorldMapOpen && bTrackEdit)
+	{
+		if (EditWaypoints.Num() > 0)
+		{
+			EditWaypoints.Pop();   // undo the last point
+			RebuildEditTrack(FindNavRoadMgr());
+		}
+		return;
+	}
 	if (AODRoadManager* RoadMgr = FindNavRoadMgr())
 	{
 		RoadMgr->ClearRoute();
+	}
+}
+
+void AODRaceHUD::RebuildEditTrack(const AODRoadManager* RoadMgr)
+{
+	bEditSaveFailed = false;
+	EditFailLeg = INDEX_NONE;
+	EditXY.Reset();
+	EditZ.Reset();
+	if (RoadMgr && EditWaypoints.Num() >= 2)
+	{
+		RoadMgr->RouteThrough(EditWaypoints, bEditLoop, EditXY, EditZ, EditFailLeg);
 	}
 }
 
@@ -1343,6 +1364,12 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 	const double RealNow = GetWorld()->GetRealTimeSeconds();
 	auto Pick = [&](const FVector2D& S)
 	{
+		if (bTrackEdit)
+		{
+			EditWaypoints.Add(ToWorld(S));
+			RebuildEditTrack(RoadMgr);
+			return;
+		}
 		const int32 T = TownNear(S, 18.0f);
 		FVector2D Snap;
 		const bool bOk = T != INDEX_NONE
@@ -1427,9 +1454,40 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		}
 		if (Pressed(EKeys::RightMouseButton) || Pressed(EKeys::Gamepad_FaceButton_Left))
 		{
-			RoadMgr->ClearRoute();
+			if (bTrackEdit)
+			{
+				ClearRouteKey();   // undo the last point
+			}
+			else
+			{
+				RoadMgr->ClearRoute();
+			}
 		}
-		if ((Pressed(EKeys::F) || Pressed(EKeys::Gamepad_FaceButton_Top)) && Hover != INDEX_NONE)
+		if (Pressed(EKeys::T) || Pressed(EKeys::Gamepad_LeftThumbstick))
+		{
+			bTrackEdit = !bTrackEdit;   // points are kept until saved
+		}
+		if (bTrackEdit && (Pressed(EKeys::L) || Pressed(EKeys::Gamepad_RightThumbstick)))
+		{
+			bEditLoop = !bEditLoop;
+			RebuildEditTrack(RoadMgr);
+		}
+		const bool bF = Pressed(EKeys::F) || Pressed(EKeys::Gamepad_FaceButton_Top);
+		if (bF && bTrackEdit && EditXY.Num() >= 2)
+		{
+			const FString Name = AODRaceManager::SaveTrack(RoadMgr->GetAreaKey(), EditXY, EditZ, bEditLoop);
+			bEditSaveFailed = Name.IsEmpty();
+			for (TActorIterator<AODMainMenu> It(GetWorld()); It && !bEditSaveFailed; ++It)
+			{
+				CloseWorldMap();
+				bTrackEdit = false;
+				EditWaypoints.Reset();
+				RebuildEditTrack(nullptr);
+				It->DriveTrack(Name, RoadMgr);
+				return;
+			}
+		}
+		if (bF && !bTrackEdit && Hover != INDEX_NONE)
 		{
 			// fast travel: the front-end map's own teleport + loading path
 			for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
@@ -1465,6 +1523,34 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 			bH ? FLinearColor(1.0f, 0.9f, 0.5f) : FLinearColor(0.92f, 0.92f, 0.88f));
 	}
 
+	if (bTrackEdit)
+	{
+		auto Line = [&](const FVector2D& A, const FVector2D& B, const FLinearColor& C, float W)
+		{
+			FCanvasLineItem L(ToScreen(A), ToScreen(B));
+			L.SetColor(C);
+			L.LineThickness = W;
+			Canvas->DrawItem(L);
+		};
+		for (int32 i = 1; i < EditXY.Num(); ++i)
+		{
+			Line(EditXY[i - 1], EditXY[i], FLinearColor(1.0f, 0.55f, 0.1f), 4.0f);
+		}
+		const int32 K = EditWaypoints.Num();
+		if (EditFailLeg != INDEX_NONE)
+		{
+			Line(EditWaypoints[EditFailLeg], EditWaypoints[(EditFailLeg + 1) % K], FLinearColor(1.0f, 0.2f, 0.15f), 2.0f);
+		}
+		for (int32 i = 0; i < K; ++i)
+		{
+			const FVector2D S = ToScreen(EditWaypoints[i]);
+			FCanvasTileItem Dot(S - FVector2D(6, 6), FVector2D(12, 12),
+				i == 0 ? FLinearColor(0.3f, 1.0f, 0.4f) : FLinearColor(1.0f, 0.85f, 0.4f));
+			Canvas->DrawItem(Dot);
+			Text(FString::FromInt(i + 1), S.X + 8.0f, S.Y - 20.0f, 1.0f, FLinearColor::White);
+		}
+	}
+
 	// center crosshair (gamepad / Enter pick point)
 	for (const FVector2D& D : {FVector2D(1, 0), FVector2D(0, 1)})
 	{
@@ -1477,6 +1563,28 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 	FCanvasTileItem Bar(FVector2D(0, 0), FVector2D(Canvas->SizeX, 64.0f), FLinearColor(0.02f, 0.03f, 0.05f, 0.8f));
 	Bar.BlendMode = SE_BLEND_Translucent;
 	Canvas->DrawItem(Bar);
+	if (bTrackEdit)
+	{
+		double LenCm = 0.0;
+		for (int32 i = 1; i < EditXY.Num(); ++i)
+		{
+			LenCm += FVector2D::Distance(EditXY[i - 1], EditXY[i]);
+		}
+		const int32 K = EditWaypoints.Num();
+		const FString EditStatus = bEditSaveFailed ? FString(TEXT("couldn't save - under 100 m, or no road height data here"))
+			: EditFailLeg != INDEX_NONE ? FString::Printf(TEXT("no road from point %d to %d"), EditFailLeg + 1, (EditFailLeg + 1) % K + 1)
+			: EditXY.Num() >= 2 ? FString::Printf(TEXT("%d points  ·  %s  ·  %s"), K, *FormatNavDist(LenCm, bMetric),
+				bEditLoop ? TEXT("loop") : TEXT("point to point"))
+			: FString::Printf(TEXT("click roads to add points  ·  %s"), bEditLoop ? TEXT("loop") : TEXT("point to point"));
+		Text(TEXT("TRACK EDITOR"), 24.0f, 14.0f, 1.8f, FLinearColor(1.0f, 0.75f, 0.4f));
+		Text(EditStatus, 300.0f, 22.0f, 1.2f, bEditSaveFailed || EditFailLeg != INDEX_NONE
+			? FLinearColor(1.0f, 0.45f, 0.35f) : FLinearColor(1.0f, 0.8f, 0.5f));
+		Text(TEXT("click: add point    right-click / backspace: undo    L: loop    F: save + drive    T: world map    drag / wheel: pan / zoom    esc: close"),
+			24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
+		Text(TEXT("pad: A add at crosshair    X undo    R3 loop    Y save + drive    L3 world map    B / back: close"),
+			24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
+		return;
+	}
 	Text(TEXT("WORLD MAP"), 24.0f, 14.0f, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
 	const FString Status = RealNow - NoRouteMsgTime < 3.0
 		? FString(TEXT("no road route to there"))
@@ -1491,9 +1599,9 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		Text(FString::Printf(TEXT("%s  -  click/enter: route here    F / Y: fast travel"), *Towns[Hover].Name),
 			24.0f, Canvas->SizeY - 84.0f, 1.1f, FLinearColor(1.0f, 0.9f, 0.5f));
 	}
-	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: town or road waypoint    right-click / backspace: clear route    tab / esc: close"),
+	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: town or road waypoint    right-click / backspace: clear route    T: track editor    tab / esc: close"),
 		24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
-	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    B / back: close"),
+	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    L3 track editor    B / back: close"),
 		24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
 }
 
@@ -1577,7 +1685,10 @@ void AODRaceHUD::DrawHUD()
 	for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
 	{
 		Race = *It;
-		break;
+		if (!Race->TrackName.IsEmpty())
+		{
+			break;   // a picked custom track over a level-placed race
+		}
 	}
 
 	// AODRoadManager exists on any level with a road, race or not

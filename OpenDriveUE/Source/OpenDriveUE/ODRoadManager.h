@@ -375,6 +375,14 @@ public:
 	/** World time of the last arrival (route auto-clears on arrival), <0 = never. */
 	double GetArrivedTime() const { return ArrivedTime; }
 	const FString& GetArrivedName() const { return ArrivedName; }
+	/** Track editor (2026-10-13): the road route through Waypoints in order
+	 *  (back to the first when bLoop) as XY + Z cm - pipeline/build_track.py's
+	 *  build_route. Each snap faces the next waypoint; false with OutFailLeg
+	 *  = the waypoint whose leg has no road, or INDEX_NONE (no graph / Z). */
+	bool RouteThrough(const TArray<FVector2D>& Waypoints, bool bLoop,
+		TArray<FVector2D>& OutXY, TArray<float>& OutZ, int32& OutFailLeg) const;
+	/** "<area>" from CenterlineFilePrefix (centerline_<area>_test), as in tracks.json */
+	FString GetAreaKey() const { return CenterlineFilePrefix.Mid(11).LeftChop(5); }
 
 private:
 	void LoadCenterline();
@@ -392,6 +400,7 @@ private:
 
 	// CSR adjacency (both directions per undirected ODG1 edge)
 	TArray<FVector2D> RouteNodes;
+	TArray<float> RouteNodeZ;      // lane block node Z, cm; empty on older files
 	TArray<int32> RouteAdjStart;   // RouteNodes.Num()+1
 	TArray<int32> RouteAdjNode;
 	TArray<float> RouteAdjLen;     // A* cost, cm (wrong-way arcs x WrongWayCostMult)

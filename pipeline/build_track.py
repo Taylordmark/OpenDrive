@@ -23,6 +23,8 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/track_<name>.bin
             + uint32 G + G * (float32 x, y, z cm, yaw deg)  gates, start
               first, finish last (a loop's finish = its start gate)
             + uint32 N + N * (float32 x, y cm)  track line, spawn at [0]
+        Masks/tracks.json  {name: {area, title, loop, km}} - the menu's
+            Track row lists these (this track's entry added/updated)
         scratchpad/track_<name>.png
 Play:   -odtrack=<name> (AODGameMode spawns the AODRaceManager).
 """
@@ -215,6 +217,11 @@ def main(name):
         f.write(struct.pack("<I", len(xy)) + xy.astype("<f4").tobytes())
     print(f"wrote {dst}: {L / 1e5:.2f} km {'loop' if loop else 'point to point'}, "
           f"{len(gates)} gates, max vertex snap {snap_cm.max() / 100:.0f} m")
+    manifest = MASKS / "tracks.json"
+    tracks = json.loads(manifest.read_text()) if manifest.exists() else {}
+    tracks[name] = {"area": area, "title": props.get("name", name), "loop": loop,
+                    "km": round(L / 1e5, 2)}
+    manifest.write_text(json.dumps(tracks, indent=2, sort_keys=True))
 
     import matplotlib
     matplotlib.use("Agg")

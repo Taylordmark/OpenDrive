@@ -137,6 +137,8 @@ public:
 	/** World-map fast travel (SS7.37): the same teleport + Loading-screen path
 	 *  as picking a town on the front-end map. */
 	void TravelToTown(int32 TownIdx, const class AODRoadManager* InRoad = nullptr) { StartAt(TownIdx, InRoad); }
+	/** Track editor (2026-10-13): pick a just-saved track (Track row) and drive it now. */
+	void DriveTrack(const FString& Name, const class AODRoadManager* InRoad);
 
 	/** Cursor + input mode for a menu/map (also used by AODRaceHUD's world map). */
 	void SetCursorVisible(bool bVisible);
@@ -175,6 +177,15 @@ private:
 	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
 	int32 AreaIdx = 0;
 	int32 CurrentAreaIdx = INDEX_NONE;   // this level's index in AreaLevels, if listed
+	// Track row (2026-10-13): Free Roam or a custom track of the picked area,
+	// from Masks/tracks.json (pipeline/build_track.py). Saved like Area, so a
+	// Drive into another level picks it back up there.
+	struct FTrackInfo { FString Name, Title, Area; bool bLoop = false; float Km = 0.0f; };
+	void LoadTracks();
+	void ApplyTrack();           // (re)spawn the track's AODRaceManager before StartAt, or clear it
+	const FTrackInfo* PickedTrack() const;
+	TArray<FTrackInfo> Tracks;
+	FString TrackPick;           // track name, empty = Free Roam
 	// saved / odtunepreset= tuning preset, applied once by EnterCarConfig() (needs the pawn)
 	int32 CarriedTuneIdx = INDEX_NONE;
 	// this level was opened by Drive (travel URL has odengine=): skip the menu,

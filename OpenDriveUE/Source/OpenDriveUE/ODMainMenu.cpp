@@ -187,14 +187,14 @@ enum ERow : int32
 {
 	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
-	RowArea, RowTime, RowSeason, RowWeather,                             // Scene: season before the weather it allows
+	RowArea, RowTrack, RowTime, RowSeason, RowWeather,                   // Scene: season before the weather it allows
 	RowStart, RowGarage, RowSettings,                                    // Main ("Drive" opens Scene)
 	RowDrive, RowBack, RowQuit,                                          // footers
 };
 const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowStart, 3}};        // footer Quit
 const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};      // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};   // footer Back
-const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 4}};       // footer Drive
+const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 5}};       // footer Drive
 
 // same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
 const TCHAR* CarConfigSection = TEXT("OpenDrive.Car");
@@ -247,6 +247,12 @@ void AODMainMenu::BeginPlay()
 	FString SavedArea;
 	GConfig->GetString(AreaConfigSection, TEXT("Level"), SavedArea, GGameUserSettingsIni);
 	AreaIdx = FMath::Max(0, AreaLevels.IndexOfByKey(SavedArea));   // missing/unlisted -> first area
+	LoadTracks();
+	GConfig->GetString(AreaConfigSection, TEXT("Track"), TrackPick, GGameUserSettingsIni);
+	if (!PickedTrack())
+	{
+		TrackPick.Empty();   // deleted, or built for another area
+	}
 
 	// saved car picks (factory default when missing or out of range); the car
 	// itself is restored by AODVehiclePawn::BeginPlay
@@ -544,6 +550,7 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	if (bEntered && bAutoStart && !bGarageMode)
 	{
 		bAutoStart = false;
+		ApplyTrack();
 		StartAt(-1);   // opened by Drive: straight to the default spawn
 		return;
 	}
@@ -795,6 +802,7 @@ void AODMainMenu::Activate()
 			}
 			else
 			{
+				ApplyTrack();
 				StartAt(-1);  // already on this area (or none listed): default spawn, no reload
 			}
 			break;
@@ -953,9 +961,29 @@ void AODMainMenu::Adjust(int32 Dir)
 		if (const int32 N = AreaLevels.Num(); N > 0)
 		{
 			AreaIdx = (AreaIdx + Dir + N) % N;
+			if (!PickedTrack())
+			{
+				TrackPick.Empty();
+			}
 			SavePicks();
 		}
 		break;
+	case RowTrack:
+	{
+		// Free Roam, then this area's tracks in manifest order
+		TArray<FString> Names = {FString()};
+		for (const FTrackInfo& T : Tracks)
+		{
+			if (AreaKeys.IsValidIndex(AreaIdx) && T.Area == AreaKeys[AreaIdx])
+			{
+				Names.Add(T.Name);
+			}
+		}
+		const int32 N = Names.Num();
+		TrackPick = Names[(FMath::Max(0, Names.IndexOfByKey(TrackPick)) + Dir + N) % N];
+		SavePicks();
+		break;
+	}
 	default:
 		break;
 	}
@@ -1169,6 +1197,7 @@ void AODMainMenu::SavePicks() const
 	{
 		GConfig->SetString(AreaConfigSection, TEXT("Level"), *AreaLevels[AreaIdx], GGameUserSettingsIni);
 	}
+	GConfig->SetString(AreaConfigSection, TEXT("Track"), *TrackPick, GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -1281,8 +1310,8 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 			const FVector2D A = It->TrackLine[0], D = It->TrackLine[1] - A;
 			Pawn->TeleportToSpawn(FVector(A.X, A.Y, 0.0f),
 				FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X)));
+			break;
 		}
-		break;
 	}
 
 	// Unpause NOW, before handing control back - tile streaming
@@ -1385,6 +1414,82 @@ void AODMainMenu::OpenArea()
 }
 
 // ---- garage-menu vistas (2026-10-05) ---------------------------------------
+
+void AODMainMenu::LoadTracks()
+{
+	// {"<name>": {"area", "title", "loop", "km"}} (pipeline/build_track.py)
+	Tracks.Reset();
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/tracks.json");
+	if (!FFileHelper::LoadFileToString(Text, *Path)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid())
+	{
+		return;
+	}
+	for (const auto& [Name, Value] : Root->Values)
+	{
+		const TSharedPtr<FJsonObject>* Obj = nullptr;
+		if (!Value->TryGetObject(Obj))
+		{
+			continue;
+		}
+		FTrackInfo& T = Tracks.AddDefaulted_GetRef();
+		T.Name = Name;
+		T.Area = (*Obj)->GetStringField(TEXT("area"));
+		T.Title = (*Obj)->GetStringField(TEXT("title"));
+		T.bLoop = (*Obj)->GetBoolField(TEXT("loop"));
+		T.Km = (*Obj)->GetNumberField(TEXT("km"));
+	}
+}
+
+const AODMainMenu::FTrackInfo* AODMainMenu::PickedTrack() const
+{
+	return TrackPick.IsEmpty() || !AreaKeys.IsValidIndex(AreaIdx) ? nullptr
+		: Tracks.FindByPredicate([this](const FTrackInfo& T) { return T.Name == TrackPick && T.Area == AreaKeys[AreaIdx]; });
+}
+
+void AODMainMenu::ApplyTrack()
+{
+	FString CmdTrack;   // -odtrack (QA): AODGameMode already spawned that race
+	if (FParse::Value(FCommandLine::Get(), TEXT("odtrack="), CmdTrack))
+	{
+		return;
+	}
+	for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
+	{
+		if (!It->TrackName.IsEmpty())
+		{
+			It->Destroy();   // a fresh one reloads gates, PB and ghost
+		}
+	}
+	// by name, not PickedTrack(): the editor's area may not be a listed one
+	// (stale picks from another area were already cleared by BeginPlay/Adjust)
+	if (const FTrackInfo* T = TrackPick.IsEmpty() ? nullptr
+			: Tracks.FindByPredicate([this](const FTrackInfo& I) { return I.Name == TrackPick; }))
+	{
+		// TrackName set before BeginPlay, which loads Masks/track_<name>.bin
+		AODRaceManager* Race = GetWorld()->SpawnActorDeferred<AODRaceManager>(AODRaceManager::StaticClass(), FTransform::Identity);
+		Race->TrackName = T->Name;
+		UGameplayStatics::FinishSpawningActor(Race, FTransform::Identity);
+	}
+}
+
+void AODMainMenu::DriveTrack(const FString& Name, const AODRoadManager* InRoad)
+{
+	LoadTracks();
+	TrackPick = Name;
+	if (const FTrackInfo* T = Tracks.FindByPredicate([&](const FTrackInfo& I) { return I.Name == Name; }))
+	{
+		if (const int32 A = AreaKeys.IndexOfByKey(T->Area); A != INDEX_NONE)
+		{
+			AreaIdx = A;   // PickedTrack() matches on the picked area
+		}
+	}
+	SavePicks();
+	ApplyTrack();
+	StartAt(-1, InRoad);   // the track's own start overrides the default spawn
+}
 
 void AODMainMenu::LoadMenuSpots()
 {
@@ -1706,6 +1811,17 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 	case RowArea:
 		OutLabel = TEXT("Area");
 		OutValue = AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : FString();
+		break;
+	case RowTrack:
+		OutLabel = TEXT("Track");
+		if (const FTrackInfo* T = PickedTrack())
+		{
+			OutValue = FString::Printf(TEXT("%s  %.1f km%s"), *T->Title, T->Km, T->bLoop ? TEXT(" loop") : TEXT(""));
+		}
+		else
+		{
+			OutValue = TEXT("Free Roam");
+		}
 		break;
 	case RowDrive:
 		OutLabel = TEXT("Start Driving");

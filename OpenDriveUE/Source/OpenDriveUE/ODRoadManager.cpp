@@ -707,6 +707,15 @@ void AODRoadManager::LoadRouteGraph()
 		RouteAdjWrongWay[Fill[B]] = Dir > 0;
 		RouteAdjNode[Fill[B]] = A; RouteAdjLen[Fill[B]++] = Dir > 0 ? L * WrongWayCostMult : L;
 	}
+	RouteNodeZ.Reset();
+	if (bHasLanes)
+	{
+		RouteNodeZ.SetNumUninitialized(N);
+		for (int64 i = 0; i < N; ++i)
+		{
+			RouteNodeZ[i] = ReadF32LE(EP + E * 13 + i * 4);
+		}
+	}
 	UE_LOG(LogTemp, Display, TEXT("ODRoadManager: route graph %lld nodes / %lld edges (one-way %s, lanes %s) from %s"),
 		N, E, bHasOneway ? TEXT("yes") : TEXT("no, old file"), bHasLanes ? TEXT("yes") : TEXT("no"), *BinPath);
 }
@@ -807,6 +816,57 @@ bool AODRoadManager::FindRoutePath(int32 From, int32 To, TArray<int32>& OutNodes
 	}
 	Algo::Reverse(OutNodes);
 	return true;
+}
+
+bool AODRoadManager::RouteThrough(const TArray<FVector2D>& Wp, bool bLoop,
+	TArray<FVector2D>& OutXY, TArray<float>& OutZ, int32& OutFailLeg) const
+{
+	OutXY.Reset();
+	OutZ.Reset();
+	OutFailLeg = INDEX_NONE;
+	const int32 K = Wp.Num();
+	if (K < 2 || RouteNodeZ.Num() != RouteNodes.Num() || RouteNodes.Num() == 0)
+	{
+		return false;
+	}
+	// ponytail: re-snaps and re-routes every leg per edit (O(N) snaps + A*);
+	// cache legs by endpoint pair if long tracks get sluggish
+	TArray<int32> Snap;
+	for (int32 i = 0; i < K; ++i)
+	{
+		const FVector2D Next = bLoop || i + 1 < K ? Wp[(i + 1) % K] : 2.0 * Wp[i] - Wp[i - 1];
+		Snap.Add(NearestRouteNode(Wp[i], Next - Wp[i]));
+	}
+	if (bLoop)
+	{
+		Snap.Add(Snap[0]);
+	}
+	TArray<int32> Path = {Snap[0]}, Leg;
+	for (int32 i = 0; i + 1 < Snap.Num(); ++i)
+	{
+		if (Snap[i] == Snap[i + 1])
+		{
+			continue;
+		}
+		if (!FindRoutePath(Snap[i], Snap[i + 1], Leg))
+		{
+			OutFailLeg = i;
+			return false;
+		}
+		Path.Append(Leg.GetData() + 1, Leg.Num() - 1);
+	}
+	// a loop whose start snapped onto a side stub leaves and re-enters it at the seam
+	while (bLoop && Path.Num() > 3 && Path[1] == Path[Path.Num() - 2])
+	{
+		Path.RemoveAt(0);
+		Path.Pop();
+	}
+	for (const int32 V : Path)
+	{
+		OutXY.Add(RouteNodes[V]);
+		OutZ.Add(RouteNodeZ[V]);
+	}
+	return Path.Num() >= 2;
 }
 
 bool AODRoadManager::RecomputeRoute(const FVector2D& From)

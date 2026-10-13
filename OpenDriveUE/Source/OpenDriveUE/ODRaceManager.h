@@ -42,6 +42,7 @@ class OPENDRIVEUE_API AODRaceManager : public AActor
 public:
 	AODRaceManager();
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Gate transforms in order, start first, finish last (set by pipeline). */
@@ -52,6 +53,13 @@ public:
 	 *  loads Masks/track_<name>.bin into Checkpoints/TrackLine instead of
 	 *  the level's own gates. Empty = the level's race, as before. */
 	FString TrackName;
+
+	/** Track editor (2026-10-13): writes a road route (XY + Z cm, from
+	 *  AODRoadManager::RouteThrough) as Masks/track_custom_<n>.bin with
+	 *  build_track.py's gates and adds it to Masks/tracks.json, so the
+	 *  menu's Track row lists it. Returns the new track name, empty on failure. */
+	static FString SaveTrack(const FString& Area, const TArray<FVector2D>& XY,
+		const TArray<float>& Z, bool bLoop);
 
 	/** Track line (world XY cm), spawn at [0]. Empty without a track. */
 	TArray<FVector2D> TrackLine;
