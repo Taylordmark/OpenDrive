@@ -19,6 +19,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
+#include "ODVisualStyle.h"
 #include "ODWeatherController.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -42,6 +43,10 @@ const TCHAR* CloudMaterialPath =
 // too low flattens depth cueing. Tune in small steps (0.05-0.1) live -
 // the r.SkyAtmosphere.AerialPerspective.StartDepth cvar is a proven no-op.
 constexpr float AerialPerspectiveViewDistanceScale = 0.8f;
+// Visual Style Realistic (PLAN-VISUALS.md Track A): a bit more haze for depth
+// between ridgelines. Kept short of the 1.0 that caused the pale-hills veil.
+constexpr float RealisticAerialPerspectiveScale = 0.9f;
+constexpr float RealisticFogDensity = 0.0013f;   // Stylized 0.001
 
 // ---- Weather W2 (sec 7.40) targets at full weight ----
 const FLinearColor DustTan(1.0f, 0.72f, 0.42f);
@@ -208,7 +213,8 @@ void AODAtmosphereController::EnsureSkyAtmosphere()
 	Comp->SetMieAnisotropy(0.82f);              // close to 0.8 default, mild bump
 	Comp->SetAerialPerspectiveStartDepth(0.07f);   // vs 0.1 default - haze builds a bit sooner
 	Comp->SetHeightFogContribution(1.0f);
-	Comp->SetAerialPespectiveViewDistanceScale(AerialPerspectiveViewDistanceScale); // sic - engine's own spelling
+	Comp->SetAerialPespectiveViewDistanceScale(ODVisualStyle::IsRealistic()   // sic - engine's own spelling
+		? RealisticAerialPerspectiveScale : AerialPerspectiveViewDistanceScale);
 	// Large-world (2026-10-02): the default PlanetTopAtAbsoluteWorldOrigin puts
 	// the planet top at (0,0,0), so an area ~650 km from the origin sat ~33 km
 	// up the curve. Anchor the planet top to the component instead; Tick keeps
@@ -263,7 +269,7 @@ void AODAtmosphereController::EnsureHeightFog()
 	// read as thin high-altitude haze instead of pea soup. Cut density by
 	// another ~6x and pushed StartDistance out so nearby road/car geometry
 	// stays clean and only distance haze builds.
-	Comp->SetFogDensity(0.001f);
+	Comp->SetFogDensity(ODVisualStyle::IsRealistic() ? RealisticFogDensity : 0.001f);
 	Comp->SetFogHeightFalloff(0.1f);
 	Comp->SetFogMaxOpacity(0.45f);
 	Comp->SetStartDistance(20000.0f);
@@ -428,9 +434,29 @@ void AODAtmosphereController::SpawnGradeVolume()
 	S.bOverride_AutoExposureSpeedDown = true;
 	S.AutoExposureSpeedDown = 1.0f;
 
+	// Visual Style Realistic (PLAN-VISUALS.md Track A): the "car ad" grade -
+	// warm highlights, firmer shadows, more bloom, no grain. Color-grading
+	// fields, not a LUT texture, so there's no asset to build. Exposure is
+	// untouched (the -1 bias fix above holds for both styles).
+	if (ODVisualStyle::IsRealistic())
+	{
+		S.ColorSaturation = FVector4(0.98, 0.98, 0.98, 1.0);
+		S.ColorContrast = FVector4(1.12, 1.12, 1.12, 1.0);
+		S.bOverride_ColorGainHighlights = true;
+		S.ColorGainHighlights = FVector4(1.04, 1.0, 0.94, 1.0);
+		S.bOverride_ColorGammaShadows = true;
+		S.ColorGammaShadows = FVector4(0.98, 0.99, 1.02, 1.0);   // cool, barely crushed (0.95 was too dark at night)
+		S.BloomIntensity = 0.7f;
+		S.BloomThreshold = 0.8f;
+		S.VignetteIntensity = 0.3f;
+		S.bOverride_FilmGrainIntensity = true;
+		S.FilmGrainIntensity = 0.0f;
+	}
+
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: spawned Grade post-process volume "
-		"(Priority=%.0f, saturation=%.2f, contrast=%.2f)"),
-		GradeVolume->Priority, S.ColorSaturation.X, S.ColorContrast.X);
+		"(style=%d, Priority=%.0f, saturation=%.2f, contrast=%.2f, bloom=%.2f@%.2f, vignette=%.2f)"),
+		ODVisualStyle::Level(), GradeVolume->Priority, S.ColorSaturation.X, S.ColorContrast.X,
+		S.BloomIntensity, S.BloomThreshold, S.VignetteIntensity);
 }
 
 void AODAtmosphereController::Tick(float DeltaSeconds)

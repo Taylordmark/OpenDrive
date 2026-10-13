@@ -1,4 +1,5 @@
 #include "ODFurnitureManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "ODDayNightController.h"
@@ -57,12 +58,12 @@ void AODFurnitureManager::BeginPlay()
 	{
 		const FString Path = FString::Printf(TEXT("/Game/OpenDrive/Furniture/SM_Furn_%s.SM_Furn_%s"),
 			FurnitureTypes[t].Name, FurnitureTypes[t].Name);
-		Meshes[t] = LoadObject<UStaticMesh>(nullptr, *Path);
+		Meshes[t] = ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, *Path));
 		NumOk += Meshes[t] != nullptr;
 	}
 	BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	if (UMaterialInterface* Lamp = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp")))
+	if (UMaterialInterface* Lamp = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp"))))
 	{
 		LampMid = UMaterialInstanceDynamic::Create(Lamp, this);
 		LampMid->SetScalarParameterValue(TEXT("Glow"), 0.0f);

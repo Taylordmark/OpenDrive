@@ -1,5 +1,6 @@
 #include "ODVehiclePawn.h"
 #include "ODAssetDetail.h"
+#include "ODVisualStyle.h"
 
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -19,7 +20,9 @@
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "ODTuningManager.h"
+#include "ODContactShadow.h"
 #include "ODVehicleDef.h"
+#include "ODVehicleFX.h"
 #include "ODVehicleMovement.h"
 #include "UObject/UObjectIterator.h"
 
@@ -50,8 +53,11 @@ AODVehiclePawn::AODVehiclePawn()
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 	Body->SetNotifyRigidBodyCollision(true);   // AODVehicleAudio impact hook
+	Body->bReceivesDecals = false;   // road decals (ODRoadDecals) project +-30 cm; the car drives through them
 
 	Movement = CreateDefaultSubobject<UODVehicleMovement>(TEXT("Movement"));
+	CreateDefaultSubobject<UODVehicleFX>(TEXT("VehicleFX"));   // Track E: Realistic-only smoke/dust/spray, reads Movement
+	CreateDefaultSubobject<UODContactShadow>(TEXT("ContactShadow"));   // Realistic-only ground blobs under body + tyres
 
 	for (int32 i = 0; i < 4; ++i)
 	{
@@ -59,6 +65,7 @@ AODVehiclePawn::AODVehiclePawn()
 			*FString::Printf(TEXT("Wheel%d"), i));
 		Wheel->SetupAttachment(Body);
 		Wheel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Wheel->bReceivesDecals = false;
 		WheelVisuals.Add(Wheel);
 	}
 	WheelSpinDeg.Init(0.0f, 4);
@@ -92,9 +99,10 @@ void AODVehiclePawn::EnsureMeshes()
 {
 	if (!Body->GetStaticMesh())
 	{
-		if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, ChassisPath)))
+		if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, ChassisPath))))
 		{
 			Body->SetStaticMesh(Chassis);
+			ODVisualStyle::PickSlots(Body);
 			Body->BodyInstance.bOverrideMass = true;
 			Body->BodyInstance.SetMassOverride(MassKg);
 			Movement->MarkBodyDirty();   // mass/COM re-derived on next tick
@@ -108,13 +116,8 @@ void AODVehiclePawn::EnsureMeshes()
 	}
 	if (WheelVisuals.Num() > 0 && !WheelVisuals[0]->GetStaticMesh())
 	{
-		if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, WheelPath)))
-		{
-			for (int32 i = 0; i < WheelVisuals.Num(); ++i)
-			{
-				WheelVisuals[i]->SetStaticMesh(Wheel);
-			}
-		}
+		WheelBaseMesh = ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, WheelPath));
+		ApplyWheelMeshes();
 	}
 }
 
@@ -179,6 +182,51 @@ void AODVehiclePawn::LoadVehicleDefs()
 	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: %d vehicle def(s) found"), Vehicles.Num());
 }
 
+// Realistic tyre per garage setup and axle (2026-10-13) - the same table as
+// pipeline/make_car_meshes_real.py SETUP_TYRES, which builds the meshes;
+// nullptr = the road tyre (Street, or any setup not listed).
+static const TCHAR* TyreKind(const FString& Setup, bool bFront)
+{
+	if (Setup == TEXT("Rally") || Setup == TEXT("Offroad"))
+	{
+		return TEXT("Knobby");
+	}
+	if (Setup == TEXT("Drift"))
+	{
+		return TEXT("Stretched");
+	}
+	if (Setup == TEXT("Drag"))
+	{
+		return bFront ? TEXT("Rib") : TEXT("Slick");
+	}
+	if (Setup == TEXT("Track"))
+	{
+		return TEXT("Semislick");
+	}
+	return nullptr;
+}
+
+void AODVehiclePawn::SetTyreSetup(const FString& SetupName)
+{
+	TyreSetup = SetupName;
+	ApplyWheelMeshes();
+}
+
+void AODVehiclePawn::ApplyWheelMeshes()
+{
+	// Stylized: PickKind returns the base, so this is the plain wheel as before
+	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
+	{
+		UStaticMesh* Wheel = ODAssetDetail::Upgrade(
+			ODVisualStyle::PickKind(WheelBaseMesh.Get(), TyreKind(TyreSetup, i < 2)));
+		if (WheelVisuals[i] && Wheel && WheelVisuals[i]->GetStaticMesh() != Wheel)
+		{
+			WheelVisuals[i]->SetStaticMesh(Wheel);
+			ODVisualStyle::PickSlots(WheelVisuals[i]);
+		}
+	}
+}
+
 void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 {
 	if (!Def || !Body || !Movement)
@@ -195,9 +243,10 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	const FVector AngVel = bWasSimulating
 		? Body->GetPhysicsAngularVelocityInDegrees() : FVector::ZeroVector;
 
-	if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(Def->ChassisMesh.LoadSynchronous()))
+	if (UStaticMesh* Chassis = ODAssetDetail::Upgrade(ODVisualStyle::Pick(Def->ChassisMesh.LoadSynchronous())))
 	{
 		Body->SetStaticMesh(Chassis);
+		ODVisualStyle::PickSlots(Body);
 	}
 	else
 	{
@@ -207,21 +256,23 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	}
 
 	MassKg = Def->MassKg;
+	Movement->ResetDirt();   // a different car starts clean
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 
-	if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(Def->WheelMesh.LoadSynchronous()))
+	if (UStaticMesh* Wheel = ODVisualStyle::Pick(Def->WheelMesh.LoadSynchronous()))
 	{
 		// visual-only scale to match this car's WheelRadiusCm against the
 		// mesh's own authored radius (see ReferenceWheelMeshRadiusCm above) -
 		// does not touch UODVehicleMovement's wheel table, which already
 		// takes WheelRadiusCm straight from the def for the physics radius.
 		const float WheelVisualScale = Def->WheelRadiusCm / ReferenceWheelMeshRadiusCm;
+		WheelBaseMesh = Wheel;
+		ApplyWheelMeshes();
 		for (UStaticMeshComponent* WV : WheelVisuals)
 		{
 			if (WV)
 			{
-				WV->SetStaticMesh(Wheel);
 				WV->SetRelativeScale3D(FVector(WheelVisualScale));
 			}
 		}
@@ -363,6 +414,7 @@ void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
 	SpawnTime = GetWorld()->GetTimeSeconds();
 	SnapReadyTime = 0.0;
 	LastSnapLogTime = 0.0;
+	Movement->ResetDirt();   // respawn: clean car (Realistic grime)
 }
 
 void AODVehiclePawn::ResetVehicle()
@@ -408,6 +460,7 @@ void AODVehiclePawn::ResetVehicle()
 	}
 	SetActorLocation(ChosenLoc, false, nullptr, ETeleportType::TeleportPhysics);
 	SetActorRotation(FRotator(0.0f, Yaw, 0.0f));
+	Movement->ResetDirt();   // reset: clean car (Realistic grime)
 
 	// re-arm the ground snap, but back-date SpawnTime so the no-asphalt
 	// fallback fires after ~3 s instead of the full spawn timeout - a reset
@@ -1478,8 +1531,9 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	}
 
 	// wheel visuals: suspension travel + steer + spin from our sim, plus the
-	// garage setup's tire diameter/width and camber (no new art - the one
-	// wheel mesh scaled on its axle axis Y and tilted top-inward)
+	// garage setup's tire diameter/width and camber (the wheel mesh - in
+	// Realistic the setup's own tyre, ApplyWheelMeshes - scaled on its axle
+	// axis Y and tilted top-inward)
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 	{
 		// shown spin: rolling with the road, so a stopped car's wheels sit

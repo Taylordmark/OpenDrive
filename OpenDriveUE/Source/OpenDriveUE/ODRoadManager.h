@@ -11,6 +11,7 @@ class UPrimitiveComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
+class UODRoadDecals;
 
 /** One parsed road-mesh chunk, plain data only - safe to build off the game
  *  thread (no UObject/component touched). Mirrors the per-chunk payload
@@ -49,6 +50,11 @@ struct FParsedChunk
 	                            // CreateChunkMeshComponent so an ODR2 fallback
 	                            // chunk doesn't fabricate class/lane data it
 	                            // doesn't have.
+
+	// Realistic only (PLAN-VISUALS J): UV3.y road-edge code per triangle
+	// corner (Tris order) - junction pad edge distance / ribbon-in-pad, see
+	// ComputeEdgeCodes in the .cpp. Empty = all 0 (Stylized, no pads near).
+	TArray<float> EdgeCode;
 };
 
 /** One parsed tile file's worth of chunks - the off-thread output of
@@ -506,6 +512,10 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatDirt;
+
+	// Realistic-only wear decals (PLAN-VISUALS Track C), null in Stylized
+	UPROPERTY()
+	TObjectPtr<UODRoadDecals> Decals;
 
 	// skirt-bottom world positions sampled every 10th station as tiles
 	// load, for -odseam

@@ -61,6 +61,24 @@ namespace ODVisualStyle
 		return Result;
 	}
 
+	/** Realistic only: Base's "<Base>_<Kind>" sibling (the garage-setup tyres
+	 *  next to SM_CarWheel_real: "/Game/X/SM_CarWheel_real_Knobby..."), or Base
+	 *  when Stylized, for a null Kind, or when that sibling isn't imported.
+	 *  Uncached: call on a setup / car change, not per frame. */
+	template <typename T>
+	T* PickKind(T* Base, const TCHAR* Kind)
+	{
+		if (!Base || !Kind || !IsRealistic())
+		{
+			return Base;
+		}
+		const FString Suffix = FString(TEXT("_")) + Kind;
+		T* Variant = LoadObject<T>(nullptr,
+			*(Base->GetOutermost()->GetName() + Suffix + TEXT(".") + Base->GetName() + Suffix),
+			nullptr, LOAD_NoWarn | LOAD_Quiet);
+		return Variant ? Variant : Base;
+	}
+
 	/** Pick() on every material slot of a mesh whose materials come from the
 	 *  mesh asset itself (the car chassis and wheels) - call after
 	 *  SetStaticMesh. Only slots with a _real twin are overridden. Clears

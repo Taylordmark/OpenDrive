@@ -1,4 +1,5 @@
 #include "ODParkingManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -23,8 +24,8 @@ void AODParkingManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	ParkingMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Parking.M_Parking"));
+	ParkingMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Parking.M_Parking")));
 	if (!ParkingMat)
 	{
 		UE_LOG(LogTemp, Warning,

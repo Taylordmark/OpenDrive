@@ -1,5 +1,7 @@
 #include "ODVehicleMovement.h"
 
+#include "ODCarGrime.h"
+
 #include "ODVehicleDef.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -242,7 +244,16 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	const float ComX = RearX + Frac * (FrontX - RearX);
 	const FTransform Xf = Body->GetComponentTransform();
 	const FVector ComLocal = Xf.InverseTransformPosition(Body->GetCenterOfMass());
-	BI->COMNudge += FVector(ComX - ComLocal.X, -ComLocal.Y, ComLocalZ - ComLocal.Z);
+	// The strut tops used to sit at z = 0, which left the body RestLength -
+	// sag above where it rests now (UpdateMounts). Every COM value (defs,
+	// presets, pipeline/checks/esc_sim.py) was tuned on that taller stance,
+	// so add the drop back: same COM height over the ground, same weight
+	// transfer and roll, for every car and preset (pipeline/checks/esc_sim.py
+	// ride-height table; the preset's own springs - soft Offroad springs sat
+	// the old body lower, and the presets were tuned on that).
+	const float SagF = StaticSagCm(true, SpringRateScale), SagR = StaticSagCm(false, SpringRateScale);
+	ComZEff = ComLocalZ + RestLengthCm - (SagR + Frac * (SagF - SagR));
+	BI->COMNudge += FVector(ComX - ComLocal.X, -ComLocal.Y, ComZEff - ComLocal.Z);
 	BI->InertiaTensorScale = FVector::OneVector;   // measure unscaled (idempotent)
 	BI->UpdateMassProperties();
 
@@ -280,6 +291,7 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	{
 		Wheels[i].FzSm = Mass * 980.0f * 0.5f * (i < 2 ? Frac : 1.0f - Frac);
 	}
+	UpdateMounts();   // the mass is final now
 
 	// headless hook: -odtc=high|low|off pins the assist level for tests
 	FString TcStr;
@@ -304,10 +316,41 @@ void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 	UE_LOG(LogTemp, Display,
 		TEXT("ODVehicleMovement: bound to %s (mass=%.0f kg, com z=%.1f -> "
 		     "%.1f, com x=%.1f -> %.1f, split %.0f/%.0f, Iz=%.3g kg cm2 "
-		     "(target %.3g, scaleX %.2f), %d wheels)"),
-		*GetOwner()->GetName(), Mass, ComLocal.Z, ComLocalZ, ComLocal.X, ComX,
+		     "(target %.3g, scaleX %.2f), %d wheels, strut tops z %.1f/%.1f)"),
+		*GetOwner()->GetName(), Mass, ComLocal.Z, ComZEff, ComLocal.X, ComX,
 		Frac * 100.0f, (1.0f - Frac) * 100.0f, IzFinal, IzTarget,
-		FMath::Sqrt(Sx2), Wheels.Num());
+		FMath::Sqrt(Sx2), Wheels.Num(),
+		Wheels.Num() == 4 ? Wheels[0].Attach.Z : 0.0f, Wheels.Num() == 4 ? Wheels[2].Attach.Z : 0.0f);
+}
+
+float UODVehicleMovement::StaticSagCm(bool bFront, float SpringScale) const
+{
+	// the pawn sets the def mass as an override before physics starts, so
+	// this is right in the frozen garage too (GetMass needs a live body)
+	const UPrimitiveComponent* Body = GetBody();
+	const float Mass = !Body ? 0.0f
+		: Body->BodyInstance.bOverrideMass ? Body->BodyInstance.GetMassOverride() : Body->GetMass();
+	const float Frac = FMath::Clamp(FrontWeightFrac, 0.3f, 0.7f);
+	return Mass * 980.0f * 0.5f * (bFront ? Frac : 1.0f - Frac)
+		/ FMath::Max(SpringRate * SpringScale, 1.0f);
+}
+
+void UODVehicleMovement::UpdateMounts()
+{
+	const float RestLen = FMath::Max(RestLengthCm + RideHeightDelta, 5.0f);
+	const UPrimitiveComponent* Body = GetBody();
+	const bool bFrozen = !Body || !Body->IsSimulatingPhysics();
+	for (int32 i = 0; i < Wheels.Num(); ++i)
+	{
+		FODWheel& W = Wheels[i];
+		W.Radius = W.BaseRadius * TireDiameterScale;
+		const float StaticLen = RestLen - FMath::Min(StaticSagCm(W.Attach.X > 0.0f, SpringRateScale), RestLen - 1.0f);
+		W.Attach.Z = StaticLen - RideHeightDelta;   // wheel centre at rest: -RideHeightDelta
+		if (bFrozen)
+		{
+			W.SpringLen = StaticLen;
+		}
+	}
 }
 
 void UODVehicleMovement::TickComponent(float DeltaSeconds, ELevelTick TickType,
@@ -428,6 +471,26 @@ void UODVehicleMovement::AsyncPhysicsTickComponent(float DeltaTime, float SimTim
 	TickTires(Body, Dt);
 	TickAero(Body);
 
+	// body dirt for the Realistic materials (ODCarGrime.h): per distance
+	// rolled this fixed step, at the mean rate of the wheels on the ground
+	{
+		const float Wet = WeatherCtl.IsValid() ? WeatherCtl->Wetness : 0.0f;
+		float Rate = 0.0f;
+		int32 OnGround = 0;
+		for (const FODWheel& W : Wheels)
+		{
+			if (W.bInContact)
+			{
+				Rate += ODCarGrime::RatePerM(W.Surface.Get(), Wet);
+				++OnGround;
+			}
+		}
+		if (OnGround > 0)
+		{
+			Dirt = ODCarGrime::Step(Dirt, Body->GetPhysicsLinearVelocity().Size() * Dt / 100.0f, Rate / OnGround);
+		}
+	}
+
 	// spawn parking hold, static part: brake torque alone can't hold on a
 	// grade - locked wheels still creep on the tire model (Frisco verify
 	// drifted ~0.4 m/s downhill under full BrakeNm). Pin the horizontal
@@ -530,10 +593,14 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 				FMath::Clamp(Hit.Distance - W.Radius, 0.0f, RestLen);
 			const float ComprRate = (W.SpringLen - NewLen) / Dt;   // cm/s
 			W.SpringLen = NewLen;
+			// bump stop: the tyre top past BumpTravelCm over the authored
+			// tyre top (body-fixed, so a taller tyre or lower ride eats travel)
+			const float StopLen = W.Attach.Z - BumpTravelCm + (W.Radius - W.BaseRadius);
 			// spring + damper, applied at the strut top so roll/pitch moments
 			// come out right; clamped so landings can't explode the solver
 			const float F = FMath::Clamp(
-				K * (RestLen - NewLen) + C * ComprRate, 0.0f, 6.0f * CornerW);
+				K * (RestLen - NewLen) + 4.0f * K * FMath::Max(StopLen - NewLen, 0.0f)
+				+ C * ComprRate, 0.0f, 6.0f * CornerW);
 			Body->AddForceAtLocation(Up * F, Start);
 
 			W.bInContact = true;
@@ -564,6 +631,7 @@ void UODVehicleMovement::PrimeSuspension()
 		return;
 	}
 
+	UpdateMounts();
 	const FTransform Xf = Body->GetComponentTransform();
 	const FVector Up = Xf.GetUnitAxis(EAxis::Z);
 	const float RestLen = FMath::Max(RestLengthCm + RideHeightDelta, 5.0f);
@@ -904,7 +972,7 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 	{
 		const FTransform Xf = Body->GetComponentTransform();
 		const FVector RearAxle = Xf.TransformPosition(
-			FVector(Wheels[2].Attach.X, 0.0f, Wheels[2].Attach.Z));
+			FVector(Wheels[2].Attach.X, 0.0f, 0.0f));   // the authored axle
 		const FVector V = Xf.InverseTransformVectorNoScale(
 			Body->GetPhysicsLinearVelocityAtPoint(RearAxle));
 		const float SlipDeg = FMath::RadiansToDegrees(
@@ -1348,7 +1416,7 @@ void UODVehicleMovement::TickAero(FODStepBody* Body)
 		Body->AddForceAtLocation(
 			-Body->GetUpVector() * DownforceCoeff * FwdMs * FwdMs * 100.0f,
 			Body->GetComponentTransform().TransformPosition(
-				FVector(RearX + Bal * (FrontX - RearX), 0.0f, ComLocalZ)));
+				FVector(RearX + Bal * (FrontX - RearX), 0.0f, ComZEff)));
 	}
 }
 

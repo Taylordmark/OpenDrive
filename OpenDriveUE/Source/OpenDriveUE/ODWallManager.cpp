@@ -1,4 +1,5 @@
 #include "ODWallManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -31,8 +32,8 @@ void AODWallManager::BeginPlay()
 	// PerVertexNormals call in FinalizeTile below) - unlike
 	// AODBuildingManager's M_BuildingFacade, which doesn't read normals at
 	// all and so never needed that call.
-	WallMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
+	WallMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized")));
 }
 
 void AODWallManager::EndPlay(const EEndPlayReason::Type EndPlayReason)

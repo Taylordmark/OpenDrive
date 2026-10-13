@@ -9,6 +9,7 @@ headlit road, moonlit ground and stars land at for the menu time presets.
 
 Usage:  python pipeline/check_night_exposure.py
 """
+import ast
 import math
 import sys
 from pathlib import Path
@@ -28,6 +29,9 @@ STAR_CELLS, STAR_CORE = 150.0, 0.25          # STARS_HLSL cells per unit dir, co
 SCREEN_W, SCREEN_PCT, HFOV = 1920, 0.67, 90.0   # worst case: lowest render scale
 HEAD_GLOW, TAIL_GLOW, BRAKE_DAY = 300.0, 25.0, 400.0   # AODDayNightController lamp glow, nits
 DAY_EV = 12.0             # bright day exposure (Grade volume max)
+# M_BuildingFacade_real lit windows (PLAN-VISUALS Track G): constants parsed from its build script
+BUILDING_SCRIPT = Path(__file__).resolve().parent.parent / "unreal" / "apply_building_material_real.py"
+FACADE_SHARE = 0.5        # worst case: a street of facades fills half the screen
 PRESETS = {"Golden Hour": 17.5, "Dusk": 18.3, "Night": 22.0, "Noon": 12.0}
 
 
@@ -47,6 +51,44 @@ def mid_grey_nits(ev):
 
 def lambert(lux, albedo):
     return lux * albedo / math.pi
+
+
+def building_constants():
+    out = {}
+    for node in ast.parse(BUILDING_SCRIPT.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            try:
+                out[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError:
+                pass
+    return out
+
+
+def check_windows(mid, tail):
+    """Lit windows by night: visible, below the tail lamps, never enough to
+    lift auto-exposure off the night floor; dark by day; switched on by the
+    same NightFactor as the grade (the shader re-derives it from the sun)."""
+    b = building_constants()
+    shader_night = lambda e: (lambda t: t * t * (3 - 2 * t))(
+        min(max((b["NIGHT_ELEV_HI"] - e) / b["NIGHT_ELEV_SPAN"], 0.0), 1.0))
+    for hour in [h / 4 for h in range(96)]:
+        assert abs(shader_night(elevation(hour)) - night_factor(elevation(hour))) < 1e-9, "window night = grade night"
+    # dimmest = low jitter x the darkest interior-mapped room face (floor)
+    lo = b["LIT_NITS"] * b["LIT_JITTER_MIN"] * b.get("INTERIOR_SHADE_MIN", 1.0) / mid
+    hi = b["LIT_NITS"] / mid
+    u0, u1 = b["WINDOW_MARGIN_U"]
+    v0, v1 = b["WINDOW_MARGIN_V_UPPER"]
+    glass_share = (u1 - u0) * (v1 - v0)
+    lit_share = {n: b["LIT_MAX_FRACTION"] * night_factor(elevation(h)) for n, h in PRESETS.items()}
+    town = FACADE_SHARE * glass_share * b["LIT_MAX_FRACTION"] * (lo + hi) / 2
+    print(f"lit windows x mid grey {lo:.1f}-{hi:.1f} | lit share " +
+          "  ".join(f"{n} {v:.2f}" for n, v in lit_share.items()) +
+          f" | facade street mean {town:.2f} x mid grey")
+    assert lo > 2.0, "dimmest lit window still reads clearly"
+    assert hi < 0.5 * tail, "windows stay below the tail lamps (headlights and car lamps first)"
+    assert town < 1.0, "a street of lit windows averages under mid grey: exposure stays on the night floor"
+    assert lit_share["Noon"] == 0.0 and lit_share["Golden Hour"] == 0.0, "no lit windows by day"
+    assert lit_share["Night"] == b["LIT_MAX_FRACTION"]
 
 
 def main():
@@ -84,7 +126,8 @@ def main():
     assert 10.0 < tail < 200.0 and brake_night < 500.0, "tails glow red at night without flooding bloom"
     assert brake_day > 0.1, "brake lights still read in daylight"
     assert behind["tail"] < 0.1 < behind["brake"] < behind["reverse"] < 1.5, "faint tail wash, visible brake and reverse"
-    print("PASS: night is headlights first, a faint moon/star floor, stars visible")
+    check_windows(mid, tail)
+    print("PASS: night is headlights first, a faint moon/star floor, stars visible, lit windows in between")
 
 
 if __name__ == "__main__":

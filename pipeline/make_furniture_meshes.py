@@ -62,7 +62,8 @@ class Mesh:
         """Flat sign plate: convex outline `yz` in the Y-Z plane, from x0 to x0 + t."""
         self.prism([(x0, y, z) for y, z in yz], (t, 0, 0), mat)
 
-    def save(self, name):
+    def save(self, name, out_dir=OUT_DIR, uv=lambda p: (0.5, 0.5)):
+        """uv(p) -> (u, v) per vertex; furniture keeps the constant 0.5."""
         groups = {}
         for a, b, c, mat in self.tris:
             groups.setdefault(mat, []).append((a, b, c))
@@ -73,13 +74,13 @@ class Mesh:
                 n = np.cross(b - a, c - a)
                 n = n / max(np.linalg.norm(n), 1e-8)
                 for p in (a, c, b):          # see make_rock_meshes.save_obj
-                    lines += [f"v {p[0]:.2f} {-p[1]:.2f} {p[2]:.2f}", "vt 0.5 0.5",
+                    lines += [f"v {p[0]:.2f} {-p[1]:.2f} {p[2]:.2f}", "vt %g %g" % uv(p),
                               f"vn {n[0]:.4f} {-n[1]:.4f} {n[2]:.4f}"]
                 f_lines.append(f"f {vi}/{vi}/{vi} {vi + 1}/{vi + 1}/{vi + 1} {vi + 2}/{vi + 2}/{vi + 2}")
                 vi += 3
-        (OUT_DIR / f"{name}.obj").write_text("\n".join(lines + f_lines) + "\n")
-        (OUT_DIR / f"{name}.mtl").write_text("".join(
-            f"newmtl {m}\nKd {COLORS[m][0]} {COLORS[m][1]} {COLORS[m][2]}\n" for m in groups))
+        (out_dir / f"{name}.obj").write_text("\n".join(lines + f_lines) + "\n")
+        (out_dir / f"{name}.mtl").write_text("".join(
+            f"newmtl {m}\nKd {' '.join(map(str, COLORS.get(m, (0.5, 0.5, 0.5))))}\n" for m in groups))
         print(f"wrote {name}.obj ({len(self.tris)} tris, slots {list(groups)})")
 
 

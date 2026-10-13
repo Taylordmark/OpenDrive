@@ -16,6 +16,12 @@ would otherwise import sRGB-on/default-compressed - visibly wrong: a
 roughness map read as sRGB darkens the mid-tones, and a normal map without
 TC_Normalmap compression's derived-Z-reconstruction breaks entirely).
 
+The Realistic twins reuse this importer for their own ambientCG sets
+(PLAN-VISUALS Tracks C/D): runpy.run_path(this file, init_globals={
+"SRC_DIR": <content_src folder with manifest.json>, "TEX_DIR": "/Game/..."})
+- 2K-JPG sets are picked up as well as 2K-PNG, and manifest entries without
+a download_url (generated textures) are skipped.
+
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
 """
@@ -25,9 +31,10 @@ from pathlib import Path
 
 import unreal
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "content_src" / "textures" / "ground"
+SRC_DIR = Path(globals().get("SRC_DIR") or
+               Path(__file__).resolve().parents[1] / "content_src" / "textures" / "ground")
 MANIFEST = json.loads((SRC_DIR / "manifest.json").read_text())
-TEX_DIR = "/Game/OpenDrive/Textures/Ground"
+TEX_DIR = globals().get("TEX_DIR") or "/Game/OpenDrive/Textures/Ground"
 
 # ambientCG map suffix -> (UE asset-name suffix, srgb, compression_settings)
 MAP_KINDS = {
@@ -35,6 +42,7 @@ MAP_KINDS = {
     "NormalGL":         ("_N", False, unreal.TextureCompressionSettings.TC_NORMALMAP),
     "Roughness":        ("_R", False, unreal.TextureCompressionSettings.TC_MASKS),
     "AmbientOcclusion": ("_AO", False, unreal.TextureCompressionSettings.TC_MASKS),
+    "Displacement":     ("_H", False, unreal.TextureCompressionSettings.TC_GRAYSCALE),
 }
 
 
@@ -46,7 +54,8 @@ tools = unreal.AssetToolsHelpers.get_asset_tools()
 imported = 0
 missing = []
 
-for entry in MANIFEST["textures"]:
+entries = [e for e in MANIFEST["textures"] if e.get("download_url")]
+for entry in entries:
     asset_id = entry["asset_id"]
     local_dir = SRC_DIR / asset_id
     dest_dir = f"{TEX_DIR}/{asset_id}"
@@ -57,8 +66,11 @@ for entry in MANIFEST["textures"]:
             f"content_src/textures/ground/download_ground_textures.py first")
         continue
 
-    for suffix, (name_suffix, srgb, compression) in MAP_KINDS.items():
+    for suffix in entry.get("maps") or ("Color", "NormalGL", "Roughness", "AmbientOcclusion"):
+        name_suffix, srgb, compression = MAP_KINDS[suffix]
         png_path = local_dir / f"{asset_id}_2K-PNG_{suffix}.png"
+        if not png_path.exists():
+            png_path = local_dir / f"{asset_id}_2K-JPG_{suffix}.jpg"
         if not png_path.exists():
             log(f"  WARN {asset_id}: missing {png_path.name}, skipping this map")
             continue
@@ -78,13 +90,14 @@ for entry in MANIFEST["textures"]:
             raise RuntimeError(f"texture import failed: {png_path}")
         tex.set_editor_property("srgb", srgb)
         tex.set_editor_property("compression_settings", compression)
-        unreal.EditorAssetLibrary.save_loaded_asset(tex, only_if_is_dirty=False)
+        if not unreal.EditorAssetLibrary.save_loaded_asset(tex, only_if_is_dirty=False):
+            raise RuntimeError(f"save failed (file in use?): {dest_dir}/{asset_name}")
         imported += 1
         log(f"  imported {dest_dir}/{asset_name} (srgb={srgb}, compression={compression})")
 
 if missing:
     raise RuntimeError(
         f"ground texture source folders missing: {missing} - run "
-        f"content_src/textures/ground/download_ground_textures.py first")
+        f"content_src/textures/ground/download_ground_textures.py {SRC_DIR / 'manifest.json'} first")
 
-log(f"done - imported {imported} texture(s) across {len(MANIFEST['textures'])} set(s)")
+log(f"done - imported {imported} texture(s) across {len(entries)} set(s)")

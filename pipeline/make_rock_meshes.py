@@ -170,7 +170,7 @@ def make_boulder(subdiv, noise_amp, seed, scale_xyz, flatten_z=-0.35,
     return based, uvs, faces
 
 
-def save_obj(name, verts, uvs, faces):
+def save_obj(name, verts, uvs, faces, smooth=False):
     """Same non-indexed v/vt/vn-per-face-corner convention and Y-negation
     (mirrors the mesh for UE's winding, matching every other OBJ writer in
     this pipeline - see make_tree_meshes.py's Mesh.save()) as the rest of
@@ -178,6 +178,17 @@ def save_obj(name, verts, uvs, faces):
     purpose (see module docstring) - each face gets its own cross-product
     normal instead of an averaged vertex normal, so the facets read as
     faceted low-poly rock instead of a smoothed blob."""
+    # smooth: area-weighted averaged vertex normals instead (the Realistic
+    # Nanite twins - tessellation displaces along the vertex normal, so the
+    # flat per-face normals' split vertices would crack open at every edge)
+    vnorm = None
+    if smooth:
+        vnorm = [np.zeros(3) for _ in verts]
+        for a, b, c in faces:
+            n = np.cross(verts[b] - verts[a], verts[c] - verts[a])
+            for i in (a, b, c):
+                vnorm[i] += n
+        vnorm = [v / max(np.linalg.norm(v), 1e-8) for v in vnorm]
     lines = [f"# OpenDrive procedural boulder: {name}", f"mtllib {name}.mtl",
              "usemtl rock"]
     f_lines = []
@@ -201,6 +212,8 @@ def save_obj(name, verts, uvs, faces):
         for idx in (a, c, b):
             p = verts[idx]
             uv = uvs[idx]
+            if vnorm is not None:
+                n = vnorm[idx]
             lines.append(f"v {p[0]:.4f} {-p[1]:.4f} {p[2]:.4f}")
             lines.append(f"vt {uv[0]:.4f} {uv[1]:.4f}")
             lines.append(f"vn {n[0]:.4f} {-n[1]:.4f} {n[2]:.4f}")
@@ -239,6 +252,10 @@ VARIANTS = [
 # noise amplitude). Standard (0, 0.0) stays byte-identical to the shipped
 # boulders; the game falls back to it when a tier variant isn't imported.
 TIERS = {"": (0, 0.0), "_high": (2, 0.035), "_ultra": (3, 0.045)}
+# Realistic Nanite twins (PLAN-VISUALS Track D, unreal/import_rock_meshes_real.py):
+# High/Ultra geometry with smooth normals -> <name>_real_high/_real_ultra. The
+# Standard _real twin reuses the Standard OBJ as-is (no Nanite, no displacement).
+REAL_TIERS = ("_high", "_ultra")
 
 
 def main():
@@ -247,6 +264,8 @@ def main():
             verts, uvs, faces = make_boulder(subdiv + extra_subdiv, noise_amp, seed,
                                              scale_xyz, fz, fs, detail_amp)
             save_obj(name + suffix, verts, uvs, faces)
+            if suffix in REAL_TIERS:
+                save_obj(name + "_real" + suffix, verts, uvs, faces, smooth=True)
 
 
 if __name__ == "__main__":

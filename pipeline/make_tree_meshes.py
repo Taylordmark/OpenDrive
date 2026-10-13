@@ -46,6 +46,7 @@ T_FoliageAtlas.png to already exist (run build_flora_textures.py first).
 """
 
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -180,7 +181,7 @@ class Mesh:
             tr = br + up * size_h
             self.quad(bl, br, tr, tl, uv, "foliage")
 
-    def branch(self, start, end, r0, r1, mat, sides=4):
+    def branch(self, start, end, r0, r1, mat, sides=4, cap=True, v0=0.0, v1=1.0):
         """A simple tapered tube from arbitrary 3D point `start` to `end`
         (unlike trunk(), which only stacks rings along world-Z) - used for
         the deciduous "bare twig" branch structure (2026-09 seasons
@@ -211,9 +212,9 @@ class Mesh:
             u0, u1 = s / sides, (s + 1) / sides
             a, b = ring0[s], ring0[s2]
             c, d = ring1[s2], ring1[s]
-            self._tri(a, b, c, (u0, 0.0), (u1, 0.0), (u1, 1.0), mat)
-            self._tri(a, c, d, (u0, 0.0), (u1, 1.0), (u0, 1.0), mat)
-        for s in range(sides):
+            self._tri(a, b, c, (u0, v0), (u1, v0), (u1, v1), mat)
+            self._tri(a, c, d, (u0, v0), (u1, v1), (u0, v1), mat)
+        for s in range(sides if cap else 0):
             s2 = (s + 1) % sides
             self._tri(ring1[s], ring1[s2], end, (0.0, 0.0), (1.0, 0.0), (0.5, 1.0), mat)
         return end
@@ -608,8 +609,389 @@ def build_grass_tuft(name):
     m.save(name, {"foliage": FOLIAGE_TEX})
 
 
+# ---------------------------------------------------------------------------
+# Realistic mode (PLAN-VISUALS.md Track F): `python make_tree_meshes.py --real`
+# writes <slot>_real{,_high,_ultra}.obj beside the stylized meshes, picked up
+# in game by ODVisualStyle::Pick (+ ODAssetDetail::Upgrade for the tiers).
+# Same slot names, slot order (bark 0, foliage 1), pivot (trunk base at the
+# origin) and cm scale as the stylized twin. Instead of crossed clusters
+# scattered over a crown envelope, a real skeleton is grown - conifers as
+# whorls of drooping/rising branches, aspens as a recursive 2-level branch
+# system - and leaf/needle spray cards are laid ALONG the branches, front
+# face outward, with crown-spherical normals so the canopy shades as a
+# volume. The cards sample the same T_FoliageAtlas cells (the _real atlas
+# keeps the layout), bark UVs keep a constant texel density (BARK_TILE_CM).
+# The stylized output above is untouched: this path uses its own rngs.
+
+REAL_TIERS = {"": (1.0, 1.0, 0, 1), "_high": (1.7, 0.8, 2, 1), "_ultra": (2.6, 0.68, 4, 2)}
+# (card count mult, card size mult, extra trunk sides, branch tube segments)
+REAL_TRI_BUDGET = {"": 1800, "_high": 3200, "_ultra": 6400}
+BARK_TILE_CM = 90.0    # world size of one bark texture repeat
+REAL_TEX = {"bark_conifer": "T_BarkConifer_real.png", "bark_aspen": "T_BarkAspen_real.png",
+            "bark_willow": "T_BarkWillow_real.png", "foliage": "T_FoliageAtlas_real.png"}
+
+
+def _unit(v):
+    n = np.linalg.norm(v)
+    return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+
+def _dir(az, pitch):
+    return np.array([math.cos(az) * math.cos(pitch), math.sin(az) * math.cos(pitch), math.sin(pitch)])
+
+
+def real_card(m, base, up, roll, w, h, cell, outward):
+    """One spray card: bottom edge at `base` (the attach point on the
+    branch), growing along `up`; `roll` rotates its plane about `up` (0 =
+    lying flat). Wound so its front face points along `outward` - the same
+    winding relation as Mesh.trunk() (whose _tri normal points inward)."""
+    up = _unit(up)
+    flat = _unit(np.cross(up, [0.0, 0.0, 1.0])) if abs(up[2]) < 0.97 else np.array([1.0, 0.0, 0.0])
+    side = np.cross(up, flat)
+    right = flat * math.cos(roll) + side * math.sin(roll)
+    base = np.asarray(base, dtype=float) - up * h * 0.12
+    if np.dot(np.cross(up, right), outward) > 0:      # _tri normal must point inward
+        right = -right
+    bl, br = base - right * w / 2, base + right * w / 2
+    m.quad(bl, br, br + up * h, bl + up * h, cell_uv_rect(cell), "foliage")
+
+
+def real_tube(m, pts, r0, r1, mat, sides, tile=BARK_TILE_CM):
+    """Tapered tube along a polyline (one Mesh.branch per segment, no tip
+    cap), v running in world cm / tile so bark texel density is constant."""
+    v, n = 0.0, len(pts) - 1
+    for i in range(n):
+        ln = float(np.linalg.norm(np.subtract(pts[i + 1], pts[i])))
+        ra, rb = r0 + (r1 - r0) * i / n, r0 + (r1 - r0) * (i + 1) / n
+        m.branch(pts[i], pts[i + 1], ra, rb, mat, sides=sides, cap=False, v0=v, v1=v + ln / tile)
+        v += ln / tile
+
+
+def real_normals(m, crown_dir):
+    """Smooth (welded) outward normals on bark; crown-spherical normals on
+    foliage: crown_dir(p) -> outward direction of the crown at p."""
+    acc = {}
+    for mat, pts, _, ns in m.tris:
+        if mat != "foliage":
+            for p in pts:
+                k = tuple(np.round(p, 1))
+                acc[k] = acc.get(k, 0) - ns[0]       # _tri normal points inward
+    out = []
+    for mat, pts, uvs, ns in m.tris:
+        if mat == "foliage":
+            front = -ns[0]
+            ns = [_unit(front * 0.3 + _unit(crown_dir(p)) * 0.7) for p in pts]
+        else:
+            ns = [_unit(acc[tuple(np.round(p, 1))]) for p in pts]
+        out.append((mat, pts, uvs, ns))
+    m.tris = sorted(out, key=lambda t: t[0] == "foliage")   # bark first: slot 0
+
+
+def _poly_at(pts, f):
+    """Point and tangent at fraction f (0..1, by segment) of a polyline."""
+    n = len(pts) - 1
+    i = min(int(f * n), n - 1)
+    t = f * n - i
+    a, b = np.asarray(pts[i], float), np.asarray(pts[i + 1], float)
+    return a + (b - a) * t, _unit(b - a)
+
+
+def real_conifer(name, sfx, seed, H, r0, crown0, R, taper, whorl_dz, per_whorl,
+                 pitch, tip_bend, cell, card, card_from=0.15, card_step=70.0, stubs=0):
+    """Whorled conifer. pitch=(low, top) branch elevation in degrees, tip_bend
+    = extra degrees on the outer half (negative droops, positive upturns),
+    card=(w, h) cm, card_from = fraction along each branch where needles
+    start, card_step = cm of branch per card at Standard."""
+    dens, csize, xsides, segs = REAL_TIERS[sfx]
+    sk = np.random.default_rng(seed)           # skeleton: identical on every tier
+    cr = np.random.default_rng(seed + 7)       # cards
+    ph = sk.uniform(0, 6.3, 2)
+    amp = H * 0.012
+
+    def lean(h):
+        return (amp * math.sin(h / H * 2.6 + ph[0]) * h / H, amp * math.sin(h / H * 1.9 + ph[1]) * h / H)
+
+    def rad(h):
+        t = h / H
+        return r0 * ((1 - t) ** 0.85 * 0.92 + 0.08 * (1 - t) + 0.25 * max(0.0, 1 - t * 12))
+
+    m = Mesh()
+    hs = [0, H * 0.03, H * 0.1] + [H * k / 8 for k in range(2, 8)] + [H * 0.94, H]
+    m.trunk([(h, rad(h) if h < H else r0 * 0.04) for h in hs], "bark_conifer",
+            sides=6 + xsides, u_repeat=max(1, round(2 * math.pi * r0 / BARK_TILE_CM)),
+            v_repeat=H / BARK_TILE_CM, lean=lean)
+    zc = H * crown0
+
+    def axis(h):
+        return np.array([*lean(h), h])
+
+    for _ in range(stubs):                      # self-pruned dead lower limbs
+        h = sk.uniform(H * 0.04, max(zc, H * 0.05))
+        a = sk.uniform(0, 2 * math.pi)
+        d = _dir(a, math.radians(sk.uniform(-25, 5)))
+        s = axis(h) + d * rad(h) * 0.6
+        real_tube(m, [s, s + d * sk.uniform(20, 55)], rad(h) * 0.22, 0.4, "bark_conifer", 3)
+
+    h = zc
+    while h < H * 0.95:
+        t = (h - zc) / (H - zc)
+        n = per_whorl + int(sk.integers(-1, 2))
+        a0 = sk.uniform(0, 2 * math.pi)
+        for k in range(n):
+            a = a0 + 2 * math.pi * k / n + sk.uniform(-0.3, 0.3)
+            L = R * (1 - t) ** taper * sk.uniform(0.8, 1.15) + 25
+            p = math.radians(pitch[0] + (pitch[1] - pitch[0]) * t + sk.uniform(-7, 7))
+            s = axis(h) + _dir(a, 0) * rad(h) * 0.5
+            mid = s + _dir(a, p) * L * 0.55
+            tip = mid + _dir(a, p + math.radians(tip_bend)) * L * 0.45
+            pts = [s, mid, tip] if segs > 1 else [s, tip]
+            real_tube(m, pts, max(1.2, rad(h) * 0.42 * (L / R) ** 0.5), 0.35, "bark_conifer", 3)
+            nc_ = max(1, int(round(L * (1 - card_from) / card_step * dens)))
+            for i in range(nc_):
+                f = card_from + (1 - card_from) * min(1.0, (i + cr.uniform(0.2, 0.9)) / nc_)
+                q, tan = _poly_at([s, mid, tip], f)
+                up = _unit(tan + cr.normal(0, 0.18, 3))
+                roll = cr.uniform(-0.6, 0.6) + (math.pi / 2 if cr.random() < 0.25 else 0.0)
+                sc = csize * (0.65 + 0.35 * L / R) * cr.uniform(0.85, 1.15)
+                real_card(m, q, up, roll, card[0] * sc, card[1] * sc, cell, q - axis(q[2]) + [0, 0, 20])
+        h += whorl_dz * H * sk.uniform(0.8, 1.2) * (1 - 0.35 * t)
+    for i in range(max(2, int(round(3 * dens)))):   # leader tuft
+        a = 2 * math.pi * i / 3 + cr.uniform(-0.4, 0.4)
+        q = axis(H * cr.uniform(0.88, 0.95))
+        real_card(m, q, _dir(a, math.radians(72)), cr.uniform(-1.5, 1.5),
+                  card[0] * 0.6 * csize, card[1] * 0.75 * csize, cell, _dir(a, 0))
+    real_normals(m, lambda p: p - axis(p[2]) + [0, 0, 0.35 * R])
+    m.save(name + "_real" + sfx, {"bark_conifer": REAL_TEX["bark_conifer"], "foliage": REAL_TEX["foliage"]})
+
+
+def real_aspen(name, sfx, seed, hs, clear_frac):
+    """Quaking aspen: straight pale trunk with a thin leader, main limbs
+    rising at 35-65 deg from the upper trunk, each splitting into 2-3
+    twigs; leaf cards cluster on the outer twigs with random roll (aspen
+    leaves flutter in every orientation). The twigs are real bark geometry,
+    so LeafDrop leaves a believable bare crown."""
+    dens, csize, xsides, segs = REAL_TIERS[sfx]
+    sk = np.random.default_rng(seed)
+    cr = np.random.default_rng(seed + 7)
+    H, r0 = 1150 * hs, 19 * hs
+    hc = H * clear_frac
+    ph = sk.uniform(0, 6.3, 2)
+
+    def lean(h):
+        return (H * 0.015 * math.sin(h / H * 2.2 + ph[0]) * h / H, H * 0.01 * math.sin(h / H * 3.1 + ph[1]) * h / H)
+
+    def axis(h):
+        return np.array([*lean(h), h])
+
+    def rad(h):
+        return r0 * (1.0 - 0.8 * h / H + 0.2 * max(0.0, 1 - h / H * 14))
+
+    m = Mesh()
+    top = H * 0.9
+    m.trunk([(h, rad(h)) for h in (0, H * 0.04, H * 0.2, hc * 0.7, hc, (hc + top) / 2, top)],
+            "bark_aspen", sides=7 + xsides, u_repeat=max(1, round(2 * math.pi * r0 / BARK_TILE_CM)),
+            v_repeat=top / BARK_TILE_CM, lean=lean)
+    ctr = axis(hc + (H - hc) * 0.55)
+    crown_r = 300 * hs
+    tips = []
+    n_limbs = 11
+    for k in range(n_limbs):
+        h = hc + (top - hc) * (k + sk.uniform(0.1, 0.9)) / n_limbs
+        t = (h - hc) / (top - hc)
+        a = k * 2.4 + sk.uniform(-0.3, 0.3)                 # golden-angle spiral
+        p = math.radians(sk.uniform(35, 55) + 15 * t)
+        L = crown_r * (1.05 - 0.55 * t) * sk.uniform(0.8, 1.1)
+        s = axis(h)
+        mid = s + _dir(a, p) * L * 0.5
+        end = mid + _dir(a + sk.uniform(-0.3, 0.3), p + math.radians(sk.uniform(-10, 15))) * L * 0.5
+        rl = max(2.0, rad(h) * 0.55)
+        real_tube(m, [s, mid, end] if segs > 1 else [s, end], rl, rl * 0.25, "bark_aspen", 4)
+        tips.append((end, _unit(end - mid), L * 0.35))
+        for j in range(int(sk.integers(2, 4))):              # twigs off the outer half
+            q, tan = _poly_at([s, mid, end], sk.uniform(0.45, 0.85))
+            d = _unit(tan + _dir(a + sk.choice([-1, 1]) * sk.uniform(0.6, 1.2), sk.uniform(0.0, 0.8)) * 0.9)
+            tl = L * sk.uniform(0.35, 0.55)
+            real_tube(m, [q, q + d * tl], rl * 0.3, 0.3, "bark_aspen", 3)
+            tips.append((q + d * tl, d, tl))
+    tips.append((axis(top), np.array([0.0, 0.0, 1.0]), H - top))
+    for end, d, ln in tips:                                  # leaf clusters on the outer twigs
+        n = max(2, int(round(5.0 * dens * min(1.6, ln / 90))))
+        for i in range(n):
+            f = cr.uniform(0.0, 1.0)
+            q = end - d * ln * f * 0.8 + cr.normal(0, 30 * hs, 3)
+            up = _unit(d + cr.normal(0, 0.5, 3))
+            sc = csize * hs * cr.uniform(0.85, 1.2)
+            real_card(m, q, up, cr.uniform(-math.pi, math.pi), 145 * sc, 145 * sc, "aspen_leaf", q - ctr)
+    real_normals(m, lambda p: (p - ctr) * [1, 1, 0.8] + [0, 0, 0.2 * crown_r])
+    m.save(name + "_real" + sfx, {"bark_aspen": REAL_TEX["bark_aspen"], "foliage": REAL_TEX["foliage"]})
+
+
+def _real_bent_stem(sk, base, ang, h, bend, n, gnarl=0.0, power=2.0):
+    """Polyline stem from `base` rising `h` cm, bending `bend` cm toward
+    azimuth `ang` (bend grows as height**power), with optional sideways
+    gnarl wobble."""
+    side = _dir(ang + math.pi / 2, 0)
+    ph = sk.uniform(0, 6.3)
+    return [np.asarray(base, float) + _dir(ang, 0) * bend * (k / n) ** power
+            + side * gnarl * math.sin(k * 1.7 + ph) * (k / n) + [0, 0, h * k / n] for k in range(n + 1)]
+
+
+def real_krummholz(name, sfx, seed=707):
+    """Treeline krummholz ("flag + mat"): a dense needle cushion lying over
+    the ground, three gnarled stems bent downwind, needles only on short
+    lee-side limbs (dead bark stubs to windward). Same footprint, height
+    and lee azimuth as the stylized build_krummholz."""
+    dens, csize, xsides, segs = REAL_TIERS[sfx]
+    sk = np.random.default_rng(seed)
+    cr = np.random.default_rng(seed + 7)
+    lee = math.pi * 0.1
+    ldir, perp = _dir(lee, 0), _dir(lee + math.pi / 2, 0)
+    m = Mesh()
+    limbs = []
+    for i in range(3):
+        h = 300.0 if i == 0 else sk.uniform(170, 250)
+        ang = lee + sk.uniform(-0.35, 0.35)
+        pts = _real_bent_stem(sk, (sk.uniform(-30, 30), sk.uniform(-30, 30), 0.0), ang, h,
+                              sk.uniform(0.35, 0.55) * h, 3 + 2 * segs, gnarl=7.0)
+        r0 = sk.uniform(12, 17) * h / 300
+        real_tube(m, pts, r0, r0 * 0.18, "bark_conifer", 5 + xsides // 2)
+        for _ in range(2):                                   # dead windward stubs
+            q, _ = _poly_at(pts, sk.uniform(0.4, 0.85))
+            d = _dir(ang + math.pi + sk.uniform(-0.6, 0.6), sk.uniform(-0.1, 0.3))
+            real_tube(m, [q, q + d * sk.uniform(25, 50)], r0 * 0.3, 0.4, "bark_conifer", 3)
+        for k in range(6):                                   # lee-side flag limbs
+            f = 0.3 + 0.7 * (k + sk.uniform(0.1, 0.9)) / 6
+            q, _ = _poly_at(pts, f)
+            d = _dir(ang + sk.uniform(-0.7, 0.7), math.radians(sk.uniform(-15, 20)))
+            ln = sk.uniform(35, 80) * (1.1 - 0.5 * f)
+            real_tube(m, [q, q + d * ln], max(1.0, r0 * 0.25 * (1 - f)), 0.4, "bark_conifer", 3)
+            limbs.append((q, d, ln, f))
+    for q, d, ln, f in limbs:
+        for i in range(max(1, int(round(2.2 * dens)))):
+            p = q + d * ln * cr.uniform(0.1, 0.8)
+            up = _unit(d + cr.normal(0, 0.25, 3) + [0, 0, 0.25])
+            sc = csize * (1.15 - 0.4 * f) * cr.uniform(0.85, 1.15)
+            real_card(m, p, up, cr.uniform(-0.6, 0.6), 95 * sc, 85 * sc, "krummholz_needle", d)
+    for _ in range(int(round(26 * dens))):                  # ground cushion
+        a = cr.uniform(0, 2 * math.pi)
+        rad = math.sqrt(cr.uniform(0.05, 1.0))
+        p = ldir * (70 + math.cos(a) * rad * 230) + perp * (math.sin(a) * rad * 150)
+        out = _unit(p)
+        p = p + [0, 0, cr.uniform(18, 50) * (1.15 - rad * 0.6)]
+        up = _unit(out * 0.85 + [0, 0, 0.4] + cr.normal(0, 0.15, 3))
+        sc = csize * cr.uniform(0.85, 1.15)
+        real_card(m, p, up, cr.uniform(-0.4, 0.4), 150 * sc, 95 * sc, "krummholz_needle", out + [0, 0, 1])
+    ctr = ldir * 70
+    real_normals(m, lambda p: (p - ctr) * [1, 1, 0.6] + [0, 0, 120])
+    m.save(name + "_real" + sfx, {"bark_conifer": REAL_TEX["bark_conifer"], "foliage": REAL_TEX["foliage"]})
+
+
+def real_willow(name, sfx, seed=808):
+    """Streamside willow scrub: six thin stems splaying from one root
+    crown, a couple of side twigs each, narrow-leaf sprays along the outer
+    half. Stylized `bush` envelope (~2.2 m tall, ~1.5 m wide)."""
+    dens, csize, xsides, segs = REAL_TIERS[sfx]
+    sk = np.random.default_rng(seed)
+    cr = np.random.default_rng(seed + 7)
+    m = Mesh()
+    shoots = []
+    for i in range(6):
+        ang = 2 * math.pi * i / 6 + sk.uniform(-0.3, 0.3)
+        h = 220 * sk.uniform(0.75, 1.05)
+        pts = _real_bent_stem(sk, (sk.uniform(-8, 8), sk.uniform(-8, 8), 0.0), ang, h,
+                              sk.uniform(40, 90), 2 + segs, gnarl=3.0, power=1.4)
+        r0 = sk.uniform(4.5, 7.0)
+        real_tube(m, pts, r0, 0.6, "bark_willow", 4 + xsides // 2)
+        shoots.append((pts, 1.0))
+        for _ in range(int(sk.integers(1, 3))):
+            q, tan = _poly_at(pts, sk.uniform(0.4, 0.8))
+            d = _unit(tan + _dir(ang + sk.choice([-1, 1]) * sk.uniform(0.5, 1.0), 0.3) * 0.8)
+            tl = sk.uniform(40, 70)
+            real_tube(m, [q, q + d * tl], r0 * 0.35, 0.3, "bark_willow", 3)
+            shoots.append(([q, q + d * tl], 0.5))
+    ctr = np.array([0.0, 0.0, 110.0])
+    for pts, wgt in shoots:
+        for _ in range(max(1, int(round(6 * wgt * dens)))):
+            q, tan = _poly_at(pts, cr.uniform(0.45, 1.0))
+            up = _unit(tan + cr.normal(0, 0.45, 3))
+            sc = csize * cr.uniform(0.85, 1.15)
+            real_card(m, q, up, cr.uniform(-math.pi, math.pi), 85 * sc, 95 * sc, "willow_leaf", q - ctr)
+    real_normals(m, lambda p: (p - ctr) * [1, 1, 0.8] + [0, 0, 40])
+    m.save(name + "_real" + sfx, {"bark_willow": REAL_TEX["bark_willow"], "foliage": REAL_TEX["foliage"]})
+
+
+def real_ground_cards(name, sfx, seed, n, r, pitch, h, w, cell, crown_z, roll=0.4):
+    """Foliage-only mound (sagebrush, grass tuft): `n` spray cards rising
+    from a disc of radius `r`, leaning outward at `pitch` degrees, with
+    their bottom edge on the ground (ScrubMeshBaseOffsetCm reads min Z).
+    Single material slot, like the stylized twin."""
+    dens = REAL_TIERS[sfx][0]
+    cr = np.random.default_rng(seed)
+    m = Mesh()
+    k = max(n, int(round(n * dens)))
+    for i in range(k):
+        a = 2 * math.pi * (i + cr.uniform(-0.4, 0.4)) / k
+        rr_ = r * math.sqrt(cr.uniform(0, 1))
+        hh, ww = cr.uniform(*h), cr.uniform(*w)
+        up = _dir(a + cr.uniform(-0.3, 0.3), math.radians(cr.uniform(*pitch)))
+        base = _dir(a, 0) * rr_ + up * hh * 0.12            # undo real_card's sink
+        real_card(m, base, up, cr.uniform(-roll, roll), ww, hh, cell, _dir(a, 0) + [0, 0, 0.5])
+    lift = np.array([0.0, 0.0, max(0.0, -min(p[2] for t in m.tris for p in t[1]))])   # rolled corners
+    m.tris = [(mt, tuple(p + lift for p in pts), uv, ns) for mt, pts, uv, ns in m.tris]
+    real_normals(m, lambda p: p * [1, 1, 0] + [0, 0, crown_z])
+    m.save(name + "_real" + sfx, {"foliage": REAL_TEX["foliage"]})
+
+
+# slot -> builder; slots not listed keep their stylized mesh in Realistic
+# (they still render the _real atlas through M_Foliage_real's season MID).
+REAL_SPECIES = {
+    "tree_conifer": lambda s: real_conifer(        # Lodgepole A - dominant evergreen
+        "tree_conifer", s, 101, H=1650, r0=24, crown0=0.45, R=290, taper=1.1, whorl_dz=0.042,
+        per_whorl=5, pitch=(-4, 28), tip_bend=8, cell="pine_needle", card=(125, 150),
+        card_from=0.3, card_step=26, stubs=9),
+    "tree_canyon_oak": lambda s: real_conifer(     # Lodgepole B - mature backdrop
+        "tree_canyon_oak", s, 202, H=2200, r0=32, crown0=0.55, R=360, taper=1.0, whorl_dz=0.038,
+        per_whorl=5, pitch=(-8, 25), tip_bend=10, cell="pine_needle", card=(140, 165),
+        card_from=0.3, card_step=30, stubs=12),
+    "tree_olive": lambda s: real_conifer(          # Engelmann spruce - full, drooping
+        "tree_olive", s, 303, H=1500, r0=28, crown0=0.12, R=330, taper=0.9, whorl_dz=0.05,
+        per_whorl=5, pitch=(-22, 10), tip_bend=14, cell="spruce_needle", card=(120, 130),
+        card_from=0.12, card_step=42, stubs=3),
+    "tree_yucca": lambda s: real_conifer(          # Subalpine fir - narrow spire
+        "tree_yucca", s, 404, H=1400, r0=22, crown0=0.08, R=200, taper=1.45, whorl_dz=0.05,
+        per_whorl=5, pitch=(-12, 18), tip_bend=8, cell="fir_needle", card=(95, 110),
+        card_from=0.1, card_step=38, stubs=2),
+    "tree_blob": lambda s: real_aspen("tree_blob", s, 505, hs=0.92, clear_frac=0.48),
+    "tree_scrub_oak": lambda s: real_aspen("tree_scrub_oak", s, 606, hs=1.22, clear_frac=0.6),
+    "tree_manzanita": lambda s: real_krummholz("tree_manzanita", s),
+    "bush": lambda s: real_willow("bush", s),
+    "sagebrush": lambda s: real_ground_cards(      # ~70 cm silver-grey mound
+        "sagebrush", s, 909, n=22, r=30, pitch=(48, 78), h=(45, 70), w=(40, 60),
+        cell="sagebrush_leaf", crown_z=30, roll=1.2),
+    "grass_tuft": lambda s: real_ground_cards(     # same 35-55 cm tuft as stylized
+        "grass_tuft", s, 1010, n=6, r=10, pitch=(66, 84), h=(36, 54), w=(26, 38),
+        cell="grass_blade", crown_z=60),
+}
+# Per-slot triangle budgets where REAL_TRI_BUDGET (trees) doesn't fit:
+# ground cover is drawn in the hundreds of thousands, so it stays close to
+# the stylized count (sagebrush 64 / grass 20 tris at Standard).
+REAL_TRI_BUDGET_SLOT = {"sagebrush": {"": 96, "_high": 160, "_ultra": 240},
+                        "grass_tuft": {"": 24, "_high": 40, "_ultra": 64}}
+
+
+def main_real():
+    global DENS, CARD, XCROSS, SIDES, RINGS
+    DENS, CARD, XCROSS, SIDES, RINGS = TIERS[""]     # Mesh helpers at their plain settings
+    for sfx in REAL_TIERS:
+        for build in REAL_SPECIES.values():
+            build(sfx)
+
+
 def main():
     global rng, DENS, CARD, XCROSS, SIDES, RINGS
+    if "--real" in sys.argv:
+        main_real()
+        return
     for suffix, tier in TIERS.items():
         rng = np.random.default_rng(11)
         DENS, CARD, XCROSS, SIDES, RINGS = tier

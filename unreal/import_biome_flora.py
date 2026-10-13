@@ -31,8 +31,14 @@ it expects them to already exist, same as the old M_Foliage dependency did.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
+
+Realistic twins (PLAN-VISUALS.md Track F): OD_FLORA_REAL=1 imports the
+make_tree_meshes.py --real set (<slot>_real{,_high,_ultra}) beside the
+stylized meshes with the M_*_real materials (build_flora_materials.py with
+the same variable first), and saves only those assets.
 """
 
+import os
 from pathlib import Path
 
 import unreal
@@ -60,9 +66,17 @@ FLORA = {
 }
 # Graphics menu "Asset Detail" variants (make_tree_meshes.py TIERS) - same
 # materials; the game falls back to the base mesh if these aren't imported.
+BASE_SLOTS = tuple(FLORA)
 FLORA = {n + sfx: v for sfx in ("", "_high", "_ultra") for n, v in FLORA.items()}
 FOLIAGE_TEXTURES = ("T_FoliageAtlas.png", "T_BarkConifer.png", "T_BarkAspen.png",
                      "T_BarkWillow.png")
+REAL = os.environ.get("OD_FLORA_REAL") == "1"
+SFX = "_real" if REAL else ""
+if REAL:   # every slot's realistic twin, same bark material family as stylized
+    FLORA = {f"{n}_real{t}": (bark and bark + "_real", None)
+             for t in ("", "_high", "_ultra")
+             for n, (bark, _tex) in FLORA.items() if n in BASE_SLOTS}
+    FOLIAGE_TEXTURES = ()   # build_flora_materials.py imported the _real textures
 
 tools = unreal.AssetToolsHelpers.get_asset_tools()
 
@@ -83,7 +97,8 @@ for fname in FOLIAGE_TEXTURES:
     ti.save = False
     ti.replace_existing = True
     tex_tasks.append(ti)
-tools.import_asset_tasks(tex_tasks)
+if tex_tasks:
+    tools.import_asset_tasks(tex_tasks)
 for fname in FOLIAGE_TEXTURES:
     asset_name = fname.rsplit(".", 1)[0]
     if unreal.load_asset(f"{TEX_DIR}/{asset_name}") is None:
@@ -107,7 +122,7 @@ if missing:
     raise RuntimeError(f"foliage mesh import failed for: {missing}")
 log(f"imported {len(fol)} flora meshes")
 
-m_foliage = unreal.load_asset(f"{MAT_DIR}/M_Foliage")
+m_foliage = unreal.load_asset(f"{MAT_DIR}/M_Foliage{SFX}")
 if m_foliage is None:
     raise RuntimeError(
         f"{MAT_DIR}/M_Foliage not found - build it first (M_Foliage needs "
@@ -138,6 +153,79 @@ for name, mesh in fol.items():
         mesh.set_material(FOLIAGE_SLOT, m_foliage)
 log(f"assigned bark/foliage materials to {len(fol)} meshes")
 
-unreal.EditorAssetLibrary.save_directory("/Game/OpenDrive", only_if_is_dirty=False)
-unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-log("DONE - saved")
+if REAL:
+    # Whole-tree wind weights into UV channel 1 (OBJ carries one UV set, so
+    # they go in here, after import). U = trunk bend, V = branch-tip extra,
+    # both from the vertex rest position (pipeline/flora_common.sway_uv);
+    # M_Foliage_real / M_Bark_*_real read them as world position offset.
+    # The reimport above starts from a clean mesh, so this is idempotent.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pipeline"))
+    from flora_common import SWAY_U_MAX, SWAY_V_MAX, sway_uv
+
+    def _gs(fn):   # GeometryScript library class names move between versions
+        for n in dir(unreal):
+            if "GeometryScript" in n and hasattr(getattr(unreal, n), fn):
+                return getattr(getattr(unreal, n), fn)
+        raise RuntimeError(f"no GeometryScript function {fn}")
+
+    OK = unreal.GeometryScriptOutcomePins.SUCCESS
+    read_lod = unreal.GeometryScriptMeshReadLOD()
+    read_lod.lod_type = unreal.GeometryScriptLODType.SOURCE_MODEL
+    to_opts = unreal.GeometryScriptCopyMeshToAssetOptions()
+    to_opts.enable_recompute_tangents = True   # OBJ has none; the import computed them too
+    to_opts.emit_transaction = False
+    to_opts.generate_lightmap_u_vs = next(   # lightmap UVs would land on UV1
+        getattr(unreal.GeometryScriptGenerateLightmapUVOptions, n)
+        for n in dir(unreal.GeometryScriptGenerateLightmapUVOptions) if n.startswith("DO_NOT"))
+    render_lod = unreal.GeometryScriptMeshReadLOD()
+    render_lod.lod_type = unreal.GeometryScriptLODType.RENDER_DATA
+    for name, mesh in fol.items():
+        dm, res = _gs("copy_mesh_from_static_mesh")(
+            mesh, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), read_lod)
+        if res != OK:
+            raise RuntimeError(f"{name}: copy_mesh_from_static_mesh failed")
+        _, plist, vgaps = _gs("get_all_vertex_positions")(dm, False)
+        _, tlist, tgaps = _gs("get_all_triangle_indices")(dm, False)
+        if vgaps or tgaps:
+            raise RuntimeError(f"{name}: dynamic mesh has id gaps")
+        pos = _gs("convert_vector_list_to_array")(plist)
+        tris = _gs("convert_triangle_list_to_array")(tlist)
+        H = max(p.z for p in pos)
+        R = max((p.x * p.x + p.y * p.y) ** 0.5 for p in pos)
+        if min(p.z for p in pos) < -30 or H <= 0:   # cards sink ~12% below their attach point
+            raise RuntimeError(f"{name}: not z-up from the trunk base (z {min(p.z for p in pos)}..{H})")
+        _gs("set_num_uv_sets")(dm, 2)
+        add, umax, vmax, elem = _gs("add_uv_element_to_mesh"), 0.0, 0.0, []
+        for p in pos:
+            u, v = sway_uv(p.x, p.y, p.z, H, R)
+            umax, vmax = max(umax, u), max(vmax, v)
+            elem.append(add(dm, 1, unreal.Vector2D(u, v), True)[1])
+        if umax > SWAY_U_MAX or vmax > SWAY_V_MAX:
+            raise RuntimeError(f"{name}: sway U {umax:.2f} / V {vmax:.2f} over the material's WPO bound")
+        set_ids = _gs("set_mesh_triangle_uv_element_i_ds")
+        for tid, t in enumerate(tris):
+            set_ids(dm, 1, tid, unreal.IntVector(elem[t.x], elem[t.y], elem[t.z]), True)
+        _, res = _gs("copy_mesh_to_static_mesh")(dm, mesh, to_opts, unreal.GeometryScriptMeshWriteLOD())
+        # read the built render mesh back (Nanite fallback): UV1 must hold the weights
+        rd, res2 = _gs("copy_mesh_from_static_mesh")(
+            mesh, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), render_lod)
+        box, valid, empty = _gs("get_uv_set_bounding_box")(rd, 1)
+        if res != OK or res2 != OK or not valid or empty or box.min.x < -0.01 or box.max.x < 0.5 * umax:
+            raise RuntimeError(f"{name}: sway UV1 not in the built mesh ({valid} {empty} {box})")
+        unreal.log_warning(f"FLORA {name}: sway UV1 baked, H {H:.0f} R {R:.0f} cm, U max {umax:.2f} "
+                           f"V max {vmax:.2f}, render UV1 max ({box.max.x:.2f}, {box.max.y:.2f})")
+
+if REAL:   # only the new twins - never re-save the stylized content
+    for name, mesh in fol.items():
+        bark = FLORA[name][0]
+        if bark is None and mesh.get_num_sections(0) != 1:
+            raise RuntimeError(f"{name}: foliage-only mesh has {mesh.get_num_sections(0)} sections")
+        if bark and (mesh.get_num_sections(0) != 2 or mesh.get_material(BARK_SLOT) != bark_mats[bark]):
+            raise RuntimeError(f"{name}: expected 2 sections, bark at slot {BARK_SLOT}")
+        unreal.EditorAssetLibrary.save_asset(f"{TREE_DIR}/{name}", only_if_is_dirty=False)
+    log(f"DONE - saved {len(fol)} realistic meshes")
+else:
+    unreal.EditorAssetLibrary.save_directory("/Game/OpenDrive", only_if_is_dirty=False)
+    unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+    log("DONE - saved")

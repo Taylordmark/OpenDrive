@@ -20,7 +20,11 @@ def log(msg):
 # ODTuningPreset C++ defaults). COM: Rally/Offroad sit LOWER than the old
 # 48/50 because ride height + tire diameter already lift the body; the old
 # values put the COM 10-12 cm up and brake-into-turn spun past what brakes-
-# only ESC can catch.
+# only ESC can catch. Still true after the 2026-10-13 ride-height fix (the
+# body now rests at the authored axle - RideHeightDelta): InitBody adds the
+# old strut drop back to the COM, so these heights over the ground hold
+# (esc_sim.py ride-height table). New setups go at the END - the garage
+# save stores the preset index.
 H, L, O = (unreal.ODTractionMode.HIGH, unreal.ODTractionMode.LOW,
            unreal.ODTractionMode.OFF)
 PRESETS = {
@@ -58,6 +62,13 @@ PRESETS = {
         center_of_mass_z=38.0,
         off_road_grip=0.45, steer_lock_scale=0.85, rear_brake_scale=0.8,
         front_tire_width_scale=0.7, rear_tire_width_scale=1.45),
+    # Street, stiffer and lower on semi-slicks (2026-10-13)
+    "Track": dict(
+        damping_ratio=0.95, spring_rate_scale=1.40, ride_height_delta=-3.0,
+        front_friction_scale=1.06, rear_friction_scale=1.06, downforce=1.6,
+        center_of_mass_z=38.0, off_road_grip=0.45,
+        tire_diameter_scale=0.98, front_tire_width_scale=1.1,
+        rear_tire_width_scale=1.15),
 }
 CDO = unreal.get_default_object(unreal.ODTuningPreset)
 ALL_FIELDS = sorted({k for f in PRESETS.values() for k in f})

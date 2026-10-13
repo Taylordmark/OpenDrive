@@ -1,5 +1,6 @@
 #include "ODForestManager.h"
 #include "ODAssetDetail.h"
+#include "ODVisualStyle.h"
 
 #include "Components/CapsuleComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -149,6 +150,10 @@ constexpr float TreelineLowM = 3350.0f, TreelineHighM = 3550.0f; // TREELINE_LOW
 // noise mask agree, inside the montane aspen elevation window.
 constexpr float AspenLowM = 2450.0f, AspenHighM = 3350.0f, AspenFadeM = 150.0f;
 constexpr float AspenNoiseScaleCm = 50000.0f;   // 500 m lattice -> grove-sized patches
+// Realistic flora wind (build_flora_materials.py) is a few cm: past 100 m it
+// can't be seen, so stop evaluating it there (Nanite WPO cost, VSM cache
+// invalidation). No effect on the stylized materials, which have no WPO.
+constexpr int32 WpoDisableCm = 10000;
 constexpr float AspenMaxShare = 0.75f;          // max fraction of the tree mix turned to aspen
 
 FBiomeRecipe LerpRecipe(const FBiomeRecipe& A, const FBiomeRecipe& B, float T)
@@ -222,11 +227,11 @@ void AODForestManager::BeginPlay()
 	// array's own comment for why ODForestManager keeps its own superset.
 	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
-		TreeMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		TreeMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 	for (const TCHAR* Path : ShrubMeshPaths)
 	{
-		ShrubMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		ShrubMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 
 	// Ground cover (2026-09-03) - see the RockMeshes declaration in
@@ -242,17 +247,17 @@ void AODForestManager::BeginPlay()
 	};
 	for (const TCHAR* Path : RockMeshPaths)
 	{
-		RockMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		RockMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
-	ScrubMesh = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft")));
+	ScrubMesh = ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(
+		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"))));
 
 	// Real CC0 rock texture (bonus scope, 2026-09-03) - see RockMat's own
 	// header comment. Missing asset (script not yet run) is not fatal - the
 	// HISM SetMaterial() call in BuildTile() just no-ops, same "optional
 	// dependency" convention every LoadObject in this file already follows.
-	RockMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030"));
+	RockMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030")));
 
 	// Seasons feature (2026-09-07): one shared MID for canopy snow, applied
 	// ONLY to the Conifer (evergreen) species batch in BuildTile() below -
@@ -263,8 +268,8 @@ void AODForestManager::BeginPlay()
 	// (added by unreal/build_flora_materials.py), not from anything here -
 	// every HISM using this MID still varies per-instance because
 	// PerInstanceRandom is a per-instance shader input, not a MID parameter.
-	if (UMaterialInterface* FoliageBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage")))
+	if (UMaterialInterface* FoliageBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage"))))
 	{
 		FoliageSeasonMID = UMaterialInstanceDynamic::Create(FoliageBase, this);
 
@@ -283,8 +288,8 @@ void AODForestManager::BeginPlay()
 	// snow (SnowCover-driven, see build_flora_materials.py's M_Bark_Aspen
 	// wiring) must not affect tree_scrub_oak, which also uses M_Bark_Aspen's
 	// STATIC (non-dynamic) reference and is out of this task's scope.
-	if (UMaterialInterface* BarkBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen")))
+	if (UMaterialInterface* BarkBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen"))))
 	{
 		DeciduousBarkMID = UMaterialInstanceDynamic::Create(BarkBase, this);
 	}
@@ -307,6 +312,11 @@ void AODForestManager::BeginPlay()
 	if (const UStaticMesh* Mesh = ScrubMesh.Get())
 	{
 		ScrubMeshBaseOffsetCm = Mesh->GetBoundingBox().Min.Z;
+	}
+
+	if (ODVisualStyle::IsRealistic())
+	{
+		GroundCover.Load(this);
 	}
 
 	Pool.Reserve(PoolSize);
@@ -2108,6 +2118,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(!bLowVeg);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
@@ -2338,12 +2349,42 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances((GrassRadiusCm + GrassLeadCm) * 0.5f, GrassRadiusCm + GrassLeadCm);   // fade band, see M_Foliage PerInstanceFadeAmount
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Xf, false, /*bWorldSpace*/false);
 	}
 	GrassCells.Add(Key, Hism);
+
+	if (GroundCover.bOn)   // Realistic only
+	{
+		TArray<int32> Near;   // stations out to the road band's far edge
+		if (bUseStationExclusion)
+		{
+			const float Pad = 6000.0f + 1500.0f;
+			RoadStationHash.QueryBox(X0 - Pad, Y0 - Pad, X0 + GrassCellCm + Pad, Y0 + GrassCellCm + Pad, Near);
+		}
+		auto RoadEdge = [&](double X, double Y)
+		{
+			float D = 1e9f;
+			for (const int32 i : Near)
+			{
+				const TArray<FRoadStation>& S = RoadStationHash.Stations;
+				D = FMath::Min(D, SegmentEdgeDistCm(S[i], S[NextRunStation(S, i)], X, Y));
+			}
+			return D;
+		};
+		const ODGroundCover::FCell Cell{Key, X0, Y0, Step, N, &Z[0][0], &bGood[0][0], (uint8)Biome,
+			ODAssetDetail::Level(), (uint32)RandomSeed, GrassShoulderClearCm, RoadEdge};
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Comps;
+		GroundCover.BuildCell(Cell, RootComponent, (GrassRadiusCm + GrassLeadCm) * (0.6f + 0.2f * ODAssetDetail::Level()),
+			WpoDisableCm, [this](UHierarchicalInstancedStaticMeshComponent* H) { UseSeasonFoliage(H); }, Comps);
+		for (UHierarchicalInstancedStaticMeshComponent* C : Comps)
+		{
+			GroundCoverCells.Add(Key, C);
+		}
+	}
 	return true;
 }
 
@@ -2356,7 +2397,9 @@ void AODForestManager::UseSeasonFoliage(UMeshComponent* Comp) const
 	if (!FoliageSeasonMID) return;
 	for (int32 i = 0; i < Comp->GetNumMaterials(); ++i)
 	{
-		if (Comp->GetMaterial(i) == FoliageSeasonMID->Parent)
+		// Pick: a stylized mesh still carries plain M_Foliage when Realistic
+		// made the MID's parent M_Foliage_real (identity in Stylized)
+		if (ODVisualStyle::Pick(Comp->GetMaterial(i)) == FoliageSeasonMID->Parent)
 		{
 			Comp->SetMaterial(i, FoliageSeasonMID);
 		}
@@ -2370,6 +2413,7 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 	const FVector Loc = CarLoc + Vel2D.GetSafeNormal() * GrassLeadCm;
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / GrassCellCm), FMath::FloorToInt(Loc.Y / GrassCellCm));
 	const int32 Reach = FMath::CeilToInt(GrassRadiusCm / GrassCellCm);
+	GroundCover.SyncSeason(FoliageSeasonMID);   // snow / wet on the Realistic ground cover cards
 
 	// missing cells inside the radius, nearest first
 	TArray<TPair<double, FIntPoint>> Want;
@@ -2403,6 +2447,11 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 			if (It.Value())
 			{
 				It.Value()->DestroyComponent();
+			}
+			for (auto G = GroundCoverCells.CreateKeyIterator(It.Key()); G; ++G)
+			{
+				G.Value()->DestroyComponent();
+				G.RemoveCurrent();
 			}
 			It.RemoveCurrent();
 		}

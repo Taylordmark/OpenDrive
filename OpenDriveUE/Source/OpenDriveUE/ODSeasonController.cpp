@@ -1,4 +1,5 @@
 #include "ODSeasonController.h"
+#include "ODVisualStyle.h"
 
 #include "Camera/PlayerCameraManager.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -528,7 +529,8 @@ void AODSeasonController::BindStaticRoadMID()
 			{
 				if (!StaticRoadMID)
 				{
-					StaticRoadMID = UMaterialInstanceDynamic::Create(RoadMat, this);
+					// level meshes carry plain M_Road; the MID takes its Realistic twin
+					StaticRoadMID = UMaterialInstanceDynamic::Create(ODVisualStyle::Pick(RoadMat), this);
 					StaticRoadMID->SetScalarParameterValue(TEXT("PuddleAmount"), 0.0f);
 				}
 				It->SetMaterial(i, StaticRoadMID);

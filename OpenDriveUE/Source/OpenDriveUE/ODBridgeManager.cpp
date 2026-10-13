@@ -1,4 +1,5 @@
 #include "ODBridgeManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -24,8 +25,8 @@ void AODBridgeManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	BridgeMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge"));
+	BridgeMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge")));
 	PierMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
 
 	UE_LOG(LogTemp, Display, TEXT("ODBridgeManager: BridgeMat=%s PierMesh=%s"),

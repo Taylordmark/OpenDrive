@@ -13,6 +13,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/CommandLine.h"
 #include "ODVehicleMovement.h"
+#include "ODVisualStyle.h"
 
 AODDayNightController::AODDayNightController()
 {
@@ -37,6 +38,14 @@ void AODDayNightController::BeginPlay()
 		if (UDirectionalLightComponent* SunComp = Cast<UDirectionalLightComponent>(Sun->GetLightComponent()))
 		{
 			SunComp->ForwardShadingPriority = 1;
+			// Realistic: short screen-space contact shadows - tyre/road and
+			// wheel-well contact that the virtual shadow map's filtering
+			// softens away. World-space length so it's the same at any FOV.
+			if (ODVisualStyle::IsRealistic())
+			{
+				SunComp->ContactShadowLength = 30.0f;
+				SunComp->ContactShadowLengthInWS = true;
+			}
 			SunComp->MarkRenderStateDirty();   // the proxy copied 0 at registration
 		}
 		break;

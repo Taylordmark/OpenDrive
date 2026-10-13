@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
+#include "ODGroundCover.h"
 #include "ODForestManager.generated.h"
 
 class UCapsuleComponent;
@@ -531,6 +532,10 @@ private:
 	float GrassLeadCm = 0.0f;   // this tick's lead, see GrassLeadSeconds
 	TMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GrassCells;   // null = built, nothing to grow
 	TMap<FIntPoint, double> GrassFirstTry;
+	// Realistic-only extra ground cover on the grass cells (ODGroundCover.h)
+	UPROPERTY()
+	FODGroundCoverAssets GroundCover;
+	TMultiMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GroundCoverCells;
 	void ReleaseTile(const FIntPoint& Key);
 	void UpdateCollision(const FVector& PlayerLoc);
 

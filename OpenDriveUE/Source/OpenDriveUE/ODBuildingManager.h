@@ -18,6 +18,9 @@ struct FParsedBuilding
 	TArray<uint32> Tris;    // flat i0,i1,i2
 	uint8 WallSet = 0;      // index into apply_building_material.py WALL_LAYERS
 	uint8 FlatRoof = 0;     // 1 = concrete flat roof, 0 = shingle
+	// Realistic pitched roof (PitchRoof, Track G): vertices from here on are
+	// the gable end walls, which get vertex alpha 0 (no windows)
+	int32 NumSolidVerts = MAX_int32;
 };
 
 /** One parsed tile file's worth of buildings - the off-thread output of
@@ -73,6 +76,14 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Headless check of the Realistic pitched roofs (Track G): parses one
+	 *  ODU2 tile, runs PitchRoof over every building and returns the counts
+	 *  (compare with pipeline/tests/test_building_roofs.py --tiles) and the
+	 *  roof time in ms - the cost the async tile parse adds per tile. */
+	UFUNCTION(BlueprintCallable, Category = "Buildings")
+	static void ProfileRoofTile(const FString& Path, int32& Buildings, int32& Pitched,
+		int32& TrisBefore, int32& TrisAfter, float& RoofMs);
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin". */
@@ -297,6 +308,13 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> FacadeMat;
+
+	/** Realistic only (PLAN-VISUALS Track G): M_BuildingRoof_real. When set,
+	 *  roof triangles go in mesh section 1 with this material and walls keep
+	 *  section 0, so neither material samples the other's textures. Null in
+	 *  Stylized (or if the asset is missing): one section, FacadeMat, as before. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RoofMat;
 
 	double LastDiagTime = 0.0;
 };

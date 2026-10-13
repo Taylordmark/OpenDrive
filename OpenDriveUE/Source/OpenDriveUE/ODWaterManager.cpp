@@ -1,4 +1,5 @@
 #include "ODWaterManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
 #include "Async/Async.h"
@@ -24,8 +25,8 @@ void AODWaterManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	WaterMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Water.M_Water"));
+	WaterMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Water.M_Water")));
 	if (!WaterMat)
 	{
 		UE_LOG(LogTemp, Warning,
