@@ -333,9 +333,25 @@ the wheel as `_real` twins with the same proportions and pivot contract:
   - the tyres always stay covered;
   - the Pickup bed is rebuilt as solid bevelled walls;
   - FBX exports smoothing groups.
-- **Open:** the body material's painted gap lines may double the real ones;
-  one shared rim design; no calipers (they would need a non-spinning pawn
-  component).
+- **Side-profile pass (same day):** a per-car `PROFILE` (in the _real generator only) sets
+  its own silhouette, glass ends and a beltline rising to the tail:
+  - Super: low sharp nose, cab pushed back, kammback;
+  - LMP: a more extreme Super;
+  - JDM: long-hood fastback;
+  - Muscle: power bulge and a high tail;
+  - Rally: short-overhang hatch;
+  - Pickup: cab-forward;
+  - Concept: teardrop.
+  - Arches: a rolled lip 2.8-3 cm above the tyre at the in-game static ride height. The well clears full bump and full lock, and `arch_clearance()` puts the numbers in the manifest, where the check asserts them.
+  - Side previews: `side_<Car>.png`.
+  - Ultra is now 72-94k tris.
+- **Open:**
+  - Ride height: the strut sags 9-16 cm at rest, so in game the wheels sit that far below the mesh axle and every car rides high, about 25 cm of ground clearance. This needs `Attach.Z` raised by the static sag, or a visual offset, plus a retune.
+  - Full bump at full lock still reaches the fender (3-10 cm).
+  - The tuning presets' bigger tyres are not covered by the arches.
+  - The body material's painted gap lines may double the real ones.
+  - One shared rim design.
+  - No calipers: they would need a non-spinning pawn component.
 
 ### Track C — Roads (medium)
 

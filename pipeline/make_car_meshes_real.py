@@ -5,7 +5,8 @@ in Blender from the same seven presets as pipeline/make_car_meshes.py.
 
 Run from the repo root (or anywhere: paths are relative to this file). With
 no car names all seven are built. --preview also renders 3/4 front and rear
-PNGs into data/cars/preview_real/ (offline asset renders, no game).
+and an orthographic side view (side_<Car>.png) into data/cars/preview_real/
+(offline asset renders at the static ride height, no game).
 
 Our own original, badge-free designs: every body is the preset's loft
 (profile / plan / beltline / centerline, recorded straight out of
@@ -36,6 +37,18 @@ Shape (CHAR, per car): plan taper to nose and tail with rounded corners, a
 waist between the arches, lower flank flared over the arches, rear-arch hips,
 shoulder character line, tumblehome and a crowned roof/hood.
 
+Side silhouette (PROFILE, per car, _real only): its own crest line, glass
+start/end, side-glass end and a beltline rising toward the tail, in place of
+the stylized one. Nose / tail x and floor are the stylized ones, so the
+bounding box holds.
+
+Arches: the lip is a circle ARCH_GAP above the tyre at the IN-GAME static
+wheel centre (static_axle_z(): the strut sag from mass and spring rate in
+make_def), with a rolled turned-in lip; the well roof clears the tyre at full
+bump (wheel centre at z = 0) and the fender stands FENDER_OUT outboard of the
+tyre. arch_clearance() ray-tests static / bump / full lock into the manifest.
+Change the suspension or mass and these meshes must be regenerated.
+
 Wheel: one shared mesh (SM_CarWheel_real): tyre with grooves and shoulder
 blocks, a 6-spoke dished alloy on BOTH faces (the pawn mounts the same mesh
 left and right), lug nuts, brake disc. No caliper: it must not spin with the
@@ -63,6 +76,7 @@ Outputs (data/cars/real/, gitignored like the rest of data/):
 
 import json
 import math
+import re
 import sys
 import time
 import types
@@ -128,7 +142,7 @@ CATS = mcm.CATEGORY_ORDER
 R_REF = mcm.REF_WHEEL_RADIUS_CM
 
 # --------------------------------------------------------------- design knobs
-CAGE_SPACING = 7.0       # cm between loft stations in the cage
+CAGE_SPACING = 7.8       # cm between loft stations in the cage
 SUBDIV = 2               # Catmull-Clark levels on the body cage
 GAP = 0.5                # panel gap width, cm
 LIP = 1.2                # turned-in panel edge depth, cm
@@ -355,8 +369,24 @@ class Car:
         px = [p[0] for p in self.profile]
         self.x0, self.x1 = max(px), min(px)
         self.gs, self.ge = st["glass_x_start"], st["glass_x_end"]
-        self.r_arch = self.wr + st["arch_margin_cm"]
+        # side profile (PROFILE): the _real silhouette replaces the stylized
+        # one here only; same nose / tail x and the same floor, so the bbox holds
+        pr = PROFILE[name]
+        self.dgs = pr["gs"] - self.gs                 # cab shift, moves the mirrors with it
+        self.profile, self.gs, self.ge = pr["profile"], pr["gs"], pr["ge"]
+        self.sge = pr.get("sge", self.ge)             # side glass ends here (C-pillar / sail behind)
+        self.belt_fr, self.hood_crown = pr["belt"], pr.get("hood_crown", 0.06)
+        # arches: the lip is a circle round the IN-GAME static wheel centre
+        # (ARCH_GAP above the tyre); the well roof clears the tyre at full
+        # bump, where the strut is at zero length and the wheel centre is at z = 0
+        self.zs = static_axle_z(name)
+        self.r_arch = self.wr + ARCH_GAP
+        self.r_bump = self.wr + BUMP_CLEAR
+        self.tyre_out = self.ht + WHEEL_HW * self.wr / R_REF
+        self.need_y = self.tyre_out + FENDER_OUT
         self.has_tail = st["tail_z"] is not None
+        # a short nose (Concept) would put the last ring on the arch: shallower cap
+        self.bulge = min(BULGE, self.x0 - self.fx - self.r_arch - 4.0)
         # panel layout: the bumper splits and door shuts of the stylized
         # material's GAPS lines, adjusted to the pillars
         self.xbf = min(self.fx + self.wr + 20.0, self.x0 - 15.0)
@@ -394,6 +424,73 @@ class Car:
 
 DOORS = {"Pickup": [(115.0, 18.0), (18.0, -38.0)]}   # crew cab: two doors a side
 
+ARCH_GAP = 3.0       # arch lip radius = wheel radius + this, round the static wheel centre
+BUMP_CLEAR = 2.5     # well roof radius = wheel radius + this, round the full-bump wheel centre (z = 0)
+FENDER_OUT = 3.0     # fender skin this far outboard of the tyre face over the arches (tyre tucks under at bump)
+WELL_CLEAR = 34.0    # well inner wall this far inboard of the half-track: clears the front tyre at full lock
+
+
+def static_axle_z(name):
+    """In-game wheel-centre z at rest, (front, rear): UODVehicleMovement puts
+    the strut tops at z = 0 and the wheel SpringLen below, which settles at
+    RestLength - corner load / SpringRate (g = 980 cm/s^2, no anti-roll).
+    Mass / split from unreal/import_car_meshes.py, spring defaults from
+    ODVehicleDef.h unless the def overrides them."""
+    src = (ROOT / "unreal" / "import_car_meshes.py").read_text()
+    blk = src.split(f'make_def("DA_Vehicle_{name}"', 1)[1].split("})", 1)[0]
+
+    def num(k, default=None):
+        m = re.search(rf'"{k}":\s*([-\d.]+)', blk)
+        return float(m.group(1)) if m else default
+    mass, ff = num("mass_kg"), num("front_weight_frac")
+    rest, k = num("rest_length_cm", 20.0), num("spring_rate", 61000.0)
+    return tuple(-(rest - mass * f / 2.0 * 980.0 / k) for f in (ff, 1.0 - ff))
+
+
+# per-car side silhouette (x, floor z, top z), glass start / end, where the
+# side glass stops, beltline (z at glass start, z at glass end: rising to the
+# rear) and hood crown (fraction of the hood half width; < 0 = fenders above
+# the hood). Ends and floor are the stylized ones (bbox), the rest is new.
+PROFILE = {
+    # long hood, slight power bulge, upright-ish screen, fastback, high ducktail
+    "Muscle": dict(profile=[(236, -12, 38), (226, -20, 50), (190, -22, 55), (140, -22, 58), (60, -22, 62),
+                            (20, -22, 99), (-45, -22, 102), (-120, -22, 72), (-165, -22, 66),
+                            (-205, -18, 66), (-222, -12, 59)],
+                   gs=60.0, ge=-120.0, sge=-82.0, belt=(58.0, 64.0), hood_crown=0.10),
+    # long hood, short deck: fastback glass onto a short ducktail deck
+    "JDM": dict(profile=[(214, -8, 22), (204, -18, 34), (160, -20, 44), (124, -20, 48), (56, -20, 53),
+                         (16, -20, 89), (-35, -20, 95), (-75, -20, 85), (-122, -20, 62), (-190, -18, 59),
+                         (-210, -12, 53)],
+                gs=56.0, ge=-122.0, sge=-78.0, belt=(50.0, 56.0)),
+    # low sharp nose, hood falling to the splitter, cab back, fast rake,
+    # buttressed roof onto a kammback tail
+    "Super": dict(profile=[(212, -16, 5), (204, -22, 15), (185, -24, 27), (160, -24, 37), (140, -24, 43),
+                           (118, -24, 45), (90, -24, 44), (62, -24, 44), (5, -24, 79), (-25, -24, 83),
+                           (-60, -24, 78), (-95, -24, 67), (-130, -24, 60), (-170, -24, 57), (-200, -20, 54),
+                           (-214, -14, 51)],
+                  gs=62.0, ge=-95.0, sge=-48.0, belt=(41.0, 50.0), hood_crown=0.02,
+                  intake=(-97.0, 22.0, 24.0, 22.0)),
+    # cab forward over a tall flat hood; the bed is its own part
+    "Pickup": dict(profile=[(268, 4, 66), (258, -6, 80), (230, -8, 86), (185, -8, 90), (130, -8, 97),
+                            (86, -8, 148), (-30, -8, 152), (-38, -8, 146), (-44, -8, 92)],
+                   gs=130.0, ge=-36.0, belt=(93.0, 97.0), hood_crown=0.04),
+    # short-overhang hatch: rounded-off ends, tall cowl, near-vertical hatch
+    "Rally": dict(profile=[(190, -4, 30), (182, -13, 41), (150, -18, 50), (112, -18, 55), (70, -18, 62),
+                           (24, -18, 109), (-100, -18, 112), (-140, -18, 107), (-160, -16, 64), (-180, -10, 56)],
+                  gs=70.0, ge=-162.0, sge=-140.0, belt=(58.0, 64.0)),
+    # smooth teardrop: softened fender humps under the stylized canopy
+    "Concept": dict(profile=[(176, -24, 14), (169, -28, 26), (154, -28, 42), (128, -28, 50), (100, -28, 48),
+                             (78, -28, 45), (0, -28, 43), (-70, -28, 46), (-110, -28, 52), (-140, -28, 54),
+                             (-175, -28, 52), (-205, -26, 48), (-228, -20, 42)],
+                    gs=86.0, ge=-70.0, belt=(48.0, 52.0),
+                    intake_f=(62.0, 9.0, 50.0, 22.0)),     # scoop kept above the tucked rocker
+    # the Super, more extreme: knife nose, tall fender pods, low tub
+    "LMP": dict(profile=[(236, -27, 5), (226, -29, 16), (200, -29, 38), (175, -29, 50), (150, -29, 55),
+                         (118, -29, 48), (100, -29, 26), (20, -29, 26), (-70, -29, 34), (-105, -29, 50),
+                         (-140, -29, 56), (-180, -29, 54), (-215, -27, 46), (-248, -22, 40)],
+                gs=100.0, ge=-95.0, belt=(48.0, 52.0)),
+}
+
 
 def sections(car, xs):
     """Per station: list of (y, z) for the right half section points S0..Slast
@@ -407,10 +504,21 @@ def sections(car, xs):
     w = np.interp(xs, wx, wh)
     zb_floor = zb.copy()
     r = car.r_arch
-    for ax in (car.fx, car.rx):
+    well = np.full_like(xs, -1e9)
+    for ax, z0 in zip((car.fx, car.rx), car.zs):
         d2 = r * r - (xs - ax) ** 2
-        zb = np.where(d2 > 0, np.maximum(zb, np.sqrt(np.maximum(d2, 0.0))), zb)
-    belt = np.minimum(st["belt_z"], zt - 4.0)
+        zb = np.where(d2 > 0, np.maximum(zb, z0 + np.sqrt(np.maximum(d2, 0.0))), zb)
+        # well roof: half-ellipse r_bump high and wider than the lip opening,
+        # so the station chords at its ends still clear the bumped tyre
+        e = 1.0 - ((xs - ax) / (r + 4.0)) ** 2
+        well = np.maximum(well, np.where(np.abs(xs - ax) <= r, car.r_bump * np.sqrt(np.maximum(e, 0.0)), -1e9))
+    well = np.maximum(well, zb)
+    # the fender top clears the well roof (the tyre at full bump): a
+    # fender hump where the silhouette is lower than that
+    zt = np.maximum(zt, well + 7.0)
+    bf, br = car.belt_fr
+    belt_fn = bf + (br - bf) * (car.gs - xs) / (car.gs - car.ge)
+    belt = np.maximum(np.minimum(belt_fn, zt - 4.0), well + 2.5)
     zb = np.minimum(zb, belt - 8.0)
     H = belt - zb
     cabin = (xs <= car.gs) & (xs >= car.ge)
@@ -439,8 +547,17 @@ def sections(car, xs):
     ramp = np.clip(np.minimum(car.gs - xs, xs - car.ge) / 24.0 + 0.5, 0.0, 1.0)
     roof = st["roof_top_frac"] * (1.0 - c["tumble"])
     top_w = wb * (st["hood_top_frac"] + (roof - st["hood_top_frac"]) * ramp)
-    crown = 0.0 if car.center else 0.06 * top_w
+    hood = np.clip((xs - car.gs) / 20.0, 0.0, 1.0)
+    crown = 0.0 if car.center else (0.06 + (car.hood_crown - 0.06) * hood) * top_w
     Y = [wb * (0.82 + 0.17 * fl), wb * (0.93 + 0.07 * fl), wb, wb * (0.88 + 0.08 * hips), top_w]
+    # over the arches the lower fender stands FENDER_OUT outboard of the
+    # tyre, so a tyre rising to full bump tucks in under it
+    near = np.min([np.abs(xs - ax) for ax in (car.fx, car.rx)], axis=0)
+    t = np.clip((r + 18.0 - near) / 18.0, 0.0, 1.0)
+    t = t * t * (3.0 - 2.0 * t)
+    t = t * np.clip(np.minimum(car.x0 - xs, xs - car.x1) / 8.0, 0.0, 1.0)    # no fender blade past a short nose
+    for k, inset in ((0, 0.0), (1, 0.0), (2, 0.0), (3, 7.0), (4, 15.0)):   # shoulder follows: no fender blade
+        Y[k] = Y[k] + np.maximum(car.need_y - inset - Y[k], 0.0) * t * (1.0 if k < 4 else ~cabin)
     Z = [zb, zb + 0.32 * H, zb + 0.78 * H, belt, zt - 0.6 * crown]
     w = wb
     if car.center:
@@ -448,7 +565,7 @@ def sections(car, xs):
         Y.append(np.interp(xs, cx, cw))
         Z.append(np.interp(xs, cx, cz))
     return dict(Y=np.stack(Y, 1), Z=np.stack(Z, 1), zb=zb, zb_floor=zb_floor, w=w, belt=belt,
-                cabin=cabin, H=H, crown=crown)
+                cabin=cabin, H=H, crown=crown, well=well)
 
 
 # per-car body character (sections): plan taper at nose/tail, waist between
@@ -466,14 +583,14 @@ CHAR = {
 
 
 def stations(car):
-    keys = [car.xbf, car.x_hf, car.gs, car.ge, *car.door_x]
+    keys = [car.xbf, car.x_hf, car.gs, car.ge, car.sge, *car.door_x]
     if car.has_tail:
         keys += [car.xbr, car.x_tr]
     for p in car.style["pillars_x"]:
         keys += [p - 5.0, p + 5.0]
     for ax in (car.fx, car.rx):
-        keys += [ax - car.r_arch, ax + car.r_arch, ax]
-    nose, tail = car.x0 - BULGE, car.x1 + (BULGE if car.has_tail else 0.0)
+        keys += [ax - car.r_arch, ax + car.r_arch, ax, ax - 0.93 * car.r_arch, ax + 0.93 * car.r_arch]
+    nose, tail = car.x0 - car.bulge, car.x1 + (BULGE if car.has_tail else 0.0)
     ks = []
     for k in sorted(keys, reverse=True):          # key lines, merged when < 1 cm apart
         if tail + 2.0 < k < nose - 2.0 and (not ks or ks[-1] - k > 1.0):
@@ -485,17 +602,19 @@ def stations(car):
 
 
 BULGE = 10.0     # nose/tail cap bulge: last ring set back this much, cap centre at the old end
-CAP_FR = [0.82, 0.55, 0.27, 0.0, -0.27, -0.55, -0.82]   # top-cap points, fraction of the cap half width
-WELL_CLEAR = 17.0    # wheel-well inner wall this far inboard of the half-track (wheel half width 13)
+# top-cap points, fraction of the cap half width (as many as the underside
+# points, for the end-cap Coons patches)
+CAP_FR = [0.86, 0.645, 0.43, 0.215, 0.0, -0.215, -0.43, -0.645, -0.86]
 
 
 def build_cage(car):
     """The closed quad cage (Part) of the hull, with cell / panel / crease.
 
     Ring per station (closed loop): right side S0..Stop, top cap, left side
-    Stop..S0, then the underside: well top W1, well foot W2, floor, W2, W1.
-    Over the axles W1 sits at the arch height, so S0 -> W1 -> W2 is the
-    wheel-well roof and inner wall; elsewhere they lie flat in the floor."""
+    Stop..S0, then the underside: lip L, well top W1, well foot W2, floor,
+    W2, W1, L. Over the axles S0 is the arch lip, S0 -> L the turned-in lip
+    face (2 cm, up to the well roof), L -> W1 the well roof at full-bump
+    height and W1 -> W2 the inner wall; elsewhere they lie flat in the floor."""
     xs = stations(car)
     S = sections(car, xs)
     Y, Z = S["Y"], S["Z"]
@@ -512,13 +631,14 @@ def build_cage(car):
     for i, x in enumerate(xs):
         y0, zf = Y[i, 0], S["zb_floor"][i]
         w1y, w2y = min(0.93 * y0, w_in), min(0.86 * y0, w_in - 4.0)
-        w1z = min(S["zb"][i], zc[i] - 4.0)
+        w1z = min(S["well"][i], Z[i, 4] - 4.0)     # under the outer top (not a centre-line car's crest)
+        ly = y0 - 2.0
         crown = 0.8 if car.center else float(S["crown"][i])
         pts = [(x, Y[i, k], Z[i, k]) for k in range(ns)]
         pts += [(x, f * Y[i, -1], zc[i] + crown * (1 - f * f)) for f in CAP_FR]
         pts += [(x, -Y[i, k], Z[i, k]) for k in range(ns - 1, -1, -1)]
-        pts += [(x, -w1y, w1z), (x, -w2y, zf), (x, -0.45 * w2y, zf), (x, 0.0, zf), (x, 0.45 * w2y, zf),
-                (x, w2y, zf), (x, w1y, w1z)]
+        pts += [(x, -ly, w1z), (x, -w1y, w1z), (x, -w2y, zf), (x, -0.45 * w2y, zf), (x, 0.0, zf),
+                (x, 0.45 * w2y, zf), (x, w2y, zf), (x, w1y, w1z), (x, ly, w1z)]
         rings.append([part.v(p) for p in pts])
     nr = len(rings[0])
     nc = len(CAP_FR)
@@ -528,8 +648,8 @@ def build_cage(car):
         desc.append(("cap", k, 0))
     for k in range(ns - 1):
         desc.append(("side", ns - 2 - k, -1))
-    desc += [("well", 0, -1), ("well", 1, -1), ("floor", 0, 0), ("floor", 1, 0), ("floor", 2, 0),
-             ("floor", 3, 0), ("well", 1, 1), ("well", 0, 1)]
+    desc += [("well", 2, -1), ("well", 0, -1), ("well", 1, -1), ("floor", 0, 0), ("floor", 1, 0),
+             ("floor", 2, 0), ("floor", 3, 0), ("well", 1, 1), ("well", 0, 1), ("well", 2, 1)]
     assert len(desc) == nr, (len(desc), nr)
 
     for i in range(len(xs) - 1):
@@ -560,7 +680,7 @@ def build_cage(car):
         for v in range(nv + 1):
             grid[v][0], grid[v][nu] = leftc[v], rightc[v]
         P = lambda vv: np.array(vv.co)
-        bulge = BULGE if (sgn > 0 or car.has_tail) else 0.0
+        bulge = car.bulge if sgn > 0 else (BULGE if car.has_tail else 0.0)
         for v in range(1, nv):
             for u in range(1, nu):
                 s, t = u / nu, v / nv
@@ -582,10 +702,10 @@ def build_cage(car):
                 e = part.bm.edges.get((rings[i][idx], rings[i + 1][idx]))
                 if e and c:
                     e[part.crease] = c
-        for idx in (2 * ns + nc, nr - 1):        # well top edge
-            e = part.bm.edges.get((rings[i][idx], rings[i + 1][idx]))
+        for idx, c in ((2 * ns + nc, 1.0), (nr - 1, 1.0), (2 * ns + nc + 1, 0.7), (nr - 2, 0.7)):
+            e = part.bm.edges.get((rings[i][idx], rings[i + 1][idx]))   # rolled lip, well top
             if e:
-                e[part.crease] = 0.7
+                e[part.crease] = c
     bmesh.ops.recalc_face_normals(part.bm, faces=part.bm.faces)
     for f in part.bm.faces:
         f.smooth = True
@@ -599,7 +719,7 @@ def face_cell_panel(car, S, i, xc, kind, b, side, in_cabin, pillar, steep, ns, n
     reg = car.region(xc)
     if kind == "side":
         is_crest = car.center is not None and b == ns - 2
-        if in_cabin and not pillar:
+        if in_cabin and not pillar and xc > car.sge:
             if car.center is not None:
                 glass = is_crest and min(S["Z"][i, -1] - S["Z"][i, -2],
                                          S["Z"][i + 1, -1] - S["Z"][i + 1, -2]) > 3.0
@@ -792,10 +912,14 @@ def render_views(objs, ground_z, length, path_stem, views=(("front", 35.0), ("re
     for tag, az in views:
         d = 2.2 * length
         a = math.radians(az)
-        cam.location = (d * math.cos(a), d * math.sin(a), ground_z + 0.42 * length)
-        tgt = Vector((0, 0, ground_z + 55))
+        side = tag == "side"          # side elevation: orthographic, 3 deg down so the ground shows
+        cam.data.type = "ORTHO" if side else "PERSP"
+        cam.data.ortho_scale = 1.12 * length
+        cam.location = (d * math.cos(a), d * math.sin(a), ground_z + (70.0 + 0.05 * d if side else 0.42 * length))
+        tgt = Vector((0, 0, ground_z + (70.0 if side else 55.0)))
         cam.rotation_euler = (tgt - cam.location).to_track_quat("-Z", "Y").to_euler()
-        sc.render.filepath = str(path_stem) + f"_{tag}.png"
+        sc.render.filepath = str(path_stem.parent / f"side_{path_stem.name}.png") if side \
+            else str(path_stem) + f"_{tag}.png"
         bpy.ops.render.render(write_still=True)
         out.append(sc.render.filepath)
     for o in hide:
@@ -851,7 +975,7 @@ def rrect_at(cu, cv, w, h, r):
 def lamp_layout(car):
     """Stylized end-cap lamp/grille rectangles: (kind, side, y0, y1, z0, z1)."""
     st, out = car.style, []
-    ends = [(+1, car.x0 - BULGE, st["lamp_z"], st["lamp_y"])]
+    ends = [(+1, car.x0 - car.bulge, st["lamp_z"], st["lamp_y"])]
     if car.has_tail:
         ends.append((-1, car.x1 + BULGE, st["tail_z"], st["tail_y"]))
     for sgn, x, lz, ly in ends:
@@ -927,6 +1051,9 @@ def cut_body(car, body, extra):
         if name == "side_patch":     # side intakes, recessed into the flanks
             x, lwf, zc, cell = a[:4]
             sw, sh = k.get("size", a[4] if len(a) > 4 else (16.0, 9.0))
+            key = "intake" if x < 0 else "intake_f"
+            if key in PROFILE[car.name]:                     # the _real side intakes
+                x, zc, sw, sh = PROFILE[car.name][key]
             for s in (1, -1):
                 surface_cutter(cut, bvh, 1, s, rrect_at(x, zc, sw, sh, 0.3 * sh), 7.0, cell, cell)
     for f in cut.bm.faces:
@@ -1038,16 +1165,18 @@ def airfoil(part, x, z0, half_span, chord, thick, cell):
     prism(part, poly, -half_span, half_span, mat, cell, cell, cell)
 
 
-def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell, rear_axle_x, arch_r,
-               n_seg=24):
+def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell, rear_axle_x, car,
+               n_seg=48):
     """The stylized bed (make_car_meshes.build_pickup_bed) as solid bevelled
-    parts: 5 cm side walls arch-cut over the rear wheel with a rounded rail,
-    floor, wheel-well humps, tailgate and bumper."""
+    parts: side walls arch-cut over the rear wheel (the same static lip as
+    the cab's arches, walls outboard of the tyre), floor, a hollow wheel
+    house over the full-bump tyre, tailgate and bumper."""
     x1 = x0 - length
     xs = np.linspace(x0, x1, n_seg + 1)
+    arch_r = car.r_arch
     d2 = arch_r ** 2 - (xs - rear_axle_x) ** 2
-    bot = np.where(d2 > 0, np.maximum(z_bottom, np.sqrt(np.maximum(d2, 0.0))), z_bottom)
-    wi = w - 5.0
+    bot = np.where(d2 > 0, np.maximum(z_bottom, car.zs[1] + np.sqrt(np.maximum(d2, 0.0))), z_bottom)
+    wi = max(w - 5.0, car.tyre_out + 0.6)
     side = frame_matrix(Vector((0, 0, 0)), Vector((1, 0, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)))
     poly = [(float(x), float(z)) for x, z in zip(xs[::-1], bot[::-1])] + [(x0, rail_z), (x1, rail_z)]
     for s in (1, -1):
@@ -1059,9 +1188,18 @@ def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell
         bmesh.ops.bevel(sub.bm, geom=list(sub.bm.edges), offset=1.6, segments=3, profile=0.5,
                         affect='EDGES', clamp_overlap=True)
         merge(p, sub)
-        rbox(p, rear_axle_x - arch_r, rear_axle_x + arch_r, *sorted((s * wi * 0.62, s * wi)),
-             floor_z, arch_r + 2, dark_cell, r=3.0)
-    rbox(p, x1 + 1.0, x0, -wi, wi, floor_z - 3.0, floor_z, dark_cell, r=0.5)
+        # wheel house: a lid over the full-bump tyre, inner wall and end
+        # walls, open underneath (the floor stops at the inner wall)
+        xa, xb = rear_axle_x - arch_r, rear_axle_x + arch_r
+        yi = wi * 0.62
+        top = car.r_bump
+        rbox(p, xa, xb, *sorted((s * yi, s * wi)), top, top + 4.0, dark_cell, r=1.5)
+        rbox(p, xa, xb, *sorted((s * yi, s * (yi + 3.0))), floor_z - 3.0, top + 4.0, dark_cell, r=1.0)
+        for xe in (xa, xb - 3.0):
+            rbox(p, xe, xe + 3.0, *sorted((s * yi, s * wi)), floor_z - 3.0, top + 4.0, dark_cell, r=1.0)
+    xa, xb = rear_axle_x - arch_r, rear_axle_x + arch_r
+    for fa, fb, fw in ((x1 + 1.0, xa, wi), (xa, xb, wi * 0.62), (xb, x0, wi)):
+        rbox(p, fa, fb, -fw, fw, floor_z - 3.0, floor_z, dark_cell, r=0.5)
     rbox(p, x1, x1 + 4.0, -w, w, z_bottom, rail_z, body_cell, r=1.6)                 # tailgate
     rbox(p, x1 - 1.0, x1 + 0.5, -12, 12, rail_z - 16, rail_z - 12, dark_cell, r=0.4)   # handle
     rbox(p, x1 - 3.0, x1 + 6.0, -w, w, z_bottom - 2.0, z_bottom + 12, PLASTIC, r=3.0)   # bumper
@@ -1075,8 +1213,11 @@ def build_parts(car):
     for name, a, k, _ in car.calls:
         if name == "mirrors":
             x, lwf, cell = a[:3]
-            _, belt, _ = lwf.z(x)
-            y = float(sections(car, np.array([x]))["Y"][0, 3]) - 1.0   # on the shaped belt line
+            x += car.dgs                                 # stays at the A-pillar foot
+            Sm = sections(car, np.array([x]))
+            belt = float(Sm["belt"][0])
+            y = float(Sm["Y"][0, 3]) - 1.0               # on the shaped belt line,
+            y = min(y, max(w for _, w in car.plan) - 18.0)   # inside the stylized width over a flared fender
             for s in (1, -1):
                 ya, yb = sorted((s * (y + 6), s * (y + 20)))
                 rbox(p, x - 12, x, ya, yb, belt + 3, belt + 11, cell, r=3.0)
@@ -1086,6 +1227,7 @@ def build_parts(car):
                 rbox(p, x - 12.4, x - 11.6, ya, yb, belt + 4.2, belt + 9.8, CHROME, r=0.3)
         elif name == "wing":
             x, z_deck, z_wing, hs = a[:4]
+            z_deck = float(sections(car, np.array([x]))["Z"][0, -1])   # on the _real deck
             chord = k.get("chord", a[4] if len(a) > 4 else 24.0)
             cell = k.get("cell", a[5] if len(a) > 5 else ACCENT)
             plate = k.get("plate_cell", a[6] if len(a) > 6 else None) or cell
@@ -1119,7 +1261,7 @@ def build_parts(car):
             ya, yb = sorted((y0, y1))
             rbox(p, x - 0.5, x + 0.5, ya, yb, z0, z1, cell, r=0.4)
         elif name == "build_pickup_bed":
-            pickup_bed(p, *a, **k)
+            pickup_bed(p, *a[:5], max(a[5], car.need_y), *a[6:9], car, **k)
     if fins:   # shark fin: the stepped fin boxes as one rounded-top blade
         cell = fins[0][4]
         fins.sort(key=lambda f: -f[1])
@@ -1376,14 +1518,67 @@ def build_car(name):
     return car, tris, ultra
 
 
+MAX_STEER = 38.0     # ODVehicleDef MaxSteerAngleDeg default (no car overrides it)
+
+
+def arch_clearance(car, ob):
+    """Measured on the finished mesh, per axle: the visible lip gap above
+    the tyre at static ride height (horizontal rays from outside find the
+    lip's underside over the axle), and the smallest body clearance around
+    the tyre (rays from the wheel centre through tread / shoulder points;
+    < 0 = intersection) at static, at full bump (wheel centre z = 0) and,
+    for the front, at static with full steering lock both ways."""
+    bm = bm_of(ob)
+    bvh = BVHTree.FromBMesh(bm)
+    bm.free()
+    R, hw = car.wr, WHEEL_HW * car.wr / R_REF
+    th = np.radians(np.linspace(-100.0, 100.0, 41))       # 0 = top of the tyre
+    us = np.linspace(-hw, hw, 9)
+    pts = [(R * math.sin(t), u, R * math.cos(t)) for t in th for u in us]
+
+    def clear(ax, zc, steer):
+        c, sn = math.cos(math.radians(steer)), math.sin(math.radians(steer))
+        best = 1e9
+        for side in (1, -1):
+            C = Vector((ax, side * car.ht, zc))
+            for px, py, pz in pts:
+                d = Vector((px * c - py * sn, px * sn + py * c, pz))
+                n = d.length
+                hit = bvh.ray_cast(C, d / n, n + 40.0)[0]
+                if hit is not None and (hit - C).length - n < best:
+                    best = (hit - C).length - n
+                    worst = (round(hit.x - ax, 1), round(abs(hit.y), 1), round(hit.z, 1))
+        if best < 1.0:
+            log(car.name, "arch closest", round(best, 2), "at dx/|y|/z", worst, "wheel z", zc, "steer", steer)
+        return round(best, 2)
+
+    out = {}
+    for tag, ax, zs in (("front", car.fx, car.zs[0]), ("rear", car.rx, car.zs[1])):
+        top = zs + R
+        lip = None
+        for z in np.arange(top, top + 30.0, 0.1):
+            hit = bvh.ray_cast(Vector((ax, 500.0, z)), Vector((0, -1, 0)), 600.0)[0]
+            if hit is not None and hit.y > car.tyre_out - 1.0:
+                lip = round(float(z - top), 2)
+                break
+        r = dict(static_axle_z=round(zs, 2), lip_gap=lip, static=clear(ax, zs, 0.0), bump=clear(ax, 0.0, 0.0))
+        if tag == "front":
+            r["lock"] = min(clear(ax, zs, MAX_STEER), clear(ax, zs, -MAX_STEER))
+            r["bump_lock"] = min(clear(ax, 0.0, MAX_STEER), clear(ax, 0.0, -MAX_STEER))
+        out[tag] = r
+    log(car.name, "arches", json.dumps(out))
+    return out
+
+
 def place_wheels(car, wheel):
+    """At the in-game static wheel centres (what the pawn shows at rest)."""
     obs = []
     sc = car.wr / R_REF
-    for x in (car.fx, car.rx):
+    for x, z in zip((car.fx, car.rx), car.zs):
         for s in (1, -1):
             o = bpy.data.objects.new("w", wheel.data)
-            o.location = (x, s * car.ht, 0.0)
-            o.scale = (sc, 1.0, sc)
+            o.location = (x, s * car.ht, z)
+            o.scale = (sc, sc, sc)
             bpy.context.scene.collection.objects.link(o)
             obs.append(o)
     return obs
@@ -1420,7 +1615,8 @@ def main():
     manifest["wheel"] = dict(tris=wt, RefRadiusCm=R_REF, HalfWidthCm=WHEEL_HW, RimRadiusCm=RIM_R)
     for name in cars:
         car, tris, ultra = build_car(name)
-        manifest["cars"][name] = dict(tris=tris, FrontAxleXCm=car.fx, RearAxleXCm=car.rx,
+        manifest["cars"][name] = dict(tris=tris, arches=arch_clearance(car, ultra),
+                                      FrontAxleXCm=car.fx, RearAxleXCm=car.rx,
                                       HalfTrackYCm=car.ht, WheelRadiusCm=car.wr,
                                       bbox=[[round(min((ultra.matrix_world @ Vector(c))[i] for c in ultra.bound_box), 2)
                                              for i in range(3)],
@@ -1430,7 +1626,9 @@ def main():
             PREVIEW.mkdir(parents=True, exist_ok=True)
             ws = place_wheels(car, wheel)
             length = ultra.dimensions.x     # the bed / wing count too
-            render_views([ultra] + ws, -car.wr, length, PREVIEW / f"SM_Car_{name}_real")
+            gz = 0.5 * sum(car.zs) - car.wr      # the in-game ground at rest
+            render_views([ultra] + ws, gz, length, PREVIEW / f"SM_Car_{name}_real")
+            render_views([ultra] + ws, gz, length, PREVIEW / name, views=(("side", 90.0),))
             if True:   # old-vs-new for every car
                 old = stylized_object(f"SM_Car_{name}")
                 old.location.y = -2.6 * car.ht
@@ -1440,7 +1638,7 @@ def main():
                 ws_old = place_wheels(car, wheel)
                 for w in ws_old:
                     w.location.y -= 2.6 * car.ht
-                render_views([ultra, old] + ws + ws_old, -car.wr, 1.5 * length,
+                render_views([ultra, old] + ws + ws_old, gz, 1.5 * length,
                              PREVIEW / f"compare_{name}", views=(("old_vs_new", 60.0),))
                 bpy.data.objects.remove(old)
                 for w in ws_old:

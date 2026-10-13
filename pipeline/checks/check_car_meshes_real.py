@@ -7,6 +7,9 @@ the contract the pawn relies on, from data/cars/real/real_manifest.json:
   proportions; mirrors, wings and lamp detail may stick out a little);
 - triangle budget: ultra 40-120k, high ~1/2, Standard ~0.22 of ultra;
 - wheel authored at radius 34 / half width 13 (the pawn scales by WheelRadius/34);
+- arches: 1.5-4.5 cm visible gap over the tyre at static ride height, the
+  tyre clear of the body at static, full bump and full lock (bump + lock
+  together is a known exception);
 - every FBX present, LICENSE.txt present.
 
 python pipeline/checks/check_car_meshes_real.py   (exit 1 on any failure)
@@ -65,7 +68,12 @@ for car, m in man["cars"].items():
     check(0.4 < h / u < 0.6 and 0.15 < s / u < 0.3, f"{car}: tiers {h}/{s} of {u}")
     for x in ("", "_high", "_ultra"):
         check((REAL / "fbx" / f"SM_Car_{car}_real{x}.fbx").exists(), f"SM_Car_{car}_real{x}.fbx exists")
-w = man["wheel"]
+    for end, a in m.get("arches", {}).items():   # bump_lock is a known exception (fender-wide at full lock)
+        check(1.5 <= a["lip_gap"] <= 4.5 and a["static"] >= 0 and a["bump"] >= 0 and a.get("lock", 0) >= 0,
+              f"{car} {end} arch: lip gap {a['lip_gap']}, clearance static {a['static']} bump {a['bump']}"
+              f" lock {a.get('lock', '-')}")
+    check(set(m.get("arches", {})) == {"front", "rear"}, f"{car}: arch clearance measured")
+w =man["wheel"]
 check(w["RefRadiusCm"] == 34 and w["HalfWidthCm"] == 13, f"wheel radius {w['RefRadiusCm']} half width {w['HalfWidthCm']}")
 for x in ("", "_high", "_ultra"):
     check((REAL / "fbx" / f"SM_CarWheel_real{x}.fbx").exists(), f"SM_CarWheel_real{x}.fbx exists")
