@@ -3,6 +3,7 @@
 #include "Dom/JsonObject.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODAmbientSoundManager.h"
@@ -15,6 +16,7 @@
 #include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
+#include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODTerrainManager.h"
@@ -77,6 +79,23 @@ void AODGameMode::BeginPlay()
 	// per set (and crossfade) if the neighbouring areas sound wrong.
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
+
+	// custom track (pipeline/build_track.py): the race manager reads
+	// -odtrack itself; open-world levels just don't place one
+	FString Track;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odtrack="), Track) && GetWorld())
+	{
+		bool bHave = false;
+		for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
+		{
+			bHave = true;
+			break;
+		}
+		if (!bHave)
+		{
+			GetWorld()->SpawnActor<AODRaceManager>();
+		}
+	}
 }
 
 TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region)

@@ -333,6 +333,15 @@ scale, built from open data, with a stylized "real places, storybook look".
 `AODRaceHUD` is the canvas HUD. The race-independent HUD, audio and tuning
 were decoupled from it on 2026-07-20.
 
+**Custom tracks** (2026-10-13, compiled, not drive-tested): draw a
+LineString at geojson.io into `content_src/tracks/<name>.geojson`
+(`area`, optional `loop`, `road`, `gate_spacing_m`), run
+`pipeline/build_track.py <name>` to get `Masks/track_<name>.bin` ('ODK1'),
+play with `-odtrack=<name>`. The game mode spawns the race manager on
+open-world levels, the menu spawns the car at the track start, a loop runs
+laps back to back, and best times save per track. `"road": true` lines
+become new roads via `fetch_osm_network.py` (rebuild the area first).
+
 ## Arc 4 — UX (4.1, 4.2, 4.4 done; 4.3 partial)
 
 - **4.0b** (2026-07-25) `AODMainMenu`: canvas front end with a live showroom

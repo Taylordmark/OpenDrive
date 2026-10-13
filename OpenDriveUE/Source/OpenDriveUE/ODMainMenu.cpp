@@ -29,6 +29,7 @@
 #include "ODForestManager.h"
 #include "ODGameMode.h"
 #include "ODGarageEnvironment.h"
+#include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODSettingsMenu.h"
@@ -1269,6 +1270,19 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 		}
 		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: odspawn override -> (%.0f,%.0f) yaw %.0f"), OdSpawnX, OdSpawnY, Yaw);
 		Pawn->TeleportToSpawn(FVector(OdSpawnX, OdSpawnY, 0.0f), Yaw);
+	}
+
+	// custom track (-odtrack): start at the track line's first point, facing
+	// along it, whatever town was picked
+	for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
+	{
+		if (It->TrackLine.Num() >= 2)
+		{
+			const FVector2D A = It->TrackLine[0], D = It->TrackLine[1] - A;
+			Pawn->TeleportToSpawn(FVector(A.X, A.Y, 0.0f),
+				FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X)));
+		}
+		break;
 	}
 
 	// Unpause NOW, before handing control back - tile streaming

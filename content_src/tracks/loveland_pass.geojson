@@ -1,0 +1,17 @@
+{
+  "type": "Feature",
+  "properties": {
+    "name": "Loveland Pass Hillclimb",
+    "area": "summit_county",
+    "loop": false
+  },
+  "geometry": {
+    "type": "LineString",
+    "coordinates": [
+      [-105.9599448, 39.60748],
+      [-105.9098176, 39.6264791],
+      [-105.8861015, 39.6400745],
+      [-105.8790674, 39.6634794]
+    ]
+  }
+}

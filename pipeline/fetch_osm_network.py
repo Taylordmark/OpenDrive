@@ -14,6 +14,7 @@ Outputs to  data/raw/<AREA_NAME>_test/ :
 import json
 from pathlib import Path
 
+from build_track import custom_road_elements
 from fetch_cache import overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
@@ -71,6 +72,11 @@ def fetch_osm_network():
     nodes = [e for e in data["elements"] if e["type"] == "node"]
     if not ways:
         raise SystemExit(f"No drivable ways matched in the {AREA_NAME} bbox.")
+    # hand-drawn roads (build_track.py, "road": true) ride along as OSM ways
+    extra_nodes, extra_ways = custom_road_elements(AREA_NAME, nodes)
+    if any(not (s <= p["lat"] <= n_ and w <= p["lon"] <= e) for p in extra_nodes):
+        print("  WARNING: a custom road leaves the area bbox - no terrain there")
+    data["elements"] += extra_nodes + extra_ways
     (RAW_DIR / "osm.json").write_text(json.dumps(data))
     print(f"  got {len(ways)} ways, {len(nodes)} nodes -> {RAW_DIR / 'osm.json'}")
     return data

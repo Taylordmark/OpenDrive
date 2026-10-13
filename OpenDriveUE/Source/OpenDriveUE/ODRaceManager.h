@@ -48,6 +48,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Race")
 	TArray<FTransform> Checkpoints;
 
+	/** Custom track (2026-10-13, pipeline/build_track.py): -odtrack=<name>
+	 *  loads Masks/track_<name>.bin into Checkpoints/TrackLine instead of
+	 *  the level's own gates. Empty = the level's race, as before. */
+	FString TrackName;
+
+	/** Track line (world XY cm), spawn at [0]. Empty without a track. */
+	TArray<FVector2D> TrackLine;
+
+	/** Circuit: the finish is the start line, laps run back to back. */
+	bool bLoop = false;
+
 	/** Pass radius (cm). */
 	UPROPERTY(EditAnywhere, Category = "Race")
 	float GateRadius = 2200.0f;
@@ -77,6 +88,8 @@ private:
 	FString SaveSlot() const;
 	void SaveBest();
 	void LoadCenterline();
+	bool LoadTrack();
+	void StartRun(double CrossTime);
 
 	/** Recording of the current run (becomes the ghost on a PB). */
 	static constexpr float SampleInterval = 0.1f;

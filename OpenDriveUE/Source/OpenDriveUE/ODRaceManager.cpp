@@ -7,6 +7,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/StaticMeshComponent.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
@@ -19,7 +20,50 @@ AODRaceManager::AODRaceManager()
 
 FString AODRaceManager::SaveSlot() const
 {
-	return FString::Printf(TEXT("OpenDrive_%s"), *GetWorld()->GetMapName());
+	return TrackName.IsEmpty()
+		? FString::Printf(TEXT("OpenDrive_%s"), *GetWorld()->GetMapName())
+		: FString::Printf(TEXT("OpenDrive_track_%s"), *TrackName);
+}
+
+bool AODRaceManager::LoadTrack()
+{
+	// pipeline/build_track.py: 'ODK1' + uint32 flags (bit 0 loop) + uint32 G
+	// + G * (x, y, z cm, yaw deg) + uint32 N + N * (x, y cm), all float32
+	TArray<uint8> Bin;
+	const FString Path = FPaths::ProjectContentDir()
+		/ FString::Printf(TEXT("OpenDrive/Masks/track_%s.bin"), *TrackName);
+	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 12
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'K' || Bin[3] != '1')
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODRaceManager: no track at %s"), *Path);
+		return false;
+	}
+	auto U32 = [&](int64 At) { uint32 V; FMemory::Memcpy(&V, Bin.GetData() + At, 4); return V; };
+	auto F32 = [&](int64 At) { float V; FMemory::Memcpy(&V, Bin.GetData() + At, 4); return V; };
+	const int64 G = U32(8);
+	const int64 LineAt = 12 + G * 16;
+	if (G < 2 || Bin.Num() < LineAt + 4 || Bin.Num() < LineAt + 4 + (int64)U32(LineAt) * 8)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODRaceManager: %s is truncated"), *Path);
+		return false;
+	}
+	bLoop = (U32(4) & 1) != 0;
+	Checkpoints.Reset(G);
+	for (int64 i = 0; i < G; ++i)
+	{
+		const int64 At = 12 + i * 16;
+		Checkpoints.Add(FTransform(FRotator(0.0f, F32(At + 12), 0.0f),
+			FVector(F32(At), F32(At + 4), F32(At + 8))));
+	}
+	const int64 N = U32(LineAt);
+	TrackLine.SetNumUninitialized(N);
+	for (int64 i = 0; i < N; ++i)
+	{
+		TrackLine[i] = FVector2D(F32(LineAt + 4 + i * 8), F32(LineAt + 8 + i * 8));
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODRaceManager: track '%s' - %d gates, %s"),
+		*TrackName, Checkpoints.Num(), bLoop ? TEXT("loop") : TEXT("point to point"));
+	return true;
 }
 
 void AODRaceManager::LoadCenterline()
@@ -58,7 +102,21 @@ void AODRaceManager::LoadCenterline()
 void AODRaceManager::BeginPlay()
 {
 	Super::BeginPlay();
-	LoadCenterline();
+	FParse::Value(FCommandLine::Get(), TEXT("odtrack="), TrackName);
+	if (!TrackName.IsEmpty())
+	{
+		// open-world track: the map keeps drawing the area's roads (empty
+		// RoadCenterline = ODRaceHUD falls back to AODRoadManager's)
+		if (!LoadTrack())
+		{
+			TrackName.Empty();
+			Checkpoints.Reset();
+		}
+	}
+	else
+	{
+		LoadCenterline();
+	}
 
 	if (const UODRaceSave* Save = Cast<UODRaceSave>(
 			UGameplayStatics::LoadGameFromSlot(SaveSlot(), 0)))
@@ -200,16 +258,7 @@ void AODRaceManager::Tick(float DeltaSeconds)
 
 	if (NextGate == 0)
 	{
-		bRunning = true;
-		RaceStart = float(CrossTime);
-		NextSampleTime = 0.0f;
-		RecPositions.Reset();
-		RecRotations.Reset();
-		RecGateTimes.Reset();
-		if (Ghost.IsValid())
-		{
-			Ghost->Play(RaceStart);
-		}
+		StartRun(CrossTime);
 	}
 	else if (bRunning)
 	{
@@ -234,6 +283,27 @@ void AODRaceManager::Tick(float DeltaSeconds)
 			SaveBest();
 		}
 		NextGate = 0;  // ready for another lap/run
+		if (bLoop)
+		{
+			// circuit: the finish line is the start line - the next lap
+			// starts at this same crossing, no re-arm or speed check
+			StartRun(CrossTime);
+			NextGate = 1;
+		}
+	}
+}
+
+void AODRaceManager::StartRun(double CrossTime)
+{
+	bRunning = true;
+	RaceStart = float(CrossTime);
+	NextSampleTime = 0.0f;
+	RecPositions.Reset();
+	RecRotations.Reset();
+	RecGateTimes.Reset();
+	if (Ghost.IsValid())
+	{
+		Ghost->Play(RaceStart);
 	}
 }
 

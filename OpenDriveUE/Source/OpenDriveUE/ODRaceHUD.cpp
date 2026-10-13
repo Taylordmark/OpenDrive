@@ -1588,7 +1588,8 @@ void AODRaceHUD::DrawHUD()
 	// carrying the (home-only) map texture - actor iteration order isn't a
 	// promise that the level-placed home manager comes first.
 	AODRoadManager* RoadMgr = nullptr;
-	if (!Race)
+	const bool bRaceMap = Race && Race->RoadCenterline.Num() > 0;   // a custom track has none
+	if (!bRaceMap)
 	{
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
@@ -1607,7 +1608,7 @@ void AODRaceHUD::DrawHUD()
 	// what actually fixes the Oahu "connects unrelated streets + ~780,000
 	// line draws a frame" map lag. Race (Tail of the Dragon) has no such
 	// distinction - a single small loop was never in trouble either way.
-	const TArray<FVector2D>* MapCenterline = Race ? &Race->RoadCenterline
+	const TArray<FVector2D>* MapCenterline = bRaceMap ? &Race->RoadCenterline
 		: (RoadMgr && RoadMgr->MapCenterline.Num() > 0) ? &RoadMgr->MapCenterline
 		: (RoadMgr ? &RoadMgr->RoadCenterline : nullptr);
 	const TArray<FTransform>* MapGates = Race ? &Race->Checkpoints : nullptr;
