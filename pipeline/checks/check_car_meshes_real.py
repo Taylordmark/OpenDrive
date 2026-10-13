@@ -8,7 +8,8 @@ the contract the pawn relies on, from data/cars/real/real_manifest.json:
   width within TOL, or out to the fender flares the generator recorded
   (FenderYCm), which may grow at most FENDER_ALLOW cm a side past it;
 - triangle budget: ultra 40-120k, high ~1/2, Standard ~0.22 of ultra;
-- wheel authored at radius 34 / half width 13 (the pawn scales by WheelRadius/34);
+- wheel authored at radius 34 / half width 13 (the pawn scales by WheelRadius/34),
+  every tyre kind (road + the per-setup ones) exported;
 - arches, for every garage setup in unreal/apply_tuning_presets.py (its tyre
   size / width, ride height, camber, steering lock): >= 1.5 cm visible gap
   over the tyre at static ride height (Street 1.5-4.5), and the tyre clear of
@@ -92,8 +93,12 @@ for car, m in man["cars"].items():
                   + " ".join(f"{k} {a[k]}" for k in keys))
 w =man["wheel"]
 check(w["RefRadiusCm"] == 34 and w["HalfWidthCm"] == 13, f"wheel radius {w['RefRadiusCm']} half width {w['HalfWidthCm']}")
-for x in ("", "_high", "_ultra"):
-    check((REAL / "fbx" / f"SM_CarWheel_real{x}.fbx").exists(), f"SM_CarWheel_real{x}.fbx exists")
+for k in w["Kinds"]:      # the road tyre + each garage setup's (SetupTyres)
+    for x in ("", "_high", "_ultra"):
+        n = "SM_CarWheel_real" + ("" if k == "Road" else f"_{k}") + x
+        check((REAL / "fbx" / f"{n}.fbx").exists(), f"{n}.fbx exists")
+check(all(k in w["Kinds"] for fr in w["SetupTyres"].values() for k in fr) and set(w["SetupTyres"]) <= set(SETUPS),
+      f"setup tyres {w['SetupTyres']} are built kinds of known setups")
 check(len(man["cars"]) == 7, f"{len(man['cars'])}/7 cars in manifest")
 print(f"\n{len(fails)} failure(s)")
 sys.exit(1 if fails else 0)

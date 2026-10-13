@@ -1,7 +1,8 @@
 """Headless: import the Realistic car meshes (pipeline/make_car_meshes_real.py,
 data/cars/real/fbx/) as _real twins of the stylized ones:
-SM_Car_<Car>_real{,_high,_ultra} and SM_CarWheel_real{,_high,_ultra} in
-/Game/OpenDrive/Cars.
+SM_Car_<Car>_real{,_high,_ultra}, SM_CarWheel_real{,_high,_ultra} (road tyre)
+and SM_CarWheel_real_<Kind>{,_high,_ultra} (garage setup tyres, swapped in by
+AODVehiclePawn) in /Game/OpenDrive/Cars.
 
 ADD-only (Content is a shared junction): no stylized mesh, material, texture
 or data asset is written. The FBX goes into a staging folder first (so any
@@ -30,7 +31,8 @@ CAR_DIR = "/Game/OpenDrive/Cars"
 STAGE = "/Game/OpenDrive/Cars/_RealImportStaging"
 EAL = unreal.EditorAssetLibrary
 CHASSIS = ("Muscle", "JDM", "Super", "Pickup", "Rally", "Concept", "LMP")
-BASES = [f"SM_Car_{c}_real" for c in CHASSIS] + ["SM_CarWheel_real"]
+TYRES = ("Knobby", "Stretched", "Slick", "Rib", "Semislick")    # make_car_meshes_real.py RIM_FRAC
+BASES = [f"SM_Car_{c}_real" for c in CHASSIS] + ["SM_CarWheel_real"] + [f"SM_CarWheel_real_{k}" for k in TYRES]
 NAMES = [b + s for b in BASES for s in ("", "_high", "_ultra")]
 CATS = ("body", "plastic", "glass", "chrome", "tire", "rim", "lights")
 

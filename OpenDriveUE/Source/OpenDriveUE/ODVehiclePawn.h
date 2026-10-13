@@ -10,6 +10,7 @@ class UInputComponent;
 class UODVehicleDef;
 class UODVehicleMovement;
 class USpringArmComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 /** Which driving input source is in control (2026-08-27 controller/wheel
@@ -204,6 +205,12 @@ public:
 	/** Select a car by index and hot-swap it (mesh + geometry + baseline
 	 *  physics). No-op if out of range or already current. */
 	void SetVehicleByIndex(int32 Index);
+
+	/** Garage setup's tyres (AODTuningManager::ApplyPreset, by preset
+	 *  DisplayName): Realistic swaps each axle's wheel for that setup's
+	 *  SM_CarWheel_real_<Kind> (TyreKind in the .cpp); Stylized keeps the one
+	 *  wheel. Kept across car swaps. */
+	void SetTyreSetup(const FString& SetupName);
 
 	/** Turntable preview for the car-select menu: freezes physics, levels the
 	 *  car, and detaches the spring-arm yaw so rotating the pawn spins the car
@@ -415,6 +422,13 @@ private:
 	TArray<TObjectPtr<UODVehicleDef>> Vehicles;
 
 	int32 CurrentVehicleIdx = 0;
+
+	// the car's wheel after ODVisualStyle::Pick (before the tier Upgrade), and
+	// the garage setup whose tyre kinds ApplyWheelMeshes swaps in
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> WheelBaseMesh;
+	FString TyreSetup;
+	void ApplyWheelMeshes();
 
 	/** Holds the Body kinematic (no physics) from spawn until a downward
 	 *  trace confirms where the actual streamed terrain/road is, then

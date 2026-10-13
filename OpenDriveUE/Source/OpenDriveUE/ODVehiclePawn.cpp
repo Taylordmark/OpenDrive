@@ -116,14 +116,8 @@ void AODVehiclePawn::EnsureMeshes()
 	}
 	if (WheelVisuals.Num() > 0 && !WheelVisuals[0]->GetStaticMesh())
 	{
-		if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, WheelPath))))
-		{
-			for (int32 i = 0; i < WheelVisuals.Num(); ++i)
-			{
-				WheelVisuals[i]->SetStaticMesh(Wheel);
-				ODVisualStyle::PickSlots(WheelVisuals[i]);
-			}
-		}
+		WheelBaseMesh = ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, WheelPath));
+		ApplyWheelMeshes();
 	}
 }
 
@@ -188,6 +182,51 @@ void AODVehiclePawn::LoadVehicleDefs()
 	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: %d vehicle def(s) found"), Vehicles.Num());
 }
 
+// Realistic tyre per garage setup and axle (2026-10-13) - the same table as
+// pipeline/make_car_meshes_real.py SETUP_TYRES, which builds the meshes;
+// nullptr = the road tyre (Street, or any setup not listed).
+static const TCHAR* TyreKind(const FString& Setup, bool bFront)
+{
+	if (Setup == TEXT("Rally") || Setup == TEXT("Offroad"))
+	{
+		return TEXT("Knobby");
+	}
+	if (Setup == TEXT("Drift"))
+	{
+		return TEXT("Stretched");
+	}
+	if (Setup == TEXT("Drag"))
+	{
+		return bFront ? TEXT("Rib") : TEXT("Slick");
+	}
+	if (Setup == TEXT("Track"))
+	{
+		return TEXT("Semislick");
+	}
+	return nullptr;
+}
+
+void AODVehiclePawn::SetTyreSetup(const FString& SetupName)
+{
+	TyreSetup = SetupName;
+	ApplyWheelMeshes();
+}
+
+void AODVehiclePawn::ApplyWheelMeshes()
+{
+	// Stylized: PickKind returns the base, so this is the plain wheel as before
+	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
+	{
+		UStaticMesh* Wheel = ODAssetDetail::Upgrade(
+			ODVisualStyle::PickKind(WheelBaseMesh.Get(), TyreKind(TyreSetup, i < 2)));
+		if (WheelVisuals[i] && Wheel && WheelVisuals[i]->GetStaticMesh() != Wheel)
+		{
+			WheelVisuals[i]->SetStaticMesh(Wheel);
+			ODVisualStyle::PickSlots(WheelVisuals[i]);
+		}
+	}
+}
+
 void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 {
 	if (!Def || !Body || !Movement)
@@ -221,19 +260,19 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 	Body->BodyInstance.bOverrideMass = true;
 	Body->BodyInstance.SetMassOverride(MassKg);
 
-	if (UStaticMesh* Wheel = ODAssetDetail::Upgrade(ODVisualStyle::Pick(Def->WheelMesh.LoadSynchronous())))
+	if (UStaticMesh* Wheel = ODVisualStyle::Pick(Def->WheelMesh.LoadSynchronous()))
 	{
 		// visual-only scale to match this car's WheelRadiusCm against the
 		// mesh's own authored radius (see ReferenceWheelMeshRadiusCm above) -
 		// does not touch UODVehicleMovement's wheel table, which already
 		// takes WheelRadiusCm straight from the def for the physics radius.
 		const float WheelVisualScale = Def->WheelRadiusCm / ReferenceWheelMeshRadiusCm;
+		WheelBaseMesh = Wheel;
+		ApplyWheelMeshes();
 		for (UStaticMeshComponent* WV : WheelVisuals)
 		{
 			if (WV)
 			{
-				WV->SetStaticMesh(Wheel);
-				ODVisualStyle::PickSlots(WV);
 				WV->SetRelativeScale3D(FVector(WheelVisualScale));
 			}
 		}
@@ -1492,8 +1531,9 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	}
 
 	// wheel visuals: suspension travel + steer + spin from our sim, plus the
-	// garage setup's tire diameter/width and camber (no new art - the one
-	// wheel mesh scaled on its axle axis Y and tilted top-inward)
+	// garage setup's tire diameter/width and camber (the wheel mesh - in
+	// Realistic the setup's own tyre, ApplyWheelMeshes - scaled on its axle
+	// axis Y and tilted top-inward)
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
 	{
 		// shown spin: rolling with the road, so a stopped car's wheels sit

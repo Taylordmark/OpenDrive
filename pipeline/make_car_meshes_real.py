@@ -54,10 +54,15 @@ the bump stop, front ones swept to full lock (tyre_sweep) - so the fenders
 may flare past the stylized width. arch_clearance() ray-tests static / bump /
 lock / bump + lock per setup into the manifest.
 
-Wheel: one shared mesh (SM_CarWheel_real): tyre with grooves and shoulder
-blocks, a 6-spoke dished alloy on BOTH faces (the pawn mounts the same mesh
-left and right), lug nuts, brake disc. No caliper: it must not spin with the
-wheel, so it needs its own pawn component. Authored at REF_WHEEL_RADIUS_CM.
+Wheels: SM_CarWheel_real (road tyre: grooves, shoulder blocks) and one
+SM_CarWheel_real_<Kind> per garage-setup tyre (SETUP_TYRES: Knobby for
+Rally / Offroad, Stretched for Drift, Rib front / Slick rear for Drag,
+Semislick for Track), each with a 6-spoke dished alloy sized to its rim on
+BOTH faces (the pawn mounts the same mesh left and right), lug nuts, brake
+disc. All authored at REF_WHEEL_RADIUS_CM / WHEEL_HW; the pawn scales them by
+the setup's tyre size / width. No caliper: it must not spin with the wheel,
+so it needs its own pawn component. --preview adds tyres_lineup / _tread
+and side_<Car>_<Setup>.png (each setup's tyres, ride height and camber).
 
 Contract (unchanged from the stylized set, see make_car_meshes.py): pivot at
 the wheelbase centre at axle height z=0, cm, +x forward; axle x / half-track
@@ -74,7 +79,7 @@ afterwards: collapse interpolates UVs across cell borders).
 
 Outputs (data/cars/real/, gitignored like the rest of data/):
     fbx/SM_Car_<Car>_real{,_high,_ultra}.fbx
-    fbx/SM_CarWheel_real{,_high,_ultra}.fbx
+    fbx/SM_CarWheel_real{,_Knobby,_Stretched,_Slick,_Rib,_Semislick}{,_high,_ultra}.fbx
     real_manifest.json   (triangle counts, axles, wheel shape params)
     LICENSE.txt
 """
@@ -1401,32 +1406,75 @@ def build_interior(car, body_bm):
 
 # =================================================================== wheels
 WHEEL_HW = 13.0      # wheel half width (stylized SM_CarWheel: 13)
-RIM_R = 0.64 * R_REF
+RIM_FRAC = {"": 0.64, "Knobby": 0.55, "Stretched": 0.75, "Slick": 0.60, "Rib": 0.62, "Semislick": 0.70}
+RIM_R = RIM_FRAC[""] * R_REF
+SEG_KNOBBY = 144     # finer ring for crisp knobs
+# garage setup -> (front, rear) tyre kind; "" = the road tyre, SM_CarWheel_real.
+# Kind K is SM_CarWheel_real_K; the pawn's TyreKind() (ODVehiclePawn.cpp) keeps the same table.
+SETUP_TYRES = {"Rally": ("Knobby", "Knobby"), "Offroad": ("Knobby", "Knobby"),
+               "Drift": ("Stretched", "Stretched"), "Drag": ("Rib", "Slick"),
+               "Track": ("Semislick", "Semislick")}
 
 
-def build_wheel():
-    """Shared realistic wheel at R_REF, axle on local Y, symmetric about
-    y = 0 (the pawn mounts it unmirrored on both sides): tyre with rounded
-    shoulders, sidewall and tread grooves, a six-spoke dished alloy on both
-    faces, barrel, lug nuts / centre cap and a brake disc on y = 0."""
-    p = Part()
-    R, HW, SEG = R_REF, WHEEL_HW, 96
-    # --- tyre: (r, y) profile, bead -> sidewall -> shoulder -> tread (grooves) -> back
-    half = [(RIM_R + 0.6, HW - 1.2), (RIM_R + 3.0, HW - 0.2), (R - 8.0, HW), (R - 3.5, HW - 0.6),
+def tyre_shape(kind):
+    """(rim radius, (r, y) half profile bead -> centre for y > 0, pattern) of a
+    tyre kind; pattern(r, y, k) moves a vertex of ring segment k (tread
+    blocks). Every kind stays inside radius R_REF / half width WHEEL_HW, so
+    the arch checks (sized on those) hold for all of them."""
+    R, HW = R_REF, WHEEL_HW
+    rim = RIM_FRAC[kind] * R
+    same = (lambda r, y, k: (r, y))
+    if kind == "Knobby":        # tall sidewall, staggered blocks over a sunken base, shoulder lugs
+        side = [(rim + 0.6, HW - 1.2), (rim + 3.0, HW - 0.2), (R - 7.0, HW), (R - 4.0, HW), (R - 1.4, HW - 0.4)]
+        tread = [(R - 2.2, y) for y in np.linspace(HW - 1.2, 0.4, 10)]
+
+        def pat(r, y, k):       # k of SEG_KNOBBY: 4-segment blocks, steep walls (sharp at shade()'s 40 deg)
+            if r < R - 2.1:
+                return (r, y) if r < R - 7.5 or (k // 4) % 2 == 0 else (r - 1.4, y - math.copysign(1.0, y))
+            return (R, y) if (k // 4 + int((y + HW) // 3.2)) % 2 == 0 else (r, y)
+        return rim, side + tread, pat
+    if kind == "Stretched":     # low profile on a wide rim: sidewall slants in from the rim lip
+        side = [(rim + 0.6, HW - 0.8), (rim + 1.8, HW - 0.6), (R - 4.0, HW - 2.6), (R - 1.6, HW - 3.6),
+                (R - 0.3, HW - 4.6)]
+        tread = [(R, HW - 5.6), (R, 3.0), (R - 0.8, 2.8), (R - 0.8, 1.8), (R, 1.6)]
+        return rim, side + tread, same
+    if kind == "Slick":         # smooth, square shoulders
+        side = [(rim + 0.6, HW - 1.2), (rim + 3.0, HW - 0.2), (R - 6.0, HW), (R - 1.6, HW - 0.1), (R - 0.3, HW - 0.9)]
+        return rim, side + [(R, HW - 1.8), (R, 6.0), (R, 0.6)], same
+    if kind == "Rib":           # skinny front-runner: round shoulders, narrow circumferential ribs
+        side = [(rim + 0.6, HW - 1.2), (rim + 3.0, HW - 0.2), (R - 8.0, HW), (R - 4.0, HW - 1.0), (R - 1.6, HW - 2.8),
+                (R - 0.3, HW - 4.4)]
+        tread = [(R, 8.2), (R, 6.7), (R - 1.0, 6.6), (R - 1.0, 6.1), (R, 6.0), (R, 2.7), (R - 1.0, 2.6),
+                 (R - 1.0, 2.1), (R, 2.0), (R, 0.4)]
+        return rim, side + tread, same
+    if kind == "Semislick":     # square shoulders, two grooves, low profile
+        side = [(rim + 0.6, HW - 1.0), (rim + 2.4, HW - 0.2), (R - 4.0, HW), (R - 1.0, HW - 0.3), (R - 0.2, HW - 1.2)]
+        tread = [(R, HW - 1.8), (R, 5.8), (R - 1.0, 5.6), (R - 1.0, 4.4), (R, 4.2), (R, 0.6)]
+        return rim, side + tread, same
+    # road: grooved tread, lateral notches in the shoulder blocks every other segment
+    side = [(rim + 0.6, HW - 1.2), (rim + 3.0, HW - 0.2), (R - 8.0, HW), (R - 3.5, HW - 0.6),
             (R - 1.2, HW - 2.2), (R - 0.2, HW - 4.0)]
     tread = [(R, 9.6), (R, 8.6), (R - 0.9, 8.4), (R - 0.9, 7.2), (R, 7.0), (R, 2.8), (R - 0.9, 2.6),
              (R - 0.9, 1.4), (R, 1.2)]
-    prof = half + tread + [(r, -y) for r, y in tread[::-1]] + [(r, -y) for r, y in half[::-1]]
+    return rim, side + tread, (lambda r, y, k: (r - 0.7 if abs(y) > 9.0 and r > R - 4.0 and k % 2 else r, y))
+
+
+def build_wheel(kind=""):
+    """Realistic wheel at R_REF, axle on local Y, symmetric about y = 0 (the
+    pawn mounts it unmirrored on both sides): tyre of the given kind
+    (tyre_shape), a six-spoke dished alloy sized to its rim on both faces,
+    barrel, lug nuts / centre cap and a brake disc on y = 0."""
+    p = Part()
+    SEG = SEG_KNOBBY if kind == "Knobby" else 96
+    rim, half, pat = tyre_shape(kind)
+    prof = half + [(r, -y) for r, y in half[::-1]]
     rings = []
     for i, (r, y) in enumerate(prof):
         ring = []
         for k in range(SEG):
             t = 2 * math.pi * k / SEG
-            rr = r
-            # shoulder tread blocks: lateral grooves notched into every other segment
-            if abs(y) > 9.0 and r > R - 4.0 and k % 2:
-                rr -= 0.7
-            ring.append(p.v((rr * math.cos(t), y, rr * math.sin(t))))
+            rr, yy = pat(r, y, k)
+            ring.append(p.v((rr * math.cos(t), yy, rr * math.sin(t))))
         rings.append(ring)
     for i in range(len(prof) - 1):
         for k in range(SEG):
@@ -1437,16 +1485,18 @@ def build_wheel():
         j = (k + 1) % SEG
         p.f((rings[-1][k], rings[-1][j], rings[0][j], rings[0][k]), TIRE)
     # --- rim barrel + lips: revolve (r, y), closed
-    barrel = [(RIM_R + 1.4, HW - 0.6), (RIM_R + 1.4, HW - 1.6), (RIM_R - 0.2, HW - 2.0), (RIM_R - 1.2, 6.0),
-              (RIM_R - 1.2, -6.0), (RIM_R - 0.2, -(HW - 2.0)), (RIM_R + 1.4, -(HW - 1.6)), (RIM_R + 1.4, -(HW - 0.6)),
-              (RIM_R - 1.6, -(HW - 0.6)), (RIM_R - 2.4, -6.0), (RIM_R - 2.4, 6.0), (RIM_R - 1.6, HW - 0.6)]
-    br = revolve(p, barrel, SEG, lambda i: RIM, closed=True)
+    HW = WHEEL_HW
+    barrel = [(rim + 1.4, HW - 0.6), (rim + 1.4, HW - 1.6), (rim - 0.2, HW - 2.0), (rim - 1.2, 6.0),
+              (rim - 1.2, -6.0), (rim - 0.2, -(HW - 2.0)), (rim + 1.4, -(HW - 1.6)), (rim + 1.4, -(HW - 0.6)),
+              (rim - 1.6, -(HW - 0.6)), (rim - 2.4, -6.0), (rim - 2.4, 6.0), (rim - 1.6, HW - 0.6)]
+    revolve(p, barrel, SEG, lambda i: RIM, closed=True)
     # --- spoke faces on both sides
     for s in (1, -1):
-        spoke_face(p, s)
-    # --- brake disc + hat on the centre plane
-    cylinder(p, (0, -1.3, 0), (0, 1.3, 0), 0.47 * R, 0.47 * R, 64, RIM)
-    cylinder(p, (0, -3.0, 0), (0, 3.0, 0), 0.2 * R, 0.2 * R, 32, ACCENT)
+        spoke_face(p, s, r_out=rim - 1.4)
+    # --- brake disc + hat on the centre plane (inside the smallest rim)
+    rd = min(0.47 * R_REF, rim - 3.0)
+    cylinder(p, (0, -1.3, 0), (0, 1.3, 0), rd, rd, 64, RIM)
+    cylinder(p, (0, -3.0, 0), (0, 3.0, 0), 0.2 * R_REF, 0.2 * R_REF, 32, ACCENT)
     bmesh.ops.recalc_face_normals(p.bm, faces=p.bm.faces)
     for f in p.bm.faces:
         f.smooth = True
@@ -1658,6 +1708,25 @@ def place_wheels(car, wheel):
     return obs
 
 
+def setup_wheels(car, setup, g, wheels):
+    """A garage setup's tyres as the pawn shows them at rest: its kind per
+    axle, centre at -RideHeightDelta, scaled by diameter / width, camber
+    leaning the top inboard."""
+    obs = []
+    kinds = SETUP_TYRES.get(setup, ("", ""))
+    for a, x in enumerate((car.fx, car.rx)):
+        R, hw, zs, _, _ = setup_tyre(car, g, a == 0)
+        S = R / R_REF
+        for s in (1, -1):
+            o = bpy.data.objects.new("w", wheels[kinds[a]].data)
+            o.location = (x, s * car.ht, zs)
+            o.scale = (S, hw / WHEEL_HW, S)
+            o.rotation_euler = (math.radians(s * g["camber_deg"]), 0.0, 0.0)
+            bpy.context.scene.collection.objects.link(o)
+            obs.append(o)
+    return obs
+
+
 def stylized_object(name):
     """The stylized OBJ, for the old-vs-new comparison render."""
     path = ROOT / "data" / "cars" / "procedural" / "obj" / f"{name}.obj"
@@ -1682,11 +1751,23 @@ def main():
         bpy.data.objects.remove(o)
     cars = CARS_ARG or list(PRESETS)
     manifest = {"wheel": {}, "cars": {}}
-    wp = build_wheel()
-    wsrc = to_object(wp, "SM_CarWheel_src")
-    wt, wheel = make_tiers(wsrc, "SM_CarWheel_real")
-    bpy.data.objects.remove(wsrc)
-    manifest["wheel"] = dict(tris=wt, RefRadiusCm=R_REF, HalfWidthCm=WHEEL_HW, RimRadiusCm=RIM_R)
+    wheels, wt = {}, {}
+    for kind in RIM_FRAC:
+        wsrc = to_object(build_wheel(kind), "SM_CarWheel_src")
+        t, wheels[kind] = make_tiers(wsrc, "SM_CarWheel_real" + (f"_{kind}" if kind else ""))
+        wt.update(t)
+        bpy.data.objects.remove(wsrc)
+    wheel = wheels[""]
+    manifest["wheel"] = dict(tris=wt, RefRadiusCm=R_REF, HalfWidthCm=WHEEL_HW, RimRadiusCm=RIM_R,
+                             Kinds={k or "Road": round(f * R_REF, 1) for k, f in RIM_FRAC.items()},
+                             SetupTyres=SETUP_TYRES)
+    if DO_PREVIEW:      # the tyre line-up, 3/4 view
+        PREVIEW.mkdir(parents=True, exist_ok=True)
+        for i, w in enumerate(wheels.values()):
+            w.location = ((2.5 - i) * 85.0, 0.0, 0.0)
+        render_views(list(wheels.values()), -R_REF, 340.0, PREVIEW / "tyres", views=(("lineup", 65.0), ("tread", 25.0)))
+        for w in wheels.values():
+            w.location = (0.0, 0.0, 0.0)
     for name in cars:
         car, tris, ultra = build_car(name)
         manifest["cars"][name] = dict(tris=tris, arches=arch_clearance(car, ultra),
@@ -1721,6 +1802,12 @@ def main():
                 ultra.location.y = 0.0
             for w in ws:
                 bpy.data.objects.remove(w)
+            for s, g in SETUPS.items():     # side view per garage setup: its tyres, ride height, camber
+                ws = setup_wheels(car, s, g, wheels)
+                render_views([ultra] + ws, -g["ride_height_delta"] - car.wr * g["tire_diameter_scale"], length,
+                             PREVIEW / f"{name}_{s}", views=(("side", 90.0),))
+                for w in ws:
+                    bpy.data.objects.remove(w)
         bpy.data.objects.remove(ultra)
     OUT.mkdir(parents=True, exist_ok=True)
     mpath = OUT / "real_manifest.json"

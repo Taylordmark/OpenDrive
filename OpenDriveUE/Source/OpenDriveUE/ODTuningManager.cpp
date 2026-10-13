@@ -106,6 +106,10 @@ void AODTuningManager::ApplyPreset(UODTuningPreset* Preset)
 	Move->RearTireWidthScale = Preset->RearTireWidthScale;
 	Move->MarkBodyDirty();
 
+	if (AODVehiclePawn* VehiclePawn = Cast<AODVehiclePawn>(Car))
+	{
+		VehiclePawn->SetTyreSetup(Preset->DisplayName);   // Realistic: the setup's tyre meshes
+	}
 	CurrentPresetName = Preset->DisplayName;
 	UE_LOG(LogTemp, Display, TEXT("ODTuningManager: applied '%s'"),
 		*Preset->DisplayName);
