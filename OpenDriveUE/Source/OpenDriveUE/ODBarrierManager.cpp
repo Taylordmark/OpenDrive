@@ -88,8 +88,8 @@ bool AODBarrierManager::LoadBiomePoints()
 	// mirrors (same sidecar file, same format). The ForestWeight byte isn't
 	// needed here (only the classified biome id is), read past but discarded.
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{

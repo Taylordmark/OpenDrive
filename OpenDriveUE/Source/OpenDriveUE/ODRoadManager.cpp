@@ -587,8 +587,8 @@ void AODRoadManager::LoadCenterline()
 		          // Dragon, which draws its map off AODRaceManager's own copy
 	}
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (CenterlineFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (CenterlineFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 	{
@@ -642,8 +642,8 @@ void AODRoadManager::LoadRouteGraph()
 		return;   // no open-world road data (e.g. Tail of the Dragon) - no nav
 	}
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ (CenterlineFilePrefix.Replace(TEXT("centerline_"), TEXT("routegraph_")) + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (CenterlineFilePrefix.Replace(TEXT("centerline_"), TEXT("routegraph_")) + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'G' || Bin[3] != '1')
 	{
@@ -1012,8 +1012,8 @@ void AODRoadManager::LoadMapCenterline()
 		return;   // unset - DrawStageMap falls back to RoadCenterline
 	}
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (MapCenterlineFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (MapCenterlineFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'M' || Bin[3] != '1')
 	{
@@ -1049,8 +1049,8 @@ void AODRoadManager::LoadPlaceLabels()
 		return;   // feature off for this level actor instance
 	}
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (PlaceLabelFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (PlaceLabelFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 4 + GenerationIdBytes + 4
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'L' || Bin[3] != '1')
 	{

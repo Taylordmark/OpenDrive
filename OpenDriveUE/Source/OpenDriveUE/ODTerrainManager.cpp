@@ -439,8 +439,8 @@ void AODTerrainManager::LoadRoadStationSidecar()
 	FString Area = TerrainTilePrefix.Mid(8);
 	Area.RemoveFromEnd(TEXT("_test"));
 
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("roadstations_%s.bin"), *Area);
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("roadstations_%s.bin"), *Area));
 
 	TArray<FRoadStation> Loaded;
 	FString GenId;
@@ -484,13 +484,13 @@ void AODTerrainManager::LoadSatAlbedo()
 	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/sat_") + TerrainTilePrefix.Mid(8);
 	FString Json;
 	TSharedPtr<FJsonObject> Meta;
-	if (!FFileHelper::LoadFileToString(Json, *(Base + TEXT(".json")))
+	if (!FFileHelper::LoadFileToString(Json, *ODTileSource::Fetch(Base + TEXT(".json")))
 		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
 	{
 		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no satellite albedo (%s.json) - biome tint only"), *Base);
 		return;
 	}
-	SatTex = FImageUtils::ImportFileAsTexture2D(Base + TEXT(".png"));
+	SatTex = FImageUtils::ImportFileAsTexture2D(ODTileSource::Fetch(Base + TEXT(".png")));
 	if (!SatTex)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - biome tint only"), *Base);
@@ -526,8 +526,8 @@ void AODTerrainManager::LoadBiomeSidecar()
 	FString Area = TerrainTilePrefix.Mid(8);
 	Area.RemoveFromEnd(TEXT("_test"));
 
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("biome_%s_test.bin"), *Area);
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("biome_%s_test.bin"), *Area));
 
 	TArray<FBiomeSample> Loaded;
 	if (!ParseBiomeSidecarFile(Path, Loaded))

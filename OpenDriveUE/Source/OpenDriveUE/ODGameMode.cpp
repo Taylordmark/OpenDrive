@@ -1,5 +1,6 @@
 #include "ODGameMode.h"
 #include "ODTileSource.h"
+#include "Async/Async.h"
 
 #include "Dom/JsonObject.h"
 #include "EngineUtils.h"
@@ -41,7 +42,6 @@ AODGameMode::AODGameMode()
 void AODGameMode::BeginPlay()
 {
 	Super::BeginPlay();
-	ODTileSource::Init();
 
 	// AODRoadManager is the same actor ODMainMenu's -odpick hook reads
 	// (GetTownNodes()) and is placed once per open-world map with its
@@ -323,7 +323,7 @@ void AODGameMode::LoadWorldManifest()
 	{
 		return;
 	}
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json");
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json"));
 	FString Text;
 	if (!FFileHelper::LoadFileToString(Text, *Path))
 	{
@@ -361,6 +361,7 @@ void AODGameMode::LoadWorldManifest()
 			}
 			FODStreamArea& A = Found.AddDefaulted_GetRef();
 			A.Name = Name;
+			(*Obj)->TryGetStringArrayField(TEXT("files"), A.Files);
 			A.Rect = FBox2D(FVector2D((*R)[0]->AsNumber(), (*R)[1]->AsNumber()),
 				FVector2D((*R)[2]->AsNumber(), (*R)[3]->AsNumber()));
 		}
@@ -372,6 +373,55 @@ void AODGameMode::LoadWorldManifest()
 			return;
 		}
 	}
+}
+
+void AODGameMode::PrefetchArea(FODStreamArea& A)
+{
+	if (A.bPrefetching)
+	{
+		return;
+	}
+	A.bPrefetching = true;
+	TArray<FString> Paths;
+	for (const FString& F : A.Files)
+	{
+		Paths.Add(FPaths::ProjectContentDir() / TEXT("OpenDrive") / F);
+	}
+	TWeakObjectPtr<AODGameMode> WeakThis(this);
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Name = A.Name, Paths]()
+	{
+		// ponytail: one worker, files in order, a file still pending after ~1 min
+		// is skipped (the area spawns without it) - parallelize if areas get big.
+		constexpr int32 MaxTries = 30;
+		int32 NumGaveUp = 0;
+		for (const FString& P : Paths)
+		{
+			FString Unused;
+			int32 Tries = 0;
+			while (ODTileSource::Resolve(P, Unused) == EODTileSource::Pending && ++Tries < MaxTries)
+			{
+				FPlatformProcess::Sleep(ODTileSource::RetryDelaySeconds);
+			}
+			NumGaveUp += (Tries == MaxTries);
+		}
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Name, NumFiles = Paths.Num(), NumGaveUp]()
+		{
+			if (!WeakThis.IsValid())
+			{
+				return;
+			}
+			for (FODStreamArea& A : WeakThis->StreamAreas)
+			{
+				if (A.Name == Name)
+				{
+					A.bPrefetching = false;
+					A.bPrefetched = true;
+				}
+			}
+			UE_LOG(LogTemp, Display, TEXT("ODGameMode: area '%s' prefetched %d file(s), %d still pending (skipped)"),
+				*Name, NumFiles, NumGaveUp);
+		});
+	});
 }
 
 void AODGameMode::Tick(float DeltaSeconds)
@@ -401,6 +451,11 @@ void AODGameMode::Tick(float DeltaSeconds)
 		const double D = FMath::Sqrt(A.Rect.ComputeSquaredDistanceToPoint(P));
 		if (!A.bLive && D < 800000.0)
 		{
+			if (ODTileSource::IsEnabled() && !A.bPrefetched)
+			{
+				PrefetchArea(A);   // spawns on a later check, once its files are cached
+				continue;
+			}
 			A.Actors.Reset();
 			for (AActor* Actor : SpawnAreaSet(A.Name))
 			{

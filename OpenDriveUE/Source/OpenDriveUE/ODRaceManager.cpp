@@ -1,4 +1,5 @@
 #include "ODRaceManager.h"
+#include "ODTileSource.h"
 
 #include "Algo/BinarySearch.h"
 #include "Components/InputComponent.h"
@@ -167,8 +168,8 @@ void AODRaceManager::LoadCenterline()
 	// same bin-sidecar pattern as ODForestManager's terrain mask: works in
 	// editor, standalone, AND packaged builds (no editor-only Texture Source)
 	TArray<uint8> Bin;
-	const FString Path =
-		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/centerline.bin");
+	const FString Path = ODTileSource::Fetch(
+		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/centerline.bin"));
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 	{

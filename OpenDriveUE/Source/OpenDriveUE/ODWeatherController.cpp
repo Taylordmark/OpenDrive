@@ -1,4 +1,5 @@
 #include "ODWeatherController.h"
+#include "ODTileSource.h"
 
 #include "Camera/CameraComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -301,8 +302,8 @@ void AODWeatherController::LoadClimate()
 
 bool AODWeatherController::LoadClimateFile(const FString& Area, FODClimate& Out)
 {
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("climate_%s.json"), *Area);
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("climate_%s.json"), *Area));
 
 	FString Text;
 	TSharedPtr<FJsonObject> Obj;

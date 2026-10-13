@@ -50,7 +50,7 @@ EODTileSource ODTileSource::Resolve(const FString& ContentPath, FString& OutRead
 
 	// ponytail: cache never invalidates - key the dir by world generation id
 	// once the server re-bakes areas in place.
-	const FString CachePath = FPaths::ProjectSavedDir() / TEXT("TileCache") / Rel;
+	const FString CachePath = ODTileSource::CachePath(ContentPath);
 	if (PF.FileExists(*CachePath))
 	{
 		OutReadPath = CachePath;
@@ -96,6 +96,24 @@ EODTileSource ODTileSource::Resolve(const FString& ContentPath, FString& OutRead
 	}
 	OutReadPath = CachePath;
 	return EODTileSource::Ready;
+}
+
+FString ODTileSource::Fetch(const FString& ContentPath)
+{
+	FString ReadPath;
+	return Resolve(ContentPath, ReadPath) == EODTileSource::Ready ? ReadPath : ContentPath;
+}
+
+FString ODTileSource::CachePath(const FString& ContentPath)
+{
+	FString Rel = ContentPath;
+	return Rel.RemoveFromStart(FPaths::ProjectContentDir() / TEXT("OpenDrive/"))
+		? FPaths::ProjectSavedDir() / TEXT("TileCache") / Rel : FString();
+}
+
+bool ODTileSource::IsEnabled()
+{
+	return !GServerUrl.IsEmpty();
 }
 
 void ODTileSource::RetryLater(UObject* Owner, TSet<FIntPoint>& Pending, const FIntPoint& Key)

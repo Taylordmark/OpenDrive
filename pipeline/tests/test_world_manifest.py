@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_world_manifest import MASKS, build_manifest, rect_cm
+from build_world_manifest import MASKS, area_files, build_manifest, rect_cm
 from test_areas import AREAS, TERRAIN_TILE_SIZE_CM as T
 from world_frame import WORLDS, lcc_forward
 
@@ -98,6 +98,20 @@ if __name__ == "__main__":
                 assert (MASKS / f).is_file(), f
             assert any(MASKS.glob(f"road_{a}_test_tile_*.bin")), a
             assert any((MASKS.parent / "MasksV2").glob(f"roadv3_{a}_test_tile_*.bin")), a
+
+    # (e) live streaming: each area's prefetch list holds those sidecars,
+    #     its water tiles, nothing per-tile otherwise, nothing of another area
+    for areas in manifest.values():
+        for a in areas:
+            files = a["files"]
+            assert files == area_files(a["name"])
+            assert f"Masks/roadstations_{a['name']}.bin" in files
+            assert f"Masks/biome_{a['name']}_test.bin" in files
+            assert {f"Masks/{p.name}" for p in MASKS.glob(f"water_{a['name']}_test_tile_*.bin")} <= set(files)
+            assert all("_tile_" not in f or f.startswith(f"Masks/water_{a['name']}_test_tile_") for f in files)
+            assert all((MASKS.parent / f).is_file() for f in files)
+            others = [o["name"] for o in areas if o["name"] != a["name"]]
+            assert not any(f.endswith((f"_{o}.bin", f"_{o}_test.bin")) for f in files for o in others), files
 
     # (d) step 3 (2026-10-05): the gv halves own the tiles either side of the
     #     2 km tile edge nearest -118.45 at the bbox centre latitude, bake a

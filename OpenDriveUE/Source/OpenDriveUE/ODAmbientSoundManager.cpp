@@ -1,4 +1,5 @@
 #include "ODAmbientSoundManager.h"
+#include "ODTileSource.h"
 
 #include "Components/AudioComponent.h"
 #include "EngineUtils.h"
@@ -82,8 +83,8 @@ bool AODAmbientSoundManager::LoadZoneGrid()
 		UE_LOG(LogTemp, Display, TEXT("ODAmbientSoundManager: no AmbientZoneFile - zone layers silent, weather layers only"));
 		return false;
 	}
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ (AmbientZoneFile + TEXT(".bin"));
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (AmbientZoneFile + TEXT(".bin")));
 
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 20

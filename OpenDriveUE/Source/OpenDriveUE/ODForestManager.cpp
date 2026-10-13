@@ -1,4 +1,5 @@
 #include "ODForestManager.h"
+#include "ODTileSource.h"
 #include "ODAssetDetail.h"
 #include "ODVisualStyle.h"
 
@@ -417,8 +418,8 @@ bool AODForestManager::LoadMask()
 	// staged into the pak via DirectoriesToAlwaysStageAsUFS ('ODM1', uint32 LE
 	// res, res*res forest-weight bytes)
 	TArray<uint8> Bin;
-	const FString BinPath =
-		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/terrain_mask.bin");
+	const FString BinPath = ODTileSource::Fetch(
+		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/terrain_mask.bin"));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'M' || Bin[3] != '1')
 	{
@@ -450,8 +451,8 @@ bool AODForestManager::LoadBiomePoints()
 	// 'ODB2' (2026-09-25, sec 7.35) appends uint8 Northness255, uint8
 	// Moisture255, uint16 ElevM; ODB1 keeps the neutral FBiomePoint defaults.
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
@@ -500,8 +501,8 @@ bool AODForestManager::LoadElevationGrid()
 	// 'ODE1', uint32 LE N, N * (float32 X_cm, float32 Y_cm, float32 Z_cm) -
 	// pipeline/build_forest_elevation.py
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'E' || Bin[3] != '1')
 	{
@@ -557,8 +558,8 @@ bool AODForestManager::LoadCenterline()
 	auto LoadPoints = [this](const FString& Prefix) -> bool
 	{
 		TArray<uint8> Bin;
-		const FString BinPath = FPaths::ProjectContentDir()
-			/ TEXT("OpenDrive/Masks") / (Prefix + TEXT(".bin"));
+		const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+			/ TEXT("OpenDrive/Masks") / (Prefix + TEXT(".bin")));
 		if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 		{
@@ -615,8 +616,8 @@ bool AODForestManager::LoadBuildingCentroids()
 	// format as LoadCenterline(), just a different sidecar
 	// (pipeline/export_building_centroids_bin.py)
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (BuildingCentroidFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BuildingCentroidFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 	{
@@ -660,8 +661,8 @@ bool AODForestManager::LoadRoadStations()
 	// uses (see RoadStationFilePrefix's comment) - lifted to ODBinSidecarUtil.h
 	// so both managers call the exact same code rather than keeping two
 	// copies in sync.
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (RoadStationFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (RoadStationFilePrefix + TEXT(".bin")));
 	TArray<FRoadStation> Loaded;
 	FString GenId;
 	if (!ParseRoadStationSidecarFile(BinPath, Loaded, GenId))
@@ -707,6 +708,16 @@ bool AODForestManager::LoadWaterLakes()
 	const FString Dir = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks");
 	TArray<FString> AllBin;
 	IFileManager::Get().FindFiles(AllBin, *Dir, TEXT(".bin"));
+	if (ODTileSource::IsEnabled())
+	{
+		// streamed area: AODGameMode::PrefetchArea put its water tiles in the cache
+		TArray<FString> CachedBin;
+		IFileManager::Get().FindFiles(CachedBin, *ODTileSource::CachePath(Dir / TEXT("")), TEXT(".bin"));
+		for (const FString& FileName : CachedBin)
+		{
+			AllBin.AddUnique(FileName);
+		}
+	}
 	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
 
 	int32 TileFileCount = 0;
@@ -716,7 +727,7 @@ bool AODForestManager::LoadWaterLakes()
 		{
 			continue;
 		}
-		const FString Path = Dir / FileName;
+		const FString Path = ODTileSource::Fetch(Dir / FileName);
 		TArray<uint8> Bin;
 		if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
 			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'L' || Bin[3] != '1')

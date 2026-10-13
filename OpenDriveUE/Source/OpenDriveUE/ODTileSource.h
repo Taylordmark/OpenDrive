@@ -29,13 +29,26 @@ namespace ODTileSource
 {
 	constexpr float RetryDelaySeconds = 2.0f;
 
-	/** Game thread, once (AODGameMode::BeginPlay): reads -ODTileServer and
+	/** Game thread, once (module startup): reads -ODTileServer and
 	 *  loads the HTTP module so worker threads never have to. */
 	void Init();
 
-	/** Worker thread - may block on HTTP for up to ~30 s. ContentPath is the
+	/** Any thread - may block on HTTP for up to ~35 s. ContentPath is the
 	 *  usual FPaths::ProjectContentDir() / "OpenDrive/..." sidecar path. */
 	EODTileSource Resolve(const FString& ContentPath, FString& OutReadPath);
+
+	/** Any thread, blocking: Resolve for a whole-area sidecar. Returns the
+	 *  path to read - ContentPath itself when there's nothing, so the caller's
+	 *  own load fails exactly as it does for a missing file today. Pending
+	 *  counts as nothing: AODGameMode::PrefetchArea already waited for a
+	 *  streamed area's files; only the level-placed home area can miss. */
+	FString Fetch(const FString& ContentPath);
+
+	/** Saved/TileCache/ twin of a Content/OpenDrive/ path, empty if
+	 *  ContentPath isn't under Content/OpenDrive/. */
+	FString CachePath(const FString& ContentPath);
+
+	bool IsEnabled();
 
 	/** Game thread: removes Key from Pending after RetryDelaySeconds so the
 	 *  owner's Tick re-requests it - only if the tile is still wanted by then. */
