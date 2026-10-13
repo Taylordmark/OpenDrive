@@ -42,12 +42,17 @@ start/end, side-glass end and a beltline rising toward the tail, in place of
 the stylized one. Nose / tail x and floor are the stylized ones, so the
 bounding box holds.
 
-Arches: the lip is a circle ARCH_GAP above the tyre at the in-game static
-wheel centre - the authored axle, z = 0, since UODVehicleMovement derives the
-strut tops from the sag (2026-10-13) - with a rolled turned-in lip; the well
-roof clears the tyre at the bump stop (tyre top BUMP_TRAVEL over the authored
-one, body-fixed, = BumpTravelCm) and the fender stands FENDER_OUT outboard of
-the tyre. arch_clearance() ray-tests static / bump / full lock into the manifest.
+Arches: built for every garage setup's tyre (SETUPS, read from
+unreal/apply_tuning_presets.py). The in-game static wheel centre is the
+authored axle - RideHeightDelta (UODVehicleMovement derives the strut tops
+from the sag, 2026-10-13). The lip, with a rolled turned-in edge, is the union
+of a circle ARCH_GAP over the Street tyre and LIP_MIN over each setup's; the
+well roof clears the tyre at the bump stop (tyre top BUMP_TRAVEL over the
+authored one, body-fixed, = BumpTravelCm, any tyre size). The fender stands
+FENDER_OUT outboard of every setup tyre point above the lip, static and at
+the bump stop, front ones swept to full lock (tyre_sweep) - so the fenders
+may flare past the stylized width. arch_clearance() ray-tests static / bump /
+lock / bump + lock per setup into the manifest.
 
 Wheel: one shared mesh (SM_CarWheel_real): tyre with grooves and shoulder
 blocks, a 6-spoke dished alloy on BOTH faces (the pawn mounts the same mesh
@@ -102,6 +107,9 @@ CARS_ARG = [a for a in ARGS if not a.startswith("--")]
 sys.modules.setdefault("PIL", types.SimpleNamespace(Image=None))
 sys.path.insert(0, str(ROOT / "pipeline"))
 import make_car_meshes as mcm  # noqa: E402
+import tuning_setups  # noqa: E402
+
+SETUPS = tuning_setups.setups()     # garage setups' tyre size / width / ride height / camber / lock
 
 mcm.Mesh.save = lambda self, name: len(self.tris)   # record only, never rewrite the stylized OBJs
 REC = []
@@ -375,14 +383,27 @@ class Car:
         self.profile, self.gs, self.ge = pr["profile"], pr["gs"], pr["ge"]
         self.sge = pr.get("sge", self.ge)             # side glass ends here (C-pillar / sail behind)
         self.belt_fr, self.hood_crown = pr["belt"], pr.get("hood_crown", 0.06)
-        # arches: the lip is a circle round the in-game static wheel centre
-        # (ARCH_GAP above the tyre); the well roof clears the tyre at the
-        # bump stop, wheel centre BUMP_TRAVEL up
-        self.zs = (0.0, 0.0)
-        self.r_arch = self.wr + ARCH_GAP
+        # arches (module docstring): lip circles (centre z, radius), Street
+        # first; the well roof clears the tyre at the bump stop
+        self.zs = (0.0, 0.0)      # Street static wheel centres
+        # per axle (front, rear); a front circle encloses the tyre steered to lock
+        # (centre z, x semi-axis, z semi-axis, flat-top half length): the side
+        # view of a tyre steered by l is its ellipses (R cos l, R) swept
+        # +-hw sin l along x
+        m = self.wr + ARCH_GAP
+        self.arcs = ([(0.0, m, m, 0.0)], [(0.0, m, m, 0.0)])
+        for g in SETUPS.values():
+            for a in (0, 1):
+                R, hw, zs, _, lock = setup_tyre(self, g, a == 0)
+                for l in {0.0, math.radians(lock)}:
+                    self.arcs[a].append((zs, R * math.cos(l) + LIP_MIN, R + LIP_MIN, hw * math.sin(l)))
+        self.r_arch = max(ax + s for arcs in self.arcs for _, ax, _, s in arcs)     # opening half length
         self.r_bump = self.wr + BUMP_CLEAR
         self.tyre_out = self.ht + WHEEL_HW * self.wr / R_REF
-        self.need_y = self.tyre_out + FENDER_OUT
+        out, self.tyre_in, sx, self.swept = tyre_sweep(self)
+        self.need_y = tuple(self.ht + o + FENDER_OUT for o in out)    # front, rear fender skin
+        self.well_clear = max(WELL_CLEAR, max(self.tyre_in) + 2.0)    # well inner wall inboard of the half track
+        self.r_well = max(self.r_arch, sx + 3.0)                       # well roof x half-length
         self.has_tail = st["tail_z"] is not None
         # a short nose (Concept) would put the last ring on the arch: shallower cap
         self.bulge = min(BULGE, self.x0 - self.fx - self.r_arch - 4.0)
@@ -397,6 +418,15 @@ class Car:
         xdr = max(bp) if bp else self.rx + self.wr + 30.0
         self.doors = DOORS.get(name, [(xdf, xdr)])
         self.door_x = sorted({x for d in self.doors for x in d}, reverse=True)
+
+    def lip(self, dx, a):
+        """Arch lip z at dx from axle a (0 front, 1 rear; -1e9 outside the opening)."""
+        dx = np.asarray(dx, float)
+        out = np.full(dx.shape, -1e9)
+        for cz, ex, ez, s in self.arcs[a]:
+            e = 1.0 - (np.maximum(np.abs(dx) - s, 0.0) / ex) ** 2
+            out = np.maximum(out, np.where(e > 0.0, cz + ez * np.sqrt(np.maximum(e, 0.0)), -1e9))
+        return out
 
     def zt(self, x):
         px, _, pzt = zip(*sorted(self.profile))
@@ -423,11 +453,54 @@ class Car:
 
 DOORS = {"Pickup": [(115.0, 18.0), (18.0, -38.0)]}   # crew cab: two doors a side
 
-ARCH_GAP = 3.0       # arch lip radius = wheel radius + this, round the static wheel centre
+ARCH_GAP = 3.0       # arch lip radius = wheel radius + this, round the Street static wheel centre
+LIP_MIN = 2.0        # ... and at least this over every setup's static tyre (the slammed Track one)
 BUMP_CLEAR = 2.5     # well roof radius = wheel radius + this, round the full-bump wheel centre
 BUMP_TRAVEL = 8.0    # UODVehicleMovement::BumpTravelCm: the bump stop, tyre top over the authored one
-FENDER_OUT = 3.0     # fender skin this far outboard of the tyre face over the arches (tyre tucks under at bump)
-WELL_CLEAR = 34.0    # well inner wall this far inboard of the half-track: clears the front tyre at full lock
+FENDER_OUT = 3.0     # fender skin this far outboard of any tyre point above the lip (tucks under at bump / lock)
+FLARE_TAPER = 0.3    # fender flare width falls off this many cm per cm fore / aft of where it is needed
+WELL_CLEAR = 34.0    # well inner wall at least this far inboard of the half-track (tyre_sweep widens it)
+MAX_STEER = 38.0     # ODVehicleDef MaxSteerAngleDeg default (no car overrides it); x SteerLockScale
+
+
+def tyre_points(R, hw, steer, camber):
+    """Tyre surface samples (cylinder, a little outside the rounded real one)
+    round its centre, y+ = outboard: camber leans the top in, then steer."""
+    T, U = np.meshgrid(np.radians(np.arange(0.0, 360.0, 3.0)), np.linspace(-hw, hw, 7))
+    x, y, z = R * np.sin(T).ravel(), U.ravel(), R * np.cos(T).ravel()
+    c, s = math.cos(math.radians(camber)), math.sin(math.radians(camber))
+    y, z = y * c - z * s, y * s + z * c
+    c, s = math.cos(math.radians(steer)), math.sin(math.radians(steer))
+    return np.stack([x * c - y * s, x * s + y * c, z], 1)
+
+
+def setup_tyre(car, g, front):
+    """(radius, half width, static centre z, bump-stop centre z, lock deg) of a setup's tyre."""
+    R = car.wr * g["tire_diameter_scale"]
+    hw = WHEEL_HW * R / R_REF * g["front_tire_width_scale" if front else "rear_tire_width_scale"]
+    return R, hw, -g["ride_height_delta"], BUMP_TRAVEL + car.wr - R, (MAX_STEER * g["steer_lock_scale"] if front else 0.0)
+
+
+def tyre_sweep(car):
+    """Per axle (front, rear): how far outboard of the half track any setup's
+    tyre reaches above the arch lip (inside the body: the fender must cover
+    it), static and at the bump stop, front ones at straight and full lock;
+    how far inboard any reaches (the well's inner wall); and how far fore /
+    aft any reaches above the lip (the well roof's length)."""
+    inn, swept = [0.0, 0.0], ([], [])
+    for g in SETUPS.values():
+        for a in (0, 1):
+            R, hw, zs, zb, lock = setup_tyre(car, g, a == 0)
+            for zc in (zs, zb):
+                for steer in {0.0, lock, -lock}:
+                    p = tyre_points(R, hw, steer, g["camber_deg"])
+                    p[:, 2] += zc
+                    swept[a].append(p[p[:, 2] > car.lip(p[:, 0], a) - 2.0])
+                    inn[a] = max(inn[a], float(-p[:, 1].min()))
+    swept = tuple(np.concatenate(s) for s in swept)
+    out = [float(s[:, 1].max()) for s in swept]
+    sx = max(float(np.abs(s[:, 0]).max()) for s in swept)
+    return out, inn, sx, swept
 
 
 # per-car side silhouette (x, floor z, top z), glass start / end, where the
@@ -488,13 +561,13 @@ def sections(car, xs):
     zb_floor = zb.copy()
     r = car.r_arch
     well = np.full_like(xs, -1e9)
-    for ax, z0 in zip((car.fx, car.rx), car.zs):
-        d2 = r * r - (xs - ax) ** 2
-        zb = np.where(d2 > 0, np.maximum(zb, z0 + np.sqrt(np.maximum(d2, 0.0))), zb)
+    for a, ax in enumerate((car.fx, car.rx)):
+        zb = np.maximum(zb, car.lip(xs - ax, a))
         # well roof: half-ellipse r_bump high and wider than the lip opening,
-        # so the station chords at its ends still clear the bumped tyre
-        e = 1.0 - ((xs - ax) / (r + 4.0)) ** 2
-        well = np.maximum(well, np.where(np.abs(xs - ax) <= r, BUMP_TRAVEL + car.r_bump * np.sqrt(np.maximum(e, 0.0)), -1e9))
+        # so the station chords at its ends still clear the bumped tyre (and
+        # the tread corner of a steered one, swung forward / back)
+        e = 1.0 - ((xs - ax) / (car.r_well + 10.0)) ** 2
+        well = np.maximum(well, np.where(np.abs(xs - ax) <= car.r_well, BUMP_TRAVEL + car.r_bump * np.sqrt(np.maximum(e, 0.0)), -1e9))
     well = np.maximum(well, zb)
     # the fender top clears the well roof (the tyre at full bump): a
     # fender hump where the silhouette is lower than that
@@ -533,20 +606,31 @@ def sections(car, xs):
     hood = np.clip((xs - car.gs) / 20.0, 0.0, 1.0)
     crown = 0.0 if car.center else (0.06 + (car.hood_crown - 0.06) * hood) * top_w
     Y = [wb * (0.82 + 0.17 * fl), wb * (0.93 + 0.07 * fl), wb, wb * (0.88 + 0.08 * hips), top_w]
-    # over the arches the lower fender stands FENDER_OUT outboard of the
-    # tyre, so a tyre rising to full bump tucks in under it
     near = np.min([np.abs(xs - ax) for ax in (car.fx, car.rx)], axis=0)
     t = np.clip((r + 18.0 - near) / 18.0, 0.0, 1.0)
     t = t * t * (3.0 - 2.0 * t)
     t = t * np.clip(np.minimum(car.x0 - xs, xs - car.x1) / 8.0, 0.0, 1.0)    # no fender blade past a short nose
-    for k, inset in ((0, 0.0), (1, 0.0), (2, 0.0), (3, 7.0), (4, 15.0)):   # shoulder follows: no fender blade
-        Y[k] = Y[k] + np.maximum(car.need_y - inset - Y[k], 0.0) * t * (1.0 if k < 4 else ~cabin)
     Z = [zb, zb + 0.32 * H, zb + 0.78 * H, belt, zt - 0.6 * crown]
+    # fender flares: each section point stands FENDER_OUT outboard of every
+    # setup's tyre point (tyre_sweep: static / bump stop, steered) that rises
+    # above the lip near it in x and between its neighbours in z - widest at
+    # the lip, tucking in over the tyre top - tapered off fore / aft
+    for k in range(5):
+        req = np.full(len(xs), -1e9)
+        for i, x in enumerate(xs):
+            a = int(abs(x - car.fx) >= abs(x - car.rx))
+            p = car.swept[a]
+            lo, hi = (Z[k - 1][i] if k else -1e9) - 1.0, (Z[k + 1][i] if k < 4 else 1e9) + 1.0
+            m = p[(np.abs(p[:, 0] - (x - (car.fx, car.rx)[a])) < 8.0) & (p[:, 2] >= lo) & (p[:, 2] <= hi)]
+            if len(m):
+                req[i] = car.ht + m[:, 1].max() + FENDER_OUT
+        req = np.max(req[None, :] - FLARE_TAPER * np.abs(xs[:, None] - xs[None, :]), axis=1)
+        Y[k] = np.maximum(Y[k], req)
     w = wb
     if car.center:
         # fender pods: over the arches the pod top reaches in past the
         # steering sweep, so its inner wall drops inboard of the well
-        Y[4] = Y[4] + (np.minimum(Y[4], car.ht - WELL_CLEAR + 2.0) - Y[4]) * t
+        Y[4] = Y[4] + (np.minimum(Y[4], car.ht - car.well_clear + 2.0) - Y[4]) * t
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
         Y.append(np.minimum(np.interp(xs, cx, cw), Y[4] - 2.0))
         Z.append(np.interp(xs, cx, cz))
@@ -575,7 +659,7 @@ def stations(car):
     for p in car.style["pillars_x"]:
         keys += [p - 5.0, p + 5.0]
     for ax in (car.fx, car.rx):
-        keys += [ax - car.r_arch, ax + car.r_arch, ax, ax - 0.93 * car.r_arch, ax + 0.93 * car.r_arch]
+        keys += [ax - car.r_well, ax + car.r_well, ax - car.r_arch, ax + car.r_arch, ax, ax - 0.93 * car.r_arch, ax + 0.93 * car.r_arch]
     nose, tail = car.x0 - car.bulge, car.x1 + (BULGE if car.has_tail else 0.0)
     ks = []
     for k in sorted(keys, reverse=True):          # key lines, merged when < 1 cm apart
@@ -611,7 +695,7 @@ def build_cage(car):
     steep = np.zeros(len(xs), bool)
     for i in range(len(xs) - 1):
         steep[i] = abs(zc[i] - zc[i + 1]) / (xs[i] - xs[i + 1]) > st["steep_slope"]
-    w_in = car.ht - WELL_CLEAR
+    w_in = car.ht - car.well_clear
 
     rings, desc = [], []
     for i, x in enumerate(xs):
@@ -1159,10 +1243,10 @@ def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell
     house over the full-bump tyre, tailgate and bumper."""
     x1 = x0 - length
     xs = np.linspace(x0, x1, n_seg + 1)
-    arch_r = car.r_arch
-    d2 = arch_r ** 2 - (xs - rear_axle_x) ** 2
-    bot = np.where(d2 > 0, np.maximum(z_bottom, car.zs[1] + np.sqrt(np.maximum(d2, 0.0))), z_bottom)
-    wi = max(w - 5.0, car.tyre_out + 0.6)
+    arch_r = car.r_well
+    bot = np.maximum(z_bottom, car.lip(xs - rear_axle_x, 1))
+    wi = max(w - 5.0, car.need_y[1] - FENDER_OUT + 0.6)
+    yi = min(wi * 0.62, car.ht - car.tyre_in[1] - 5.0)    # wheel-house inner wall, inboard of every setup's tyre
     side = frame_matrix(Vector((0, 0, 0)), Vector((1, 0, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)))
     poly = [(float(x), float(z)) for x, z in zip(xs[::-1], bot[::-1])] + [(x0, rail_z), (x1, rail_z)]
     for s in (1, -1):
@@ -1177,14 +1261,13 @@ def pickup_bed(p, x0, length, z_bottom, floor_z, rail_z, w, body_cell, dark_cell
         # wheel house: a lid over the full-bump tyre, inner wall and end
         # walls, open underneath (the floor stops at the inner wall)
         xa, xb = rear_axle_x - arch_r, rear_axle_x + arch_r
-        yi = wi * 0.62
         top = BUMP_TRAVEL + car.r_bump
         rbox(p, xa, xb, *sorted((s * yi, s * wi)), top, top + 4.0, dark_cell, r=1.5)
         rbox(p, xa, xb, *sorted((s * yi, s * (yi + 3.0))), floor_z - 3.0, top + 4.0, dark_cell, r=1.0)
         for xe in (xa, xb - 3.0):
             rbox(p, xe, xe + 3.0, *sorted((s * yi, s * wi)), floor_z - 3.0, top + 4.0, dark_cell, r=1.0)
     xa, xb = rear_axle_x - arch_r, rear_axle_x + arch_r
-    for fa, fb, fw in ((x1 + 1.0, xa, wi), (xa, xb, wi * 0.62), (xb, x0, wi)):
+    for fa, fb, fw in ((x1 + 1.0, xa, wi), (xa, xb, yi), (xb, x0, wi)):
         rbox(p, fa, fb, -fw, fw, floor_z - 3.0, floor_z, dark_cell, r=0.5)
     rbox(p, x1, x1 + 4.0, -w, w, z_bottom, rail_z, body_cell, r=1.6)                 # tailgate
     rbox(p, x1 - 1.0, x1 + 0.5, -12, 12, rail_z - 16, rail_z - 12, dark_cell, r=0.4)   # handle
@@ -1247,7 +1330,7 @@ def build_parts(car):
             ya, yb = sorted((y0, y1))
             rbox(p, x - 0.5, x + 0.5, ya, yb, z0, z1, cell, r=0.4)
         elif name == "build_pickup_bed":
-            pickup_bed(p, *a[:5], max(a[5], car.need_y), *a[6:9], car, **k)
+            pickup_bed(p, *a[:5], max(a[5], car.need_y[1]), *a[6:9], car, **k)
     if fins:   # shark fin: the stepped fin boxes as one rounded-top blade
         cell = fins[0][4]
         fins.sort(key=lambda f: -f[1])
@@ -1295,6 +1378,8 @@ def build_interior(car, body_bm):
     rows = [xh] + ([xh - 78.0] if SEAT_ROWS[car.name] > 1 and xh - 95.0 > car.ge else [])
     for ri, x in enumerate(rows):
         ys = seat_y(x)
+        if x - 40.0 < car.rx + car.r_well:      # over the rear arch: inboard of every setup's tyre
+            ys = min(ys, car.ht - car.tyre_in[1] - 24.0)
         Sx = sections(car, np.array([x]))
         top = float(Sx["Z"][0, -1]) - 8.0
         for s in (1, -1):
@@ -1504,55 +1589,57 @@ def build_car(name):
     return car, tris, ultra
 
 
-MAX_STEER = 38.0     # ODVehicleDef MaxSteerAngleDeg default (no car overrides it)
-
-
 def arch_clearance(car, ob):
-    """Measured on the finished mesh, per axle: the visible lip gap above
-    the tyre at static ride height (horizontal rays from outside find the
-    lip's underside over the axle), and the smallest body clearance around
-    the tyre (rays from the wheel centre through tread / shoulder points;
-    < 0 = intersection) at static, at the bump stop (wheel centre BUMP_TRAVEL) and,
-    for the front, at static with full steering lock both ways."""
+    """Measured on the finished mesh, per axle and garage setup: the visible
+    lip gap above the tyre at static ride height (horizontal rays from
+    outside find the lip's underside over the axle), and the smallest body
+    clearance around the tyre (rays from the wheel centre through tread /
+    shoulder points; < 0 = intersection) at static, at the bump stop and, for
+    the front, both at full steering lock both ways."""
     bm = bm_of(ob)
     bvh = BVHTree.FromBMesh(bm)
     bm.free()
-    R, hw = car.wr, WHEEL_HW * car.wr / R_REF
     th = np.radians(np.linspace(-100.0, 100.0, 41))       # 0 = top of the tyre
-    us = np.linspace(-hw, hw, 9)
-    pts = [(R * math.sin(t), u, R * math.cos(t)) for t in th for u in us]
 
-    def clear(ax, zc, steer):
+    def clear(ax, zc, steer, R, hw, camber, tag):
         c, sn = math.cos(math.radians(steer)), math.sin(math.radians(steer))
+        cc, sc = math.cos(math.radians(camber)), math.sin(math.radians(camber))
         best = 1e9
         for side in (1, -1):
             C = Vector((ax, side * car.ht, zc))
-            for px, py, pz in pts:
-                d = Vector((px * c - py * sn, px * sn + py * c, pz))
-                n = d.length
-                hit, _, fi, _ = bvh.ray_cast(C, d / n, n + 40.0)
-                if hit is not None and (hit - C).length - n < best:
-                    best = (hit - C).length - n
-                    worst = (round(hit.x - ax, 1), round(abs(hit.y), 1), round(hit.z, 1),
-                             ob.data.materials[ob.data.polygons[fi].material_index].name)
+            for t in th:
+                for u in np.linspace(-hw, hw, 9):
+                    px, py, pz = R * math.sin(t), u, R * math.cos(t)
+                    py, pz = py * cc - pz * sc, py * sc + pz * cc        # top leans in
+                    d = Vector((px * c - py * sn, side * (px * sn + py * c), pz))
+                    n = d.length
+                    hit, _, fi, _ = bvh.ray_cast(C, d / n, n + 40.0)
+                    if hit is not None and (hit - C).length - n < best:
+                        best = (hit - C).length - n
+                        worst = (round(hit.x - ax, 1), round(abs(hit.y), 1), round(hit.z, 1),
+                                 ob.data.materials[ob.data.polygons[fi].material_index].name)
         if best < 1.0:
-            log(car.name, "arch closest", round(best, 2), "at dx/|y|/z", worst, "wheel z", zc, "steer", steer)
+            log(car.name, tag, "arch closest", round(best, 2), "at dx/|y|/z", worst, "wheel z", round(zc, 1),
+                "steer", round(steer, 1))
         return round(best, 2)
 
     out = {}
-    for tag, ax, zs in (("front", car.fx, car.zs[0]), ("rear", car.rx, car.zs[1])):
-        top = zs + R
-        lip = None
-        for z in np.arange(top, top + 30.0, 0.1):
-            hit = bvh.ray_cast(Vector((ax, 500.0, z)), Vector((0, -1, 0)), 600.0)[0]
-            if hit is not None and hit.y > car.tyre_out - 1.0:
-                lip = round(float(z - top), 2)
-                break
-        r = dict(static_axle_z=round(zs, 2), lip_gap=lip, static=clear(ax, zs, 0.0), bump=clear(ax, BUMP_TRAVEL, 0.0))
-        if tag == "front":
-            r["lock"] = min(clear(ax, zs, MAX_STEER), clear(ax, zs, -MAX_STEER))
-            r["bump_lock"] = min(clear(ax, BUMP_TRAVEL, MAX_STEER), clear(ax, BUMP_TRAVEL, -MAX_STEER))
-        out[tag] = r
+    for end, ax in (("front", car.fx), ("rear", car.rx)):
+        out[end] = {}
+        for name, g in SETUPS.items():
+            R, hw, zs, zb, lock = setup_tyre(car, g, end == "front")
+            cb, tag = g["camber_deg"], f"{name} {end}"
+            top, lip = zs + R, None
+            for z in np.arange(top, top + 30.0, 0.1):
+                hit = bvh.ray_cast(Vector((ax, 500.0, z)), Vector((0, -1, 0)), 600.0)[0]
+                if hit is not None and hit.y > car.ht + hw - 1.0:
+                    lip = round(float(z - top), 2)
+                    break
+            r = dict(lip_gap=lip, static=clear(ax, zs, 0.0, R, hw, cb, tag), bump=clear(ax, zb, 0.0, R, hw, cb, tag))
+            if lock:
+                r["lock"] = min(clear(ax, zs, s * lock, R, hw, cb, tag) for s in (1, -1))
+                r["bump_lock"] = min(clear(ax, zb, s * lock, R, hw, cb, tag) for s in (1, -1))
+            out[end][name] = r
     log(car.name, "arches", json.dumps(out))
     return out
 
@@ -1605,6 +1692,7 @@ def main():
         manifest["cars"][name] = dict(tris=tris, arches=arch_clearance(car, ultra),
                                       FrontAxleXCm=car.fx, RearAxleXCm=car.rx,
                                       HalfTrackYCm=car.ht, WheelRadiusCm=car.wr,
+                                      FenderYCm=[round(v, 1) for v in car.need_y], Setups=list(SETUPS),
                                       bbox=[[round(min((ultra.matrix_world @ Vector(c))[i] for c in ultra.bound_box), 2)
                                              for i in range(3)],
                                             [round(max((ultra.matrix_world @ Vector(c))[i] for c in ultra.bound_box), 2)

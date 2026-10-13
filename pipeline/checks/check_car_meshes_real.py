@@ -3,13 +3,16 @@ the contract the pawn relies on, from data/cars/real/real_manifest.json:
 
 - axles / half track / wheel radius equal the physics in
   unreal/import_car_meshes.py's make_def() calls (the mesh is built on them);
-- bounding box within TOL cm of the stylized OBJ twin (same identity and
-  proportions; mirrors, wings and lamp detail may stick out a little);
+- length and height within TOL cm of the stylized OBJ twin (same identity
+  and proportions; mirrors, wings and lamp detail may stick out a little);
+  width within TOL, or out to the fender flares the generator recorded
+  (FenderYCm), which may grow at most FENDER_ALLOW cm a side past it;
 - triangle budget: ultra 40-120k, high ~1/2, Standard ~0.22 of ultra;
 - wheel authored at radius 34 / half width 13 (the pawn scales by WheelRadius/34);
-- arches: 1.5-4.5 cm visible gap over the tyre at static ride height, the
-  tyre clear of the body at static, full bump and full lock (bump + lock
-  together is a known exception);
+- arches, for every garage setup in unreal/apply_tuning_presets.py (its tyre
+  size / width, ride height, camber, steering lock): >= 1.5 cm visible gap
+  over the tyre at static ride height (Street 1.5-4.5), and the tyre clear of
+  the body at static, at the bump stop, at full lock and at bump + lock;
 - every FBX present, LICENSE.txt present.
 
 python pipeline/checks/check_car_meshes_real.py   (exit 1 on any failure)
@@ -20,9 +23,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "pipeline"))
+import tuning_setups  # noqa: E402
+
 REAL = ROOT / "data" / "cars" / "real"
 OBJ = ROOT / "data" / "cars" / "procedural" / "obj"
 TOL = 4.0
+FENDER_ALLOW = 18.0    # cm a side the fender flares may stand past the stylized width (Offroad tyres at bump + lock: 16-17)
+SETUPS = list(tuning_setups.setups())
 fails = []
 
 
@@ -59,20 +67,29 @@ for car, m in man["cars"].items():
     lo, hi = obj_bbox(OBJ / f"SM_Car_{car}.obj")
     blo, bhi = m["bbox"]
     # OBJ y is negated (symmetric, so only the extents matter); z is the same frame
-    d = max(max(abs(a - b) for a, b in zip(blo, (lo[0], -hi[1], lo[2]))),
-            max(abs(a - b) for a, b in zip(bhi, (hi[0], -lo[1], hi[2]))))
-    check(d <= TOL, f"{car}: bbox within {d:.1f} cm of stylized (tol {TOL})")
+    d = max(abs(blo[0] - lo[0]), abs(bhi[0] - hi[0]), abs(blo[2] - lo[2]), abs(bhi[2] - hi[2]))
+    check(d <= TOL, f"{car}: length / height within {d:.1f} cm of stylized (tol {TOL})")
+    sw, fy = max(-lo[1], hi[1]), max(m["FenderYCm"])
+    rw = max(-blo[1], bhi[1])
+    check(abs(rw - sw) <= TOL or (sw < rw <= fy + 0.5 and fy - sw <= FENDER_ALLOW),
+          f"{car}: half width {rw:.1f} (stylized {sw:.1f}, fender flares {fy:.1f}: +{fy - sw:.1f},"
+          f" allow {FENDER_ALLOW})")
     t = m["tris"]
     u, h, s = (t[f"SM_Car_{car}_real{x}"] for x in ("_ultra", "_high", ""))
     check(40000 <= u <= 120000, f"{car}: ultra {u} tris in 40-120k")
     check(0.4 < h / u < 0.6 and 0.15 < s / u < 0.3, f"{car}: tiers {h}/{s} of {u}")
     for x in ("", "_high", "_ultra"):
         check((REAL / "fbx" / f"SM_Car_{car}_real{x}.fbx").exists(), f"SM_Car_{car}_real{x}.fbx exists")
-    for end, a in m.get("arches", {}).items():   # bump_lock is a known exception (fender-wide at full lock)
-        check(1.5 <= a["lip_gap"] <= 4.5 and a["static"] >= 0 and a["bump"] >= 0 and a.get("lock", 0) >= 0,
-              f"{car} {end} arch: lip gap {a['lip_gap']}, clearance static {a['static']} bump {a['bump']}"
-              f" lock {a.get('lock', '-')}")
-    check(set(m.get("arches", {})) == {"front", "rear"}, f"{car}: arch clearance measured")
+    arches = m.get("arches", {})
+    check(set(arches) == {"front", "rear"} and all(list(arches[e]) == SETUPS for e in arches),
+          f"{car}: arch clearance measured for {SETUPS}")
+    for end, per in arches.items():
+        for s, a in per.items():
+            hi_gap = 4.5 if s == "Street" else 99.0
+            keys = ("static", "bump", "lock", "bump_lock") if end == "front" else ("static", "bump")
+            check(a["lip_gap"] is not None and 1.5 <= a["lip_gap"] <= hi_gap and all(a[k] >= 0 for k in keys),
+                  f"{car} {end} {s}: lip gap {a['lip_gap']}, clearance "
+                  + " ".join(f"{k} {a[k]}" for k in keys))
 w =man["wheel"]
 check(w["RefRadiusCm"] == 34 and w["HalfWidthCm"] == 13, f"wheel radius {w['RefRadiusCm']} half width {w['HalfWidthCm']}")
 for x in ("", "_high", "_ultra"):
