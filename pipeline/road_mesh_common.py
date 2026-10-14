@@ -35,6 +35,17 @@ SKIRT_DROP = 2.5             # m - no longer shapes the road mesh (the 2.5 m
 # carved terrain (CARVE_DROP 0.15 m below) within ~0.15 m of the edge; on a
 # raised road it reads as a thick asphalt slab.
 WRAP_LIP_OUT_M = 0.5         # lip's lateral reach past the pavement edge
+# At-grade apron (Taylor, 2026-10-13: "too difficult to drive back on"): the
+# terrain sits ~35 cm under the pavement edge, and the 50 deg lip above
+# wedged the car's nose. Where the shipped terrain APRON_LIP_OUT_M out is
+# within APRON_FULL_GAP_M of the edge, the lip widens to a 17 deg ramp that
+# dives into the ground; past APRON_NONE_GAP_M (ledge, cliff, embankment,
+# wall) it keeps WRAP_LIP_OUT_M so raised roads look as before.
+APRON_LIP_OUT_M = 2.0
+APRON_FULL_GAP_M = 0.6
+APRON_NONE_GAP_M = 1.0
+APRON_MAX_CURVE_FRAC = 0.8   # pavement+lip reach under this share of the turn
+                             # radius, so hairpin insides don't fold
 WRAP_LIP_DROP_M = 0.6        # lip bottom below the pavement
 WRAP_DEPTH_M = 1.0           # slab underside below the pavement (bridge decks are 1.25)
 ROAD_PROFILE_COLS = 7        # verts per station row - consumers index by this
@@ -767,8 +778,12 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
                        bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
                        osm_lanes=None, half_width_s=None, junction_suppress=None,
-                       is_unpaved=None, bank_scale=None):
+                       is_unpaved=None, bank_scale=None, ground_cm=None):
     """Build banked, skirted road mesh chunks from station arrays.
+
+    `ground_cm` (optional): f(x_cm, y_cm arrays) -> terrain z cm, NaN off-mesh
+    (shipped_terrain_heights). Widens each side's lip into the at-grade apron
+    (see APRON_LIP_OUT_M); None keeps the plain WRAP_LIP_OUT_M lip.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
     `e`, `n`, `z` are smoothed per-station east/north/elevation in meters
@@ -843,13 +858,32 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     # down). The pavement offset is per-station when half_width_s is given
     # (variable width, 2026-09-06). skirt_extra/skirt_drop are unused now
     # (kept in the signature for experimental_junction_pads.py's callers).
+    hw_s = (np.asarray(half_width_s, dtype=np.float64) if half_width_s is not None
+            else np.full(len(s), float(road_half_width)))
+    lip_out = np.full((len(s), 2), WRAP_LIP_OUT_M)   # [left, right] of travel
+    if ground_cm is not None and len(s) > 1:
+        for k, sgn in enumerate((-1.0, 1.0)):
+            off_cm = sgn * (hw_s + APRON_LIP_OUT_M) * 100.0
+            gap_m = (cz + bank * sgn * hw_s * 100.0
+                     - ground_cm(cx + rx * off_cm, cy + ry * off_cm)) / 100.0
+            t = np.clip((APRON_NONE_GAP_M - gap_m) / (APRON_NONE_GAP_M - APRON_FULL_GAP_M), 0.0, 1.0)
+            lip_out[:, k] += np.nan_to_num(t) * (APRON_LIP_OUT_M - WRAP_LIP_OUT_M)
+        turn = np.abs(np.gradient(np.unwrap(np.arctan2(ry, rx)), s))   # 1/m
+        cap = APRON_MAX_CURVE_FRAC / np.maximum(turn, 1e-6) - hw_s
+        lip_out = np.minimum(lip_out, np.maximum(cap, WRAP_LIP_OUT_M)[:, None])
+        # 5-station min then ease: no single-station spikes, no sawtooth
+        pad = np.concatenate([lip_out[:1], lip_out[:1], lip_out, lip_out[-1:], lip_out[-1:]])
+        lip_out = np.min([pad[j:j + len(s)] for j in range(5)], axis=0)
+        lip_out = np.stack([gaussian1d(lip_out[:, k], 1.0) for k in (0, 1)], axis=1)
+
     def station_profile(i):
-        hw = float(half_width_s[i]) if half_width_s is not None else road_half_width
+        hw = float(hw_s[i])
+        lo_l, lo_r = lip_out[i]
         return hw, [(-hw, -WRAP_DEPTH_M),
-                    (-(hw + WRAP_LIP_OUT_M), -WRAP_LIP_DROP_M),
+                    (-(hw + lo_l), -WRAP_LIP_DROP_M),
                     (-hw, 0.0),
                     (hw, 0.0),
-                    (hw + WRAP_LIP_OUT_M, -WRAP_LIP_DROP_M),
+                    (hw + lo_r, -WRAP_LIP_DROP_M),
                     (hw, -WRAP_DEPTH_M),
                     (-hw, -WRAP_DEPTH_M)]
     n_prof = ROAD_PROFILE_COLS
@@ -2250,4 +2284,50 @@ def sample_mesh_heights(positions, triangles, xs_cm, ys_cm, eps=1e-4, chunk=50_0
         z = w_a[ok] * az[tri] + w_b[ok] * bz[tri] + w_c[ok] * cz[tri]
         np.maximum.at(out, lo + pt, z)
     out[np.isinf(out)] = np.nan
+    return out
+
+
+_TERRAIN_GRIDS = {}
+TERRAIN_GRID_M = 2.0   # raster step for shipped_terrain_heights
+
+
+def shipped_terrain_heights(xs_cm, ys_cm):
+    """Height (cm, NaN where no tile/off-mesh) of the near terrain tiles
+    already on disk in Content/OpenDrive/Masks - the collision the car drives
+    on. build_road_chunks' ground_cm. Each tile is rasterized once to a
+    TERRAIN_GRID_M grid (per-call sample_mesh_heights re-bins a whole tile)
+    and sampled bilinearly."""
+    from pathlib import Path
+    from bin_tile_io import parse_terrain_tile_bin
+    from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM as T
+    masks = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+    xs = np.asarray(xs_cm, dtype=np.float64)
+    ys = np.asarray(ys_cm, dtype=np.float64)
+    out = np.full(len(xs), np.nan)
+    step = TERRAIN_GRID_M * 100.0
+    n = int(round(T / step)) + 1
+    tx = np.floor(xs / T).astype(np.int64)
+    ty = np.floor(ys / T).astype(np.int64)
+    for key in set(zip(tx.tolist(), ty.tolist())):
+        if key not in _TERRAIN_GRIDS:
+            t = parse_terrain_tile_bin(masks / f"terrain_{AREA_NAME}_test_tile_{key[0]}_{key[1]}.bin")
+            grid = None
+            if t is not None:
+                pos = np.array(t["verts"], dtype=np.float64).reshape(-1, 3)
+                tri = np.array(t["tris"], dtype=np.int64).reshape(-1, 3)
+                ax = np.arange(n) * step
+                gx, gy = np.meshgrid(key[0] * T + ax, key[1] * T + ax)
+                grid = sample_mesh_heights(pos, tri, gx.ravel(), gy.ravel()).reshape(n, n)
+            _TERRAIN_GRIDS[key] = grid
+        grid = _TERRAIN_GRIDS[key]
+        if grid is None:
+            continue
+        m = (tx == key[0]) & (ty == key[1])
+        fx = (xs[m] - key[0] * T) / step
+        fy = (ys[m] - key[1] * T) / step
+        ix = np.clip(fx.astype(np.int64), 0, n - 2)
+        iy = np.clip(fy.astype(np.int64), 0, n - 2)
+        wx, wy = fx - ix, fy - iy
+        out[m] = (grid[iy, ix] * (1 - wx) * (1 - wy) + grid[iy, ix + 1] * wx * (1 - wy)
+                  + grid[iy + 1, ix] * (1 - wx) * wy + grid[iy + 1, ix + 1] * wx * wy)
     return out

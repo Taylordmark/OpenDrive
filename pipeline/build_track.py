@@ -9,6 +9,8 @@ Feature properties:
                     (custom_road_elements below), so rebuild_area.py builds
                     it on the real terrain like any OSM way. Optional "tags"
                     (dict) override the OSM tags (default highway=secondary).
+                    Bridges are automatic (structure_labels below) unless
+                    "tags" sets bridge/tunnel itself or "structures": false.
     gate_spacing_m  default 300 (the Dragon's)
 
 Either way the race follows the line's vertices over the area's route graph
@@ -45,6 +47,23 @@ SNAP_WARN_M = 50.0       # a vertex farther than this from any road is probably 
 CUSTOM_ID0 = 10 ** 15    # synthetic OSM ids: far above real ones (~1e10), under 2^53
 ROAD_STEP_M = 10.0       # custom road vertex spacing after the spline
 END_SNAP_M = 15.0        # a custom road end this close to a fetched node joins it
+
+# structure_labels (2026-10-13): a drawn road leaves the ground for a bridge
+# where a sane profile would sit more than FILL_MAX_M above it, a tunnel
+# where it would sit more than CUT_MAX_M below, instead of the terrain carve
+# reshaping a gorge or a mountain to fit the line
+DESIGN_GRADE = 0.22      # = road_mesh_common.FOLLOW_ABS_MAX_GRADE: anything the bake can drive stays ground
+FILL_MAX_M = 15.0        # deeper fill -> bridge
+CUT_MAX_M = 25.0         # deeper cut -> tunnel
+BRIDGE_COST = 20.0       # per station, any height (> FILL_MAX_M: a 10 m fill stays fill)
+TUNNEL_COST = 40.0       # tunnels cost more than bridges
+GRADE_COST = 0.2         # per DZ_M of climb: level spans when height is free
+DZ_M = 0.5               # profile search resolution
+MIN_STRUCT_M = 40.0      # shorter structures stay ground (a blip in the DEM)
+MIN_GAP_M = 60.0         # shorter ground between two like structures joins them
+TUNNELS = True           # deep cuts become tunnel=yes; build_tunnels.py bores them
+GROUND, BRIDGE, TUNNEL = 0, 1, 2
+STRUCT_TAGS = {BRIDGE: {"bridge": "yes", "layer": "1"}, TUNNEL: {"tunnel": "yes", "layer": "-1"}}
 
 
 def load_track(path):
@@ -96,6 +115,97 @@ def _dedup(ll):
     return ll[keep]
 
 
+def structure_labels(ground, step=ROAD_STEP_M, grade=DESIGN_GRADE):
+    """Per-vertex GROUND/BRIDGE/TUNNEL for a line with DEM `ground` (m) every
+    `step` m. Dynamic programme over profile heights (DZ_M levels), grade
+    <= `grade`: a station costs its fill/cut depth up to FILL_MAX_M/CUT_MAX_M,
+    a flat BRIDGE_COST/TUNNEL_COST beyond - a span's cost is its length, not
+    its height, so a gorge gets one level deck rim to rim instead of a dive
+    down and back up. Returns (labels, profile_m)."""
+    g = np.asarray(ground, float)
+    z = np.arange(g.min() - CUT_MAX_M - 10.0, g.max() + FILL_MAX_M + 10.0, DZ_M)
+    k = max(1, int(grade * step / DZ_M))
+
+    def cost(i):
+        d = z - g[i]
+        return np.where(d > FILL_MAX_M, BRIDGE_COST, np.where(-d > CUT_MAX_M, TUNNEL_COST, np.abs(d)))
+
+    acc = cost(0)
+    back = np.zeros((len(g), len(z)), np.int8)
+    for i in range(1, len(g)):
+        best = np.full(len(z), np.inf)
+        for j in range(-k, k + 1):   # came from level l - j
+            prev = np.full(len(z), np.inf)
+            if j >= 0:
+                prev[j:] = acc[:len(z) - j]
+            else:
+                prev[:j] = acc[-j:]
+            prev += GRADE_COST * abs(j)
+            better = prev < best
+            best[better] = prev[better]
+            back[i][better] = j
+        acc = best + cost(i)
+    lv = np.empty(len(g), int)
+    lv[-1] = int(np.argmin(acc))
+    for i in range(len(g) - 1, 0, -1):
+        lv[i - 1] = lv[i] - back[i][lv[i]]
+    h = z[lv]
+    lab = np.where(h - g > FILL_MAX_M, BRIDGE, np.where(g - h > CUT_MAX_M, TUNNEL, GROUND))
+    for kind in (BRIDGE, TUNNEL):   # join near runs, then drop blips
+        lab = _runs_fix(lab, kind, GROUND, MIN_GAP_M / step, True)
+        lab = _runs_fix(lab, kind, kind, MIN_STRUCT_M / step, False)
+    return lab, h
+
+
+def _runs_fix(lab, kind, target, max_len, interior_gap):
+    """Relabel runs of `target` no longer than max_len vertices: ground gaps
+    between two `kind` runs become `kind` (interior_gap), or short `kind`
+    runs become ground."""
+    lab = lab.copy()
+    i = 0
+    while i < len(lab):
+        j = i
+        while j < len(lab) and lab[j] == lab[i]:
+            j += 1
+        if lab[i] == target and j - i <= max_len:
+            if not interior_gap:
+                lab[i:j] = GROUND
+            elif 0 < i and j < len(lab) and lab[i - 1] == kind and lab[j] == kind:
+                lab[i:j] = kind
+        i = j
+    return lab
+
+
+def ground_m(lonlat):
+    """DEM metres at each (lon, lat) - the same z15 Terrarium tiles and
+    bilinear sampler the road stations use (tiles stay in fetch_cache)."""
+    from build_road_stations import DEM_ZOOM, dem_sample_sparse
+    from terrain_common import fetch_terrarium_tile, lonlat_to_tilepx, terrarium_to_elevation
+    tiles = {}
+    for lon, lat in lonlat:
+        px, py = lonlat_to_tilepx(lon, lat, DEM_ZOOM)
+        for tx in (int(px // 256) - 1, int(px // 256), int(px // 256) + 1):
+            for ty in (int(py // 256) - 1, int(py // 256), int(py // 256) + 1):
+                if (tx, ty) not in tiles:
+                    tiles[(tx, ty)] = terrarium_to_elevation(fetch_terrarium_tile(DEM_ZOOM, tx, ty))
+    return dem_sample_sparse(tiles, lonlat[:, 1], lonlat[:, 0])
+
+
+def split_by_structure(ids, lab, tags, way_id):
+    """One way per run of like segments (a segment takes its structure end's
+    label), sharing the boundary node, structure tags added."""
+    seg = np.maximum(lab[:-1], lab[1:])
+    if not TUNNELS:
+        seg = np.where(seg == TUNNEL, GROUND, seg)
+    ways, a = [], 0
+    for b in range(1, len(seg) + 1):
+        if b == len(seg) or seg[b] != seg[a]:
+            ways.append({"type": "way", "id": way_id + len(ways), "nodes": ids[a:b + 1],
+                         "tags": {**tags, **STRUCT_TAGS.get(int(seg[a]), {})}})
+            a = b
+    return ways
+
+
 def custom_road_elements(area, osm_nodes):
     """Synthetic OSM (nodes, ways) for every road track of `area`. Ends
     within END_SNAP_M of a fetched node reuse that node, so they become real
@@ -134,8 +244,15 @@ def custom_road_elements(area, osm_nodes):
                     ids[end] = osm_nodes[j]["id"]
         tags = {"highway": "secondary", "name": props.get("name", path.stem)}
         tags.update(props.get("tags") or {})
-        out_ways.append({"type": "way", "id": CUSTOM_ID0 + k, "nodes": ids, "tags": tags})
-        print(f"  custom road '{path.stem}': {len(ids)} nodes, {tags['highway']}")
+        if props.get("structures", True) and not {"bridge", "tunnel"} & tags.keys():
+            lab, _ = structure_labels(ground_m(np.vstack([lonlat, lonlat[:1]]) if closed else lonlat))
+            ways = split_by_structure(ids, lab, tags, CUSTOM_ID0 + 1000 * k)
+        else:
+            ways = [{"type": "way", "id": CUSTOM_ID0 + 1000 * k, "nodes": ids, "tags": tags}]
+        out_ways += ways
+        kinds = [w["tags"].get("bridge") and "bridge" or w["tags"].get("tunnel") and "tunnel" for w in ways]
+        print(f"  custom road '{path.stem}': {len(ids)} nodes, {tags['highway']}, "
+              f"{kinds.count('bridge')} bridge(s), {kinds.count('tunnel')} tunnel(s)")
     return out_nodes, out_ways
 
 

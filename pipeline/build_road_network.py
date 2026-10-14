@@ -19,11 +19,10 @@ CARTOGRAPHIC_ORIGIN frame (road_mesh_common.road_ue_z_m - see that function's
 docstring for why the shift exists), then build banked/skirted geometry via
 road_mesh_common.build_road_chunks (unchanged math, shared with the Dragon).
 
-Tunnels (2026-07-28, AUDIT.md item 3): a segment is split on its is_tunnel
-stretches (split_excluding_tunnels()) before meshing, so no ribbon gets
-built through a tunnel span at all - the road visibly ends at each portal.
-Only the visible geometry is stubbed out; road_stations.json still carries
-real elev_m through the tunnel for a future real-bore pass.
+Tunnels: the ribbon runs straight through on the stations' real elev_m;
+build_tunnels.py adds the bore around it and opens the terrain at each
+portal. Tunnel stations stay out of the ODS2 station sidecar (runtime verge
+tint / tree exclusion / player start belong to open-air road only).
 """
 
 import json
@@ -37,7 +36,8 @@ from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
                               build_road_chunks, half_width_for_stations,
-                              road_ue_z_m, unpaved_stations)
+                              road_ue_z_m, shipped_terrain_heights,
+                              unpaved_stations)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
@@ -56,10 +56,8 @@ def write_station_sidecar(path, segment_geoms, gen_id_bytes):
     already computed.
 
     `segment_geoms` is the same list of (cx, cy, cz, hw_cm) UE-frame (cm)
-    station-centerline arrays main() already builds per non-tunnel run
-    (tunnel stretches get no road mesh, so they're excluded here too - this
-    sidecar only ever describes stations the road mesh itself is built
-    from). hw_cm is the per-station pavement half-width in cm
+    station-centerline arrays main() already builds per segment, minus
+    tunnel stations (see the module docstring). hw_cm is the per-station pavement half-width in cm
     (road_mesh_common.half_width_for_stations - the same values baked into
     the ribbon's uv1.x channel, x100).
 
@@ -93,52 +91,22 @@ def write_station_sidecar(path, segment_geoms, gen_id_bytes):
     return total
 
 
-def split_excluding_tunnels(is_tunnel):
-    """Yields (lo, hi) index ranges (Python slice convention) covering each
-    contiguous non-tunnel stretch of a segment's stations, skipping tunnel-
-    flagged stretches entirely. AUDIT.md item 3 (2026-07-28): tunnels get no
-    visible road ribbon at all - pavement stops at each portal instead of
-    running through solid rock the terrain was never carved for - while
-    road_stations.json still carries real elev_m through the tunnel for a
-    future real-bore pass to consume without redoing any of this."""
-    n = len(is_tunnel)
-    i = 0
-    while i < n:
-        if is_tunnel[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and not is_tunnel[j]:
-            j += 1
-        yield i, j
-        i = j
-
-
 def main():
     if not STATIONS_PATH.exists():
         raise SystemExit(f"{STATIONS_PATH} not found - run build_road_stations.py first.")
     data = json.loads(STATIONS_PATH.read_text())
 
-    MIN_RUN_STATIONS = 2   # a lone leftover station either side of a tunnel
-                            # portal can't form a chunk (build_road_chunks
-                            # needs at least 2 points for its tangent calc)
+    MIN_RUN_STATIONS = 2   # build_road_chunks needs 2 points for its tangent
 
     segments = []
     segment_geoms = []   # (cx, cy, cz, hw_cm) per built segment - player-start pick + ODS2 sidecar
     total_km = 0.0
-    n_tunnel_truncated = 0
     for seg in data["segments"]:
         s_full = np.array(seg["s_m"])
         e_full = np.array(seg["east_m"])
         n_full = np.array(seg["north_m"])
         h_full = np.array(seg["elev_m"])
-        # AUDIT.md item 3 (2026-07-28): no visible ribbon through tunnels -
-        # split each segment on its is_tunnel stretches and mesh only the
-        # non-tunnel runs, so pavement stops at each portal instead of
-        # continuing through solid rock the terrain isn't carved for. elev_m
-        # for the tunnel stations themselves is untouched in road_stations.json,
-        # so a future real-bore pass has everything it needs without redoing
-        # this script's work. Absent in older road_stations.json -> no tunnels.
+        # only filters the station sidecar now - the ribbon runs through
         is_tunnel = np.array(seg.get("is_tunnel", [False] * len(s_full)), dtype=bool)
         is_oneway_full = seg.get("oneway")   # absent in older files - defaults to two-way
         highway_full = seg.get("highway_class")   # absent in older files - defaults to unknown class
@@ -151,9 +119,7 @@ def main():
         # path this feeds: ODR3 marking-suppression channel + z-bias.
         junction_suppress_full = np.array(
             seg.get("junction_suppress", [0.0] * len(s_full)), dtype=np.float64)
-        runs = list(split_excluding_tunnels(is_tunnel))
-        if len(runs) > 1:
-            n_tunnel_truncated += 1
+        runs = [(0, len(s_full))]
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < MIN_RUN_STATIONS:
                 continue
@@ -177,18 +143,16 @@ def main():
                                                    highway_classes=highway_classes,
                                                    osm_lanes=osm_lanes, half_width_s=half_width_s,
                                                    junction_suppress=junction_suppress,
-                                                   is_unpaved=is_unpaved)
+                                                   is_unpaved=is_unpaved,
+                                                   ground_cm=shipped_terrain_heights)
             segments.append({"name": name, "chunks": chunks})
             hw_m = (half_width_s if half_width_s is not None
                     else np.full(len(cx), ROAD_HALF_WIDTH))
-            segment_geoms.append((cx, cy, cz, hw_m * 100.0))
+            open_air = ~is_tunnel[lo:hi]
+            segment_geoms.append((cx[open_air], cy[open_air], cz[open_air], hw_m[open_air] * 100.0))
             length_km = float(s[-1] - s[0]) / 1000.0 if len(s) > 1 else 0.0
             total_km += length_km
-            tag = " [tunnel-truncated]" if len(runs) > 1 else ""
-            print(f"  {name}: {length_km:.2f} km, {len(chunks)} chunk(s){tag}")
-    if n_tunnel_truncated:
-        print(f"{n_tunnel_truncated} segment(s) had a tunnel span - "
-              f"pavement truncated at each portal")
+            print(f"  {name}: {length_km:.2f} km, {len(chunks)} chunk(s)")
 
     if not segment_geoms:
         raise SystemExit("No segments in road_stations.json - check build_road_stations.py's output.")

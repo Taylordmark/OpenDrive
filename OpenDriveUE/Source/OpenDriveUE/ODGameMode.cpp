@@ -310,6 +310,22 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 		Bridge->BridgeTilePrefix = FString::Printf(TEXT("bridge_%s_test"), *Area);
 		Finish(Bridge);
 	}
+	// Tunnel bores + light strips (pipeline/build_tunnels.py): two more
+	// wall-manager instances, spawned directly since the home level already
+	// places one AODWallManager (Begin() would skip the class).
+	if (!Vista)
+	{
+		for (const TCHAR* Kind : {TEXT("tunnel"), TEXT("tunnellights")})
+		{
+			AODWallManager* T = World->SpawnActorDeferred<AODWallManager>(AODWallManager::StaticClass(), Xf);
+			T->WallTilePrefix = FString::Printf(TEXT("%s_%s_test"), Kind, *Area);
+			const bool bLights = FCString::Strcmp(Kind, TEXT("tunnellights")) == 0;
+			T->MaterialPath = bLights ? TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp")
+				: TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge");
+			T->Glow = bLights ? 20.0f : -1.0f;
+			Finish(T);
+		}
+	}
 	return Out;
 }
 

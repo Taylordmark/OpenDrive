@@ -65,7 +65,7 @@ from pymartini import Martini
 
 import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
-from build_road_network import split_excluding_tunnels
+from build_tunnels import cut_holes, load_tunnels
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
                               half_width_for_stations, road_ue_z_m,
                                classify_wall_stations, sample_mesh_heights)
@@ -795,6 +795,17 @@ def _get_struct_mask(n):
     return _STRUCT_MASK_CACHE if n == m else np.concatenate([_STRUCT_MASK_CACHE, np.zeros(n - m, bool)])
 
 
+_TUNNELS_CACHE = None
+
+
+def _get_tunnels():
+    """build_tunnels.load_tunnels() for this area, cached per worker."""
+    global _TUNNELS_CACHE
+    if _TUNNELS_CACHE is None:
+        _TUNNELS_CACHE = load_tunnels(STATIONS_PATH)
+    return _TUNNELS_CACHE
+
+
 _PAVEMENT_CACHE = None
 
 
@@ -952,18 +963,18 @@ def load_stations():
 def station_bank(east, north, bank_scale=None):
     """(n, 3) per-station (bank slope, UE right-normal x, y) for load_stations()'
     east/north (or experimental_junction_pads' regraded copy, with its pad
-    bank fade as `bank_scale`), computed per tunnel-split run exactly as the
-    road ribbons are - see road_mesh_common.bank_slopes. Extra trailing
-    entries (pad-rim anchors) and runs too short to bank stay 0."""
+    bank fade as `bank_scale`), computed per segment exactly as the road
+    ribbons are (tunnels included since the bore landed) - see
+    road_mesh_common.bank_slopes. Extra trailing entries (pad-rim anchors)
+    and segments too short to bank stay 0."""
     out = np.zeros((len(east), 3))
     off = 0
     for seg in json.loads(STATIONS_PATH.read_text())["segments"]:
         k = len(seg["east_m"])
-        for lo, hi in split_excluding_tunnels(np.array(seg.get("is_tunnel", [False] * k), dtype=bool)):
-            if hi - lo >= 2:
-                sl = slice(off + lo, off + hi)
-                out[sl] = np.column_stack(bank_slopes(
-                    east[sl], north[sl], bank_scale=None if bank_scale is None else bank_scale[sl]))
+        if k >= 2:
+            sl = slice(off, off + k)
+            out[sl] = np.column_stack(bank_slopes(
+                east[sl], north[sl], bank_scale=None if bank_scale is None else bank_scale[sl]))
         off += k
     return out
 
@@ -1399,6 +1410,13 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
         verts = np.concatenate([verts, skirt_verts], axis=0)
         uvs = np.concatenate([uvs, skirt_uvs], axis=0)
         tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
+        # Tunnel portals (build_tunnels.py): cut every triangle (seam skirt
+        # included) that reaches into a bore's shell out at ~1 m, so the
+        # ground opens at each portal and never cuts through a bore; over the middle of a
+        # tunnel the mountain is far above it and stays. ponytail: near tiles
+        # only - coarse/far 100 m cells keep covering the portal from afar,
+        # cut them too if that reads badly at distance.
+        verts, uvs, tris = cut_holes(verts, uvs, tris, _get_tunnels())
     else:
         # Uniform grid, unchanged - far tiles are already coarse/cheap and
         # have no collision, so adaptive triangulation isn't worth it here.

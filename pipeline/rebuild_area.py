@@ -172,6 +172,9 @@ STAGES = [
     # constraint, needs road_embankments.json first" reason.
     ("build_road_bridges.py", "build road_bridges.json (genuine-span deck points + pier placement)"),
     ("export_road_bridge_bin.py", "export bridge tiles -> Content/OpenDrive/Masks/bridge_*.bin"),
+    # TUNNELS: bore + headwalls + light strips from road_stations.json's
+    # is_tunnel runs (the terrain bake opens the portals from the same runs)
+    ("build_tunnels.py", "export tunnel tiles -> Content/OpenDrive/Masks/tunnel_*.bin, tunnellights_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),

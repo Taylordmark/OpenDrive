@@ -88,12 +88,13 @@ import prune_unowned_tiles
 import build_terrain_mesh_tiles as btmt
 from export_road_mesh_bin import write_tile
 from export_road_mesh_bin_v2 import write_tile as write_tile_v3
-from build_road_network import split_excluding_tunnels, write_station_sidecar
+from build_road_network import write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks,
                                half_width_for_stations, road_ue_z_m,
-                               sample_mesh_height, sample_mesh_heights, unpaved_stations)
+                               sample_mesh_height, sample_mesh_heights,
+                               shipped_terrain_heights, unpaved_stations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -3914,7 +3915,7 @@ def main():
         # the pad (2026-10-02): a full 8 deg bank met a pad's plane with a
         # ~1.3 m outer-edge lip; real roads drop the bank into an intersection
         bank_full = bank[goff:goff + len(s_full)]
-        runs = list(split_excluding_tunnels(is_tunnel))
+        runs = [(0, len(s_full))]   # tunnels included: build_tunnels.py bores them
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
                 continue
@@ -4084,7 +4085,8 @@ def main():
                             osm_lanes=ln_r,
                             half_width_s=hw_r,
                             junction_suppress=js_r,
-                            is_unpaved=up_r, bank_scale=bk_r)
+                            is_unpaved=up_r, bank_scale=bk_r,
+                            ground_cm=shipped_terrain_heights)
                         all_chunks.extend(chunks)
                         total_km += float(s_r[-1] - s_r[0]) / 1000.0
                         sub_idx += 1

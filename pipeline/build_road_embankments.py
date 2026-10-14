@@ -364,6 +364,7 @@ WALL_CHUNK_STATIONS = 80         # matches build_road_guardrails.py's tile-bucke
 BRIDGE_GENUINE_MAX_LEN_M = 300.0     # real spans are short
 BRIDGE_BOTH_SIDED_MIN_FRAC = 0.5     # majority-of-run opposite-side qualifying-drop overlap
 BRIDGE_WATER_MIN_FRAC = 0.03         # any meaningful lake-polygon overlap -> always genuine
+BRIDGE_TAGGED_MIN_FRAC = 0.5         # raw bridge= tag coverage -> genuine at any length (2026-10-13)
 BRIDGE_OSM_TAG_MIN_FRAC = 0.3        # meaningful widened-OSM-structure-tag coverage (proxy, see docstring)
 DEMOTED_BRIDGE_DROP_CAP_M = 12.0     # cap a demoted run's shipped skirt drop (geometry only)
 
@@ -902,8 +903,16 @@ def subclassify_bridge_runs(seg_i, side, d, other, report):
         # *some* deck-worthy road to carry it - a dirt road fords or
         # culverts a creek, it doesn't get a concrete span - so the paved
         # gate applies here too, same as the ordinary short-span path below.
+        # 2026-10-13: the RAW bridge= tag (is_struct, not the conflict-widened
+        # is_bridge proxy the NOTE below rejects) is a decision - OSM's, or
+        # build_track.structure_labels() for a drawn road over a gorge. Any
+        # length: the 300 m short-span rule is for untagged drop runs.
+        tagged_frac = float(d["is_struct_raw"][run_start:run_end].mean())
         if genuine:
             pass
+        elif tagged_frac >= BRIDGE_TAGGED_MIN_FRAC and not is_single_station_touch and not is_unpaved:
+            genuine = True
+            reasons.append(f"bridge-tagged ({tagged_frac * 100:.0f}% of run)")
         elif water_frac >= BRIDGE_WATER_MIN_FRAC and not is_single_station_touch and not is_unpaved:
             # Unconditional OR - a water crossing always gets a deck, per the
             # task brief, regardless of the paved/rebound rules below (a
@@ -1049,6 +1058,8 @@ def main():
             sides[side] = compute_side(seg, side, lakes,
                                         junction_touched_seg, is_bridge_osm_seg,
                                         session, dem_cache)
+            sides[side]["is_struct_raw"] = (np.array(seg["is_struct"], dtype=bool)
+                                            & ~np.array(seg["is_tunnel"], dtype=bool))
             n_skipped_junction += int((sides[side]["in_junction_box"] &
                                         (sides[side]["drop_m"] >= EMBANK_LOW_THRESHOLD_M)).sum())
 

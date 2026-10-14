@@ -215,9 +215,10 @@ how traffic reacts to the player.
 1. **Tunnel bore:** pavement through the tunnel, along the real `elev_m`
    the stations already keep (`build_road_network.py:26`). Add an extruded
    stylized arch with full collision, dark interior lighting and portal
-   faces. The terrain needs no hole, because the bore runs below it and the
-   portal faces cover the seam. Check the carve stop at the portal still
-   leaves an opening, and lower the terrain there if it doesn't.
+   faces. **Done (2026-10-13):** `build_tunnels.py` (bore, headwalls, light
+   strips; ribbon runs through). Near terrain tiles are cut ~1 m around the
+   bore wherever the ground reaches into it, mostly at the portals.
+   Dark-interior exposure is still to do.
 2. **Stacked crossings:** use `layer` in the elevation-conflict detection
    (`next steps.md` §4, OSM tag consumers). Grade-separated crossings with
    no structure get a bridge from the existing ODB1 path.

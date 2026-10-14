@@ -88,6 +88,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Walls")
 	int32 MaxNewLoadsPerTick = 1;
 
+	/** Chunk material (tunnel bores reuse this manager with M_Bridge). */
+	UPROPERTY(EditAnywhere, Category = "Walls")
+	FString MaterialPath = TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized");
+
+	/** >= 0: MID with this "Glow" scalar (tunnel light strips). */
+	UPROPERTY(EditAnywhere, Category = "Walls")
+	float Glow = -1.0f;
+
 private:
 	static bool ParseWallTileFile(const FString& Path, FParsedWallTile& Out);
 

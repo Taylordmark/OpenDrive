@@ -10,6 +10,7 @@
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -33,8 +34,13 @@ void AODWallManager::BeginPlay()
 	// PerVertexNormals call in FinalizeTile below) - unlike
 	// AODBuildingManager's M_BuildingFacade, which doesn't read normals at
 	// all and so never needed that call.
-	WallMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized")));
+	WallMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr, *MaterialPath));
+	if (WallMat && Glow >= 0.0f)
+	{
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(WallMat, this);
+		Mid->SetScalarParameterValue(TEXT("Glow"), Glow);
+		WallMat = Mid;
+	}
 }
 
 void AODWallManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
