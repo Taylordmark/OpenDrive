@@ -61,6 +61,11 @@ public:
 	static FString SaveTrack(const FString& Area, const TArray<FVector2D>& XY,
 		const TArray<float>& Z, bool bLoop);
 
+	/** Masks/track_<Name>.bin -> gates + line (the menu's Track Select reads
+	 *  lines without spawning a race). False if missing or corrupt. */
+	static bool ReadTrack(const FString& Name, TArray<FTransform>& OutGates,
+		TArray<FVector2D>& OutLine, bool& bOutLoop);
+
 	/** Track line (world XY cm), spawn at [0]. Empty without a track. */
 	TArray<FVector2D> TrackLine;
 

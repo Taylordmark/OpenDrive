@@ -7,8 +7,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
@@ -22,6 +24,8 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "SWebBrowser.h"
 #include "UnrealClient.h"
 
 #include "ODDayNightController.h"
@@ -187,14 +191,18 @@ enum ERow : int32
 {
 	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
-	RowArea, RowTrack, RowTime, RowSeason, RowWeather,                   // Scene: season before the weather it allows
-	RowStart, RowGarage, RowSettings,                                    // Main ("Drive" opens Scene)
+	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
+	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
+	RowPick,                                                             // Area: RowPick + i = Picks[i]
 };
-const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowStart, 3}};        // footer Quit
-const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};      // footer Back
-const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};   // footer Back
-const FODMenuTab SceneTabs[] = {{TEXT("SCENE"), RowArea, 5}};       // footer Drive
+const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // footer Quit
+const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};            // footer Back
+const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
+const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // footer Drive
+// globe pins: areas whose centres are closer than this (deg) share one pin,
+// and the Area screen gets a tab per area (green_valley / gv_west / gv_east)
+constexpr double ClusterDeg = 0.5;
 
 // same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
 const TCHAR* CarConfigSection = TEXT("OpenDrive.Car");
@@ -232,7 +240,7 @@ void AODMainMenu::BeginPlay()
 	WeatherIdx = FMath::Clamp(WeatherIdx, 0, (int32)UE_ARRAY_COUNT(WeatherNames) - 1);
 	FindAreaLevels();
 	LoadMenuSpots();
-	// Scene Select lists only areas with a menu spot (a vista to show)
+	// the menu lists only areas with a menu spot (a vista to show)
 	for (int32 i = Spots.Num() - 1; i >= 0; --i)
 	{
 		if (!Spots[i].bValid)
@@ -248,11 +256,13 @@ void AODMainMenu::BeginPlay()
 	GConfig->GetString(AreaConfigSection, TEXT("Level"), SavedArea, GGameUserSettingsIni);
 	AreaIdx = FMath::Max(0, AreaLevels.IndexOfByKey(SavedArea));   // missing/unlisted -> first area
 	LoadTracks();
+	LoadWorldMap();
 	GConfig->GetString(AreaConfigSection, TEXT("Track"), TrackPick, GGameUserSettingsIni);
 	if (!PickedTrack())
 	{
 		TrackPick.Empty();   // deleted, or built for another area
 	}
+	GConfig->GetString(AreaConfigSection, TEXT("Town"), TownPick, GGameUserSettingsIni);
 
 	// saved car picks (factory default when missing or out of range); the car
 	// itself is restored by AODVehiclePawn::BeginPlay
@@ -406,11 +416,17 @@ void AODMainMenu::BeginPlay()
 	OpenMenu();
 }
 
+void AODMainMenu::EndPlay(const EEndPlayReason::Type Reason)
+{
+	HideWeb(true);
+	Super::EndPlay(Reason);
+}
+
 void AODMainMenu::OpenMenu()
 {
 	Stage = EODMenuStage::Menu;
 	bGarageMode = false;
-	SetScreen(EODMenuScreen::Main, RowStart);
+	SetScreen(EODMenuScreen::Main, RowOpenDrive);
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
 	// Deliberately NOT pausing here (unlike OpenGarage() below): the camera
@@ -551,8 +567,14 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	{
 		bAutoStart = false;
 		ApplyTrack();
-		StartAt(-1);   // opened by Drive: straight to the default spawn
+		StartAtTown(TownPick);   // opened by Drive: straight to the picked start
 		return;
+	}
+	// a click on the globe focuses the page; hand the keys back to the game
+	// (WebKey forwards them) once the button is up, so a drag isn't cut off
+	if (Web && Web->HasAnyUserFocusOrFocusedDescendants() && FSlateApplication::Get().GetPressedMouseButtons().Num() == 0)
+	{
+		FSlateApplication::Get().SetAllUserFocusToGameViewport();
 	}
 	UpdateScene();
 }
@@ -653,11 +675,28 @@ void AODMainMenu::EnterCarConfig()
 
 // ---- input ---------------------------------------------------------------
 
+bool AODMainMenu::WebKey(const TCHAR* Key)
+{
+	if (Stage != EODMenuStage::Menu || Screen != EODMenuScreen::World)
+	{
+		return false;
+	}
+	if (Web && bWebReady)
+	{
+		Web->ExecuteJavascript(FString::Printf(TEXT("od.key('%s')"), Key));
+	}
+	return true;
+}
+
 void AODMainMenu::Up()
 {
 	if (bSettingsOpen)
 	{
 		if (SettingsMenu) { SettingsMenu->MoveSelection(-1); }
+		return;
+	}
+	if (WebKey(TEXT("ArrowUp")))
+	{
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
@@ -671,6 +710,10 @@ void AODMainMenu::Down()
 	if (bSettingsOpen)
 	{
 		if (SettingsMenu) { SettingsMenu->MoveSelection(+1); }
+		return;
+	}
+	if (WebKey(TEXT("ArrowDown")))
+	{
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
@@ -688,8 +731,7 @@ void AODMainMenu::SwitchTab(int32 Dir)
 	}
 	if (const int32 N = GetTabs().Num(); Stage == EODMenuStage::Menu && N > 1)
 	{
-		TabIdx = (TabIdx + Dir + N) % N;
-		Selected = GetTabs()[TabIdx].First;
+		SetTab((TabIdx + Dir + N) % N);
 	}
 }
 
@@ -699,14 +741,32 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 	{
 	case EODMenuScreen::Garage: return GarageTabs;
 	case EODMenuScreen::Sound: return SoundTabs;
-	case EODMenuScreen::Scene: return SceneTabs;
-	default: return MainTabs;
+	case EODMenuScreen::Area: return AreaTabs;
+	case EODMenuScreen::Conditions: return ConditionsTabs;
+	default: return MainTabs;   // World draws no panel
 	}
 }
 
 int32 AODMainMenu::GetFooterRow() const
 {
-	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Scene ? RowDrive : RowBack;
+	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Conditions ? RowDrive : RowBack;
+}
+
+FString AODMainMenu::GetScreenTitle() const
+{
+	switch (Screen)
+	{
+	case EODMenuScreen::Garage: return TEXT("Garage");
+	case EODMenuScreen::Sound: return TEXT("Exhaust Sound");
+	case EODMenuScreen::Area: return bTrackMode ? TEXT("Track Select") : TEXT("Open Drive");
+	case EODMenuScreen::Conditions: return AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : TEXT("Conditions");
+	default: return TEXT("OpenDrive");
+	}
+}
+
+int32 AODMainMenu::GetSelectedPick() const
+{
+	return Screen == EODMenuScreen::Area && Picks.IsValidIndex(Selected - RowPick) ? Selected - RowPick : INDEX_NONE;
 }
 
 void AODMainMenu::SetScreen(EODMenuScreen NewScreen, int32 Row)
@@ -723,7 +783,7 @@ void AODMainMenu::SelectRow(int32 Row, int32 Col)
 		if (SettingsMenu) { SettingsMenu->SelectRow(Row, Col); }
 		return;
 	}
-	if (Stage == EODMenuStage::Menu && Row >= 0 && Row <= RowQuit)
+	if (Stage == EODMenuStage::Menu && Row >= 0 && (Row <= RowQuit || Picks.IsValidIndex(Row - RowPick)))
 	{
 		Selected = Row;
 	}
@@ -739,6 +799,10 @@ void AODMainMenu::SetTab(int32 Tab)
 	if (Stage == EODMenuStage::Menu && GetTabs().IsValidIndex(Tab))
 	{
 		TabIdx = Tab;
+		if (Screen == EODMenuScreen::Area)
+		{
+			FocusArea(Siblings[Tab]);   // tabs are the cluster's areas
+		}
 		Selected = GetTabs()[TabIdx].First;
 	}
 }
@@ -750,9 +814,13 @@ void AODMainMenu::Left()
 		Adjust(-1);
 		return;
 	}
+	if (WebKey(TEXT("ArrowLeft")))
+	{
+		return;
+	}
 	if (Stage == EODMenuStage::Menu)
 	{
-		Adjust(-1);
+		Screen == EODMenuScreen::Area ? SwitchTab(-1) : Adjust(-1);
 	}
 }
 
@@ -763,9 +831,13 @@ void AODMainMenu::Right()
 		Adjust(+1);
 		return;
 	}
+	if (WebKey(TEXT("ArrowRight")))
+	{
+		return;
+	}
 	if (Stage == EODMenuStage::Menu)
 	{
-		Adjust(+1);
+		Screen == EODMenuScreen::Area ? SwitchTab(+1) : Adjust(+1);
 	}
 }
 
@@ -779,11 +851,19 @@ void AODMainMenu::Activate()
 		}
 		return;
 	}
+	if (WebKey(TEXT("Enter")))
+	{
+		return;
+	}
 	if (Stage == EODMenuStage::Menu)
 	{
 		switch (Selected)
 		{
-		case RowStart: SetScreen(EODMenuScreen::Scene, RowArea); break;
+		case RowOpenDrive:
+		case RowTrackSelect:
+			bTrackMode = Selected == RowTrackSelect;
+			ShowWorld();
+			break;
 		case RowGarage: SetScreen(EODMenuScreen::Garage, RowCar); break;
 		case RowSound: SetScreen(EODMenuScreen::Sound, RowLoudness); break;
 		case RowSettings:
@@ -795,19 +875,18 @@ void AODMainMenu::Activate()
 				EQuitPreference::Quit, false);
 			break;
 		case RowBack: Back(); break;
-		case RowDrive:
-			if (AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx)
+		case RowDrive: DriveNow(); break;
+		default:
+			if (const int32 Pick = GetSelectedPick(); Pick != INDEX_NONE)
 			{
-				OpenArea();   // that level's menu auto-starts (bAutoStart)
+				TownPick = Picks[Pick].Town;     // one of the two is always empty:
+				TrackPick = Picks[Pick].Track;   // Open Drive is free roam, a track starts at its line
+				SetScreen(EODMenuScreen::Conditions, RowDrive);
 			}
 			else
 			{
-				ApplyTrack();
-				StartAt(-1);  // already on this area (or none listed): default spawn, no reload
+				Adjust(+1);   // Enter cycles a value row, like the pause menu
 			}
-			break;
-		default:
-			Adjust(+1);   // Enter cycles a value row, like the pause menu
 			break;
 		}
 	}
@@ -830,21 +909,330 @@ void AODMainMenu::Back()
 	if (Stage == EODMenuStage::MapSelect)
 	{
 		Stage = EODMenuStage::Menu;
-		SetScreen(EODMenuScreen::Scene, RowDrive);
+		SetScreen(EODMenuScreen::Main, RowOpenDrive);
 	}
-	else if (Stage == EODMenuStage::Menu && Screen == EODMenuScreen::Sound)
+	else if (Stage != EODMenuStage::Menu)
+	{
+		return;
+	}
+	else if (Screen == EODMenuScreen::Sound)
 	{
 		SetScreen(EODMenuScreen::Garage, RowSound);   // before the garage-mode resume below
 	}
-	else if (Stage == EODMenuStage::Menu && bGarageMode)
+	else if (bGarageMode)
 	{
 		ResumeFromGarage();   // the pause menu's garage: Back resumes driving
 	}
-	else if (Stage == EODMenuStage::Menu && Screen != EODMenuScreen::Main)
+	else if (Screen == EODMenuScreen::Conditions)
 	{
-		SetScreen(EODMenuScreen::Main, Screen == EODMenuScreen::Garage ? RowGarage : RowStart);
+		// back onto the row that was picked, on its area's tab
+		const int32 Pick = Picks.IndexOfByPredicate([this](const FODMenuPick& K) { return K.Town == TownPick && K.Track == TrackPick; });
+		SetScreen(EODMenuScreen::Area, RowPick + FMath::Max(0, Pick));
+		TabIdx = FMath::Max(0, Siblings.IndexOfByKey(AreaIdx));
+	}
+	else if (Screen == EODMenuScreen::Area)
+	{
+		ShowWorld();
+	}
+	else if (Screen != EODMenuScreen::Main)
+	{
+		HideWeb(false);
+		SetScreen(EODMenuScreen::Main, Screen == EODMenuScreen::Garage ? RowGarage
+			: bTrackMode ? RowTrackSelect : RowOpenDrive);
 	}
 	// Main screen: nothing to back out to
+}
+
+// ---- Open Drive / Track Select (2026-10-13) ---------------------------------
+
+void AODMainMenu::WebReady()
+{
+	bWebReady = true;
+	if (Web)
+	{
+		Web->ExecuteJavascript(FString::Printf(TEXT("od.init(%s, %s)"),
+			WorldMapJson.IsEmpty() ? TEXT("{\"coast\":[],\"borders\":[],\"states\":[]}") : *WorldMapJson, *WorldOpts()));
+	}
+}
+
+void AODMainMenu::WebPick(const FString& Key)
+{
+	if (const int32 Area = AreaKeys.IndexOfByKey(Key); Area != INDEX_NONE && Screen == EODMenuScreen::World)
+	{
+		EnterArea(Area);
+	}
+}
+
+void AODMainMenu::WebBack()
+{
+	if (Screen == EODMenuScreen::World)
+	{
+		Back();
+	}
+}
+
+void AODMainMenu::ShowWorld()
+{
+	SetScreen(EODMenuScreen::World, RowBack);
+	if (!Web)
+	{
+		bWebReady = false;   // WebReady() inits the page once it has loaded
+		const FString Page = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("OpenDrive/WorldMap/index.html"));
+		Web = SNew(SWebBrowser)
+			.InitialURL(TEXT("file:///") + Page.Replace(TEXT(" "), TEXT("%20")))
+			.ShowControls(false)
+			.ShowAddressBar(false)
+			.BackgroundColor(FColor(5, 7, 12))
+			.BrowserFrameRate(60);
+		Web->BindUObject(TEXT("od"), this, true);
+		if (GEngine && GEngine->GameViewport)
+		{
+			GEngine->GameViewport->AddViewportWidgetContent(Web.ToSharedRef(), 50);
+		}
+		return;
+	}
+	Web->SetVisibility(EVisibility::Visible);
+	if (bWebReady)
+	{
+		Web->ExecuteJavascript(FString::Printf(TEXT("od.show(%s)"), *WorldOpts()));
+	}
+}
+
+void AODMainMenu::HideWeb(bool bDestroy)
+{
+	if (!Web)
+	{
+		return;
+	}
+	if (!bDestroy)
+	{
+		Web->SetVisibility(EVisibility::Collapsed);   // kept loaded: Back from Area returns instantly
+	}
+	else
+	{
+		if (GEngine && GEngine->GameViewport)
+		{
+			GEngine->GameViewport->RemoveViewportWidgetContent(Web.ToSharedRef());
+		}
+		Web.Reset();
+		bWebReady = false;
+	}
+	if (FSlateApplication::IsInitialized())
+	{
+		FSlateApplication::Get().SetAllUserFocusToGameViewport();
+	}
+}
+
+bool AODMainMenu::AreaListed(int32 Area) const
+{
+	return !bTrackMode || Tracks.ContainsByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[Area]; });
+}
+
+TArray<int32> AODMainMenu::ClusterOf(int32 Area) const
+{
+	TArray<int32> Out;
+	for (int32 i = 0; i < AreaKeys.Num(); ++i)
+	{
+		if (AreaListed(i) && AreaLL.IsValidIndex(i) && FVector2D::Distance(AreaLL[i], AreaLL[Area]) < ClusterDeg)
+		{
+			Out.Add(i);
+		}
+	}
+	return Out;
+}
+
+FString AODMainMenu::WorldOpts() const
+{
+	// one pin per cluster, at its first area; focus the picked area's cluster
+	TArray<TSharedPtr<FJsonValue>> Pins;
+	FString Focus;
+	for (int32 i = 0; i < AreaKeys.Num(); ++i)
+	{
+		const TArray<int32> Cluster = AreaListed(i) && AreaLL.IsValidIndex(i) ? ClusterOf(i) : TArray<int32>();
+		if (Cluster.IsEmpty() || Cluster[0] != i)
+		{
+			continue;
+		}
+		TArray<FString> Names;
+		int32 Count = 0;
+		for (const int32 A : Cluster)
+		{
+			Names.Add(AreaNames[A]);
+			Count += bTrackMode
+				? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
+				: AreaTowns[A].Num();
+			Focus = A == AreaIdx ? AreaKeys[i] : Focus;
+		}
+		const TSharedRef<FJsonObject> Pin = MakeShared<FJsonObject>();
+		Pin->SetStringField(TEXT("key"), AreaKeys[i]);
+		Pin->SetStringField(TEXT("name"), FString::Join(Names, TEXT(" / ")));
+		Pin->SetStringField(TEXT("sub"), FString::Printf(TEXT("%d %s"), Count,
+			bTrackMode ? (Count == 1 ? TEXT("track") : TEXT("tracks")) : (Count == 1 ? TEXT("town") : TEXT("towns"))));
+		Pin->SetNumberField(TEXT("lng"), AreaLL[i].X);
+		Pin->SetNumberField(TEXT("lat"), AreaLL[i].Y);
+		Pins.Add(MakeShared<FJsonValueObject>(Pin));
+	}
+	const TSharedRef<FJsonObject> Opts = MakeShared<FJsonObject>();
+	Opts->SetStringField(TEXT("title"), bTrackMode ? TEXT("Track Select") : TEXT("Open Drive"));
+	Opts->SetStringField(TEXT("hint"), TEXT("<b>Click</b> pick &nbsp; <b>Drag</b> spin &nbsp; <b>Wheel</b> zoom &nbsp; <b>Arrows</b> browse &nbsp; <b>Esc</b> back"));
+	Opts->SetStringField(TEXT("focus"), Focus);
+	Opts->SetArrayField(TEXT("areas"), Pins);
+	FString Out;
+	FJsonSerializer::Serialize(Opts, TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out));
+	return Out;
+}
+
+void AODMainMenu::LoadWorldMap()
+{
+	// {"coast", "borders", "states": [[lon, lat, ...]], "areas": {"<area>": {"ll": [lon, lat],
+	// "towns": [[name, x_cm, y_cm]]}}} (pipeline/bake_world_map.py); lines only go to the page
+	AreaLL.Init(FVector2D::ZeroVector, AreaKeys.Num());
+	AreaTowns.Reset();
+	AreaTowns.SetNum(AreaKeys.Num());
+	TSharedPtr<FJsonObject> Root;
+	const TSharedPtr<FJsonObject>* Areas = nullptr;
+	if (!FFileHelper::LoadFileToString(WorldMapJson, *(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worldmap.json")))
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(WorldMapJson), Root) || !Root.IsValid()
+		|| !Root->TryGetObjectField(TEXT("areas"), Areas))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODMainMenu: no Masks/worldmap.json - run pipeline/bake_world_map.py"));
+		WorldMapJson.Empty();
+		return;
+	}
+	for (int32 i = 0; i < AreaKeys.Num(); ++i)
+	{
+		const TSharedPtr<FJsonObject>* A = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* LL = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Towns = nullptr;
+		if (!(*Areas)->TryGetObjectField(AreaKeys[i], A))
+		{
+			continue;
+		}
+		if ((*A)->TryGetArrayField(TEXT("ll"), LL) && LL->Num() == 2)
+		{
+			AreaLL[i] = FVector2D((*LL)[0]->AsNumber(), (*LL)[1]->AsNumber());
+		}
+		if ((*A)->TryGetArrayField(TEXT("towns"), Towns))
+		{
+			for (const TSharedPtr<FJsonValue>& T : *Towns)
+			{
+				const TArray<TSharedPtr<FJsonValue>>& V = T->AsArray();
+				if (V.Num() == 3)
+				{
+					AreaTowns[i].Emplace(V[0]->AsString(), FVector2D(V[1]->AsNumber(), V[2]->AsNumber()));
+				}
+			}
+		}
+	}
+}
+
+void AODMainMenu::EnterArea(int32 Area)
+{
+	HideWeb(false);
+	Siblings = ClusterOf(Area);
+	if (Siblings.IsEmpty())
+	{
+		Siblings = {Area};
+	}
+	AreaTabs.Reset();
+	for (const int32 A : Siblings)
+	{
+		// every tab's rows start at RowPick; Count is that area's own row count
+		const int32 N = bTrackMode
+			? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
+			: AreaTowns[A].Num() + 1;
+		AreaTabs.Add({*AreaNames[A], RowPick, N});
+	}
+	SetScreen(EODMenuScreen::Area, RowPick);
+	SetTab(Siblings.IndexOfByKey(Area));
+}
+
+void AODMainMenu::FocusArea(int32 Area)
+{
+	AreaIdx = Area;
+	const FString& Key = AreaKeys[Area];
+
+	// road map: centerline_map_<area>_test.bin, ODM1 (see AODRoadManager::LoadMapCenterline)
+	AreaMap.Reset();
+	TArray<uint8> Bin;
+	if (FFileHelper::LoadFileToArray(Bin, *(FPaths::ProjectContentDir()
+			/ FString::Printf(TEXT("OpenDrive/Masks/centerline_map_%s_test.bin"), *Key)))
+		&& Bin.Num() >= 8 && FMemory::Memcmp(Bin.GetData(), "ODM1", 4) == 0)
+	{
+		uint32 N = 0;
+		FMemory::Memcpy(&N, Bin.GetData() + 4, 4);
+		for (int64 i = 0; i < N && 8 + (i + 1) * 8 <= Bin.Num(); ++i)
+		{
+			float XY[2];
+			FMemory::Memcpy(XY, Bin.GetData() + 8 + i * 8, 8);
+			AreaMap.Add(FVector2D(XY[0], XY[1]));
+		}
+	}
+
+	Picks.Reset();
+	if (!bTrackMode)
+	{
+		Picks.AddDefaulted_GetRef().Label = TEXT("Default Start");
+		for (const TPair<FString, FVector2D>& T : AreaTowns[Area])
+		{
+			FODMenuPick& K = Picks.AddDefaulted_GetRef();
+			K.Label = K.Town = T.Key;
+			K.bHasPos = true;
+			K.Pos = T.Value;
+		}
+		return;
+	}
+	for (const FTrackInfo& T : Tracks)
+	{
+		if (T.Area != Key)
+		{
+			continue;
+		}
+		FODMenuPick& K = Picks.AddDefaulted_GetRef();
+		K.Label = T.Title;
+		K.Track = T.Name;
+		K.Km = T.Km;
+		K.bLoop = T.bLoop;
+		TArray<FTransform> Gates;
+		bool bLoop = false;
+		if (AODRaceManager::ReadTrack(T.Name, Gates, K.Line, bLoop) && K.Line.Num() > 0)
+		{
+			K.bHasPos = true;
+			K.Pos = K.Line[0];
+		}
+		if (const UODRaceSave* Save = Cast<UODRaceSave>(
+				UGameplayStatics::LoadGameFromSlot(FString::Printf(TEXT("OpenDrive_track_%s"), *T.Name), 0)))
+		{
+			K.BestTime = Save->BestTime;
+		}
+	}
+}
+
+void AODMainMenu::DriveNow()
+{
+	SavePicks();
+	if (AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx)
+	{
+		OpenArea();   // that level's menu auto-starts (bAutoStart) at TownPick / the track
+		return;
+	}
+	ApplyTrack();
+	StartAtTown(TownPick);
+}
+
+void AODMainMenu::StartAtTown(const FString& Town)
+{
+	DestroyVistas();   // the vista copies carry the same town names
+	for (TActorIterator<AODRoadManager> It(GetWorld()); It && !Town.IsEmpty(); ++It)
+	{
+		if (const int32 i = It->GetTownNodes().IndexOfByPredicate([&](const FTownNode& N) { return N.Name == Town; });
+			i != INDEX_NONE)
+		{
+			StartAt(i, *It);
+			return;
+		}
+	}
+	StartAt(-1);   // default start (or the track's, which StartAt applies either way)
 }
 
 void AODMainMenu::OnClick()
@@ -955,35 +1343,6 @@ void AODMainMenu::Adjust(int32 Dir)
 		GConfig->SetInt(WeatherConfigSection, TEXT("WeatherIdx"), WeatherIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
-	case RowArea:
-		// picks only - nothing loads until Drive; the vista (UpdateScene)
-		// swaps to the picked area's preloaded copy
-		if (const int32 N = AreaLevels.Num(); N > 0)
-		{
-			AreaIdx = (AreaIdx + Dir + N) % N;
-			if (!PickedTrack())
-			{
-				TrackPick.Empty();
-			}
-			SavePicks();
-		}
-		break;
-	case RowTrack:
-	{
-		// Free Roam, then this area's tracks in manifest order
-		TArray<FString> Names = {FString()};
-		for (const FTrackInfo& T : Tracks)
-		{
-			if (AreaKeys.IsValidIndex(AreaIdx) && T.Area == AreaKeys[AreaIdx])
-			{
-				Names.Add(T.Name);
-			}
-		}
-		const int32 N = Names.Num();
-		TrackPick = Names[(FMath::Max(0, Names.IndexOfByKey(TrackPick)) + Dir + N) % N];
-		SavePicks();
-		break;
-	}
 	default:
 		break;
 	}
@@ -1198,6 +1557,7 @@ void AODMainMenu::SavePicks() const
 		GConfig->SetString(AreaConfigSection, TEXT("Level"), *AreaLevels[AreaIdx], GGameUserSettingsIni);
 	}
 	GConfig->SetString(AreaConfigSection, TEXT("Track"), *TrackPick, GGameUserSettingsIni);
+	GConfig->SetString(AreaConfigSection, TEXT("Town"), *TownPick, GGameUserSettingsIni);
 	GConfig->Flush(false, GGameUserSettingsIni);
 }
 
@@ -1233,6 +1593,7 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
 	{
 		return;
 	}
+	HideWeb(true);
 	DestroyVistas();   // and un-freeze the real area streaming before the teleport
 
 	FVector2D Target = FVector2D::ZeroVector;   // only read when bHaveTarget is true
@@ -1398,6 +1759,7 @@ void AODMainMenu::OpenArea()
 	// the car picks also ride the travel URL, read back in BeginPlay (this
 	// class; odengine= also triggers bAutoStart) and AODVehiclePawn::BeginPlay
 	// (odvehidx=). The new level starts at its default spawn.
+	HideWeb(true);
 	SavePicks();
 	FString Options = FString::Printf(TEXT("odengine=%d?oddrive=%d"), EngineIdx, DriveIdx);
 	if (const AODVehiclePawn* Pawn = FindPawn())
@@ -1624,7 +1986,7 @@ void AODMainMenu::UpdateScene()
 	{
 		return;
 	}
-	const int32 Want = Screen == EODMenuScreen::Scene && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
+	const int32 Want = (Screen == EODMenuScreen::Area || Screen == EODMenuScreen::Conditions) && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
 		? AreaIdx : INDEX_NONE;
 	if (Want == ShownVista)
 	{
@@ -1808,26 +2170,15 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutLabel = TEXT("Weather");
 		OutValue = FName::NameToDisplayString(WeatherNames[WeatherIdx], false);   // "HeavyRain" -> "Heavy Rain"
 		break;
-	case RowArea:
-		OutLabel = TEXT("Area");
-		OutValue = AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : FString();
-		break;
-	case RowTrack:
-		OutLabel = TEXT("Track");
-		if (const FTrackInfo* T = PickedTrack())
-		{
-			OutValue = FString::Printf(TEXT("%s  %.1f km%s"), *T->Title, T->Km, T->bLoop ? TEXT(" loop") : TEXT(""));
-		}
-		else
-		{
-			OutValue = TEXT("Free Roam");
-		}
-		break;
-	case RowDrive:
-		OutLabel = TEXT("Start Driving");
+	case RowOpenDrive:
+		OutLabel = TEXT("Open Drive");
 		OutValue.Empty();
 		break;
-	case RowStart:
+	case RowTrackSelect:
+		OutLabel = TEXT("Track Select");
+		OutValue.Empty();
+		break;
+	case RowDrive:
 		OutLabel = TEXT("Drive");
 		OutValue.Empty();
 		break;
@@ -1848,7 +2199,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	default:
-		OutLabel.Empty();
+		OutLabel = Row >= RowPick && Picks.IsValidIndex(Row - RowPick) ? Picks[Row - RowPick].Label : FString();
 		OutValue.Empty();
 		break;
 	}

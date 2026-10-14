@@ -147,6 +147,7 @@ private:
 	/** Front-end menu (AODMainMenu): the current screen's panel, the loading
 	 *  overlay, or the QA town map. Takes over the whole screen when the menu is active - drawn
 	 *  instead of the in-game HUD, not on top of it. */
+	void DrawAreaMap(const AODMainMenu* Menu) const;
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
 

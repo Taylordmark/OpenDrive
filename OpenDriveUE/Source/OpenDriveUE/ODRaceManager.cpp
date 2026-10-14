@@ -124,11 +124,23 @@ FString AODRaceManager::SaveTrack(const FString& Area, const TArray<FVector2D>& 
 
 bool AODRaceManager::LoadTrack()
 {
+	if (!ReadTrack(TrackName, Checkpoints, TrackLine, bLoop))
+	{
+		return false;
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODRaceManager: track '%s' - %d gates, %s"),
+		*TrackName, Checkpoints.Num(), bLoop ? TEXT("loop") : TEXT("point to point"));
+	return true;
+}
+
+bool AODRaceManager::ReadTrack(const FString& Name, TArray<FTransform>& OutGates,
+	TArray<FVector2D>& OutLine, bool& bOutLoop)
+{
 	// pipeline/build_track.py: 'ODK1' + uint32 flags (bit 0 loop) + uint32 G
 	// + G * (x, y, z cm, yaw deg) + uint32 N + N * (x, y cm), all float32
 	TArray<uint8> Bin;
 	const FString Path = FPaths::ProjectContentDir()
-		/ FString::Printf(TEXT("OpenDrive/Masks/track_%s.bin"), *TrackName);
+		/ FString::Printf(TEXT("OpenDrive/Masks/track_%s.bin"), *Name);
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 12
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'K' || Bin[3] != '1')
 	{
@@ -144,22 +156,20 @@ bool AODRaceManager::LoadTrack()
 		UE_LOG(LogTemp, Warning, TEXT("ODRaceManager: %s is truncated"), *Path);
 		return false;
 	}
-	bLoop = (U32(4) & 1) != 0;
-	Checkpoints.Reset(G);
+	bOutLoop = (U32(4) & 1) != 0;
+	OutGates.Reset(G);
 	for (int64 i = 0; i < G; ++i)
 	{
 		const int64 At = 12 + i * 16;
-		Checkpoints.Add(FTransform(FRotator(0.0f, F32(At + 12), 0.0f),
+		OutGates.Add(FTransform(FRotator(0.0f, F32(At + 12), 0.0f),
 			FVector(F32(At), F32(At + 4), F32(At + 8))));
 	}
 	const int64 N = U32(LineAt);
-	TrackLine.SetNumUninitialized(N);
+	OutLine.SetNumUninitialized(N);
 	for (int64 i = 0; i < N; ++i)
 	{
-		TrackLine[i] = FVector2D(F32(LineAt + 4 + i * 8), F32(LineAt + 8 + i * 8));
+		OutLine[i] = FVector2D(F32(LineAt + 4 + i * 8), F32(LineAt + 8 + i * 8));
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODRaceManager: track '%s' - %d gates, %s"),
-		*TrackName, Checkpoints.Num(), bLoop ? TEXT("loop") : TEXT("point to point"));
 	return true;
 }
 

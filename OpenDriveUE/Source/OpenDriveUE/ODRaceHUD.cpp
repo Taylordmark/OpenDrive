@@ -1035,6 +1035,63 @@ void AODRaceHUD::DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const
 	DrawHints(P, X, {{TEXT("Arrows / Wheel"), TEXT("Scroll")}, {TEXT("Esc"), TEXT("Back")}});
 }
 
+// Area screen (2026-10-13): the area's road map left of the panel, a dot per
+// pick (towns / track starts); the selected track's line, length and best time
+void AODRaceHUD::DrawAreaMap(const AODMainMenu* Menu) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const TArray<FVector2D>& Map = Menu->GetAreaMap();
+	const TArray<FODMenuPick>& Picks = Menu->GetPicks();
+	const int32 Sel = Menu->GetSelectedPick();
+	if (Map.Num() < 2)
+	{
+		return;
+	}
+	const float X = ColX * S, Y = 215.0f * S;
+	const float Size = FMath::Min(Canvas->SizeY - Y - 170.0f * S, Canvas->SizeX - ColW * S - 3.0f * ColX * S);
+	if (Size < 120.0f * S)
+	{
+		return;
+	}
+	DrawStageMap(&Map, nullptr, false, INDEX_NONE, X, Y, Size, 0.6f, 0.0f, false, nullptr);
+	const FMapFit Fit = ComputeFullMapFit(Map, X, Y, Size);
+	if (Picks.IsValidIndex(Sel) && Picks[Sel].Line.Num() > 1)
+	{
+		const TArray<FVector2D>& L = Picks[Sel].Line;
+		for (int32 i = 1; i < L.Num() + (Picks[Sel].bLoop ? 1 : 0); ++i)
+		{
+			FCanvasLineItem Seg(Fit.ToMap(L[i - 1]), Fit.ToMap(L[i % L.Num()]));
+			Seg.SetColor(Accent);
+			Seg.LineThickness = 4.0f * S;
+			Canvas->DrawItem(Seg);
+		}
+	}
+	for (int32 i = 0; i < Picks.Num(); ++i)
+	{
+		if (!Picks[i].bHasPos || i == Sel)
+		{
+			continue;
+		}
+		const FVector2D D = Fit.ToMap(Picks[i].Pos);
+		P.Rect(D.X - 4.0f * S, D.Y - 4.0f * S, 8.0f * S, 8.0f * S, FLinearColor(TextCol.R, TextCol.G, TextCol.B, 0.75f));
+	}
+	if (Picks.IsValidIndex(Sel) && Picks[Sel].bHasPos)   // selected last, on top
+	{
+		const FVector2D D = Fit.ToMap(Picks[Sel].Pos);
+		P.Rect(D.X - 7.0f * S, D.Y - 7.0f * S, 14.0f * S, 14.0f * S, Accent);
+		P.Text(Picks[Sel].Label, D.X + 14.0f * S, D.Y, 20.0f, EMenuWeight::Bold, TextCol);
+	}
+	if (Picks.IsValidIndex(Sel) && !Picks[Sel].Track.IsEmpty())
+	{
+		const FODMenuPick& K = Picks[Sel];
+		P.Text(FString::Printf(TEXT("%s  ·  %.1f km %s  ·  %s"), *K.Label, K.Km,
+				K.bLoop ? TEXT("loop") : TEXT("point to point"),
+				K.BestTime > 0.0f ? *(TEXT("Best ") + FormatTime(K.BestTime)) : TEXT("No time set")),
+			X, Y + Size + 24.0f * S, 20.0f, EMenuWeight::Medium, DimCol);
+	}
+}
+
 void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 	const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const
 {
@@ -1082,19 +1139,31 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 			return;
 		}
 		const EODMenuScreen Screen = Menu->GetScreen();
-		DrawMenuPanel(Screen == EODMenuScreen::Garage ? TEXT("Garage")
-				: Screen == EODMenuScreen::Sound ? TEXT("Exhaust Sound")
-				: Screen == EODMenuScreen::Scene ? TEXT("Select Scene") : TEXT("OpenDrive"),
+		if (Screen == EODMenuScreen::World)
+		{
+			return;   // the globe (SWebBrowser) covers the screen
+		}
+		DrawMenuPanel(Menu->GetScreenTitle(),
 			Menu->GetTabs(), Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista);
 		const float HX = MenuX(bVista, ColW * S);
+		if (Screen == EODMenuScreen::Area)
+		{
+			DrawAreaMap(Menu);
+		}
 		if (Screen == EODMenuScreen::Main)
 		{
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}});
 		}
+		else if (Screen == EODMenuScreen::Area)
+		{
+			DrawHints(P, HX, {{TEXT("Q/E"), TEXT("Area")}, {TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Pick")},
+				{TEXT("Esc"), TEXT("World Map")}});
+		}
 		else
 		{
-			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")}, {TEXT("Enter"), TEXT("Confirm")},
+			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")},
+				{TEXT("Enter"), Screen == EODMenuScreen::Conditions ? TEXT("Drive") : TEXT("Confirm")},
 				{TEXT("Esc"), Screen == EODMenuScreen::Garage && Menu->IsGarageMode() ? TEXT("Resume") : TEXT("Back")}});
 		}
 		return;
@@ -1917,6 +1986,7 @@ void AODRaceHUD::DrawHUD()
 		{
 			FODGaugeData G;
 			G.SpeedCmS = FMath::Abs(Mv->GetForwardSpeed());
+			G.TopSpeedCmS = Mv->GetGearedTopSpeed();
 			// sum of v*dt: frame-rate independent; world dt is 0 while paused
 			TripCm += G.SpeedCmS * GetWorld()->GetDeltaSeconds();
 			G.TripCm = TripCm;
