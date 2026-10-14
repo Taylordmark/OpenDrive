@@ -590,6 +590,19 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 		}
 	}
 
+	// Raw Z snapshot (2026-10-14): repairing in place used to let an
+	// already-repaired (or still-bad) neighbor feed the next vertex's mean -
+	// Oahu's offshore Terrarium voids (-32768 m clusters) produced "repaired"
+	// Zs of -3 km. Detect and repair against the raw values, median not
+	// mean, so one bad neighbor can't drag the result.
+	TArray<float> RawZ;
+	RawZ.SetNumUninitialized(VCount);
+	for (uint32 v = 0; v < VCount; ++v)
+	{
+		RawZ[v] = Tile.Verts[v * 3 + 2];
+	}
+
+	TArray<float> NbrZ;
 	for (uint32 v = 0; v < VCount; ++v)
 	{
 		const TArray<uint32>& Nbrs = Neighbors[v];
@@ -598,14 +611,13 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 			continue; // isolated vertex (shouldn't happen for a real tile) - nothing to compare against
 		}
 
-		const float Z = Tile.Verts[v * 3 + 2];
+		const float Z = RawZ[v];
 		float MinAbsDelta = TNumericLimits<float>::Max();
-		float SumNeighborZ = 0.0f;
+		NbrZ.Reset();
 		for (uint32 N : Nbrs)
 		{
-			const float NZ = Tile.Verts[N * 3 + 2];
-			MinAbsDelta = FMath::Min(MinAbsDelta, FMath::Abs(Z - NZ));
-			SumNeighborZ += NZ;
+			NbrZ.Add(RawZ[N]);
+			MinAbsDelta = FMath::Min(MinAbsDelta, FMath::Abs(Z - RawZ[N]));
 		}
 
 		if (MinAbsDelta <= ThresholdCm)
@@ -613,17 +625,23 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 			continue; // agrees with at least one neighbor within threshold - not an outlier
 		}
 
-		const float RepairedZ = SumNeighborZ / Nbrs.Num();
-		FString NeighborZList;
-		for (uint32 N : Nbrs)
+		NbrZ.Sort();
+		const float RepairedZ = NbrZ[NbrZ.Num() / 2];
+		// Verbose (2026-10-14): one line per vertex was 3,666 Warnings on
+		// one Oahu load; the per-tile summary in the caller stays a Warning.
+		if (UE_LOG_ACTIVE(LogTemp, Verbose))
 		{
-			NeighborZList += FString::Printf(TEXT("%.1f,"), Tile.Verts[N * 3 + 2] / 100.0f);
+			FString NeighborZList;
+			for (float NZ : NbrZ)
+			{
+				NeighborZList += FString::Printf(TEXT("%.1f,"), NZ / 100.0f);
+			}
+			UE_LOG(LogTemp, Verbose,
+				TEXT("ODTerrainManager: outlier vertex repaired - tile (%d,%d) vert=%u rawZ=%.1fm ")
+				TEXT("neighborZs_m=[%s] repairedZ=%.1fm (min neighbor delta %.1fm > threshold %.1fm)"),
+				Key.X, Key.Y, v, Z / 100.0f, *NeighborZList, RepairedZ / 100.0f,
+				MinAbsDelta / 100.0f, ThresholdCm / 100.0f);
 		}
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODTerrainManager: outlier vertex repaired - tile (%d,%d) vert=%u rawZ=%.1fm ")
-			TEXT("neighborZs_m=[%s] repairedZ=%.1fm (min neighbor delta %.1fm > threshold %.1fm)"),
-			Key.X, Key.Y, v, Z / 100.0f, *NeighborZList, RepairedZ / 100.0f,
-			MinAbsDelta / 100.0f, ThresholdCm / 100.0f);
 
 		Tile.Verts[v * 3 + 2] = RepairedZ;
 		++OutNumRepaired;

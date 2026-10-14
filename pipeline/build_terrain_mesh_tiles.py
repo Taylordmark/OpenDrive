@@ -70,7 +70,7 @@ from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
                               half_width_for_stations, road_ue_z_m,
                                classify_wall_stations, sample_mesh_heights)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, local_rect, to_lonlat
+from test_areas import AREA_NAME, ELEV_PLAUSIBLE_MIN_M, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, local_rect, to_lonlat
 
 # Optional per-area wider bbox for background-visuals-only far tiles (raw
 # DEM, no road carving, no collision) - see test_areas.py's own comment.
@@ -1017,7 +1017,13 @@ def sample_dem(lat_arr, lon_arr, zoom, session, cache):
                 f"silent sea-level patch (AUDIT-RELIABILITY.md SS5.3). Rerun "
                 f"once the network/S3 issue clears."
             ) from exc
-        cache[key] = terrarium_to_elevation(img)
+        # Void floor (2026-10-14): Terrarium voids decode to -32768 m (raw
+        # (0,0,0) pixel - see DEM_SPIKE_THRESHOLD_M in road_mesh_common.py)
+        # and bilinear smears them into -1..-33 km spikes; Oahu's offshore
+        # tiles had thousands. Clamped per PIXEL, before interpolation, to
+        # the area's plausible floor (never above sea level, so inland areas
+        # only lose impossible sub-sea-level reads).
+        cache[key] = np.maximum(terrarium_to_elevation(img), min(ELEV_PLAUSIBLE_MIN_M, 0.0))
 
     # vectorized (2026-10-01; was a per-point Python loop) - same float64
     # expression in the same order, so bit-identical to the old loop

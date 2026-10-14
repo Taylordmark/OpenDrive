@@ -2128,9 +2128,19 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		}
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
+		// Scrub (grass_tuft, ~1 m) gets its own short cull (2026-10-14, Oahu
+		// 20-25 fps): it's the largest batch in dense biomes (~45% of a
+		// Rainforest tile) and sub-pixel long before the old shared 450 m
+		// low-veg cull - 250 m end draws ~30% of the old area.
+		const bool bScrub = m == ScrubBatchIdx;
+		Hism->SetCullDistances(bScrub ? 15000 : bLowVeg ? 20000 : 45000, bScrub ? 25000 : bLowVeg ? 45000 : 60000);
 		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(!bLowVeg);
+		// Wind WPO is a few cm (see WpoDisableCm): don't let it invalidate
+		// Virtual Shadow Map pages every frame for every tree within 100 m.
+		// Instances never move after AddInstances, so Rigid is exact apart
+		// from the shadow not swaying.
+		Hism->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
