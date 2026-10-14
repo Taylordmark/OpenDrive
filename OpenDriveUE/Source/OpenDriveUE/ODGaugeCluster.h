@@ -9,6 +9,7 @@ class UFont;
 struct FODGaugeData
 {
 	float SpeedCmS = 0.0f;       // unsigned
+	float TopSpeedCmS = 0.0f;    // geared top; the speedo dial reaches past it
 	float Rpm = 0.0f;
 	float RedlineRpm = 7000.0f;  // red band starts at the 500 below this
 	float MaxRpm = 7000.0f;

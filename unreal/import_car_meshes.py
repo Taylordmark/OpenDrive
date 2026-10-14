@@ -437,6 +437,9 @@ make_def("DA_Vehicle_LMP", {
     # Le Mans prototype: mid-engine, aero nose keeps it 45% front, lowest COM
     "front_weight_frac": 0.45, "yaw_dynamic_index": 0.85, "com_local_z": 3.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 600.0,
+    # 6-speed (Taylor, 2026-10-13: ran out of gears): the default 5 plus a
+    # 0.82 sixth, same 1.22 step as 4->5; limiter in 6th ~381 km/h
+    "gear_ratios": [4.25, 2.52, 1.66, 1.22, 1.0, 0.82],
     "front_brake_nm": 2850.0, "rear_brake_nm": 2300.0, "handbrake_nm": 4600.0,
     # racing slicks (low load sensitivity); 1.5x weight at 150 mph (ClA ~5.5)
     "mu_peak": 1.60, "tire_load_sensitivity": 0.15, "rear_grip_ratio": 1.06,

@@ -342,9 +342,14 @@ void ODGaugeCluster::Draw(UCanvas* Canvas, const UFont* Font, const FODGaugeData
 	DialNeedle(Canvas, TachM, R, D.Rpm / TachMax);
 
 	// ---- speedo
-	const float SpeedMax = D.bMetric ? 280.0f : 160.0f;
-	const float Speed = D.SpeedCmS * (D.bMetric ? 0.036f : 0.0223694f);
-	DialFace(Canvas, Font, SpeedM, R, SpeedMax, D.bMetric ? 40.0f : 20.0f, 10.0f,
+	// dial ends on the major tick at or past the car's geared top speed,
+	// never shorter than the old fixed 280 km/h / 160 mph face
+	const float ToUnit = D.bMetric ? 0.036f : 0.0223694f;
+	const float Major = D.bMetric ? 40.0f : 20.0f;
+	const float SpeedMax = FMath::Max(D.bMetric ? 280.0f : 160.0f,
+		FMath::CeilToFloat(D.TopSpeedCmS * ToUnit / Major) * Major);
+	const float Speed = D.SpeedCmS * ToUnit;
+	DialFace(Canvas, Font, SpeedM, R, SpeedMax, Major, 10.0f,
 		1.0e9f, 1.0f, D.bMetric ? TEXT("km/h") : TEXT("MPH"));
 	const FString Trip = D.bMetric
 		? FString::Printf(TEXT("%.1f km"), D.TripCm / 100000.0)

@@ -479,6 +479,13 @@ public:
 	float GetWheelRadius(int32 i) const { return Wheels[i].BaseRadius * TireDiameterScale; }
 
 	// --- telemetry (audio, HUD, ghost, pause menu) ---
+	/** Limiter in top gear, cm/s - the speedo dial's reach (ignores drag). */
+	float GetGearedTopSpeed() const
+	{
+		const float R = Wheels.Num() > 0 ? GetWheelRadius(Wheels.Num() - 1) : 34.0f;
+		return GearRatios.Num() > 0
+			? LimiterRpm / (GearRatios.Last() * FinalRatio) * UE_TWO_PI / 60.0f * R : 0.0f;
+	}
 	float GetRpm() const { return EngineRpm; }
 	int32 GetGear() const { return Gear; }
 	/** Throttle after fuel/shift cuts - what the engine actually receives. */

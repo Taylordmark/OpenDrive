@@ -228,7 +228,9 @@ UPrimitiveComponent* UODVehicleMovement::GetBody() const
 void UODVehicleMovement::InitBody(UPrimitiveComponent* Body)
 {
 	FBodyInstance* BI = Body->GetBodyInstance();
-	if (!BI || !BI->IsValidBodyInstance() || Body->GetMass() < 1.0f)
+	// Chaos reports exactly 1 kg until the body's mass properties land (seen
+	// 2026-10-13: "mass=1 kg, Iz=1" bind -> car tumbling), so <= not <
+	if (!BI || !BI->IsValidBodyInstance() || Body->GetMass() <= 1.0f)
 	{
 		return;                       // mesh not loaded yet - retry next tick
 	}

@@ -92,7 +92,21 @@ for n in NAMES:
         mesh.set_material(i, mats[hi][s])
     if not n.startswith("SM_CarWheel"):
         unreal.EditorStaticMeshLibrary.remove_collisions(mesh)
-        unreal.EditorStaticMeshLibrary.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.BOX)
+        # headless, add_simple_collisions returns -1 and adds nothing - a car with
+        # no collision gets Chaos' 1 kg default and falls through the road
+        # (2026-10-13), so write the bbox box ourselves
+        if unreal.EditorStaticMeshLibrary.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.BOX) < 0:
+            bb = mesh.get_bounding_box()
+            box = unreal.KBoxElem()
+            box.set_editor_property("center", (bb.min + bb.max) * 0.5)
+            for axis in "xyz":
+                box.set_editor_property(axis, getattr(bb.max, axis) - getattr(bb.min, axis))
+            bs = mesh.get_editor_property("body_setup")
+            agg = bs.get_editor_property("agg_geom")
+            agg.set_editor_property("box_elems", [box])
+            bs.set_editor_property("agg_geom", agg)
+        if not mesh.get_editor_property("body_setup").get_editor_property("agg_geom").get_editor_property("box_elems"):
+            raise RuntimeError(f"{n}: no chassis collision")
     b = mesh.get_bounding_box()
     report.append(f"{n}: {mesh.get_num_triangles(0)} tris, {len(slots)} slots {slots}, bbox "
                   f"({b.min.x:.0f},{b.min.y:.0f},{b.min.z:.0f})..({b.max.x:.0f},{b.max.y:.0f},{b.max.z:.0f})")
