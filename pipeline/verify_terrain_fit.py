@@ -171,7 +171,29 @@ HAIRPIN_MIN_DROP_M = 1.5
 
 
 HAIRPIN_CAUSE = "tight hairpin apex (accepted, see HAIRPIN_GAP_STATIONS)"
-ACCEPTED_CAUSES = ("covered by wall", HAIRPIN_CAUSE)
+COVER_CAUSE = "covered by wall / embankment / bridge"
+ACCEPTED_CAUSES = (COVER_CAUSE, HAIRPIN_CAUSE)
+
+
+def drop_cover_tree():
+    """KD tree (east/north m) over road-owned geometry that hides terrain
+    falling away under a road: retaining-wall surface points plus the
+    embankment/bridge side-run stations of road_embankments.json (2026-10-14:
+    H-3 rides fill and viaducts far above its valleys on purpose - the road
+    stays smooth, the side runs dress the drop; only walls counted before).
+    None if there is nothing."""
+    from scipy.spatial import cKDTree
+    import json
+    walls = json.loads(brw.OUT_PATH.read_text())["walls"] if brw.OUT_PATH.exists() else []
+    pts = [np.einsum("kj,tjc->tkc", brw._BARY,
+                     np.array(w["vertices"], float).reshape(-1, 3)[np.array(w["triangles"]).reshape(-1, 3)]
+                     ).reshape(-1, 3)[:, :2] / 100.0 for w in walls]
+    emb = brw.STATIONS_PATH.parent / "road_embankments.json"
+    if emb.exists():
+        pts += [np.array(r["station_xyzd_cm"], float).reshape(-1, 4)[:, :2] / 100.0
+                for r in json.loads(emb.read_text())["runs"] if r.get("cls") != "none"]
+    pts = np.concatenate(pts) * [1.0, -1.0] if pts else np.zeros((0, 2))
+    return cKDTree(pts) if len(pts) else None
 
 
 def _judge_devs(label, rows):
@@ -180,7 +202,6 @@ def _judge_devs(label, rows):
     fails only if no wall covers it; uncovered ones are reported by cause.
     Returns ok."""
     from scipy.spatial import cKDTree
-    import json
     if not rows:
         return True
     st = np.array([r[0] for r in rows])
@@ -196,12 +217,7 @@ def _judge_devs(label, rows):
 
     east, north, elev, seg_idx, _si, _rn = brw.load_station_arrays()
     hw = brw.load_station_half_widths()
-    walls = json.loads(brw.OUT_PATH.read_text())["walls"] if brw.OUT_PATH.exists() else []
-    wall_xy = [np.einsum("kj,tjc->tkc", brw._BARY,
-                         np.array(w["vertices"], float).reshape(-1, 3)[np.array(w["triangles"]).reshape(-1, 3)]
-                         ).reshape(-1, 3)[:, :2] / 100.0 for w in walls]
-    wall_xy = np.concatenate(wall_xy) * [1.0, -1.0] if wall_xy else np.zeros((0, 2))
-    wall_tree = cKDTree(wall_xy) if len(wall_xy) else None
+    wall_tree = drop_cover_tree()
     st_tree = cKDTree(np.c_[east, north])
     struct = btmt._get_struct_mask(len(east))
     _ex, wall_pairs = classify_wall_stations(east, north, elev, seg_idx, _si, _rn, half_width_m=hw)
@@ -212,7 +228,7 @@ def _judge_devs(label, rows):
     causes = defaultdict(list)
     for i in below:
         if wall_tree is not None and wall_tree.query([east[i], north[i]])[0] <= hw[i] + WALL_COVER_REACH_M:
-            causes["covered by wall"].append(i)
+            causes[COVER_CAUSE].append(i)
             continue
         near = np.asarray(st_tree.query_ball_point([east[i], north[i]], hw[i] + 20.0), dtype=int)
         near = near[(seg_idx[near] != seg_idx[i]) & ~struct[near] & (elev[near] < elev[i] - 2.0)]

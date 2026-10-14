@@ -355,6 +355,11 @@ EMBANK_LOW_THRESHOLD_M = 2.5     # <= this: no treatment
 EMBANK_HIGH_THRESHOLD_M = 7.0    # > this (or water crossing): bridge, not embankment
 EMBANK_HYSTERESIS_M = 0.3        # Schmitt-trigger band half-width at each threshold
 EMBANK_MIN_RUN_M = 10.0          # sustained-condition requirement, matches guardrails
+# ...unless the run drops this deep: a gulch/culvert notch under a smooth
+# highway is short but real (2026-10-14, Farrington Hwy station 200642 -
+# terrain several m below a fill road, 42 m from the nearest run). Matches
+# verify_terrain_fit's TOL_M, past which an uncovered drop fails the gate.
+EMBANK_DEEP_SHORT_M = 2.8
 EMBANK_PROBE_OFFSET_M = ROAD_HALF_WIDTH + 3.0   # same "a few meters beyond the shoulder" probe
 EMBANK_EDGE_OFFSET_M = ROAD_HALF_WIDTH          # skirt top seats AT the pavement edge (no gap
                                                   # vs. the road ribbon's own edge vertex)
@@ -450,19 +455,21 @@ def classify_with_hysteresis(drop_m, in_lake, in_junction):
     return out
 
 
-def demote_short_runs(cls_arr, s_m):
+def demote_short_runs(cls_arr, s_m, drop_m=None):
     """Any contiguous non-NONE run shorter than EMBANK_MIN_RUN_M (arc length)
     is demoted back to NONE_CLS - a momentary DEM blip shouldn't spawn a 3m
     stub of embankment or a one-station bridge flag. Mirrors build_road_
     guardrails.py's GUARDRAIL_MIN_RUN_M filter, generalized to a 3-class
     array (kept per-run rather than per-mask since a run may change class
     mid-run at the hi/lo boundary - it's still one physically-contiguous
-    "above threshold" stretch)."""
+    "above threshold" stretch). A short run of 2+ stations dropping past
+    EMBANK_DEEP_SHORT_M is kept (drop_m given)."""
     out = cls_arr.copy()
     nonzero = cls_arr != NONE_CLS
     for start, end in contiguous_runs(nonzero):
         run_len_m = s_m[end - 1] - s_m[start] if end > start else 0.0
-        if run_len_m < EMBANK_MIN_RUN_M:
+        deep = drop_m is not None and end - start >= 2 and drop_m[start:end].max() > EMBANK_DEEP_SHORT_M
+        if run_len_m < EMBANK_MIN_RUN_M and not deep:
             out[start:end] = NONE_CLS
     return out
 
@@ -784,7 +791,7 @@ def compute_side(seg, side, lakes, junction_touched_seg,
             lake_z_cm[hit_idx] = lake["z_cm"]  # last-match wins on rare overlap - harmless
 
     cls_arr = classify_with_hysteresis(drop_m, in_lake, in_junction_box)
-    cls_arr = demote_short_runs(cls_arr, s)
+    cls_arr = demote_short_runs(cls_arr, s, drop_m)
     drop_cm = np.clip(drop_m, 0.0, None) * 100.0
 
     return {
@@ -1097,7 +1104,7 @@ def main():
                  both_edges_real_lake & ~d["in_junction_box"]).sum())
             if water_crossing.any():
                 d["cls_arr"] = np.where(water_crossing, BRIDGE_CLS, d["cls_arr"]).astype(np.int8)
-                d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"])
+                d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"], d["drop_m"])
 
             # Pier/deck termination at the WATER SURFACE (baked lake Z), not the
             # noisy raw-DEM sample - any in_lake station (whichever rule promoted

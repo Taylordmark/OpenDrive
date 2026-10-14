@@ -250,6 +250,21 @@ def check_road_vs_terrain_fit():
     gaps = ((road_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M) - (terrain_h[ok_pts] / 100.0 + ORIGIN_HEIGHT_M))
     gaps = gaps if len(gaps) else np.array([EXPECTED_GAP_M])
     dev = gaps - EXPECTED_GAP_M
+    # road far ABOVE terrain is fine where an embankment/bridge/wall dresses
+    # the drop (verify_terrain_fit.drop_cover_tree) - terrain above never is
+    hi = np.where(dev > TOL_M)[0]
+    if len(hi):
+        from verify_terrain_fit import WALL_COVER_REACH_M, drop_cover_tree
+        tree, hw = drop_cover_tree(), brw.load_station_half_widths()
+        st = fit_idx[ok_pts][hi]
+        if tree is not None:
+            covered = tree.query(np.c_[east[st], north[st]])[0] <= hw[st] + WALL_COVER_REACH_M
+            print(f"{int(covered.sum())}/{len(hi)} station(s) over {TOL_M}m above terrain "
+                  f"covered by a wall/embankment/bridge")
+            dev[hi[covered]] = 0.0
+        for i in st[dev[hi] > TOL_M][:5]:
+            print(f"  road {gaps[np.searchsorted(fit_idx[ok_pts], i)]:.1f}m above terrain, "
+                  f"uncovered, at station {i} ({east[i]:.0f}, {north[i]:.0f})")
     mean_abs = float(np.mean(np.abs(dev)))
     max_dev = float(np.max(np.abs(dev))) if len(dev) else 0.0
 

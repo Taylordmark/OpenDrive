@@ -55,6 +55,7 @@ HEAD_THICK_CM = 60.0
 HOLE_PAD_CM = 50.0
 HOLE_SAMPLE_CM = 100.0   # max spacing of the per-triangle 3D sample points
 HOLE_CUT_CM = 100.0      # hit triangles are re-split this fine before the cut
+MAX_SAMPLES = 2_000_000  # points per tri_samples batch (~50 MB float64)
 DENSE_CM = 50.0          # centerline resampling for the hole test
 CHUNK_STATIONS = 40      # stations per bore mesh chunk (~200 m)
 LIGHT_W_CM = 30.0
@@ -241,11 +242,14 @@ def tri_samples(verts, tris, step_cm=HOLE_SAMPLE_CM):
     edge = np.max(np.linalg.norm(v - np.roll(v, 1, axis=1), axis=2), axis=1)
     levels = np.maximum(1, np.ceil(edge / step_cm)).astype(int)
     for n in np.unique(levels):
-        ids = np.where(levels == n)[0]
         i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1))
         ok = i + j <= n
         b = np.c_[i[ok], j[ok], n - i[ok] - j[ok]] / n
-        yield ids, np.einsum("sk,tkd->tsd", b, v[ids])
+        all_ids = np.where(levels == n)[0]
+        per = max(1, MAX_SAMPLES // len(b))   # bound memory: ~MAX_SAMPLES points per yield
+        for k in range(0, len(all_ids), per):
+            ids = all_ids[k:k + per]
+            yield ids, np.einsum("sk,tkd->tsd", b, v[ids])
 
 
 def hole_mask(verts, tris, runs, pad_cm=HOLE_PAD_CM):
@@ -267,9 +271,14 @@ def hole_mask(verts, tris, runs, pad_cm=HOLE_PAD_CM):
         return out
     runs = [runs[i] for i in near]
     index = _dense(runs)
-    rlo = np.min([np.r_[r["c"].min(0), r["z"].min()] for r in runs], axis=0) - reach - 2000.0
-    rhi = np.max([np.r_[r["c"].max(0), r["z"].max()] for r in runs], axis=0) + reach + 2000.0
-    cand = np.where(np.all((hi >= rlo) & (lo <= rhi), axis=1))[0]
+    # per-run boxes, not one union box: two far-apart tunnels on a tile would
+    # otherwise put the whole tile in play (548M samples, OOM on oahu)
+    keep = np.zeros(len(tris), bool)
+    for r in runs:
+        rlo = np.r_[r["c"].min(0) - r["w"].max(), r["z"].min()] - reach - 2000.0
+        rhi = np.r_[r["c"].max(0) + r["w"].max(), r["z"].max()] + reach + 2000.0
+        keep |= np.all((hi >= rlo) & (lo <= rhi), axis=1)
+    cand = np.where(keep)[0]
     for ids, pts in tri_samples(verts, tris[cand]):
         hit = inside_bore(pts.reshape(-1, 3), runs, pad_cm, index).reshape(pts.shape[:2]).any(axis=1)
         out[cand[ids[hit]]] = True
