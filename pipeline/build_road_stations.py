@@ -829,7 +829,7 @@ def main():
     # so an OSM bridge over another road sat only 0.2-4 m above it - see
     # lift_overpasses(). Before the conflict/junction passes so they see
     # the lifted profile; the lifted ramps sit out the agreement pass below.
-    lifted_h, over_road, lifted, overpass_rows, n_overpass_skipped = lift_overpasses(
+    lifted_h, over_road, lifted, overpass_rows, n_overpass_synth = lift_overpasses(
         segments)
     for seg, hh, o in zip(segments, lifted_h, over_road):
         seg["h"], seg["over_road_s"] = hh, o
@@ -837,7 +837,7 @@ def main():
     print(f"{len(overpass_rows)} bridge-over-road crossing(s): "
           f"{sum(r[4] < OVERPASS_SEPARATION_M - 0.05 for r in overpass_rows)} lifted to "
           f"{OVERPASS_SEPARATION_M} m separation ({int(all_lifted.sum())} station(s) moved); "
-          f"{n_overpass_skipped} grade-separated crossing(s) skipped (upper road not a bridge)")
+          f"{n_overpass_synth} of them untagged layer stack(s) given a synthesized span")
     for x, y, up, lo, before, after in overpass_rows:
         print(f"  overpass ({x:.0f},{y:.0f}) '{segments[up]['road_name_s'][0]}' over "
               f"'{segments[lo]['road_name_s'][0]}': {before:.1f} m -> {after:.1f} m")

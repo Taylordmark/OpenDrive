@@ -490,13 +490,13 @@ def check_wall_coverage():
     hw = brw.load_station_half_widths()
     _exclude, wall_pairs = classify_wall_stations(
         east, north, elev, seg_idx, station_idx, road_name, half_width_m=hw)
-    runs = brw.cluster_runs(wall_pairs, len(east))
+    runs = brw.cluster_runs(wall_pairs, len(east), seg_idx)
 
     tol_m = WALL_EMBED_MARGIN_M + 5.0
     n_checked = n_failed = 0
     for run_stations in runs:
         centroid_ref_cm = brw.own_chain_centroid_cm(run_stations, east, north, seg_idx)
-        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm)
+        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm, seg_idx)
         if mesh is None:
             continue
         verts, _uvs, _tris = mesh

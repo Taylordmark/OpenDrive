@@ -392,10 +392,77 @@ def check_station_frame():
     return ok
 
 
+TUNNEL_TOL_M = 0.5
+
+
+def check_tunnel_pavement():
+    """PLAN-REALISM Phase 5: every owned tunnel station must have road
+    pavement at its shipped height - continuous portal to portal (tunnels
+    are skipped by the coverage check above with the rest of is_struct)."""
+    segs = json.loads(btmt.STATIONS_PATH.read_text())["segments"]
+    cat = lambda k: np.concatenate([np.asarray(s[k], dtype=np.float64) for s in segs])
+    east, north = cat("east_m"), cat("north_m")
+    tun = cat("is_tunnel").astype(bool)
+    east, north, z = _shipped_stations(east, north, cat("elev_m"))
+    x_cm, y_cm = east * 100.0, -north * 100.0
+    idx = np.where(tun & owns(x_cm, y_cm))[0]
+    road_h = _sample_with_neighbors(_load_road_tile, np.floor(x_cm[idx] / ROAD_TILE_SIZE_CM).astype(int),
+                                    np.floor(y_cm[idx] / ROAD_TILE_SIZE_CM).astype(int),
+                                    x_cm[idx], y_cm[idx], ring=2)
+    dev = np.abs(road_h / 100.0 + ORIGIN_HEIGHT_M - z[idx])
+    # the sampler keeps the TOPMOST surface: at a portal under another road
+    # (Columbine Dr under I-70) that is the other road's wrap lip - re-test
+    # those against each covering triangle and keep the nearest height
+    for q in np.where(np.isnan(road_h) | (dev > TUNNEL_TOL_M))[0]:
+        i = idx[q]
+        tx, ty = int(np.floor(x_cm[i] / ROAD_TILE_SIZE_CM)), int(np.floor(y_cm[i] / ROAD_TILE_SIZE_CM))
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                parsed = _load_road_tile(tx + dx, ty + dy)
+                if parsed is None or len(parsed["triangles"]) == 0:
+                    continue
+                pos, tri = parsed["positions"], parsed["triangles"]
+                tp = pos[tri]
+                cov = ((tp[:, :, 0].min(1) <= x_cm[i]) & (tp[:, :, 0].max(1) >= x_cm[i])
+                       & (tp[:, :, 1].min(1) <= y_cm[i]) & (tp[:, :, 1].max(1) >= y_cm[i]))
+                for tt in tri[cov]:
+                    hz = sample_mesh_heights(pos, tt[None], x_cm[i:i + 1], y_cm[i:i + 1])[0]
+                    d = abs(hz / 100.0 + ORIGIN_HEIGHT_M - z[i])
+                    if not np.isnan(hz) and not d >= dev[q]:
+                        road_h[q], dev[q] = hz, d
+    bad = np.isnan(road_h) | (dev > TUNNEL_TOL_M)
+    for i in idx[bad][:5]:
+        print(f"  tunnel station ({east[i]:.0f}, {north[i]:.0f}): no pavement at its height")
+    ok = not bad.any()
+    print(f"{'PASS' if ok else 'FAIL'} [TUNNEL PAVEMENT]: {len(idx)} tunnel station(s), "
+          f"{int(np.isnan(road_h).sum())} without pavement, {int((dev > TUNNEL_TOL_M).sum())} "
+          f"more than {TUNNEL_TOL_M} m off, max dev {np.nanmax(dev, initial=0.0):.2f} m")
+    return ok
+
+
+def check_stacked_crossings():
+    """Stacked (layer-separated) crossings with no structure on either road -
+    lift_overpasses synthesizes a span for each at build time, so a fresh
+    bake re-run over the SHIPPED stations must find none (target 0)."""
+    from road_mesh_common import lift_overpasses
+    segs = []
+    for s in json.loads(btmt.STATIONS_PATH.read_text())["segments"]:
+        segs.append({"e": np.asarray(s["east_m"], float), "n": np.asarray(s["north_m"], float),
+                     "s": np.asarray(s["s_m"], float), "h": np.asarray(s["elev_m"], float),
+                     "is_struct_s": np.asarray(s["is_struct"], bool),
+                     "is_tunnel_s": np.asarray(s["is_tunnel"], bool), "layer_s": list(s["layer"])})
+    *_, n_synth = lift_overpasses(segs, passes=1)
+    print(f"{'PASS' if n_synth == 0 else 'FAIL'} [STACKED CROSSINGS]: {n_synth} layer-stacked "
+          f"crossing(s) with no bridge/tunnel structure (target 0)")
+    return n_synth == 0
+
+
 def main():
     ok = check_station_frame()
     ok = check_road_vs_terrain_fit() and ok
     ok = check_poke_through() and ok
+    ok = check_tunnel_pavement() and ok
+    ok = check_stacked_crossings() and ok
     if not ok:
         sys.exit(1)
 

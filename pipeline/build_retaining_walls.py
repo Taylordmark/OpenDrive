@@ -151,7 +151,7 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
-def cluster_runs(wall_pairs, n_stations):
+def cluster_runs(wall_pairs, n_stations, seg_idx=None):
     """Union-Find over wall-eligible pairs -> connected components ("runs").
     Two stations already share a pair only because classify_wall_stations
     flagged them in-scope + above WALL_MIN_GRADE, so this step is purely
@@ -159,7 +159,19 @@ def cluster_runs(wall_pairs, n_stations):
     Drive's many overlapping pairs (each comparing a slightly different
     station combination along the same real hairpin) collapsing into a
     small number of real runs instead of hundreds of 2-station fragments.
-    Returns a list of station-index lists, one per run."""
+    Returns a list of station-index lists, one per run.
+
+    With seg_idx, runs are clustered per ROAD PAIR (2026-10-14, PLAN-REALISM
+    Phase 5): at I-70's East Portal the benched EB/WB carriageways and the
+    US 6 frontage roads chained into 143-station runs over 4-6 roads, which
+    the two-sided ruled surface can't fit (every piece came back None - no
+    wall between carriageways 4 m apart). Each pair of roads now gets its
+    own corridor wall; a station can border several."""
+    if seg_idx is not None:
+        groups = defaultdict(list)
+        for i, j in wall_pairs:
+            groups[(min(seg_idx[i], seg_idx[j]), max(seg_idx[i], seg_idx[j]))].append((i, j))
+        return [r for g in groups.values() for r in cluster_runs(g, n_stations)]
     uf = _UnionFind(n_stations)
     touched = set()
     for i, j in wall_pairs:
@@ -289,7 +301,7 @@ def own_chain_centroid_cm(run_stations, east, north, seg_idx):
     ])
 
 
-def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm):
+def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm, seg_idx=None):
     """Ruled-surface retaining-wall mesh (UE cm frame) between a run's
     upper and lower station sets. Returns (verts Nx3 float32 cm, uvs Nx2,
     tris Mx3 uint32) or None if the run is too degenerate to build (fewer
@@ -300,6 +312,13 @@ def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm):
         return None
     elevs = np.array([elev[s] for s in run_stations])
     upper_mask = kmeans_1d_2(elevs)
+    segs = None if seg_idx is None else np.array([seg_idx[s] for s in run_stations])
+    if segs is not None and len(set(segs.tolist())) == 2:
+        # two roads (per-pair runs): the sides are the roads themselves - a
+        # 1-D elevation split cuts a long piece along its grade instead
+        # (I-70 EB over WB, both climbing 5%)
+        a = segs == segs[0]
+        upper_mask = a if elevs[a].mean() > elevs[~a].mean() else ~a
     lower_idx = [s for s, up in zip(run_stations, upper_mask) if not up]
     upper_idx = [s for s, up in zip(run_stations, upper_mask) if up]
     if len(lower_idx) < 1 or len(upper_idx) < 1:
@@ -409,7 +428,8 @@ def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm):
     # surface bridging unrelated geometry, not a wall face - no quad is
     # emitted on either side of it, splitting the mesh there instead of
     # draping a shallow sheet over the hillside.
-    row_ok = (row_span <= WALL_MAX_ROW_SPAN_M) & (lo_clear >= 0.5) & (hi_clear >= 0.5)
+    row_ok = ((row_span <= WALL_MAX_ROW_SPAN_M) & (lo_clear >= 0.5) & (hi_clear >= 0.5)
+              & (hi_z - lo_z >= 0.5))   # the two roads swap heights (or nearly): no face there
 
     tris = []
     for k in range(n_samples - 1):
@@ -436,7 +456,15 @@ def build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm):
     if len(tris) == 0:
         return None
     tris = face_outward_flip(tris, verts, centroid_ref_cm)
-    return verts.astype(np.float32), np.array(uvs, dtype=np.float32), tris.astype(np.uint32)
+    # keep only rows some face uses (still [lower, upper] pairs), so a gated
+    # row's swapped/flat vertices don't ship or skew verify_terrain_fit
+    rows = np.unique(tris // 2)
+    remap = np.full(n_samples, -1, dtype=np.int64)
+    remap[rows] = np.arange(len(rows))
+    keep = np.stack([rows * 2, rows * 2 + 1], axis=1).ravel()
+    tris = remap[tris // 2] * 2 + tris % 2
+    return (verts[keep].astype(np.float32), np.array(uvs, dtype=np.float32)[keep],
+            tris.astype(np.uint32))
 
 
 # Catch-all lane gate (2026-09-28): a wall triangle with any part standing
@@ -532,7 +560,7 @@ def main():
         east, north, elev, seg_idx, station_idx, road_name, half_width_m=hw)
     print(f"{len(wall_pairs)} wall-eligible conflict pair(s) over {len(east)} station(s)")
 
-    runs = cluster_runs(wall_pairs, len(east))
+    runs = cluster_runs(wall_pairs, len(east), seg_idx)
     print(f"{len(runs)} run(s) after clustering")
 
     # 2026-09-07 giant-slab fix (see WALL_RUN_GAP_M's comment): break each
@@ -550,7 +578,7 @@ def main():
     max_edge_m = 0.0
     for piece_idx, piece_stations in enumerate(pieces):
         centroid_ref_cm = own_chain_centroid_cm(piece_stations, east, north, seg_idx)
-        mesh = build_wall_run_mesh(piece_stations, east, north, elev, hw, centroid_ref_cm)
+        mesh = build_wall_run_mesh(piece_stations, east, north, elev, hw, centroid_ref_cm, seg_idx)
         if mesh is None:
             n_skipped += 1
             continue

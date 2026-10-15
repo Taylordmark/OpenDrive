@@ -4,7 +4,10 @@
 #include "ODBinSidecarUtil.h"
 #include "ODTileSource.h"
 #include "Async/Async.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Engine/World.h"
 #include "Components/DynamicMeshComponent.h"
+#include "Components/PostProcessComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
@@ -41,6 +44,43 @@ void AODWallManager::BeginPlay()
 		Mid->SetScalarParameterValue(TEXT("Glow"), Glow);
 		WallMat = Mid;
 	}
+
+	if (WallTilePrefix.StartsWith(TEXT("tunnel_")))
+	{
+		TunnelPP = NewObject<UPostProcessComponent>(this, TEXT("TunnelInteriorPP"));
+		TunnelPP->SetupAttachment(RootComponent);
+		TunnelPP->bUnbound = true;
+		TunnelPP->Priority = 1000.0f;   // over AODAtmosphereController's volume (100)
+		TunnelPP->BlendWeight = 0.0f;
+		FPostProcessSettings& S = TunnelPP->Settings;
+		S.bOverride_IndirectLightingIntensity = true;
+		S.IndirectLightingIntensity = 0.2f;
+		S.bOverride_AutoExposureSpeedUp = true;
+		S.AutoExposureSpeedUp = 0.6f;    // outside: 3 - the eye takes a few seconds
+		S.bOverride_AutoExposureBias = true;
+		S.AutoExposureBias = -1.5f;      // outside: -1
+		TunnelPP->RegisterComponent();
+	}
+}
+
+void AODWallManager::UpdateTunnelInterior(float DeltaSeconds)
+{
+	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (!TunnelPP || !Cam)
+	{
+		return;
+	}
+	// Under a bore = straight up hits one of this manager's chunks.
+	const FVector From = Cam->GetCameraLocation();
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ODTunnelInterior), true);
+	const bool bInside = GetWorld()->LineTraceSingleByChannel(
+		Hit, From, From + FVector(0.0, 0.0, 2500.0), ECC_Visibility, Params)
+		&& Hit.GetActor() == this;
+	// exponential approach, same at any frame rate (0.4 s time constant)
+	const float Target = bInside ? 1.0f : 0.0f;
+	TunnelBlend += (Target - TunnelBlend) * (1.0f - FMath::Exp(-DeltaSeconds / 0.4f));
+	TunnelPP->BlendWeight = TunnelBlend;
 }
 
 void AODWallManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -281,6 +321,7 @@ void AODWallManager::ReleaseTile(const FIntPoint& Key)
 void AODWallManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	UpdateTunnelInterior(DeltaSeconds);
 
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Player)

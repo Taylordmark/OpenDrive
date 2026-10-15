@@ -1085,6 +1085,7 @@ OVERPASS_SEPARATION_M = 6.5   # upper pavement over lower pavement at an OSM
 OVERPASS_RAMP_GRADE = 0.06    # steepest grade the lift's approach ramps add
 OVERPASS_FLAT_M = 12.0        # full lift at least this far either side of the crossing
 OVERPASS_JOIN_M = 40.0        # a same-level crossing this close to a bridge's deck zone joins it
+OVERPASS_SYNTH_HALF_M = 10.0  # synthesized span half-length (over a square crossing) for an untagged layer stack
 OVERPASS_SMOOTH_STATIONS = 5  # moving average over the lift (25 m at 5 m stations)
 
 
@@ -1092,8 +1093,11 @@ def lift_overpasses(segs, passes=3):
     """Raises the upper road at every mid-segment centerline crossing whose
     upper road is an OSM bridge there, until it sits OVERPASS_SEPARATION_M
     over the lower road. Upper = higher OSM layer, else the bridge one. A
-    non-bridge upper is skipped: terrain conforms to it, so lifting it would
-    bury the road below in fill. The road is raised to a floor that is the
+    non-bridge upper over a non-tunnel road (an untagged `layer` stack) gets
+    a synthesized span: its is_struct_s is set IN PLACE over the crossing
+    (OVERPASS_SYNTH_HALF_M / sin(angle)), so downstream it is carved out and
+    decked like a tagged bridge instead of burying the road below in the
+    fill terrain conforms to. The road is raised to a floor that is the
     deck height over the bridge run (and OVERPASS_FLAT_M around the crossing)
     and falls OVERPASS_RAMP_GRADE per metre of road-graph distance beyond -
     through junction nodes too - so the DEM's sag under the span fills in
@@ -1103,7 +1107,7 @@ def lift_overpasses(segs, passes=3):
     segs: [{"e","n","s","h","is_struct_s","is_tunnel_s","layer_s"}].
     Returns (h list, over_road list - each crossing's flat deck zone,
     lifted list - stations the lift moved, report rows
-    (x, y, up_seg, lo_seg, sep_before_m, sep_after_m), n_skipped)."""
+    (x, y, up_seg, lo_seg, sep_before_m, sep_after_m), n_synth - spans synthesized)."""
     from shapely.geometry import LineString
     from shapely.strtree import STRtree
 
@@ -1117,13 +1121,21 @@ def lift_overpasses(segs, passes=3):
     def is_br(i, k):
         return any(segs[i]["is_struct_s"][j] and not segs[i]["is_tunnel_s"][j] for j in win(i, k))
 
+    def heading(i, k):
+        g, k0 = segs[i], max(min(k, len(segs[i]["e"]) - 2), 0)
+        d = np.array([g["e"][k0 + 1] - g["e"][k0], g["n"][k0 + 1] - g["n"][k0]], dtype=np.float64)
+        return d / max(np.hypot(*d), 1e-9)
+
+    def is_tn(i, k):
+        return any(segs[i]["is_tunnel_s"][j] for j in win(i, k))
+
     def layer(i, k):
         return max(segs[i]["layer_s"][j] for j in win(i, k))
 
     def near(i, p):   # by distance - projected length drifts from s over km
         return int(np.argmin(np.hypot(segs[i]["e"] - p.x, segs[i]["n"] - p.y)))
 
-    crossings, level, n_skipped = [], [], 0   # [x, y, up, s_up, flat_lo, flat_hi, lo, s_lo]
+    crossings, level, n_synth = [], [], 0   # [x, y, up, s_up, flat_lo, flat_hi, lo, s_lo]
     for a in ids:
         for b in (ids[j] for j in tree.query(lines[a])):
             if b <= a:
@@ -1147,9 +1159,25 @@ def lift_overpasses(segs, passes=3):
                     continue
                 (ku, su), (lo, sl) = ((ka, da), (b, db)) if up == a else ((kb, db), (a, da))
                 if not is_br(up, ku):
-                    n_skipped += 1
-                    level.append((a, da, b, db))
-                    continue
+                    k_lo = near(lo, p)
+                    if is_tn(up, ku) or (is_tn(lo, k_lo) and segs[up]["h"][ku] - segs[lo]["h"][k_lo]
+                                         >= OVERPASS_SEPARATION_M):
+                        level.append((a, da, b, db))   # a bored tunnel deep under: no span
+                        continue
+                    # an underpass tagged tunnel=yes under a road at its own
+                    # level (Summit: Columbine Dr under I-70) gets the span
+                    # too - else its bore stands up through the road above
+                    # an OSM `layer` stack with no structure tag: terrain
+                    # conforming to the upper road buries the lower one, so
+                    # the upper road gets a synthesized span (is_struct_s)
+                    # over the crossing - carved out and decked like a
+                    # tagged bridge downstream (PLAN-REALISM Phase 5)
+                    ta, tb = heading(a, ka), heading(b, kb)
+                    sin_x = abs(ta[0] * tb[1] - ta[1] * tb[0])
+                    half = max(OVERPASS_FLAT_M, OVERPASS_SYNTH_HALF_M / max(sin_x, 0.34))
+                    s_arr = np.asarray(segs[up]["s"], dtype=np.float64)
+                    segs[up]["is_struct_s"] = np.asarray(segs[up]["is_struct_s"], dtype=bool) | (np.abs(s_arr - su) <= half)
+                    n_synth += 1
                 st = segs[up]["is_struct_s"]
                 ku = next(j for j in win(up, ku) if st[j])
                 r0 = r1 = ku
@@ -1241,7 +1269,7 @@ def lift_overpasses(segs, passes=3):
         sep = [np.interp(su, segs[up]["s"], hh[up]) - np.interp(sl, segs[lo]["s"], hh[lo]) for hh in (h0, h)]
         rows.append((x, y, up, lo, sep[0], sep[1]))
     lifted = [np.abs(v - v0) > 0.01 for v, v0 in zip(h, h0)]
-    return h, over_road, lifted, rows, n_skipped
+    return h, over_road, lifted, rows, n_synth
 
 
 JUNCTION_ZBIAS_PER_CLASS_M = 0.02   # tiny deterministic per-road-class Z

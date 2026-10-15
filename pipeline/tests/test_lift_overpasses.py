@@ -41,14 +41,30 @@ def test_ramp_continues_through_a_node_but_never_onto_the_road_below():
     assert lifted[1][0] and not lifted[1][-1] and not lifted[2].any()
 
 
-def test_non_bridge_upper_and_at_grade_are_left_alone():
+def test_untagged_layer_stack_gets_a_synthesized_span():
     x = np.arange(-200, 201, 5.0)
     cut = seg(np.zeros_like(x), x, 95.0, layer=-1)              # underpass cut, upper road untagged
     road = seg(x, np.zeros_like(x), 100.0)
-    h, _, lifted, rows, skipped = lift_overpasses([road, cut])
-    assert skipped == 1 and not rows and not any(m.any() for m in lifted)
-    h, _, lifted, rows, skipped = lift_overpasses([road, seg(np.zeros_like(x), x, 100.0)])
-    assert skipped == 0 and not rows
+    h, over, lifted, rows, synth = lift_overpasses([road, cut])
+    assert synth == 1 and len(rows) == 1
+    assert road["is_struct_s"][np.abs(x) <= 12].all() and not road["is_struct_s"][np.abs(x) > 12].any()
+    assert rows[0][5] >= OVERPASS_SEPARATION_M - 0.05 and not lifted[1].any()
+    # a road tunnelling deep under: no span; at grade: nothing
+    tun = seg(np.zeros_like(x), x, 80.0, layer=-1)
+    tun["is_tunnel_s"][:] = True
+    road = seg(x, np.zeros_like(x), 100.0)
+    _, _, lifted, rows, synth = lift_overpasses([road, tun])
+    assert synth == 0 and not rows and not road["is_struct_s"].any()
+    # ...but a tunnel-tagged underpass at the road's own level gets the span
+    tun = seg(np.zeros_like(x), x, 101.0, layer=-1)
+    tun["is_tunnel_s"][:] = True
+    road = seg(x, np.zeros_like(x), 100.0)
+    _, _, lifted, rows, synth = lift_overpasses([road, tun])
+    assert synth == 1 and road["is_struct_s"][np.abs(x) <= 12].all() and not lifted[1].any()
+    assert rows[0][5] >= OVERPASS_SEPARATION_M - 0.05
+    road = seg(x, np.zeros_like(x), 100.0)
+    h, _, lifted, rows, synth = lift_overpasses([road, seg(np.zeros_like(x), x, 100.0)])
+    assert synth == 0 and not rows
 
 
 def test_road_crossing_just_past_a_short_bridge_way_joins_the_deck():
