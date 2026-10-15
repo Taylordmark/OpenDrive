@@ -282,6 +282,7 @@ void AODTerrainManager::BeginPlay()
 	// point-classified biome sidecar AODForestManager's BlendAt() reads, into
 	// this manager's OWN spatial hash - see LoadBiomeSidecar/ApplyBiomeTint.
 	LoadBiomeSidecar();
+	LoadHorizon();
 
 	// Diagnostic-only override (2026-08-25): lets a headless test bisect
 	// how many resident near-fidelity (collision-enabled) tiles trigger the
@@ -2157,4 +2158,37 @@ void AODTerrainManager::GetStreamingProgress(const FVector& AroundPos, int32& Ou
 			}
 		}
 	}
+}
+
+void AODTerrainManager::LoadHorizon()
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return;
+	}
+	const double T0 = FPlatformTime::Seconds();
+	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (TEXT("horizon_") + TerrainTilePrefix.Mid(8) + TEXT(".bin"));
+	FString ReadPath;
+	FParsedTerrainTile Parsed;
+	if (ODTileSource::Resolve(Path, ReadPath) != EODTileSource::Ready || !ParseTerrainTileFile(ReadPath, Parsed)
+		|| Parsed.Verts.Num() < 3)
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no horizon mesh (%s)"), *Path);
+		return;
+	}
+	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetupAttachment(RootComponent);
+	Comp->SetRelativeLocation(FVector(Parsed.Verts[0], Parsed.Verts[1], 0.0));   // FillTileMesh's local origin
+	Comp->SetCollisionProfileName(TEXT("NoCollision"));
+	Comp->SetCastShadow(false);   // 160+ km of low-res ground: not worth shadow-map pages
+	Comp->RegisterComponent();
+	Comp->EditMesh([&](FDynamicMesh3& Mesh) { FillTileMesh(Mesh, Parsed); });
+	if (TerrainMID)
+	{
+		Comp->SetMaterial(0, TerrainMID);
+	}
+	HorizonComp = Comp;
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms"),
+		Parsed.Verts.Num() / 3, Parsed.Tris.Num() / 3, (FPlatformTime::Seconds() - T0) * 1000.0);
 }

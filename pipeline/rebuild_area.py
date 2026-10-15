@@ -197,6 +197,7 @@ STAGES = [
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
     ("build_far_forest.py", "WorldCover canopy cards + town street trees -> farforest_*.bin"),
+    ("build_horizon.py", "zoom-10 horizon mesh, baked extent + 80 km -> horizon_*.bin"),
     # (2026-10-05, step 3) after the last tile writer: the gates check owned tiles only
     ("prune_unowned_tiles.py", "delete tiles outside the area's owned rect (its halo)"),
     ("build_menu_spots.py", "pick the garage-menu backdrop spot -> menu_spots.json"),

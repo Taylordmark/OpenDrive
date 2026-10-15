@@ -114,7 +114,17 @@ SEAM_SKIRT_DROP_M = 10.0    # see build_seam_skirt()'s docstring - hides the
                              # crack an adaptive mesh can produce at a tile
                              # boundary, the same "gap hidden under geometry"
                              # pattern road_mesh_common.py's road skirt uses.
-FAR_GRID_N = 21              # 100 m spacing (2026-07-28, was 9/~250m) - Taylor:
+FAR_GRID_N = 257             # near's 7.8 m grid, RTIN-simplified to MAX_ERROR_FAR_M
+# (realism eval T4, 2026-10-15: the uniform 100 m grid sat 13 m RMS off the
+# near mesh on Oahu and kept 0.8% of its area steeper than 45 deg vs the near
+# mesh's 5.9% - cliffs and ridgelines flattened at distance; now 1.9 m RMS,
+# 5.1%, ~16k tris/tile vs 800). Far tiles take the near path's martini + seam
+# skirt; the note below is history.
+MAX_ERROR_FAR_M = 5.0        # martini tolerance off the road zone
+FAR_ROAD_ERROR_GAIN = MAX_ERROR_FAR_M / MAX_ERROR_NEAR_M   # martini sees z x this within
+                             # FAR_MIN_INFLUENCE_M of a carving station -> near's
+                             # 0.3 m there, so a distant road is never buried
+# (was) FAR_GRID_N = 21 - 100 m spacing (2026-07-28, was 9/~250m) - Taylor:
 # hillsides visible off to the side of the road read as hard-faceted,
 # obviously low-poly ("looks like Windows XP") at the old spacing. Far tiles
 # stay on the old uniform-grid path (no adaptive triangulation - they're
@@ -291,7 +301,7 @@ TERRAIN_CARVE_CUT_OUTER_M = 75.0
 # several fine samples across it instead of being averaged/skipped entirely,
 # matching the same "several grid cells across the feature" reasoning
 # TERRAIN_CARVE_CUT_INNER_M's own comment already used for near tiles.
-FAR_SUPERSAMPLE = 10
+FAR_SUPERSAMPLE = 1   # T4: FAR_GRID_N is already the 7.8 m carve grid (was 10 under 100 m)
 
 # Background-hillside facet-noise bug (2026-09-04, §7.15 follow-up to the
 # FAR-tile-burying fix above): downsample_min_grid's per-footprint MIN was
@@ -1433,6 +1443,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
                              st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep],
                              st_clamp_r=st_clamp_r[keep], st_bank=st_bank[keep])
 
+    road_zone = None   # far tiles: output vertices the carve can still reach
     if is_near:
         gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
     else:
@@ -1454,6 +1465,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
                 dist_m = np.minimum(dist_m, np.hypot(out_east_m - sx, out_north_m - sy))
             near_carve = dist_m <= FAR_MIN_INFLUENCE_M
             elev = np.where(near_carve, min_grid, mean_grid)
+            road_zone = near_carve
         else:
             elev = downsample_mean_grid(elev, n, FAR_SUPERSAMPLE)
 
@@ -1484,62 +1496,39 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # the lake rim blend can pull toward a shore above a lakeside road
     z_cm = np.minimum(z_cm, road_ue_z_m(cap, 0.0, ORIGIN_HEIGHT_M) * 100.0)
 
+    # AUDIT.md item 1: adaptive martini triangulation instead of a
+    # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. Martini
+    # simplifies the FINAL z (2026-10-09, Deals Gap station 4107: it used
+    # to read `elev`, from before the lake-bed depression and cap, so a
+    # triangle it judged flat kept one corner on a lake bed 20 m down and
+    # sank the lakeside road's edge 3.6 m). Meters; the UE-Z shift is
+    # additive, so the tolerance is unchanged.
+    # Far tiles (T4): z x FAR_ROAD_ERROR_GAIN in the road zone so martini's
+    # error there is judged 10x stricter; vertices still take the real z.
+    z_err = z_cm / 100.0 if road_zone is None else z_cm / 100.0 * np.where(road_zone, FAR_ROAD_ERROR_GAIN, 1.0)
+    tile = _martini_for(n).create_tile(z_err.astype(np.float32))
+    grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M if is_near else MAX_ERROR_FAR_M)
+    grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
+    gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]
+
+    verts = np.stack([gx_cm[gyi, gxi], gy_cm[gyi, gxi], z_cm[gyi, gxi]],
+                      axis=-1).astype(np.float32)
+    uvs = np.stack([gxi / (n - 1), gyi / (n - 1)], axis=-1).astype(np.float32)
+    tris = fix_up_winding(verts, martini_tris.reshape(-1, 3).astype(np.uint32))
+
+    skirt_verts, skirt_uvs, skirt_tris = build_seam_skirt(gx_cm, gy_cm, z_cm, n)
+    base = len(verts)
+    verts = np.concatenate([verts, skirt_verts], axis=0)
+    uvs = np.concatenate([uvs, skirt_uvs], axis=0)
+    tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
+    # Tunnel portals (build_tunnels.py): cut every triangle (seam skirt
+    # included) that reaches into a bore's shell out at ~1 m, so the
+    # ground opens at each portal and never cuts through a bore; over the middle of a
+    # tunnel the mountain is far above it and stays. ponytail: near tiles
+    # only - coarse/far cells keep covering the portal from afar,
+    # cut them too if that reads badly at distance.
     if is_near:
-        # AUDIT.md item 1: adaptive martini triangulation instead of a
-        # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. Martini
-        # simplifies the FINAL z (2026-10-09, Deals Gap station 4107: it used
-        # to read `elev`, from before the lake-bed depression and cap, so a
-        # triangle it judged flat kept one corner on a lake bed 20 m down and
-        # sank the lakeside road's edge 3.6 m). Meters; the UE-Z shift is
-        # additive, so the tolerance is unchanged.
-        tile = _martini_for(n).create_tile((z_cm / 100.0).astype(np.float32))
-        grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M)
-        grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
-        gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]
-
-        verts = np.stack([gx_cm[gyi, gxi], gy_cm[gyi, gxi], z_cm[gyi, gxi]],
-                          axis=-1).astype(np.float32)
-        uvs = np.stack([gxi / (n - 1), gyi / (n - 1)], axis=-1).astype(np.float32)
-        tris = fix_up_winding(verts, martini_tris.reshape(-1, 3).astype(np.uint32))
-
-        skirt_verts, skirt_uvs, skirt_tris = build_seam_skirt(gx_cm, gy_cm, z_cm, n)
-        base = len(verts)
-        verts = np.concatenate([verts, skirt_verts], axis=0)
-        uvs = np.concatenate([uvs, skirt_uvs], axis=0)
-        tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
-        # Tunnel portals (build_tunnels.py): cut every triangle (seam skirt
-        # included) that reaches into a bore's shell out at ~1 m, so the
-        # ground opens at each portal and never cuts through a bore; over the middle of a
-        # tunnel the mountain is far above it and stays. ponytail: near tiles
-        # only - coarse/far 100 m cells keep covering the portal from afar,
-        # cut them too if that reads badly at distance.
         verts, uvs, tris = cut_holes(verts, uvs, tris, _get_tunnels())
-    else:
-        # Uniform grid, unchanged - far tiles are already coarse/cheap and
-        # have no collision, so adaptive triangulation isn't worth it here.
-        verts = np.stack([gx_cm, gy_cm, z_cm], axis=-1).reshape(-1, 3).astype(np.float32)
-        ii, jj = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
-        uvs = np.stack([ii, jj], axis=-1).reshape(-1, 2).astype(np.float32)
-
-        # Winding must put the front face / computed vertex normal UP (+Z). UE's
-        # triangle-normal convention (VectorUtil::Normal) is
-        # normalize(cross(V2-V0, V1-V0)) - reversed vs. the usual right-handed
-        # cross for its left-handed coordinate system - so a grid quad emitted as
-        # (p, p+1, q) actually faces DOWN (fixed 2026-07-24: that inverted winding
-        # made FMeshNormals::ComputeVertexNormals fill AODTerrainManager's normal
-        # overlay pointing down, so the ground material's sun lighting hit the terrain
-        # as a back-face and every tile read as flat blue sky-ambient - the "no
-        # terrain / no grass" bug). Emitting (p, q, p+1) / (p+1, q, q+1) faces the
-        # top up, matching the road pipeline's own convention (road tiles verify
-        # 100% up-normals, terrain now does too).
-        tris = []
-        for j in range(n - 1):
-            b = j * n
-            for i in range(n - 1):
-                p, q = b + i, b + i + n
-                tris.append((p, q, p + 1))
-                tris.append((p + 1, q, q + 1))
-        tris = np.array(tris, dtype=np.uint32)
 
     return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
 
@@ -1631,9 +1620,11 @@ def _bake_one_tile(item):
     worker. Returns (path, coarse path or None, verts, tris)."""
     (tx, ty), is_near = item
     station_data, gen_id_bytes, session, caches = _BAKE_WORKER
-    tile = build_tile(tx, ty, is_near, station_data, session, caches)
     out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-    write_tile_bin(out_path, tile, gen_id_bytes)
+    # --far-only (T4): far tiles + near tiles' coarse twins; near files untouched
+    tile = None if is_near and "--far-only" in sys.argv else build_tile(tx, ty, is_near, station_data, session, caches)
+    if tile is not None:
+        write_tile_bin(out_path, tile, gen_id_bytes)
     # Runtime dynamic-LOD streaming (2026-08-25, Arc 7 rescope): near
     # tiles are the only ones with full-res+collision geometry, but
     # AODTerrainManager needs something cheap to show *before* the
@@ -1644,8 +1635,9 @@ def _bake_one_tile(item):
     coarse_path = None
     if is_near:
         coarse_path = OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile_bin(coarse_path, build_tile(tx, ty, False, station_data, session, caches),
-                       gen_id_bytes)
+        coarse = build_tile(tx, ty, False, station_data, session, caches)
+        write_tile_bin(coarse_path, coarse, gen_id_bytes)
+        tile = tile or coarse
     return out_path, coarse_path, len(tile["verts"]), len(tile["tris"])
 
 
@@ -1748,7 +1740,7 @@ def main():
                 print(f"  {i + 1}/{len(tiles)} tile(s) built")
     n_coarse_fallback = len(written_coarse_paths)
 
-    if lakes_only or bbox_cm is not None:
+    if lakes_only or bbox_cm is not None or "--far-only" in sys.argv:
         print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "
               f"rebuilt, the rest are intentionally left as-is)")
     else:

@@ -491,6 +491,13 @@ private:
 	void LoadRoadStationSidecar();
 	void LoadBiomeSidecar();
 
+	/** horizon_<area>_test.bin (pipeline/build_horizon.py, realism eval T4):
+	 *  one low-res mesh from the baked tile extent out to +80 km, sunk under
+	 *  every streamed tile - the world past VisualRadius. No collision/shadow. */
+	void LoadHorizon();
+	UPROPERTY()
+	TObjectPtr<UDynamicMeshComponent> HorizonComp;
+
 	/** groundbands_<area>_test.json -> GroundBands (tile-local, for the tint)
 	 *  + GroundBandsWorld, and the TreelineLow/HighZCm + SeaLevelZCm params on TerrainMID. */
 	void LoadGroundBands();
