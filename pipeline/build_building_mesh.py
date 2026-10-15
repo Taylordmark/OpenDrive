@@ -49,6 +49,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from building_roofs import clean_ring, make_roof, triangulate
+from classify_settlements import MIN_BUILDINGS_PER_TILE
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -421,9 +422,12 @@ def main():
     known_idx = np.array([i for i, lv in enumerate(known) if lv], dtype=np.int64)
     known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
     level_sources = defaultdict(int)
+    tile_counts = defaultdict(int)
+    for cx, cy in centroids_cm:
+        tile_counts[f"{int(cx // TERRAIN_TILE_SIZE_CM)},{int(cy // TERRAIN_TILE_SIZE_CM)}"] += 1
 
     out = []
-    n_excluded_road = n_not_populated = 0
+    n_excluded_road = n_not_populated = n_ms = 0
     facade_counts = defaultdict(int)
     roof_counts = defaultdict(int)
     archetype_counts = defaultdict(int)
@@ -434,6 +438,8 @@ def main():
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
         tile_key = f"{tx},{ty}"
         archetype_tile = settlement.get(tile_key)
+        if archetype_tile is None and tile_counts[tile_key] >= MIN_BUILDINGS_PER_TILE:
+            archetype_tile = "AmericanTown"   # B6: settlement tiles count OSM only; MS fill populates too
         if archetype_tile is None:
             n_not_populated += 1
             continue
@@ -511,11 +517,13 @@ def main():
             "levels": levels,
             "roof": shape,
         })
+        n_ms += b.get("source") == "ms"
 
     OUT_PATH.write_text(json.dumps({"buildings": out}))
     print(f"{len(buildings_raw)} footprint(s) -> {len(out)} building(s) built "
           f"({n_not_populated} outside populated tiles, {n_excluded_road} "
           f"excluded - too close to the road) -> {OUT_PATH}")
+    print(f"  {n_ms} of them Microsoft gap-fill footprints")
     print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
     n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
     print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "

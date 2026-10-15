@@ -95,6 +95,8 @@ def main():
     counts = defaultdict(int)
     residential_counts = defaultdict(int)
     for b in buildings:
+        if b.get("source") == "ms":
+            continue   # B6 gap-fill is all "yes"-tagged: counting it would flip suburbs to City
         lat, lon = footprint_centroid(b["nodes"])
         east_m, north_m = to_local(lon, lat)
         x_cm, y_cm = east_m * 100.0, -north_m * 100.0

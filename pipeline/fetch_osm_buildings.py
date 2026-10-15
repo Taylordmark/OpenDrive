@@ -16,7 +16,8 @@ Outputs to  data/raw/<AREA_NAME>_test/ :
     osm_buildings.json   [{"nodes": [[lat,lon], ...], "levels": int|None,
                            "height_m": float|None, "way_id": int,
                            "building_tag": str}, ...]
-    plus "ms_height_m": float|None (see ms_building_heights below)
+    plus "ms_height_m": float|None (see ms_building_heights below), and
+    Microsoft gap-fill entries with "source": "ms" (see ms_gap_fill)
     (multipolygon building relations - malls, podium towers - ship one
     entry per assembled outer ring with way_id = -relation id, so ids never
     collide with real ways; inner rings/courtyards are ignored)
@@ -87,30 +88,36 @@ def parse_height(tags):
 MS_LINKS_URL = "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv"
 
 
-def ms_building_heights(bbox_snwe):
-    """(lon[], lat[], height_m[]) of MS footprint centroids with a height."""
+def ms_footprints(bbox_snwe):
+    """[(ring [[lon, lat], ...], height_m or -1)] of MS footprints whose
+    centroid is inside the bbox."""
     s, w, n_, e = bbox_snwe
     get = lambda url: lambda: requests.get(url, headers=HEADERS, timeout=600).content
     links = csv.DictReader(io.StringIO(cached_bytes("ms_buildings", "dataset-links.csv",
                                                     get(MS_LINKS_URL)).decode()))
     qks = {mercantile.quadkey(t) for t in mercantile.tiles(w, s, e, n_, 9)}
-    lon, lat, hgt = [], [], []
+    out = []
     for row in links:
         if row["QuadKey"] not in qks:
             continue
         data = cached_bytes("ms_buildings", f"{row['Location']}_{row['QuadKey']}.csv.gz", get(row["Url"]))
         for line in gzip.open(io.BytesIO(data), "rt"):
             f = json.loads(line)
-            h = f["properties"].get("height") or -1
-            if h <= 0:
-                continue
             ring = f["geometry"]["coordinates"][0]
             x = sum(p[0] for p in ring) / len(ring)
             y = sum(p[1] for p in ring) / len(ring)
             if w <= x <= e and s <= y <= n_:
-                lon.append(x); lat.append(y); hgt.append(h)
-    print(f"  {len(hgt)} Microsoft building height(s) in the bbox")
-    return np.array(lon), np.array(lat), np.array(hgt)
+                out.append((ring, f["properties"].get("height") or -1))
+    print(f"  {len(out)} Microsoft footprint(s) in the bbox")
+    return out
+
+
+def ms_building_heights(ms):
+    """(lon[], lat[], height_m[]) of MS footprint centroids with a height."""
+    pts = [(sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r), h) for r, h in ms if h > 0]
+    print(f"  {len(pts)} Microsoft building height(s) in the bbox")
+    lon, lat, hgt = (np.array(c) for c in zip(*pts)) if pts else (np.array([]),) * 3
+    return lon, lat, hgt
 
 
 def attach_ms_heights(buildings, ms):
@@ -125,6 +132,53 @@ def attach_ms_heights(buildings, ms):
     for b, h in zip(buildings, best):
         b["ms_height_m"] = round(float(h), 1) if h > 0 else None
     print(f"  {int((best > 0).sum())} of {len(buildings)} footprint(s) got a Microsoft height")
+
+
+# Realism B6 (2026-10-15): OSM is near-empty in places MS mapped well
+# (Makapuu / Hawaii Kai: 2 OSM vs ~100 MS footprints within 1.2 km). An MS
+# footprint that no OSM footprint already covers ships as an untagged
+# "yes" building (source "ms") and runs the same height / facade / roof /
+# road-clearance path as OSM ones. "Covers" = IoU >= MS_MAX_IOU, or OSM
+# overlapping >= MS_MAX_COVERED of the MS polygon (one MS block inside a
+# big OSM mall has a tiny IoU but is still a duplicate).
+MS_MAX_IOU = 0.3
+MS_MAX_COVERED = 0.5
+MS_MIN_AREA_M2 = 20.0
+MS_ID_BASE = 10**13   # way_id for fill i = MS_ID_BASE + i, clear of OSM way ids
+
+
+def ms_gap_fill(buildings, ms, water):
+    """New building entries for MS footprints no OSM footprint covers,
+    skipping slivers under MS_MIN_AREA_M2 and any touching osm_water.json
+    polygons (roads are build_building_mesh's clearance gate)."""
+    if not ms:
+        return []
+    lat0 = np.radians(np.mean([p[1] for r, _ in ms[:1000] for p in r]))
+    m2_per_deg2 = 111320.0 ** 2 * np.cos(lat0)   # area scale; IoU itself is affine-invariant
+    polys = lambda rings: shapely.make_valid(np.array([shapely.Polygon(r) for r in rings], dtype=object))
+    osm = polys([[(p[1], p[0]) for p in b["nodes"]] for b in buildings])
+    wat = polys([[(p[1], p[0]) for p in w_["nodes"]] for w_ in water if len(w_["nodes"]) >= 3])
+    cand = polys([r for r, _ in ms])
+    keep = shapely.area(cand) * m2_per_deg2 >= MS_MIN_AREA_M2
+    if len(wat):
+        hit = shapely.STRtree(wat).query(cand, predicate="intersects")[0]
+        keep[hit] = False
+    if len(osm):
+        ci, oi = shapely.STRtree(osm).query(cand, predicate="intersects")
+        inter = shapely.area(shapely.intersection(cand[ci], osm[oi]))
+        union = shapely.area(cand[ci]) + shapely.area(osm[oi]) - inter
+        dup = (inter >= MS_MAX_IOU * union) | (inter >= MS_MAX_COVERED * shapely.area(cand[ci]))
+        keep[ci[dup]] = False
+    out = []
+    for i in np.flatnonzero(keep):
+        ring, h = ms[i]
+        ring = ring[:-1] if ring[0] == ring[-1] else ring
+        out.append({"nodes": [[lat, lon] for lon, lat in ring], "levels": None, "height_m": None,
+                    "way_id": MS_ID_BASE + int(i), "building_tag": "yes", "source": "ms",
+                    "ms_height_m": round(float(h), 1) if h > 0 else None})
+    print(f"  +{len(out)} Microsoft gap-fill footprint(s) ({int((~keep).sum())} of {len(ms)} "
+          f"already in OSM, under {MS_MIN_AREA_M2:.0f} m2 or in water)")
+    return out
 
 
 # Realism B3: roof/wall look tags, kept only when set (build_building_mesh
@@ -191,7 +245,10 @@ def fetch_osm_buildings():
             buildings.append(building_entry(ring, tags, -rel["id"]))
             n_rel_rings += 1
 
-    attach_ms_heights(buildings, ms_building_heights(BBOX_SNWE))
+    ms = ms_footprints(BBOX_SNWE)
+    attach_ms_heights(buildings, ms_building_heights(ms))
+    buildings += ms_gap_fill(buildings, ms, json.loads((RAW_DIR / "osm_water.json").read_text())
+                             if (RAW_DIR / "osm_water.json").exists() else [])
     (RAW_DIR / "osm_buildings.json").write_text(json.dumps(buildings))
     print(f"  {n_rel_rings} of them from {len(relations)} multipolygon relation(s)")
     print(f"  got {len(buildings)} building footprint(s) ({skipped} skipped, "
