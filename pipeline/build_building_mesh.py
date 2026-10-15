@@ -1,7 +1,7 @@
 """Extrude OSM building footprints into simple facade meshes (Arc 7.0 step
 3, 2026-07-24) - "simple extruded facades" per Taylor's scope decision:
 real footprint polygon -> archetype-appropriate height band -> wall quads
-+ a fan-triangulated roof cap, tiled facade UV. Deterministic per building
++ an ear-clipped flat roof cap, tiled facade UV. Deterministic per building
 (seeded off the OSM way ID), zero per-instance storage beyond the
 footprint polygon itself (already compact vector data) - same
 zero-per-instance-storage logic as the tree HISM scatter, just
@@ -45,6 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
+from building_roofs import clean_ring, triangulate
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -220,16 +221,27 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
         tris.append((b, b + 1, b + 2))
         tris.append((b, b + 2, b + 3))
 
-    # ---- roof: fan triangulation from centroid (fine for the simple,
-    # mostly-convex footprints this first pass targets - see module
-    # docstring, "simple extruded facades" is the deliberate scope) ----
-    cx = sum(p[0] for p in ring_xy_cm) / n
-    cy = sum(p[1] for p in ring_xy_cm) / n
-    # signed area sets a consistent winding so the roof faces up regardless
-    # of the source ring's own winding direction
+    # ---- roof: ear-clipped flat cap (2026-10-15, realism B5). The old
+    # centroid fan crossed outside 33-60% of real (concave) footprints;
+    # building_roofs.triangulate is the same ear clipper the pitched roofs
+    # use. Cap triangles wind CCW in (x, y) whatever the ring's own winding,
+    # so the roof faces up. ----
     signed_area = sum(ring_xy_cm[i][0] * ring_xy_cm[(i + 1) % n][1]
                        - ring_xy_cm[(i + 1) % n][0] * ring_xy_cm[i][1] for i in range(n))
     roof_z = base_z_cm + height_cm
+    ccw = clean_ring(list(ring_xy_cm) if signed_area >= 0 else list(ring_xy_cm)[::-1])
+    ears = triangulate(ccw) if len(ccw) >= 3 else None
+    if ears is not None:
+        cb = len(verts)
+        for x, y in ccw:
+            verts.append((x, y, roof_z))
+            uvs.append((x / 100.0 / FACADE_TILE_M, y / 100.0 / FACADE_TILE_M))
+        tris.extend((cb + a, cb + b, cb + c) for a, b, c in ears)
+        return verts, uvs, tris
+
+    # self-touching ring the ear clipper can't split: centroid fan fallback
+    cx = sum(p[0] for p in ring_xy_cm) / n
+    cy = sum(p[1] for p in ring_xy_cm) / n
     cb = len(verts)
     verts.append((cx, cy, roof_z))
     uvs.append((cx / 100.0 / FACADE_TILE_M, cy / 100.0 / FACADE_TILE_M))
