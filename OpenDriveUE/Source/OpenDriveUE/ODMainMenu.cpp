@@ -230,7 +230,7 @@ const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};            // foo
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
 const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
-// and the AreaMap screen gets a tab per area (green_valley / gv_west / gv_east)
+// and the AreaMap screen gets a tab per area (green_valley / oahu / ...)
 constexpr double ClusterDeg = 0.5;
 
 // same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
@@ -1080,14 +1080,14 @@ void AODMainMenu::ShowWorld()
 			Names.Add(AreaNames[A]);
 			Count += bTrackMode
 				? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
-				: AreaTowns[A].Num();
+				: StartPoses[A].Num() - 1;   // turnouts, not the Default
 			Focus = A == AreaIdx ? Pins.Num() : Focus;
 		}
 		FODGlobePin& Pin = Pins.AddDefaulted_GetRef();
 		Pin.Key = AreaKeys[i];
 		Pin.Name = FString::Join(Names, TEXT(" / "));
 		Pin.Sub = FString::Printf(TEXT("%d %s"), Count,
-			bTrackMode ? (Count == 1 ? TEXT("track") : TEXT("tracks")) : (Count == 1 ? TEXT("town") : TEXT("towns")));
+			bTrackMode ? (Count == 1 ? TEXT("track") : TEXT("tracks")) : (Count == 1 ? TEXT("turnout") : TEXT("turnouts")));
 		Pin.Lat = AreaLL[i].Y;
 		Pin.Lng = AreaLL[i].X;
 	}
@@ -1242,11 +1242,9 @@ TArray<int32> AODMainMenu::ClusterOf(int32 Area) const
 void AODMainMenu::LoadWorldMap()
 {
 	// {"coast", "borders", "states": [[lon, lat, ...]], "areas": {"<area>": {"ll": [lon, lat],
-	// "towns": [[name, x_cm, y_cm]]}}} (pipeline/bake_world_map.py); lines go to the globe, lat first
+	// "hidden"}}} (pipeline/bake_world_map.py); lines go to the globe, lat first
 	AreaLL.Init(FVector2D::ZeroVector, AreaKeys.Num());
 	AreaHidden.Init(false, AreaKeys.Num());
-	AreaTowns.Reset();
-	AreaTowns.SetNum(AreaKeys.Num());
 	FString Text;
 	TSharedPtr<FJsonObject> Root;
 	const TSharedPtr<FJsonObject>* Areas = nullptr;
@@ -1282,7 +1280,6 @@ void AODMainMenu::LoadWorldMap()
 	{
 		const TSharedPtr<FJsonObject>* A = nullptr;
 		const TArray<TSharedPtr<FJsonValue>>* LL = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Towns = nullptr;
 		if (!(*Areas)->TryGetObjectField(AreaKeys[i], A))
 		{
 			continue;
@@ -1291,17 +1288,6 @@ void AODMainMenu::LoadWorldMap()
 		if ((*A)->TryGetArrayField(TEXT("ll"), LL) && LL->Num() == 2)
 		{
 			AreaLL[i] = FVector2D((*LL)[0]->AsNumber(), (*LL)[1]->AsNumber());
-		}
-		if ((*A)->TryGetArrayField(TEXT("towns"), Towns))
-		{
-			for (const TSharedPtr<FJsonValue>& T : *Towns)
-			{
-				const TArray<TSharedPtr<FJsonValue>>& V = T->AsArray();
-				if (V.Num() == 3)
-				{
-					AreaTowns[i].Emplace(V[0]->AsString(), FVector2D(V[1]->AsNumber(), V[2]->AsNumber()));
-				}
-			}
 		}
 	}
 }
@@ -1319,7 +1305,7 @@ void AODMainMenu::EnterArea(int32 Area)
 		// every tab's rows start at RowPick; Count is that area's own row count
 		const int32 N = bTrackMode
 			? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
-			: AreaTowns[A].Num() + 1;
+			: StartPoses[A].Num();
 		AreaTabs.Add({*AreaNames[A], RowPick, N});
 	}
 	SetScreen(EODMenuScreen::AreaMap, RowPick);
@@ -1392,9 +1378,9 @@ void AODMainMenu::FocusArea(int32 Area)
 	// ponytail: no elevation range - nothing loaded here knows the area's heights
 	const int32 Starts = bTrackMode
 		? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == Key; }).Num()
-		: AreaTowns[Area].Num() + 1;
+		: StartPoses[Area].Num();
 	AreaBlurb = FString::Printf(TEXT("%d %s"), Starts,
-		bTrackMode ? (Starts == 1 ? TEXT("track") : TEXT("tracks")) : (Starts == 1 ? TEXT("start") : TEXT("starts")));
+		bTrackMode ? (Starts == 1 ? TEXT("track") : TEXT("tracks")) : (Starts == 1 ? TEXT("turnout") : TEXT("turnouts")));
 	if (RoadCm > 0.0)
 	{
 		AreaBlurb = FString::Printf(TEXT("%d km of road  \u00B7  %s"), FMath::RoundToInt(RoadCm / 1.0e5), *AreaBlurb);
@@ -1403,25 +1389,19 @@ void AODMainMenu::FocusArea(int32 Area)
 	Picks.Reset();
 	if (!bTrackMode)
 	{
-		Picks.AddDefaulted_GetRef().Label = TEXT("Default Start");
-		for (const TPair<FString, FVector2D>& T : AreaTowns[Area])
+		// Turnouts (2026-10-14, menu_spots.json "starts"): "" = the area's
+		// menu spot, the Default Turnout, first; the rest by name
+		for (const auto& [Name, Pose] : StartPoses[Area])
 		{
 			FODMenuPick& K = Picks.AddDefaulted_GetRef();
-			K.Label = K.Town = T.Key;
-			K.bHasPos = true;
-			K.Pos = T.Value;
+			K.Label = Name.IsEmpty() ? TEXT("Default Turnout") : Name;
+			K.Town = Name;
+			K.bHasPos = K.bHasStart = true;
+			K.Start = Pose;
+			K.Pos = FVector2D(Pose.GetLocation());
 		}
-		// road-snapped starts (2026-10-14), "" = the area's menu spot: the dot
-		// sits where the car will
-		for (FODMenuPick& K : Picks)
-		{
-			if (const FTransform* Pose = StartPoses[Area].Find(K.Town))
-			{
-				K.bHasStart = true;
-				K.Start = *Pose;
-				K.Pos = FVector2D(Pose->GetLocation());
-			}
-		}
+		Picks.StableSort([](const FODMenuPick& A, const FODMenuPick& B)
+			{ return A.Town.IsEmpty() != B.Town.IsEmpty() ? A.Town.IsEmpty() : A.Town < B.Town; });
 		return;
 	}
 	for (const FTrackInfo& T : Tracks)
@@ -2133,7 +2113,7 @@ void AODMainMenu::DriveTrack(const FString& Name, const AODRoadManager* InRoad)
 void AODMainMenu::LoadMenuSpots()
 {
 	// {"<area>": {"car_cm": [x, y, z], "car_yaw_deg", "view_yaw_deg", "source",
-	// "starts": {"<town>": {"car_cm", "car_yaw_deg"}}}} (pipeline/build_menu_spots.py).
+	// "starts": {"<turnout>": {"car_cm", "car_yaw_deg"}}}} (pipeline/build_menu_spots.py).
 	// An area without a spot is dropped from the Area row by BeginPlay.
 	Spots.Reset();
 	Spots.SetNum(AreaLevels.Num());
@@ -2176,7 +2156,7 @@ void AODMainMenu::LoadMenuSpots()
 		double SeaZ = 0.0;
 		S.bHasSea = (*Spot)->TryGetNumberField(TEXT("sea_z_cm"), SeaZ);
 		S.SeaZCm = SeaZ;
-		// road-snapped town starts (2026-10-14); "" = the spot itself, the Default Start
+		// the Turnouts (2026-10-14); "" = the spot itself, the Default Turnout
 		StartPoses[i].Add(FString(), Car);
 		const TSharedPtr<FJsonObject>* Starts = nullptr;
 		if ((*Spot)->TryGetObjectField(TEXT("starts"), Starts))

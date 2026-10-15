@@ -3,8 +3,8 @@ area -> Content/OpenDrive/Masks/menu_spots.json, merged per area:
 
     {"summit_county": {"car_cm": [x, y, z], "car_yaw_deg": .., "view_yaw_deg": ..,
                        "source": "auto" | "override",
-                       "starts": {"<town>": {"car_cm": [x, y, z], "car_yaw_deg": ..}}}, ...}
-    ("starts", 2026-10-14: town_starts below)
+                       "starts": {"<turnout>": {"car_cm": [x, y, z], "car_yaw_deg": ..}}}, ...}
+    ("starts", 2026-10-14: the Turnouts, turnouts() below)
 
 UE cm in the area's own frame, as the baked tiles: X = east*100,
 Y = -north*100, Z = (road surface - ORIGIN_HEIGHT_M)*100. Yaws are UE yaw
@@ -39,9 +39,9 @@ the junction-pad XY snap - verify_road_fit._shipped_stations):
 
 Usage:  python build_menu_spots.py              (active area, OD_AREA)
         python build_menu_spots.py --all        (every area whose bake is complete)
-        python build_menu_spots.py gv_east ...  (those areas)
+        python build_menu_spots.py oahu ...     (those areas)
         add --png DIR for a top-down sanity plot per area,
-        --starts to only refresh each area's "starts" (town_starts) and keep its spot.
+        --starts to only refresh each area's "starts" (turnouts) and keep its spot.
 """
 import json
 import os
@@ -98,6 +98,11 @@ GRID_M = 25.0
 # ponytail: below-sea inland basins (Salton Sink, Death Valley) would pass;
 # add an OSM coastline check if an area there is ever baked.
 SEA_M, SEA_SHARE, SEA_FAR_M = 2.0, 0.10, 20000.0
+# turnouts(): place node -> road
+NEAR_ROAD_M = 300.0         # a place farther from any road is no turnout
+SNAP_M = 600.0
+DEDUP_M = 300.0
+MAIN_ROADS = ("trunk", "primary", "secondary", "tertiary")
 
 
 def candidates(e, n, z, seg, structural, in_box, clear_m=JUNCTION_CLEAR_M, max_grade=MAX_GRADE):
@@ -247,7 +252,7 @@ def load_stations():
     return dict(e=e, n=n, z=z, lon=cat("lon"), lat=cat("lat"),
                 seg=np.concatenate([np.full(len(s["east_m"]), k) for k, s in enumerate(segs)]),
                 structural=cat("is_bridge").astype(bool) | cat("is_tunnel").astype(bool),
-                no_park=np.isin(cat("highway_class", ""), NO_PARK),
+                cls=cat("highway_class", ""), no_park=np.isin(cat("highway_class", ""), NO_PARK),
                 in_box=cat("in_junction_box").astype(bool),
                 name=[nm for s in segs for nm in s["road_name"]])
 
@@ -306,33 +311,52 @@ def pick(st, h, bldg):
     return int(ci[b]), car_heading(rh[b], vh[b]), float(vh[b]), {k: v[b] for k, v in s.items()}, "auto"
 
 
-def town_starts(st):
-    """(2026-10-14) Area-screen starts: each town of labels_<area>_test.bin
-    (bake_world_map.read_towns, the menu's own names and centroids) -> the
-    nearest parkable station (step 1's RELAXED rung, owned, not a motorway),
-    facing along the road. The menu previews the car there and Drive spawns
-    there (AODMainMenu::StartAtTown), so a town centre's junction never is.
-    -> {name: {"car_cm": [x, y, z], "car_yaw_deg": ..}}"""
+def turnouts(st):
+    """(2026-10-14) Area-screen Turnouts (in-game map fast travel too, via
+    AODRoadManager::BuildTownNodes): each osm_places node (city..hamlet) the
+    area owns, kept only within NEAR_ROAD_M of a road (hamlets fill the empty
+    map), snapped to a parkable station (step 1's RELAXED rung, not a
+    motorway) - the nearest on a MAIN_ROADS class within SNAP_M, else the
+    nearest any class within SNAP_M - facing along the road. One per
+    DEDUP_M: a place whose snap lands near a kept one is dropped.
+    The place node itself, not the centroid of the roads labelled with its
+    name (that mean sat 1-3 km off, deep in subdivisions; Nast 15 km).
+    -> {"<place> · <road>": {"car_cm": [x, y, z], "car_yaw_deg": ..}}"""
     from scipy.spatial import cKDTree
-    from bake_world_map import read_towns
-    lab = MASKS / f"labels_{AREA_NAME}_test.bin"
+    path = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm_places.json"
     e, n, z = st["e"], st["n"], st["z"]
     idx = candidates(e, n, z, st["seg"], st["structural"], st["in_box"], *RELAXED)
     idx = idx[owns(e[idx] * 100.0, -n[idx] * 100.0) & ~st["no_park"][idx]]
-    if not lab.exists() or not len(idx):
+    if not path.exists() or not len(idx):
         return {}
-    tree = cKDTree(np.c_[e[idx], n[idx]])
+    places = json.loads(path.read_text(encoding="utf-8"))
+    le, ln = to_local(st["lon"], st["lat"])   # places' frame (see pick)
+    pe, pn = to_local(np.array([p["lon"] for p in places], float), np.array([p["lat"] for p in places], float))
+    near_road, _ = cKDTree(np.c_[le, ln]).query(np.c_[pe, pn])
+    main = np.isin(st["cls"][idx], MAIN_ROADS)
+    trees = [(cKDTree(np.c_[le[idx[m]], ln[idx[m]]]), idx[m]) for m in (main, np.ones_like(main)) if m.any()]
     w = int(round(WINDOW_M / STATION_SPACING))   # candidates() keeps +-w inside the segment
-    out, far = {}, 0.0
-    for name, x, y in read_towns(lab):
-        d, k = tree.query((x / 100.0, -y / 100.0))
-        i = int(idx[k])
-        far = max(far, d)
-        out[name] = {"car_cm": [round(float(e[i]) * 100.0, 1), round(-float(n[i]) * 100.0, 1),
-                                round((float(z[i]) - ORIGIN_HEIGHT_M) * 100.0, 1)],
-                     "car_yaw_deg": ue_yaw(np.degrees(np.arctan2(e[i + w] - e[i - w], n[i + w] - n[i - w])))}
-    print(f"{len(out)} town start(s), farthest {far:.0f} m from its label centroid")
-    return out
+    out, kept = {}, []
+    for k in np.argsort(near_road):   # best-placed first wins a dedup
+        if near_road[k] > NEAR_ROAD_M or not owns(pe[k] * 100.0, -pn[k] * 100.0):
+            continue
+        for tree, ids in trees:
+            d, j = tree.query((pe[k], pn[k]))
+            if d <= SNAP_M:
+                break
+        else:
+            continue
+        i = int(ids[j])
+        if any(np.hypot(e[i] - a, n[i] - b) < DEDUP_M for a, b in kept):
+            continue
+        kept.append((e[i], n[i]))
+        road = st["name"][i]
+        out[f"{places[k]['name']} · {road}" if road else places[k]["name"]] = {
+            "car_cm": [round(float(e[i]) * 100.0, 1), round(-float(n[i]) * 100.0, 1),
+                       round((float(z[i]) - ORIGIN_HEIGHT_M) * 100.0, 1)],
+            "car_yaw_deg": ue_yaw(np.degrees(np.arctan2(e[i + w] - e[i - w], n[i + w] - n[i - w])))}
+    print(f"{len(out)} turnout(s) from {len(places)} place(s)")
+    return dict(sorted(out.items()))
 
 
 def plot(path, st, H, x0, y0, i, car_h, view_h):
@@ -374,10 +398,10 @@ def run_area(png_dir=None, starts_only=False):
         print(f"SKIP {AREA_NAME}: bake incomplete (missing stations/sidecar/terrain, or mixed generations)")
         return
     st = load_stations()
-    if starts_only:   # --starts: refresh the town starts, keep the picked spot
+    if starts_only:   # --starts: refresh the turnouts, keep the picked spot
         spots = json.loads(SPOTS_PATH.read_text()) if SPOTS_PATH.exists() else {}
         if AREA_NAME in spots:
-            spots[AREA_NAME]["starts"] = town_starts(st)
+            spots[AREA_NAME]["starts"] = turnouts(st)
             SPOTS_PATH.write_text(json.dumps(spots, indent=1))
         return
     h, H, x0, y0 = height_grid()
@@ -395,7 +419,7 @@ def run_area(png_dir=None, starts_only=False):
     print(f"sea share {sea:.0%}")
     if sea >= SEA_SHARE:
         spots[AREA_NAME]["sea_z_cm"] = round(-ORIGIN_HEIGHT_M * 100.0, 1)
-    spots[AREA_NAME]["starts"] = town_starts(st)
+    spots[AREA_NAME]["starts"] = turnouts(st)
     SPOTS_PATH.write_text(json.dumps(spots, indent=1))
     flags = [k for k in ("void", "blocked", "cliff") if s[k]] + (["buildings"] if s["buildings"] else [])
     print(f"{AREA_NAME}: {source} {st['name'][i]!r} at {st['lat'][i]:.5f}, {st['lon'][i]:.5f} "

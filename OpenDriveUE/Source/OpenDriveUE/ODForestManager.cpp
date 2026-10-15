@@ -2142,10 +2142,11 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(!bLowVeg);
 		// Wind WPO is a few cm (see WpoDisableCm): don't let it invalidate
-		// Virtual Shadow Map pages every frame for every tree within 100 m.
-		// Instances never move after AddInstances, so Rigid is exact apart
-		// from the shadow not swaying.
-		Hism->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
+		// Virtual Shadow Map pages every frame for every tree within 100 m
+		// while driving. Instances never move after AddInstances, so Rigid is
+		// exact apart from the shadow not swaying; Tick() switches swaying
+		// shadows back on when slow (see bSwayShadows).
+		Hism->ShadowCacheInvalidationBehavior = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
@@ -2637,6 +2638,33 @@ void AODForestManager::Tick(float DeltaSeconds)
 	// HeightOnlyAt()'s raycast fallback traces relative to this instead of a
 	// hardcoded absolute Z.
 	PlayerZHint = Loc.Z;
+
+	// Swaying tree shadows only when slow (2026-10-14): at speed nobody sees
+	// them and they re-render VSM pages every frame (the Oahu lag). 10/12 mph
+	// hysteresis so creeping around 10 doesn't flip-flop. A flip re-creates
+	// every forest HISM's render state, so it's spread over frames
+	// (SwayShadowsPerTick per frame) instead of one hitch.
+	const float Mph = Vista.bActive ? 0.0f : Player->GetVelocity().Size() * 0.0223694f;
+	if (bSwayShadows ? Mph > 12.0f : Mph < 10.0f)
+	{
+		bSwayShadows = !bSwayShadows;
+		SwayShadowsPending.Reset();
+		for (const TPair<FIntPoint, FTile>& T : Tiles)
+		{
+			SwayShadowsPending.Append(T.Value.Hisms);
+		}
+	}
+	const EShadowCacheInvalidationBehavior SwayB = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
+	for (int32 n = 0; n < SwayShadowsPerTick && SwayShadowsPending.Num() > 0; )
+	{
+		UHierarchicalInstancedStaticMeshComponent* H = SwayShadowsPending.Pop(EAllowShrinking::No).Get();
+		if (H && H->ShadowCacheInvalidationBehavior != SwayB)   // tile may have been dropped / rebuilt already
+		{
+			H->ShadowCacheInvalidationBehavior = SwayB;
+			H->MarkRenderStateDirty();
+			++n;
+		}
+	}
 
 	// spawn missing tiles nearest-first, a few per tick - capped by BOTH the
 	// TilesPerTick count ceiling and TileBuildMsBudget of actual frame time

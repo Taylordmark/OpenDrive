@@ -8,6 +8,7 @@
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Containers/StringConv.h"
+#include "Dom/JsonObject.h"
 #include "EngineUtils.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -18,6 +19,8 @@
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "ODWeatherController.h"
 
 using namespace UE::Geometry;
@@ -1180,45 +1183,42 @@ bool AODRoadManager::NearestRoadPoint(const FVector2D& Query, FVector2D& OutPoin
 
 void AODRoadManager::BuildTownNodes()
 {
+	// The area's Turnouts (2026-10-14): menu_spots.json "starts" (pipeline/
+	// build_menu_spots.py turnouts), the same road-snapped points the menu
+	// lists - was the centroid of each place label's road points, which sat
+	// 1-3 km off, deep in subdivisions. Empty without a menu spot (Tail of
+	// the Dragon): map-select falls back to PlayerStart.
 	TownNodes.Reset();
-	if (PlaceLabels.Num() == 0)
+	FString Area = PlaceLabelFilePrefix;
+	if (!Area.RemoveFromStart(TEXT("labels_")) || !Area.RemoveFromEnd(TEXT("_test")))
 	{
-		return;   // no place data (e.g. Tail of the Dragon) - map-select falls
-		          // back to PlayerStart
+		return;
 	}
-	// Dedup the ~50 m-spaced label points into one node per unique town: the
-	// representative position is the centroid of that town's label points
-	// (they already sit on/near the road), then snapped to the exact nearest
-	// centerline point so a spawn there lands on pavement.
-	struct FAccum { FVector2D Sum = FVector2D::ZeroVector; int32 Count = 0; };
-	TMap<FString, FAccum> ByName;
-	for (const FPlaceLabel& L : PlaceLabels)
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	const TSharedPtr<FJsonObject>* Spot = nullptr;
+	const TSharedPtr<FJsonObject>* Starts = nullptr;
+	if (!FFileHelper::LoadFileToString(Text, *(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/menu_spots.json")))
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid()
+		|| !Root->TryGetObjectField(Area, Spot) || !(*Spot)->TryGetObjectField(TEXT("starts"), Starts))
 	{
-		if (L.CityLabel.IsEmpty())
+		return;
+	}
+	for (const auto& [Name, Value] : (*Starts)->Values)
+	{
+		const TSharedPtr<FJsonObject>* O = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Car = nullptr;
+		if (Value->TryGetObject(O) && (*O)->TryGetArrayField(TEXT("car_cm"), Car) && Car->Num() == 3)
 		{
-			continue;
+			TownNodes.Add({FString(Name), FVector2D((*Car)[0]->AsNumber(), (*Car)[1]->AsNumber())});
 		}
-		FAccum& A = ByName.FindOrAdd(L.CityLabel);
-		A.Sum += L.Pos;
-		++A.Count;
-	}
-	for (const TPair<FString, FAccum>& Pair : ByName)
-	{
-		const FVector2D Centroid = Pair.Value.Sum / FMath::Max(1, Pair.Value.Count);
-		FTownNode Node;
-		Node.Name = Pair.Key;
-		FVector2D Snapped;
-		float Yaw;
-		Node.Pos = NearestRoadPoint(Centroid, Snapped, Yaw) ? Snapped : Centroid;
-		TownNodes.Add(MoveTemp(Node));
 	}
 	// stable, human-friendly order for the map labels
 	TownNodes.Sort([](const FTownNode& A, const FTownNode& B)
 	{
 		return A.Name < B.Name;
 	});
-	UE_LOG(LogTemp, Display, TEXT("AODRoadManager: %d town node(s) for the menu map"),
-		TownNodes.Num());
+	UE_LOG(LogTemp, Display, TEXT("AODRoadManager: %d turnout(s) for the map"), TownNodes.Num());
 }
 
 void AODRoadManager::EndPlay(const EEndPlayReason::Type EndPlayReason)

@@ -7,19 +7,15 @@ Reads   data/raw/ne_10m_coastline.geojson (fetch_climate.py downloads it),
         data/raw/ne_50m_admin_0_boundary_lines_land.geojson,
         data/raw/ne_50m_admin_1_states_provinces_lines.geojson
         (Natural Earth, public domain, github.com/nvkelso/natural-earth-vector),
-        test_areas.AREAS, Masks/labels_<area>_test.bin
+        test_areas.AREAS
 Writes  OpenDriveUE/Content/OpenDrive/Masks/worldmap.json
           {"coast": [[lon0, lat0, lon1, lat1, ...], ...], "borders": [...], "states": [...],
-           "areas": {"<area>": {"ll": [lon, lat], "towns": [[name, x_cm, y_cm], ...]}}}
+           "areas": {"<area>": {"ll": [lon, lat]}}}
         Lines clipped to North America + Hawaii (the globe's texture carries
-        the rest). Towns: area-local UE cm, the
-        AODRoadManager::BuildTownNodes centroids (it snaps them to the road
-        at spawn; these are only drawn).
+        the rest). (An area's Turnouts live in menu_spots.json since 2026-10-14.)
 """
 import json
-import struct
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 from shapely.geometry import box, shape
@@ -47,34 +43,8 @@ def lines(name):
     return out
 
 
-def read_towns(path):
-    """labels_<area>_test.bin (ODL1: magic, 16-byte generation id, uint32 N,
-    N * (f32 x, y cm, u16-len utf8 road, u16-len utf8 city)) -> one centroid
-    per city, sorted by name like BuildTownNodes."""
-    b = path.read_bytes()
-    assert b[:4] == b"ODL1", path
-    n = struct.unpack_from("<I", b, 20)[0]
-    p = 24
-    acc = defaultdict(lambda: [0.0, 0.0, 0])
-    for _ in range(n):
-        x, y = struct.unpack_from("<ff", b, p)
-        p += 8
-        names = []
-        for _ in range(2):
-            ln = struct.unpack_from("<H", b, p)[0]
-            names.append(b[p + 2:p + 2 + ln].decode("utf-8"))
-            p += 2 + ln
-        if names[1]:
-            a = acc[names[1]]
-            a[0] += x
-            a[1] += y
-            a[2] += 1
-    return [[k, round(a[0] / a[2]), round(a[1] / a[2])] for k, a in sorted(acc.items())]
-
-
 def rank(key):
-    """Identical-bbox tie-break: the earlier AREAS entry wins (far_gasquet, the
-    real-location world member, over near_gasquet, its centred control)."""
+    """Identical-bbox tie-break: the earlier AREAS entry wins."""
     return list(AREAS).index(key)
 
 
@@ -87,11 +57,8 @@ def main():
     areas = {}
     for key, cfg in AREAS.items():
         s, w, n, e = cfg["bbox_snwe"]
-        lab = MASKS / f"labels_{key}_test.bin"
-        areas[key] = {"ll": [round((w + e) / 2, 4), round((s + n) / 2, 4)],
-                      "towns": read_towns(lab) if lab.exists() else []}
-        # (2026-10-14) a dev/test variant inside another area's bbox (gv_west/gv_east
-        # halves of green_valley, near_gasquet = far_gasquet's control) gets no globe pin
+        areas[key] = {"ll": [round((w + e) / 2, 4), round((s + n) / 2, 4)]}
+        # (2026-10-14) a dev/test variant inside another area's bbox gets no globe pin
         if any(o != key and inside(cfg["bbox_snwe"], c["bbox_snwe"]) and
                (not inside(c["bbox_snwe"], cfg["bbox_snwe"]) or rank(o) < rank(key))
                for o, c in AREAS.items()):
@@ -103,8 +70,7 @@ def main():
     dst = MASKS / "worldmap.json"
     dst.write_text(json.dumps(out, separators=(",", ":")))
     pts = sum(len(l) // 2 for k in ("coast", "borders", "states") for l in out[k])
-    print(f"wrote {dst}: {pts} line points, {len(areas)} areas "
-          f"({sum(len(a['towns']) for a in areas.values())} towns), {dst.stat().st_size / 1024:.0f} KB")
+    print(f"wrote {dst}: {pts} line points, {len(areas)} areas, {dst.stat().st_size / 1024:.0f} KB")
     return out
 
 

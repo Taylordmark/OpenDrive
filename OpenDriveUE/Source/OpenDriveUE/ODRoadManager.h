@@ -101,12 +101,11 @@ struct FPlaceLabel
 	FString CityLabel;
 };
 
-/** One clickable spawn destination on the map (2026-07-25): a real named
- *  town/place, deduplicated from the place-label points and positioned at its
- *  label-point centroid snapped to the nearest road-centerline point, so
- *  picking it spawns the car on the road at that town. Empty on levels without
- *  place-label data (Tail of the Dragon), where the map-select just falls back
- *  to the level's PlayerStart. */
+/** One clickable spawn destination on the map: a Turnout (2026-10-14) -
+ *  a named place snapped to a parkable road point, read from menu_spots.json
+ *  "starts" (pipeline/build_menu_spots.py turnouts), the menu's own list.
+ *  Empty on levels without a menu spot (Tail of the Dragon), where the
+ *  map-select just falls back to the level's PlayerStart. */
 struct FTownNode
 {
 	FString Name;
@@ -323,8 +322,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Road")
 	float MapTextureSpanCm = 0.0f;
 
-	/** Clickable town destinations for the main-menu map (built once at
-	 *  BeginPlay from PlaceLabels). Empty on levels without place data. */
+	/** The area's Turnouts for the map (built once at BeginPlay from
+	 *  menu_spots.json). Empty on levels without a menu spot. */
 	const TArray<FTownNode>& GetTownNodes() const { return TownNodes; }
 
 	/** Nearest road-centerline point to a world-XY query, plus the road

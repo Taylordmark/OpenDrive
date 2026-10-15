@@ -1426,7 +1426,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	const float FullSize = FMath::Min(Canvas->SizeY - 170.0f, Canvas->SizeX * 0.6f);
 	const float PanelX = (Canvas->SizeX - FullSize) * 0.5f;
 	const float PanelY = (Canvas->SizeY - FullSize) * 0.5f + 12.0f;
-	Text(TEXT("CHOOSE A START"), PanelX, PanelY - 48.0f, 1.8f, FLinearColor::White);
+	Text(TEXT("CHOOSE A TURNOUT"), PanelX, PanelY - 48.0f, 1.8f, FLinearColor::White);
 
 	// route polyline + player arrow (no gate markers - bRunning=false)
 	DrawStageMap(Centerline, Gates, false, INDEX_NONE, PanelX, PanelY, FullSize,
@@ -1481,7 +1481,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	const FString Foot = (Hover != INDEX_NONE && RoadMgr)
 		? FString::Printf(TEXT("click to start near %s"),
 			*RoadMgr->GetTownNodes()[Hover].Name)
-		: TEXT("hover a town, or press enter to start here");
+		: TEXT("hover a turnout, or press enter to start here");
 	Text(Foot, PanelX, PanelY + FullSize + 16.0f, 1.1f, FLinearColor(0.85f, 0.9f, 0.85f));
 	Text(TEXT("esc  back"), PanelX, PanelY + FullSize + 42.0f, 1.0f,
 		FLinearColor(0.6f, 0.6f, 0.6f));
@@ -1913,7 +1913,7 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		Text(FString::Printf(TEXT("%s  -  click/enter: route here    F / Y: fast travel"), *Towns[Hover].Name),
 			24.0f, Canvas->SizeY - 84.0f, 1.1f, FLinearColor(1.0f, 0.9f, 0.5f));
 	}
-	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: town or road waypoint    right-click / backspace: clear route    T: track editor    tab / esc: close"),
+	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: turnout or road waypoint    right-click / backspace: clear route    T: track editor    tab / esc: close"),
 		24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
 	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    L3 track editor    B / back: close"),
 		24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));

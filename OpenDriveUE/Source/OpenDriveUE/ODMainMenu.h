@@ -34,7 +34,7 @@ struct FODMenuSpot
 struct FODMenuPick
 {
 	FString Label;
-	FString Town;                            // Open Drive: town name, empty = the level's default start
+	FString Town;                            // Open Drive: turnout name, empty = the Default Turnout
 	FString Track;                           // Track Select: track name
 	bool bHasPos = false;
 	FVector2D Pos = FVector2D::ZeroVector;   // area-local cm
@@ -232,7 +232,7 @@ private:
 
 	// Open Drive / Track Select (2026-10-13): World -> AreaMap -> Start -> Drive
 	void ShowWorld();                   // spawn the globe once, one pin per cluster, fly to AreaIdx's
-	void LoadWorldMap();                // Masks/worldmap.json -> WorldLines, AreaLL, AreaTowns
+	void LoadWorldMap();                // Masks/worldmap.json -> WorldLines, AreaLL, AreaHidden
 	void ViewFrom(AActor* Target, float BlendSec);   // the player's camera view target
 	bool AreaListed(int32 Area) const;  // Track Select: only areas with tracks
 	TArray<int32> ClusterOf(int32 Area) const;   // listed areas overlapping Area: one globe pin, one tab each
@@ -248,7 +248,6 @@ private:
 	TArray<TArray<float>> WorldLines[3];   // coast, borders, states: [lat, lng, ...] (AODMenuGlobe::SetLines)
 	TArray<FVector2D> AreaLL;           // lon, lat per area, parallel to AreaKeys
 	TArray<bool> AreaHidden;           // worldmap.json "hidden": no pin, no tab (bake_world_map.py)
-	TArray<TArray<TPair<FString, FVector2D>>> AreaTowns;   // name, area-local cm
 	TArray<int32> Siblings;             // the AreaMap screen's areas, one tab each
 	TArray<FODMenuTab> AreaTabs;
 	TArray<FODMenuPick> Picks;          // AreaIdx's rows
@@ -279,7 +278,7 @@ private:
 	// CurrentAreaIdx calls OpenArea().
 	void FindAreaLevels();
 	void OpenArea();             // OpenLevel(AreaLevels[AreaIdx]) carrying the car picks as URL options
-	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_gv_west"
+	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_oahu"
 	TArray<FString> AreaNames;   // readable, parallel to AreaLevels
 	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
 	int32 AreaIdx = 0;
@@ -366,9 +365,9 @@ private:
 	int32 WeatherIdx = 0;
 
 	// Start vista: the car parked on a real road, live terrain behind it.
-	// Spots parallel AreaLevels (the area's menu spot = its Default Start);
+	// Spots parallel AreaLevels (the area's menu spot = its Default Turnout);
 	// StartPoses too (menu_spots.json "starts", pipeline/build_menu_spots.py
-	// town_starts: town -> road-snapped pose). One offset copy of the area's
+	// turnouts: name -> road-snapped pose, "" = the Default Turnout). One offset copy of the area's
 	// terrain/road/forest/water/guardrail managers (AODGameMode::SpawnVistaSet)
 	// at a time (2026-10-14, was one per focused pin, an LRU of 3 that
 	// respawned while hovering a cluster), centred on the shown start.

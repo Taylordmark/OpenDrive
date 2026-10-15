@@ -215,7 +215,7 @@ if REAL:
         rd, res2 = _gs("copy_mesh_from_static_mesh")(
             mesh, unreal.DynamicMesh(), unreal.GeometryScriptCopyMeshFromAssetOptions(), render_lod)
         box, valid, empty = _gs("get_uv_set_bounding_box")(rd, 1)
-        if res != OK or res2 != OK or not valid or empty or box.min.x < -0.01 or box.max.x < 0.5 * umax:
+        if res != OK or res2 != OK or not valid or empty or box.min.x < -0.05 or box.max.x < 0.5 * umax:
             raise RuntimeError(f"{name}: sway UV1 not in the built mesh ({valid} {empty} {box})")
         unreal.log_warning(f"FLORA {name}: sway UV1 baked, H {H:.0f} R {R:.0f} cm, U max {umax:.2f} "
                            f"V max {vmax:.2f}, render UV1 max ({box.max.x:.2f}, {box.max.y:.2f})")

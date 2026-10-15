@@ -670,6 +670,9 @@ private:
 	TArray<FVector> PoolAt;   // centre of the obstacle each Pool slot holds (stable slots)
 
 	TMap<FIntPoint, FTile> Tiles;
+	bool bSwayShadows = true;   // forest shadows follow wind WPO (slow) vs VSM-cached Rigid (driving) - Tick()
+	TArray<TWeakObjectPtr<UHierarchicalInstancedStaticMeshComponent>> SwayShadowsPending;   // HISMs still to switch after a flip
+	static constexpr int32 SwayShadowsPerTick = 24;
 
 	// terrain mask CPU copy (downsampled R channel = forest weight) - the
 	// Landscape-actor path (Tail of the Dragon)
