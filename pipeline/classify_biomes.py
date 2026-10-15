@@ -99,7 +99,14 @@ WC_URL = ("https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/"
           "ESA_WorldCover_10m_2021_v200_{tile}_Map.tif")
 WC_HEADER_BYTES = 65536   # all 7 IFDs + tile offset tables sit in the first 64 KB
 WC_OVERVIEW = 1           # IFD 1 = 20 m, ~IMG_ZOOM's 19 m/px
-WC_SHRUB, WC_GRASS, WC_CROP, WC_BUILT, WC_BARE = 20, 30, 40, 50, 60
+WC_TREE, WC_SHRUB, WC_GRASS, WC_CROP, WC_BUILT, WC_BARE, WC_WATER = 10, 20, 30, 40, 50, 60, 80
+# Shore (2026-10-15, realism eval T5): Sandy Beach/Waikiki's beach strip
+# classified Savanna (1 of 200 shore points was TropicalCoast) - the old
+# coast test needed 0.1 < w_water <= 0.4 imagery colour, which bright sand
+# never has. Now: within SHORE_M of WorldCover water (or no-data open ocean)
+# and below SHORE_MAX_ELEV_M, unless WorldCover says trees or built-up.
+SHORE_M = 80.0
+SHORE_MAX_ELEV_M = 8.0
 # Lava (tropics only) = dark imagery where WorldCover says bare/sparse, or
 # grass/shrub with no green and little colour at all: WorldCover maps young
 # Hawaiian flows mostly as grass (Mauna Loa 1984: 80% class 30, 13% bare).
@@ -394,8 +401,15 @@ ALPINE_RISE_ABOVE_VALLEY_M = 900.0
 ARID_MAX_PRECIP_MM = 500.0
 
 
+def shore_mask(wc_grid):
+    """True within SHORE_M of WorldCover water / no data (20 m px at WC_OVERVIEW)."""
+    water = (wc_grid == WC_WATER) | (wc_grid == 0)
+    return ndimage.distance_transform_edt(~water) * (10 << WC_OVERVIEW) <= SHORE_M
+
+
 def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
-                grade=1.0, area_elev_min_m=0.0, annual_precip_mm=0.0, wc=0, w_lava=0.0):
+                grade=1.0, area_elev_min_m=0.0, annual_precip_mm=0.0, wc=0, w_lava=0.0,
+                shore=False):
     """Elevation/latitude bands tuned for the Skagit/Cascades loop specifically
     (see module docstring) - not a general-purpose elevation->biome model. A
     real per-region model is the ESA WorldCover + climate-raster work (7.3).
@@ -448,6 +462,8 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
     # and lava_weight(); the defaults leave every branch as before.
     if w_lava > 0.5:
         return BIOME_LAVA
+    if shore and elev_m < SHORE_MAX_ELEV_M and wc not in (WC_TREE, WC_BUILT, WC_WATER, 0):
+        return BIOME_TROPICAL_COAST if abs_lat < 23.5 else BIOME_COASTAL
     if w_rock > 0.35 and grade > CANYON_GRADE_MIN:
         if elev_m > alpine_floor_m or (elev_m > 500.0 and abs_lat > 35.0
                                         and elev_m - area_elev_min_m > 500.0):
@@ -592,6 +608,7 @@ def main():
     w_forest, w_grass, w_rock, w_water, w_bare = classify_rgb(mosaic)
     wc_grid, wc_bounds = fetch_worldcover(west, south, east, north)
     wc = sample_nearest_ll(wc_grid, wc_bounds, lon, lat)
+    shore = sample_nearest_ll(shore_mask(wc_grid), wc_bounds, lon, lat)
     sl = sample_bilinear(lava_weight(mosaic, bounds, wc_grid, wc_bounds), bounds, lon, lat)
     del mosaic, wc_grid
 
@@ -603,7 +620,8 @@ def main():
 
     biomes = [pick_biome(float(sf[i]), float(sg[i]), float(sr[i]), float(sw[i]),
                           float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]),
-                          area_elev_min_m, annual_precip_mm, int(wc[i]), float(sl[i]))
+                          area_elev_min_m, annual_precip_mm, int(wc[i]), float(sl[i]),
+                          bool(shore[i]))
               for i in range(len(lon))]
     forest_weight = np.clip(sf + 0.3 * sg, 0, 1)   # density signal, not just the forest channel
 

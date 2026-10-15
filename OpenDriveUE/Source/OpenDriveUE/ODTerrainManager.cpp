@@ -547,6 +547,7 @@ void AODTerrainManager::LoadGroundBands()
 		Read(TEXT("snow_summer_high_cm"), B.SnowSummerHighCm);
 		Read(TEXT("snow_winter_low_cm"), B.SnowWinterLowCm);
 		Read(TEXT("snow_winter_high_cm"), B.SnowWinterHighCm);
+		Read(TEXT("low_green_bias"), B.LowGreenBias);
 	}
 	// tiles sit at actor-relative positions; the material reads world Z
 	const float Dz = (float)GetActorLocation().Z;
@@ -1255,7 +1256,7 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 		// high - smoothstep across the bands so there's no visible seam. ----
 		const float ElevT = FMath::Clamp((Z - Bands.ElevLowCm) / (Bands.ElevHighCm - Bands.ElevLowCm), 0.0f, 1.0f);
 		const float ElevS = ElevT * ElevT * (3.0f - 2.0f * ElevT);
-		const FLinearColor LowBiased = FMath::Lerp(GroundTint, ElevLowBias, 0.45f);
+		const FLinearColor LowBiased = FMath::Lerp(GroundTint, ElevLowBias, Bands.LowGreenBias);
 		const FLinearColor HighBiased = FMath::Lerp(GroundTint, ElevHighBias, 0.55f);
 		FLinearColor Tint = FMath::Lerp(LowBiased, HighBiased, ElevS);
 

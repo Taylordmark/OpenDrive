@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from build_ground_bands import SNOW_NOISE_STRENGTH, bands, snow_ramp
+from build_ground_bands import LOW_GREEN_BIAS, SNOW_NOISE_STRENGTH, bands, low_green_bias, snow_ramp
 
 
 def climate(t_lo, t_hi):
@@ -55,8 +55,18 @@ def test_warm_areas_bare():
         assert abs(b["sea_z_cm"] + origin * 100) < 1e-6
 
 
+def test_low_green_bias():
+    gv = {"monthly_temp_c": [8, 9, 11, 14, 18, 23, 26, 26, 23, 18, 12, 8],
+          "monthly_precip_mm": [75, 74, 50, 21, 10, 1, 2, 1, 3, 18, 25, 61]}
+    wet = dict(gv, monthly_precip_mm=[60] * 12)
+    assert low_green_bias(gv) == 0.0                     # summer-dry: no olive pull
+    assert low_green_bias(wet) == LOW_GREEN_BIAS
+    assert low_green_bias({"monthly_temp_c": [0] * 12}) == LOW_GREEN_BIAS   # old climate.json
+
+
 if __name__ == "__main__":
     test_snow_ramp_first_patch()
     test_summit_like()
     test_warm_areas_bare()
+    test_low_green_bias()
     print("test_ground_bands: OK")

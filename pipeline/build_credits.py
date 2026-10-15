@@ -155,6 +155,9 @@ def build_lines():
     add("U.S. Geological Survey data - public domain.")
     add("Ground colour (Realistic style): Contains modified Copernicus Sentinel data")
     add("2023-2025. Sentinel-2 L2A via Element84 Earth Search on AWS.")
+    add("Land cover (biomes, paved ground, far forest): ESA WorldCover 10 m 2021 v200,")
+    add("(C) ESA WorldCover project / Contains modified Copernicus Sentinel data")
+    add("(2021) processed by ESA WorldCover consortium. Licensed CC-BY 4.0.")
     add("Traffic volumes: FHWA Highway Performance Monitoring System (HPMS) - public domain.")
     add()
 

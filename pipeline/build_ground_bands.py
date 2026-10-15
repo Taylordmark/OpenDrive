@@ -53,6 +53,12 @@ WINTER_FIRST_T_C = 1.0
 WINTER_FULL_T_C = -3.0
 ELEV_TINT_SPAN_M = 765.0        # vertex-tint low->high grey ramp, from treeline low
 SNOW_NOISE_STRENGTH = 1.3       # == apply_ground_material.py / apply_terrain_real_materials.py
+# ApplyBiomeTint pulls ground below the elevation ramp toward dark "lush" green
+# (ElevLowBias, 0.45). Right for summer-wet valleys, wrong for summer-dry ones:
+# Green Valley's golden grass and ochre desert rendered olive (T5). Scaled by
+# the three warmest months' precipitation: <= 30 mm none, >= 120 mm full.
+LOW_GREEN_BIAS = 0.45
+LOW_GREEN_DRY_MM, LOW_GREEN_WET_MM = 30.0, 120.0
 
 
 def isotherm_m(ref_m, ref_t_c, t_c):
@@ -66,8 +72,18 @@ def snow_ramp(first_m, full_m):
     return full_m - w, full_m
 
 
+def low_green_bias(climate):
+    t, p = climate["monthly_temp_c"], climate.get("monthly_precip_mm")
+    if not p:
+        return LOW_GREEN_BIAS
+    summer = sum(p[i] for i in sorted(range(12), key=lambda i: -t[i])[:3])
+    return round(LOW_GREEN_BIAS * min(1.0, max(0.0, (summer - LOW_GREEN_DRY_MM)
+                                                / (LOW_GREEN_WET_MM - LOW_GREEN_DRY_MM))), 3)
+
+
 def bands(origin_m, climate, ref_elev_m):
-    """All values in UE cm relative to origin_m (= area-local world Z)."""
+    """All values in UE cm relative to origin_m (= area-local world Z), plus
+    low_green_bias (0..LOW_GREEN_BIAS)."""
     tw, tc = max(climate["monthly_temp_c"]), min(climate["monthly_temp_c"])
     tree_lo = isotherm_m(ref_elev_m, tw, TREELINE_T_C)
     s_lo, s_hi = snow_ramp(isotherm_m(ref_elev_m, tw, SUMMER_SNOW_T_C),
@@ -81,6 +97,7 @@ def bands(origin_m, climate, ref_elev_m):
         elev_low_cm=cm(tree_lo), elev_high_cm=cm(tree_lo + ELEV_TINT_SPAN_M),
         snow_summer_low_cm=cm(s_lo), snow_summer_high_cm=cm(s_hi),
         snow_winter_low_cm=cm(w_lo), snow_winter_high_cm=cm(w_hi),
+        low_green_bias=low_green_bias(climate),
     )
 
 
@@ -131,7 +148,7 @@ def build(area):
     out.update(area=area, origin_m=origin, ref_elev_m=round(ref, 1))
     (MASKS / f"groundbands_{area}_test.json").write_text(json.dumps(out, indent=1))
     asl = {k: round(v / 100.0 + origin) for k, v in out.items() if k.endswith("_cm")}
-    print(f"build_ground_bands: {area} ref {ref:.0f} m -> ASL m {asl}")
+    print(f"build_ground_bands: {area} ref {ref:.0f} m -> ASL m {asl}, low green bias {out['low_green_bias']}")
     return out
 
 

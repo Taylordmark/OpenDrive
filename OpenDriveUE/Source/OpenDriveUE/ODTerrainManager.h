@@ -27,6 +27,7 @@ struct FODGroundBands
 	float ElevLowCm = Off, ElevHighCm = Off + 76500.0f;               // ApplyBiomeTint grey ramp
 	float SnowSummerLowCm = Off, SnowSummerHighCm = Off + 45000.0f;   // AODSeasonController, SnowCover 0
 	float SnowWinterLowCm = Off, SnowWinterHighCm = Off + 45000.0f;   // ... and SnowCover 1
+	float LowGreenBias = 0.45f;   // ApplyBiomeTint's pull toward ElevLowBias (0 = summer-dry, T5)
 };
 
 /** One parsed terrain tile - plain data, safe to build off the game thread

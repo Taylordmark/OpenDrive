@@ -291,5 +291,8 @@ then read `OpenDriveUE/Saved/Logs/OpenDriveUE.log` (manager heartbeats:
 - Climate normals: NASA POWER.
 - Traffic volumes: FHWA HPMS (geo.dot.gov), state lookup via the US Census
   geocoder — public domain.
-- Planned (Arc 7): ESA WorldCover (CC-BY 4.0), PRISM/WorldClim — credit when
-  integrated.
+- Land cover: ESA WorldCover 10 m 2021 (© ESA WorldCover project, CC-BY 4.0) —
+  biomes, paved ground, far forest.
+- Ground colour (Realistic): contains modified Copernicus Sentinel data
+  2023-2025 (Sentinel-2 L2A via Element84 Earth Search on AWS).
+- Planned: PRISM/WorldClim — credit when integrated.
