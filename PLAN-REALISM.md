@@ -66,11 +66,9 @@ Steps 1–6 built 2026-10-06 (see `status.md`). They need the combined
 Phase 3 can read junction control from `road_furniture.json`'s `controls`
 list (one entry per signal/stop/give-way node, with its approaches).
 
-What's left:
-
-1. **Phase 1b:** sidewalks in settlements (a curb strip from the
-   road edge, part of the road mesh) and `highway=service` driveway stubs,
-   limited to the first 30 m off the road for perf.
+Phase 1b (sidewalks + driveway stubs) built 2026-10-15 (`build_sidewalks.py`,
+see `status.md`). Sidewalks are concrete ODS1 solids beside the ribbon, not
+part of the road mesh, so `M_Road` didn't need regenerating.
 
 **Drive check:** a town (Frisco/Breck) day and night, and one rural pass.
 Do the signs and lights read as stylized, and is the density right?
@@ -209,18 +207,8 @@ how traffic reacts to the player.
 
 ## Phase 4 — Water and coast (medium; needed for the coast ranges and Hawaii in scope)
 
-1. **Coastline:** stitch `natural=coastline` ways into closed land rings,
-   clipped to the area bbox.
-2. **Sea plane:** world members share datum 0 (sea level, 2026-10-05), so a
-   Tier 0 sea plane is a flat Z=0 mesh outside the land rings, with the
-   existing water material. Bake the offshore tiles that are skipped today.
-3. **Lake islands:** subtract the `inner` members of lake multipolygons.
-4. **Culverts:** at unbridged ribbon crossings (gap-clipped today), keep the
-   ribbon and add a culvert mouth mesh on each side of the embankment.
-5. **Oahu water tiles,** so hurricane rough water can show there.
-6. **Check:** a test for ring stitching on a synthetic broken coastline,
-   plus a `verify_*` count of tiles with water and of any lake polygon that
-   still covers an island.
+Built 2026-10-15 (coastline rings, Z=0 sea tiles, lake islands, culvert
+mouths, Oahu water, `verify_water.py`; see `status.md`).
 
 **Drive check:** Oahu coast road, and a lake with an island.
 
@@ -228,21 +216,11 @@ how traffic reacts to the player.
 
 ## Phase 5 — Tunnels and stacked crossings (medium–large)
 
-1. **Tunnel bore:** pavement through the tunnel, along the real `elev_m`
-   the stations already keep (`build_road_network.py:26`). Add an extruded
-   stylized arch with full collision, dark interior lighting and portal
-   faces. **Done (2026-10-13):** `build_tunnels.py` (bore, headwalls, light
-   strips; ribbon runs through). Near terrain tiles are cut ~1 m around the
-   bore wherever the ground reaches into it, mostly at the portals.
-   Dark-interior exposure is still to do.
-2. **Stacked crossings:** use `layer` in the elevation-conflict detection
-   (`next steps.md` §4, OSM tag consumers). Grade-separated crossings with
-   no structure get a bridge from the existing ODB1 path.
-3. **I-70 East Portal:** split the two benched carriageways into separate
-   carve corridors.
-4. **Check:** `verify_road_fit` covers tunnel stations (pavement continuous
-   portal to portal), plus a count of stacked crossings without a structure
-   (target 0).
+Built 2026-10-13..15 (bore + dark-interior post-process, synthesized spans
+for untagged `layer` stacks, per-road-pair East Portal walls, and the
+`verify_road_fit` TUNNEL PAVEMENT / STACKED CROSSINGS gates; see
+`status.md`). The East Portal "30 m off the DEM" no longer reproduces: the
+worst road-vs-DEM gap near the portal is now a 9 m bridge ramp.
 
 **Drive check:** Eisenhower/Johnson tunnel and one interchange.
 
