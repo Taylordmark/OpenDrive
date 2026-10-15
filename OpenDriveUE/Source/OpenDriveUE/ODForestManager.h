@@ -742,6 +742,10 @@ private:
 	{
 		TArray<FVector2D> Ring;   // world cm, closed (last point != first, IsInsideLake wraps)
 		double MinX = 0.0, MaxX = 0.0, MinY = 0.0, MaxY = 0.0;
+		// Water feature this ring belongs to (2026-10-14): a lake with an
+		// island, or a sea tile around one, is several rings of ONE feature,
+		// and even-odd parity runs over all of them so the island stays dry.
+		int32 Feature = 0;
 	};
 	TArray<FLakeRing> LakeRings;
 

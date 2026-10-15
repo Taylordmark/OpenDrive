@@ -17,6 +17,11 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/tunnel_<AREA_NAME>_test_tile_<tx>_<t
         Both ODS1 (export_retaining_wall_bin.write_tile's mesh-chunk format),
         streamed by two extra AODWallManager instances (M_Bridge concrete,
         and the glowing MI_Furn_lamp) - see AODGameMode::SpawnAreaSet.
+
+Culverts (PLAN-REALISM Phase 4, 2026-10-14) ride in the same concrete
+tunnel_* tiles: build_water_tiles.py cuts a waterway ribbon short where it
+crosses a road with no bridge (§7.27 gap); each end of that gap gets a pipe
+mouth in a square headwall, sized to the stream and kept under the road.
 """
 
 import json
@@ -35,6 +40,7 @@ from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
+WATERWAY_SUMMARY = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "waterway_build_summary.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 # Bore cross-section (cm, relative to the road centerline, sheared with the
@@ -199,6 +205,105 @@ def light_strips(run):
     return verts, uvs, tris
 
 
+# ------------------------------------------------------------------ culverts
+CULVERT_SEGS = 16
+CULVERT_R_MIN_M, CULVERT_R_MAX_M = 0.3, 1.2
+CULVERT_WALL_M = 0.12      # pipe wall
+CULVERT_HEAD_PAD_M = 0.6   # headwall square half-side = pipe outer radius + this
+CULVERT_HEAD_THICK_M = 0.3
+CULVERT_PIPE_IN_M = 1.5    # pipe runs this far into the embankment
+CULVERT_PIPE_OUT_M = 0.2   # and sticks out of the headwall this much
+CULVERT_ROAD_COVER_M = 0.3  # headwall top stays this far under the road
+CULVERT_PAVE_CLEAR_M = 1.0  # headwall stays this far off the pavement edge
+
+
+def circle(r_cm):
+    a = np.linspace(0.0, 2.0 * math.pi, CULVERT_SEGS, endpoint=False)
+    return np.c_[r_cm * np.cos(a), r_cm * np.sin(a)]
+
+
+def square_like(r_cm, half_cm):
+    """circle(r_cm)'s angles pushed out to a square of half-side half_cm,
+    index-paired with it (the band between is the headwall face)."""
+    c = circle(1.0)
+    return c * half_cm / np.abs(c).max(axis=1, keepdims=True)
+
+
+def culvert_mouth(p_cm, u, z_cm, r_m):
+    """Pipe + headwall at mouth p_cm (UE cm, 2), u = unit UE direction into
+    the embankment, z_cm = pipe centre. Two closed solids."""
+    r = np.array([u[1], -u[0]])
+    two = lambda a: np.repeat(np.asarray(a, float)[None], 2, axis=0)
+    rc, wc = r_m * 100.0, (r_m + CULVERT_WALL_M) * 100.0
+    pipe_c = np.stack([p_cm - u * CULVERT_PIPE_OUT_M * 100.0, p_cm + u * CULVERT_PIPE_IN_M * 100.0])
+    head_c = np.stack([p_cm, p_cm + u * CULVERT_HEAD_THICK_M * 100.0])
+    zz, sl = two(z_cm), np.zeros(2)
+    return [sweep(pipe_c, two(r), zz, sl, two(circle(rc)), two(circle(wc))),
+            sweep(head_c, two(r), zz, sl, two(circle(wc)),
+                  two(square_like(wc, wc + CULVERT_HEAD_PAD_M * 100.0)))]
+
+
+def culvert_sites(summary_path=WATERWAY_SUMMARY, stations_path=STATIONS_PATH):
+    """One (p_cm, u, z_cm, r_m) per end of every §7.27 ribbon gap, with the
+    gaps a crossing spreads over several resampled segments merged first.
+    Returns (sites, n_skipped) - skipped where the road sits too low over the
+    stream for even the smallest pipe."""
+    if not Path(summary_path).is_file():
+        return [], 0
+    pts, zs, hws = [], [], []
+    for seg in json.loads(Path(stations_path).read_text())["segments"]:
+        e, n = np.array(seg["east_m"]), np.array(seg["north_m"])
+        hwy = seg.get("highway_class")
+        hw = (half_width_for_stations(hwy, seg.get("oneway"), seg.get("lanes")) if hwy
+              else np.full(len(e), ROAD_HALF_WIDTH))
+        pts.append(np.c_[e, n]); zs.append(road_ue_z_m(np.array(seg["elev_m"]), ROAD_LIFT, ORIGIN_HEIGHT_M))
+        hws.append(np.asarray(hw, float))
+    pts, zs, hws = np.vstack(pts), np.concatenate(zs), np.concatenate(hws)
+    tree = cKDTree(pts)
+    sites, n_skipped = [], 0
+    for ch in json.loads(Path(summary_path).read_text()).get("chain_summaries", []):
+        if not ch.get("seg_gaps"):
+            continue
+        e, n = np.array(ch["east_m"]), np.array(ch["north_m"])
+        w = road_ue_z_m(np.array(ch["water_elev_m"]), 0.0, ORIGIN_HEIGHT_M)
+        s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(e), np.diff(n)))])
+        iv = sorted((s[i] + a * (s[i + 1] - s[i]), s[i] + b * (s[i + 1] - s[i]))
+                    for i, ivls in ch["seg_gaps"] for a, b in ivls)
+        merged = []
+        for lo, hi in iv:
+            if merged and lo <= merged[-1][1] + 0.1:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        for lo, hi in merged:
+            for at, sign in ((lo, 1.0), (hi, -1.0)):
+                if at <= 0.0 or at >= s[-1]:
+                    continue   # the stream starts/ends under the road
+                k = min(int(np.searchsorted(s, at, side="right")) - 1, len(s) - 2)
+                d = np.array([e[k + 1] - e[k], n[k + 1] - n[k]])
+                d = d / (np.linalg.norm(d) or 1.0) * sign      # into the gap
+                t = (at - s[k]) / ((s[k + 1] - s[k]) or 1.0)
+                p = np.array([e[k], n[k]]) + (np.array([e[k + 1], n[k + 1]]) - [e[k], n[k]]) * t
+                wz = w[k] + (w[k + 1] - w[k]) * t
+                r_m = float(np.clip(0.6 * ch["half_width_m"], CULVERT_R_MIN_M, CULVERT_R_MAX_M))
+                for _ in range(20):   # back off the pavement, 0.5 m a step
+                    dist, j = tree.query(p)
+                    pad = r_m + CULVERT_WALL_M + CULVERT_HEAD_PAD_M
+                    if dist >= hws[j] + CULVERT_PAVE_CLEAR_M + pad:
+                        break
+                    p = p - d * 0.5
+                road_z = zs[tree.query(p, k=min(8, len(zs)))[1]].min()
+                # centre 0.3 r over the water; top = centre + r + wall + pad
+                r_fit = (road_z - CULVERT_ROAD_COVER_M - wz - CULVERT_WALL_M - CULVERT_HEAD_PAD_M) / 1.3
+                r_m = min(r_m, r_fit)
+                if r_m < CULVERT_R_MIN_M:
+                    n_skipped += 1
+                    continue
+                sites.append((np.array([p[0], -p[1]]) * 100.0, np.array([d[0], -d[1]]),
+                              (wz + 0.3 * r_m) * 100.0, r_m))
+    return sites, n_skipped
+
+
 # ------------------------------------------------------------- terrain holes
 def _dense(runs):
     """Every run resampled to DENSE_CM along: (KD-tree, points (N,2), attrs
@@ -350,6 +455,12 @@ def main():
         for mesh in bore_chunks(run) + headwalls(run):
             add("tunnel", mesh, mesh[0][:, :2].mean(axis=0))
         add("tunnellights", light_strips(run), run["c"][len(run["c"]) // 2])
+    sites, n_culvert_skipped = culvert_sites()
+    for p_cm, u, z_cm, r_m in sites:
+        for mesh in culvert_mouth(p_cm, u, z_cm, r_m):
+            add("tunnel", mesh, p_cm)
+    print(f"culverts: {len(sites)} mouth(s), {n_culvert_skipped} skipped (road too low "
+          f"over the stream for a {CULVERT_R_MIN_M:.1f} m pipe)")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     gen_id_bytes = pack_generation_id(compute_generation_id())

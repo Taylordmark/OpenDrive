@@ -11,7 +11,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from build_terrain_mesh_tiles import (NEAR_GRID_N, PAVEMENT_CEIL_LOW_EXT_M, PAVEMENT_CEIL_MARGIN_NEAR_M,
-                                      TERRAIN_TILE_SIZE_CM as T, pavement_ceiling)
+                                      TERRAIN_TILE_SIZE_CM as T, pavement_ceiling,
+                                      pavement_grade)
 from road_mesh_common import MAX_BANK_RAD
 
 N, M = 5, 0.15
@@ -88,7 +89,19 @@ def test_banked_road_under_no_triangle():
     print(f"banked: worst triangle {worst:+.3f} m vs pavement, deepest at low lip {deepest:+.3f} m vs edge")
 
 
+def test_snapped_stations_no_steep_grade():
+    """Junction pads XY-snap a road's end stations onto one node, ~10 cm
+    apart (Oahu Farrington Hwy, 2026-10-14): the 9 cm dz between them is
+    not a 64% grade - the run is floored at the probe spacing."""
+    z = np.array([14.14, 14.08, 13.99, 13.90, 13.93])
+    run = np.array([136.0, 85.0, 14.0, 108.0, 240.0])        # cm, measured
+    assert np.abs(pavement_grade(z, run)).max() * 100.0 < 0.06
+    run = np.full(5, 500.0)                                   # a real 5 m station row
+    assert np.allclose(pavement_grade(z, run), np.gradient(z) / 500.0)
+
+
 if __name__ == "__main__":
+    test_snapped_stations_no_steep_grade()
     test_banked_road_under_no_triangle()
     test_lower_road_wins_its_cell()
     test_grade_line_reproduced_at_probe()

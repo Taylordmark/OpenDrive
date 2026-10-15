@@ -56,4 +56,28 @@ assert area(cv, ct) > area(verts, tris[~gone]), "split didn't give any ground ba
 # lights face down
 lv, _, lt = bt.light_strips(run)
 assert (np.cross(lv[lt[:, 2]] - lv[lt[:, 0]], lv[lt[:, 1]] - lv[lt[:, 0]])[:, 2] < 0).all()
+
+# culverts: a stream along +x crossing a 2-lane road along y at x=100 m,
+# road 3 m over the water; gap 90..110 m spread over two resampled segments
+import json, tempfile
+from test_areas import ORIGIN_HEIGHT_M
+with tempfile.TemporaryDirectory() as td:
+    yy = np.arange(-50.0, 51.0, 5.0)
+    st = {"segments": [{"east_m": [100.0] * len(yy), "north_m": yy.tolist(),
+                        "elev_m": [ORIGIN_HEIGHT_M + 3.0] * len(yy), "highway_class": "residential"}]}
+    ch = {"east_m": [0.0, 95.0, 105.0, 200.0], "north_m": [0.0] * 4,
+          "water_elev_m": [ORIGIN_HEIGHT_M] * 4, "half_width_m": 1.75,
+          "seg_gaps": [[0, [[90 / 95, 1.0]]], [1, [[0.0, 1.0]]], [2, [[0.0, 5 / 95]]]]}
+    (Path(td) / "st.json").write_text(json.dumps(st))
+    (Path(td) / "ww.json").write_text(json.dumps({"chain_summaries": [ch]}))
+    sites, skipped = bt.culvert_sites(Path(td) / "ww.json", Path(td) / "st.json")
+assert len(sites) == 2 and skipped == 0, (len(sites), skipped)
+(p0, u0, z0, r0), (p1, u1, z1, r1) = sorted(sites, key=lambda s: s[0][0])
+assert p0[0] < 9500 and p1[0] > 10500 and u0[0] > 0 and u1[0] < 0   # both face the road
+for p_, u_, z_, r_ in sites:
+    for v, uv, t in bt.culvert_mouth(p_, u_, z_, r_):
+        e = Counter(map(tuple, np.r_[t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]))
+        assert all(e[(b, a)] == n for (a, b), n in e.items()), "open culvert mesh"
+        assert bt.ue_volume(v, t) > 0
+        assert v[:, 2].max() <= 300.0 + 10.0 - bt.CULVERT_ROAD_COVER_M * 100.0 + 1e-3   # under the road
 print("ok")

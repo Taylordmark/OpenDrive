@@ -543,10 +543,24 @@ def load_lake_beds():
         m = _TILE_XY_RE.search(path.name)
         tile_flags = ribbon_flags.get(f"{m.group(1)},{m.group(2)}", []) if m else []
         for feature_idx, (verts, tris) in enumerate(_read_lake_bin_tile(path)):
-            is_ribbon = feature_idx < len(tile_flags) and bool(tile_flags[feature_idx])
-            if len(tris) == 0:
-                continue
-            for ring_idx in _extract_boundary_rings(tris):
+            kind = int(tile_flags[feature_idx]) if feature_idx < len(tile_flags) else 0
+            if len(tris) == 0 or kind == 2:
+                continue   # Phase 4: the sea (kind 2) is datum water - no bed, no crossing
+            is_ribbon = kind == 1
+            rings = _extract_boundary_rings(tris)
+            holes = []
+            if len(rings) > 1:
+                # Phase 4: an island cut out of the lake is a boundary ring
+                # inside the largest one - a hole, not a second lake
+                xy = [verts[r][:, :2].astype(np.float64) for r in rings]
+                area = [abs(float(np.sum(a[:, 0] * np.roll(a[:, 1], -1) - np.roll(a[:, 0], -1) * a[:, 1])))
+                        for a in xy]
+                big = int(np.argmax(area))
+                inner = [k for k in range(len(rings)) if k != big and
+                         _point_in_polygon(xy[k][:1, 0], xy[k][:1, 1], xy[big][:, 0], xy[big][:, 1])[0]]
+                holes = [(xy[k][:, 0], xy[k][:, 1]) for k in inner]
+                rings = [r for k, r in enumerate(rings) if k not in inner]
+            for ring_idx in rings:
                 ring_xy = verts[ring_idx][:, :2]
                 bbox = (float(ring_xy[:, 0].min()), float(ring_xy[:, 0].max()),
                         float(ring_xy[:, 1].min()), float(ring_xy[:, 1].max()))
@@ -585,6 +599,7 @@ def load_lake_beds():
                     "z_cm": z_cm,
                     "bbox": bbox,
                     "is_ribbon": is_ribbon,
+                    "holes": holes if len(rings) == 1 else [],
                 })
     if lakes:
         print(f"  loaded {len(lakes)} lake bed(s) from {len(paths)} water tile(s) for "
@@ -715,12 +730,20 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
                 by1 + blend_cm < tile_y0 or by0 - blend_cm > tile_y1):
             continue
         inside = _point_in_polygon(flat_x, flat_y, lake["ring_x"], lake["ring_y"])
+        for hx, hy in lake.get("holes", ()):
+            inside &= ~_point_in_polygon(flat_x, flat_y, hx, hy)   # Phase 4: islands stay land
+
+        def ring_dist_m(ix):
+            d = _dist_to_ring(flat_x[ix], flat_y[ix], lake["ring_x"], lake["ring_y"])
+            for hx, hy in lake.get("holes", ()):
+                d = np.minimum(d, _dist_to_ring(flat_x[ix], flat_y[ix], hx, hy))
+            return d / 100.0
         shore_z_cm = lake["z_cm"] + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
 
         if inside.any():
             touched = True
             idx = np.nonzero(inside)[0]
-            dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
+            dist_m = ring_dist_m(idx)
             depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
                 np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
             bed_z = lake["z_cm"] - depth_m * 100.0
@@ -742,7 +765,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
         if not near.any():
             continue
         out_idx = out_idx[near]
-        dist_m = _dist_to_ring(flat_x[out_idx], flat_y[out_idx], lake["ring_x"], lake["ring_y"]) / 100.0
+        dist_m = ring_dist_m(out_idx)
         lin_t = np.clip(1.0 - dist_m / WATER_SHORE_BLEND_M, 0.0, 1.0)  # 1 at ring, 0 at blend edge
         # Smoothstep, not linear (2026-09-03 shore-cliff fix - see
         # WATER_SHORE_BLEND_M's comment): zero slope at both dist_m==0 (the
@@ -809,6 +832,15 @@ def _get_tunnels():
 _PAVEMENT_CACHE = None
 
 
+def pavement_grade(z, run_cm):
+    """Grade (m per cm) along a pavement probe row, the run floored at the
+    probe spacing (2026-10-14): junction pads XY-snap a road's last stations
+    onto one node ~10 cm apart, and dz over that read as a 64% grade that
+    pavement_ceiling extrapolated a cell out - a 6.7 m notch under Oahu's
+    Farrington Hwy pad (stations 200642-200644)."""
+    return np.gradient(z) / np.maximum(run_cm, PAVEMENT_SAMPLE_M * 100.0)
+
+
 def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank):
     """Probe points covering every non-structure road's pavement, bucketed
     by terrain tile - see PAVEMENT_SAMPLE_M. Each is (x cm, y cm, centerline
@@ -850,7 +882,7 @@ def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank):
             tx, ty = np.ones(1), np.zeros(1)
         tn = np.maximum(np.hypot(tx, ty), 1e-9)
         tx, ty = tx / tn, ty / tn
-        grade = np.gradient(z) / tn if len(x) >= 2 else np.zeros(1)   # m per cm
+        grade = pavement_grade(z, tn) if len(x) >= 2 else np.zeros(1)   # m per cm
         rep = lambda a: np.repeat(a, k)
         for c, a in zip(cols, ((x[:, None] - ty[:, None] * h[:, None] * fan).ravel(),
                                (y[:, None] + tx[:, None] * h[:, None] * fan).ravel(),

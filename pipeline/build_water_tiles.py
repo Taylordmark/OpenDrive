@@ -62,21 +62,22 @@ relation's "outer" member way segments end-to-end (matching shared node
 ids, same idea any multipolygon assembler uses) into one or more closed
 rings.
 
-STILL NOT handled (documented scope, not silently dropped): the 28 "inner"
-member ways (islands/points/exclusion zones) are NOT subtracted as holes -
-ear_clip/fan_triangulate below have no hole support, and adding that is a
-real triangulation feature, not a quick follow-on. Dillon Reservoir
-therefore triangulates as solid water straight through its small islands/
-points - a real, visible simplification up close at those specific spots,
-accepted for this pass the same way the old single-tile-per-feature/no-
-multipolygon-relation limits were accepted for the version before it.
+ISLANDS (Phase 4, 2026-10-14): a relation's "inner" members are assembled
+the same way and cut out as holes (mesh_from_polygon - shapely's
+constrained Delaunay; plain lakes still ear-clip).
+
+SEA (Phase 4, 2026-10-14): natural=coastline ways are stitched into chains
+(stitch_coastline / close_coast_gaps), the bbox is split along them into
+land and sea (land_polygon), and every owned 2 km tile with any sea - the
+offshore ones included - gets one sea feature at sea level + SEA_LIFT_M.
+The ribbon-flags sidecar marks it kind 2 so the terrain lake-bed pass and
+the embankment water-crossing logic leave it alone.
 
 Elevation formula: SAME road_ue_z_m(elev_m, 0.0, ORIGIN_HEIGHT_M) shift
 every other elevation-consuming stage in this pipeline uses (road_mesh_
 common.py) - a lake at ~700 m ASL sits at the SAME kind of "real absolute
 elevation minus this area's local origin" UE-frame Z everything else here
-already does; there is deliberately NO global sea-level plane (per task
-scope - Green Valley's lakes are ~700 m ASL, nowhere near ocean level).
+already does; the sea (see SEA) is the one feature pinned to datum 0.
 
 WATERWAYS (added 2026-09-07, closes the §7.23 caveat that a bridge deck
 crosses a dry gully - no water was ever drawn under real creek/river
@@ -264,6 +265,9 @@ def fetch_water_polygons():
     for w_el in ways:
         if w_el["id"] in used_way_ids:
             continue
+        w_tags = w_el.get("tags", {})
+        if w_tags.get("natural") != "water" and w_tags.get("landuse") != "reservoir":
+            continue    # pulled in by >> as a relation member (an island's inner ring), not water itself
         nd_ids = w_el.get("nodes", [])
         if len(nd_ids) < 4 or nd_ids[0] != nd_ids[-1]:
             skipped_not_closed += 1
@@ -282,28 +286,223 @@ def fetch_water_polygons():
         tags = rel.get("tags", {})
         outer_ids = [m["ref"] for m in rel.get("members", [])
                      if m.get("type") == "way" and m.get("role") == "outer"]
-        n_inner = sum(1 for m in rel.get("members", []) if m.get("role") == "inner")
+        inner_ids = [m["ref"] for m in rel.get("members", [])
+                     if m.get("type") == "way" and m.get("role") == "inner"]
         rings = assemble_outer_rings(outer_ids, ways_by_id_raw)
+        # Phase 4 (2026-10-14): inner members (islands) are holes now - each
+        # goes to the outer ring that contains its first node.
+        inners = [[nodes[n] for n in r if n in nodes]
+                  for r in assemble_outer_rings(inner_ids, ways_by_id_raw)]
+        inners = [r for r in inners if len(r) >= 3]
+        n_holes = 0
         for ring_ids in rings:
             ring = [nodes[n] for n in ring_ids if n in nodes]
             if len(ring) < 3:
                 continue
-            polygons.append({"nodes": ring, "way_id": rel["id"],
+            ry, rx = np.array([p[0] for p in ring]), np.array([p[1] for p in ring])
+            holes = [h for h in inners
+                     if point_in_polygon(np.array([h[0][1]]), np.array([h[0][0]]), rx, ry)[0]]
+            n_holes += len(holes)
+            polygons.append({"nodes": ring, "way_id": rel["id"], "holes": holes,
                               "name": tags.get("name", ""),
                               "water_tag": tags.get("water", tags.get("natural", "water"))})
             n_relation_rings += 1
         if rings:
             n_relations_built += 1
-            if n_inner:
+            if inner_ids:
                 print(f"  relation {rel['id']} \"{tags.get('name', '(unnamed)')}\": "
                       f"{len(rings)} outer ring(s) from {len(outer_ids)} segment(s), "
-                      f"{n_inner} inner member(s) NOT subtracted (see module docstring)")
+                      f"{n_holes} island hole(s) from {len(inner_ids)} inner member(s)")
 
     (RAW_DIR / "osm_water.json").write_text(json.dumps(polygons))
     print(f"  got {len(polygons)} water polygon(s) ({skipped_not_closed} not closed rings, "
           f"{skipped_too_few} too few nodes, skipped; {n_relations_built} multipolygon "
           f"relation(s) contributed {n_relation_rings} outer ring(s)) -> {RAW_DIR / 'osm_water.json'}")
     return polygons
+
+
+# --------------------------------------------------------------- coast/sea
+# Phase 4 (2026-10-14). OSM draws natural=coastline ways with land on the
+# LEFT; they are stitched into chains, clipped to the bbox, and the bbox is
+# split along them into land and sea faces. Each 2 km tile of the area then
+# gets one sea feature (tile minus land) at sea level - offshore tiles too.
+SEA_LIFT_M = 0.25        # over datum 0: the level's flat "Ocean" plane sits
+                         # exactly at sea level (build_openworld_test_level.py)
+                         # and would z-fight a sea tile at the same height
+COAST_GAP_MAX_M = 2000.0  # a broken chain end joins the nearest start within this
+
+
+def fetch_coastline():
+    """natural=coastline ways in the bbox -> (list of node-id lists, nodes)."""
+    s, w, n_, e = BBOX_SNWE
+    data = overpass_json(f"""
+    [out:json][timeout:180];
+    way["natural"="coastline"]({s},{w},{n_},{e});
+    (._;>;);
+    out body;
+    """, HEADERS)
+    nodes = {el["id"]: (el["lat"], el["lon"]) for el in data["elements"] if el["type"] == "node"}
+    ways = [[n for n in el.get("nodes", []) if n in nodes]
+            for el in data["elements"] if el["type"] == "way"]
+    return [w_ for w_ in ways if len(w_) >= 2], nodes
+
+
+def stitch_coastline(ways):
+    """Joins coastline ways (node-id lists, OSM direction) end-to-start
+    wherever they share a node. Returns the chains; a closed one (an island)
+    ends on its own first node."""
+    heads, tails, chains = {}, {}, []
+    for w_ in ways:
+        c = list(w_)
+        if c[0] in tails:
+            p = tails.pop(c[0]); heads.pop(p[0]); c = p + c[1:]
+        if c[-1] != c[0] and c[-1] in heads:
+            q = heads.pop(c[-1]); tails.pop(q[-1]); c = c + q[1:]
+        if c[0] == c[-1]:
+            chains.append(c)
+        else:
+            heads[c[0]] = c; tails[c[-1]] = c
+    return chains + list(heads.values())
+
+
+def close_coast_gaps(chains_xy, box, max_gap_m=COAST_GAP_MAX_M):
+    """chains_xy: (N,2) arrays (meters). An open chain whose END lies inside
+    the bbox (a hole in the OSM data, not the bbox cutting it) is joined to
+    the nearest open chain START inside the bbox within max_gap_m - possibly
+    its own, closing an island. Ends that find nothing are dropped with
+    their chain, since a dangling coastline can't split land from sea."""
+    import shapely
+    inner = box.buffer(-1.0)
+    def inside(p): return inner.contains(shapely.Point(p))
+    closed = [c for c in chains_xy if np.allclose(c[0], c[-1])]
+    open_ = [c for c in chains_xy if not np.allclose(c[0], c[-1])]
+    n_dropped = 0
+    while True:
+        ends = [i for i, c in enumerate(open_) if inside(c[-1])]
+        if not ends:
+            break
+        i = ends[0]
+        starts = [(np.hypot(*(c[0] - open_[i][-1])), j) for j, c in enumerate(open_) if inside(c[0])]
+        d, j = min(starts) if starts else (np.inf, -1)
+        if d > max_gap_m:
+            open_.pop(i); n_dropped += 1
+            continue
+        if j == i:
+            closed.append(np.vstack([open_[i], open_[i][:1]])); open_.pop(i)
+        else:
+            merged = np.vstack([open_[i], open_[j]])
+            open_ = [c for k, c in enumerate(open_) if k not in (i, j)] + [merged]
+    # a start inside the bbox with its end outside: nothing upstream joins it
+    keep = [c for c in open_ if not inside(c[0])]
+    return closed + keep, n_dropped + len(open_) - len(keep)
+
+
+def land_polygon(chains_xy, box):
+    """The land part of the bbox polygon `box` (meters) given coastline
+    chains (closed or open, already gap-closed). Faces of the bbox split by
+    the chains vote by sample points just left (land) / right (sea) of each
+    coastline segment. No coastline at all -> the whole box is land."""
+    import shapely
+    from shapely.ops import polygonize, unary_union
+    if not chains_xy:
+        return box
+    # node the WHOLE chains against the box edge (clipping first leaves the
+    # cut ends a float hair off the edge - dangles polygonize drops, so the
+    # mainland coast split nothing on Oahu), then keep the faces in the box
+    lines = [shapely.LineString(c) for c in chains_xy]
+    faces = [f for f in polygonize(unary_union(lines + [box.boundary]))
+             if box.contains(f.representative_point())]
+    pts, votes = [], []
+    for c in chains_xy:
+        d = np.diff(c, axis=0)
+        ln = np.hypot(d[:, 0], d[:, 1])
+        ok = ln > 1e-6
+        mid, d, ln = (c[:-1] + c[1:])[ok] / 2.0, d[ok], ln[ok]
+        left = np.c_[-d[:, 1], d[:, 0]] / ln[:, None] * np.minimum(0.25, ln / 4.0)[:, None]
+        pts += [mid + left, mid - left]
+        votes += [ln, -ln]   # length-weighted
+    pts, votes = np.vstack(pts), np.concatenate(votes)
+    land = [f for f in faces
+            if votes[shapely.contains_xy(f, pts[:, 0], pts[:, 1])].sum() > 0]
+    return unary_union(land) if land else shapely.Polygon()
+
+
+def mesh_from_polygon(geom_m, z_cm):
+    """(Multi)Polygon in local meters, holes allowed -> flat (verts, uvs,
+    tris) at z_cm in the UE cm frame, faces up (build_lake_mesh's winding
+    rule). Constrained Delaunay, so holes and long thin shorelines stay
+    exact."""
+    import shapely
+    tris_geom = shapely.get_parts(shapely.constrained_delaunay_triangles(geom_m))
+    if len(tris_geom) == 0:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 2), np.float32), np.zeros((0, 3), np.uint32)
+    corners = shapely.get_coordinates(shapely.get_exterior_ring(tris_geom)).reshape(-1, 4, 2)[:, :3]
+    xy, inv = np.unique(corners.reshape(-1, 2), axis=0, return_inverse=True)
+    xy_cm = np.c_[xy[:, 0], -xy[:, 1]] * 100.0
+    verts = np.c_[xy_cm, np.full(len(xy_cm), z_cm)].astype(np.float32)
+    uvs = (xy_cm / 100.0 / UV_TILE_M).astype(np.float32)
+    tris = inv.reshape(-1, 3).astype(np.uint32)
+    v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    flip = np.cross(v2 - v0, v1 - v0)[:, 2] < 0
+    tris[flip, 1], tris[flip, 2] = tris[flip, 2].copy(), tris[flip, 1].copy()
+    return verts, uvs, tris
+
+
+def bbox_box_m():
+    """The area bbox as a local-meter polygon (corners through to_local)."""
+    import shapely
+    s, w, n_, e = BBOX_SNWE
+    lon = np.array([w, e, e, w]); lat = np.array([s, s, n_, n_])
+    east, north = to_local(lon, lat)
+    return shapely.Polygon(np.c_[east, north])
+
+
+def build_sea_features():
+    """{(tx,ty): sea feature dict} for every owned tile the bbox touches
+    that holds any sea. {} for an area with no coastline (all land)."""
+    import shapely
+    from test_areas import owns
+    ways, nodes = fetch_coastline()
+    if not ways:
+        print("  no natural=coastline in the bbox - no sea tiles")
+        return {}
+    box = bbox_box_m()
+    chains_xy = []
+    for c in stitch_coastline(ways):
+        lat = np.array([nodes[n][0] for n in c]); lon = np.array([nodes[n][1] for n in c])
+        east, north = to_local(lon, lat)
+        chains_xy.append(np.c_[east, north])
+    chains_xy, n_dropped = close_coast_gaps(chains_xy, box)
+    land = land_polygon(chains_xy, box)
+    print(f"  coastline: {len(ways)} way(s) -> {len(chains_xy)} chain(s) "
+          f"({n_dropped} dangling dropped), land {land.area / 1e6:.1f} of "
+          f"{box.area / 1e6:.1f} km^2 in the bbox")
+    sea = shapely.make_valid(box.difference(land))
+    shapely.prepare(sea)
+    z_cm = road_ue_z_m(SEA_LIFT_M, 0.0, ORIGIN_HEIGHT_M) * 100.0
+    t_m = TERRAIN_TILE_SIZE_CM / 100.0
+    x0, y0, x1, y1 = box.bounds   # meters east / north
+    out = {}
+    for tx in range(int(math.floor(x0 / t_m)), int(math.floor(x1 / t_m)) + 1):
+        for ty in range(int(math.floor(-y1 / t_m)), int(math.floor(-y0 / t_m)) + 1):
+            if not owns(tx * TERRAIN_TILE_SIZE_CM, ty * TERRAIN_TILE_SIZE_CM):
+                continue
+            # UE y = -north: tile ty spans north (-(ty+1)*t, -ty*t]
+            cell = shapely.box(tx * t_m, -(ty + 1) * t_m, (tx + 1) * t_m, -ty * t_m)
+            if not sea.intersects(cell):
+                continue
+            part = cell if sea.contains(cell) else shapely.make_valid(sea.intersection(cell))
+            part = shapely.union_all([g for g in shapely.get_parts(part)
+                                      if g.geom_type == "Polygon" and g.area > 1.0])
+            if part.is_empty:
+                continue
+            verts, uvs, tris = mesh_from_polygon(part, z_cm)
+            if len(tris):
+                out[(tx, ty)] = {"verts": verts, "uvs": uvs, "tris": tris, "kind": KIND_SEA}
+    return out
+
+
+KIND_LAKE, KIND_RIBBON, KIND_SEA = 0, 1, 2
 
 
 # --------------------------------------------------------------- waterways
@@ -1058,7 +1257,8 @@ def main():
                           f"(water needs its road points for the waterway/road overlap check).")
 
     polygons = fetch_water_polygons()
-    if not polygons:
+    sea_tiles = build_sea_features()
+    if not polygons and not sea_tiles:
         # a dry area is valid (2026-10-02, sf_russian_hill) - terrain treats
         # missing water tiles as "no lake beds"
         print(f"No water polygons matched in the {AREA_NAME} bbox - no water tiles.")
@@ -1093,7 +1293,16 @@ def main():
         surface_z_cm = road_ue_z_m(surface_elev_m, 0.0, ORIGIN_HEIGHT_M) * 100.0
 
         ring_xy_cm = list(zip((east_m * 100.0).tolist(), (-north_m * 100.0).tolist()))
-        verts, uvs, tris, method = build_lake_mesh(ring_xy_cm, surface_z_cm)
+        if poly.get("holes"):
+            # Phase 4: islands cut out (constrained Delaunay keeps the holes)
+            import shapely
+            holes_m = [np.c_[to_local(np.array([lon for _, lon in h]), np.array([lat for lat, _ in h]))]
+                       for h in poly["holes"]]
+            geom = shapely.make_valid(shapely.Polygon(np.c_[east_m, north_m], holes_m))
+            verts, uvs, tris = mesh_from_polygon(geom, surface_z_cm)
+            method = f"cdt_{len(holes_m)}_holes"
+        else:
+            verts, uvs, tris, method = build_lake_mesh(ring_xy_cm, surface_z_cm)
         if len(tris) == 0:
             continue
         if method == "fan_fallback":
@@ -1103,7 +1312,7 @@ def main():
         cy_cm = float(np.mean([p[1] for p in ring_xy_cm]))
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris, "is_ribbon": False})
+        buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris, "kind": KIND_LAKE})
 
         lake_summaries.append({
             "way_id": poly["way_id"], "name": poly["name"] or "(unnamed)",
@@ -1126,7 +1335,12 @@ def main():
         cx_cm, cy_cm = rb["centroid_cm"]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"], "is_ribbon": True})
+        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"], "kind": KIND_RIBBON})
+    n_before_sea = len(buckets)
+    for key, feat in sea_tiles.items():
+        buckets[key].append(feat)
+    print(f"sea: {len(sea_tiles)} tile(s) with sea ({len(buckets) - n_before_sea} of them "
+          f"had no other water)")
     n_river_chains = sum(1 for c in chains if c["class"] == "river")
     n_stream_chains = sum(1 for c in chains if c["class"] == "stream")
     print(f"\n{len(raw_ways)} waterway way(s) chained into {len(chains)} waterway centerline(s) "
@@ -1161,7 +1375,9 @@ def main():
         t = sum(len(lk["tris"]) for lk in lakes)
         total_verts += v
         total_tris += t
-        ribbon_flags[f"{tx},{ty}"] = [bool(lk.get("is_ribbon", False)) for lk in lakes]
+        # 0 lake, 1 ribbon, 2 sea (Phase 4; old readers' bool(flag) still
+        # reads 0/1 as before)
+        ribbon_flags[f"{tx},{ty}"] = [lk["kind"] for lk in lakes]
         print(f"  tile ({tx},{ty}): {len(lakes)} feature(s), {v} verts, {t} tris -> {out_path.name}")
 
     n_stale = delete_stale_tiles(OUT_DIR, f"water_{AREA_NAME}_test_tile_*.bin", written_paths)
@@ -1169,7 +1385,7 @@ def main():
 
     ribbon_flags_path = OUT_DIR / f"water_{AREA_NAME}_test_ribbon_flags.json"
     ribbon_flags_path.write_text(json.dumps(ribbon_flags))
-    n_ribbon_features = sum(sum(1 for v in flags if v) for flags in ribbon_flags.values())
+    n_ribbon_features = sum(sum(1 for v in flags if v == KIND_RIBBON) for flags in ribbon_flags.values())
     print(f"wrote ribbon/lake type sidecar ({n_ribbon_features} ribbon feature(s) "
           f"of {sum(len(v) for v in ribbon_flags.values())} total) -> {ribbon_flags_path.name}")
 

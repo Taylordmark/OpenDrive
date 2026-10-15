@@ -726,6 +726,7 @@ bool AODForestManager::LoadWaterLakes()
 	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
 
 	int32 TileFileCount = 0;
+	int32 FeatureCount = 0;   // FLakeRing::Feature
 	for (const FString& FileName : AllBin)
 	{
 		if (!FileName.StartsWith(TileMatch))
@@ -752,6 +753,7 @@ bool AODForestManager::LoadWaterLakes()
 
 		for (uint32 l = 0; l < LakeCount; ++l)
 		{
+			++FeatureCount;
 			if (Remaining() < 8)
 			{
 				break;
@@ -947,6 +949,7 @@ bool AODForestManager::LoadWaterLakes()
 						FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
 						LR.Ring.Reserve(RingIdx.Num());
 						LR.MinX = MinX; LR.MaxX = MaxX; LR.MinY = MinY; LR.MaxY = MaxY;
+						LR.Feature = FeatureCount;
 						for (uint32 Idx : RingIdx)
 						{
 							const float X = ReadF32LE(VertsBase + (int64)Idx * 12 + 0);
@@ -1071,25 +1074,26 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 		}
 	}
 
-	// Interior: even-odd ray cast to +X per ring, using only segments whose
-	// Y-span covers this row (a crossing segment must). Row lists are grouped
-	// by ring, so parity resets whenever the ring id changes.
+	// Interior: even-odd ray cast to +X per feature, using only segments
+	// whose Y-span covers this row (a crossing segment must). Row lists are
+	// grouped by ring and a feature's rings are consecutive, so parity resets
+	// whenever the feature changes - an island ring flips it back to dry.
 	const TArray<FLakeSeg>* Row = LakeSegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
 	if (!Row)
 	{
 		return false;
 	}
-	int32 CurRing = INDEX_NONE;
+	int32 CurFeature = INDEX_NONE;
 	bool bInside = false;
 	for (const FLakeSeg& S : *Row)
 	{
-		if (S.Ring != CurRing)
+		if (LakeRings[S.Ring].Feature != CurFeature)
 		{
 			if (bInside)
 			{
 				return true;
 			}
-			CurRing = S.Ring;
+			CurFeature = LakeRings[S.Ring].Feature;
 		}
 		SegEnds(S, Pi, Pj);
 		if (((Pi->Y > WorldY) != (Pj->Y > WorldY)) &&
@@ -1103,14 +1107,24 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 
 bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) const
 {
+	int32 CurFeature = INDEX_NONE;
+	bool bInside = false;   // parity over the current feature's rings
 	for (const FLakeRing& LR : LakeRings)
 	{
+		if (LR.Feature != CurFeature)
+		{
+			if (bInside)
+			{
+				return true;
+			}
+			CurFeature = LR.Feature;
+			bInside = false;
+		}
 		if (WorldX < LR.MinX - LakeShoreExclusionMarginCm || WorldX > LR.MaxX + LakeShoreExclusionMarginCm ||
 			WorldY < LR.MinY - LakeShoreExclusionMarginCm || WorldY > LR.MaxY + LakeShoreExclusionMarginCm)
 		{
 			continue;
 		}
-		bool bInside = false;
 		const int32 N = LR.Ring.Num();
 		double MinDist = TNumericLimits<double>::Max();
 		for (int32 i = 0, j = N - 1; i < N; j = i++)
@@ -1124,12 +1138,12 @@ bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) cons
 			}
 			MinDist = FMath::Min(MinDist, DistPointToSegment2D(WorldX, WorldY, Pi.X, Pi.Y, Pj.X, Pj.Y));
 		}
-		if (bInside || MinDist <= LakeShoreExclusionMarginCm)
+		if (MinDist <= LakeShoreExclusionMarginCm)
 		{
 			return true;
 		}
 	}
-	return false;
+	return bInside;
 }
 
 bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const
