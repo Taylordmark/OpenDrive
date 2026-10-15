@@ -9,8 +9,8 @@ footprint-driven instead of tile-seed-scatter-driven.
 
 Also the offline "no building in the road" verification gate (in-line,
 not a separate script - see next steps.md Arc 7.0 step 3): any footprint
-with a vertex or centroid within ROAD_EXCLUSION_M of the nearest road
-station is skipped and counted, not silently placed on top of the road.
+with a vertex closer than ROAD_CLEARANCE_M (CITY_ROAD_CLEARANCE_M in City
+tiles) to the nearest road station's pavement edge is skipped and counted, not silently placed on top of the road.
 
 Generalized 2026-07-27 (for the Oahu testbed) beyond the Mount-Vernon-only
 proof: "City" tiles (classify_settlements.py's new density split) get a
@@ -45,10 +45,19 @@ from pathlib import Path
 
 import numpy as np
 
-from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, road_ue_z_m
+from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
-ROAD_EXCLUSION_M = ROAD_HALF_WIDTH + SKIRT_EXTRA + 2.0   # +2 m slop margin
+# Clearance a footprint corner must keep beyond the nearest station's OWN
+# pavement edge (per-station half-width, same rule the road mesh and the
+# terrain carve use). Was a flat ROAD_HALF_WIDTH + 5 m = 9.5 m from the
+# centreline everywhere (2026-10-14): real downtown blocks sit at the back
+# of the sidewalk ~6-9 m from centre, so that gate deleted ~1/3 of
+# downtown Honolulu incl. tagged towers. City tiles only keep a sidewalk;
+# elsewhere stay clear of the terrain-carve skirt (the old +2 m slop
+# covered the fixed-width guess, which the real width now replaces).
+ROAD_CLEARANCE_M = SKIRT_EXTRA
+CITY_ROAD_CLEARANCE_M = 1.5
 
 LEVEL_HEIGHT_M = 3.2
 # stories, when the OSM way has no building:levels/height tag (parsed in
@@ -116,6 +125,21 @@ BUILDING_TYPE_LEVEL_RANGE = {
 # (1..40) still comes out looking like a real Honolulu high-rise district
 # in aggregate (mean story count ~20) while no longer making literally
 # every untyped building implausibly tall.
+# "City"-tile overrides for multi-storey types whose small-town range above
+# reads wrong in a real downtown (2026-10-14, Honolulu): untagged
+# apartments there are mostly condo towers, offices/hotels mid-to-high
+# rise, commercial blocks taller than a storefront. Scaled off the area
+# cap for the same reason as archetype_level_range below.
+def city_type_level_range(building_tag, max_levels):
+    hi = {"apartments": max_levels // 2, "dormitory": max_levels // 4,
+          "office": max_levels // 2, "hotel": max_levels // 2,
+          "commercial": max_levels // 4}.get(building_tag)
+    if hi is None:
+        return None
+    lo, base_hi = BUILDING_TYPE_LEVEL_RANGE[building_tag]
+    return lo, max(base_hi, hi)   # never shorter than the small-town range
+
+
 def archetype_level_range(archetype, max_levels):
     if archetype == "City":
         return 1, max_levels
@@ -164,7 +188,11 @@ def load_stations():
     east = np.concatenate([np.array(seg["east_m"]) for seg in data["segments"]])
     north = np.concatenate([np.array(seg["north_m"]) for seg in data["segments"]])
     elev = np.concatenate([np.array(seg["elev_m"]) for seg in data["segments"]])
-    return east, north, elev
+    half_w = np.concatenate([
+        half_width_for_stations(seg["highway_class"], seg.get("oneway"), seg.get("lanes"))
+        if seg.get("highway_class") else np.full(len(seg["east_m"]), ROAD_HALF_WIDTH)
+        for seg in data["segments"]])
+    return east, north, elev, half_w
 
 
 def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
@@ -221,8 +249,9 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
 
 
 def main():
-    st_east, st_north, st_elev = load_stations()
+    st_east, st_north, st_elev, st_half_w = load_stations()
     st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
+    st_half_w_cm = st_half_w * 100.0
 
     # Tile-bucket every station once (same TERRAIN_TILE_SIZE_CM grid the
     # settlement classification already uses) so the per-building nearest-
@@ -280,9 +309,11 @@ def main():
             # widening the search - can't place it without a ground height
             n_not_populated += 1
             continue
-        min_dist_cm = min(
-            float(np.min(np.hypot(st_x_cm[cand] - x, st_y_cm[cand] - y))) for x, y in ring_xy_cm)
-        if min_dist_cm / 100.0 < ROAD_EXCLUSION_M:
+        clearance_cm = min(
+            float(np.min(np.hypot(st_x_cm[cand] - x, st_y_cm[cand] - y) - st_half_w_cm[cand]))
+            for x, y in ring_xy_cm)
+        min_clear_m = CITY_ROAD_CLEARANCE_M if archetype == "City" else ROAD_CLEARANCE_M
+        if clearance_cm / 100.0 < min_clear_m:
             n_excluded_road += 1
             continue
 
@@ -296,7 +327,8 @@ def main():
         rng = random.Random(b["way_id"])
         levels = b["levels"]
         if levels is None:
-            tag_range = BUILDING_TYPE_LEVEL_RANGE.get(b.get("building_tag"))
+            tag_range = ((archetype == "City" and city_type_level_range(b.get("building_tag"), MAX_BUILDING_LEVELS))
+                         or BUILDING_TYPE_LEVEL_RANGE.get(b.get("building_tag")))
             lo, hi = tag_range if tag_range is not None else archetype_level_range(archetype, MAX_BUILDING_LEVELS)
             levels = rng.randint(lo, hi)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS

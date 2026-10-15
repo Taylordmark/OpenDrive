@@ -5,7 +5,7 @@ UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout
 
 The level's (home) area is test_areas.ACTIVE_AREA: set OD_AREA in the
-environment that launches the editor (e.g. OD_AREA=gv_west) to pick another
+environment that launches the editor (e.g. OD_AREA=oahu) to pick another
 baked area (2026-10-05). Other world members stream in via worlds.json.
 
 Per-area levels (2026-10-05): the level saves to /Game/Areas/OpenWorld_<area>

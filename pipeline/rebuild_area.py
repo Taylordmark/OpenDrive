@@ -102,6 +102,7 @@ run immediately (no partial bake left half-updated silently) and this
 script exits non-zero itself with a clear "stage N/23 failed" message.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -218,7 +219,9 @@ def main():
 
         print(f"\n[{i}/{len(STAGES)}] {script} - {desc}")
         t0 = time.time()
-        result = subprocess.run([sys.executable, str(script_path), *args])
+        # UTF-8 stdout: OSM names (e.g. Hawaiian macrons) crash cp1252 when piped
+        result = subprocess.run([sys.executable, str(script_path), *args],
+                                env={**os.environ, "PYTHONUTF8": "1"})
         dt = time.time() - t0
 
         if result.returncode != 0:

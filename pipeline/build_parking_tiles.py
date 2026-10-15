@@ -34,7 +34,7 @@ own docstring for the wire layout) with exactly two differences:
      there's no baked terrain-depression step for parking the way water
      grew one - out of scope for this pass, see task notes).
 
-No road-adjacency exclusion (unlike buildings' ROAD_EXCLUSION_M gate): a
+No road-adjacency exclusion (unlike buildings' ROAD_CLEARANCE_M gate): a
 parking lot legitimately touches/abuts the road it serves at its entrance,
 excluding footprints near roads would delete real lots wholesale.
 

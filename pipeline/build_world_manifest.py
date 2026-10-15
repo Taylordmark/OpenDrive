@@ -2,8 +2,8 @@
 Content/OpenDrive/Masks/worlds.json, the list of baked areas per world that
 the runtime streams in and out as whole manager sets:
 
-    {"california": [{"name": "gv_west", "rect_cm": [xmin, ymin, xmax, ymax],
-                     "files": ["Masks/biome_gv_west_test.bin", ...]}, ...]}
+    {"california": [{"name": "far_gasquet", "rect_cm": [xmin, ymin, xmax, ymax],
+                     "files": ["Masks/biome_far_gasquet_test.bin", ...]}, ...]}
 
 An area is listed when it has a `world` in test_areas.AREAS and terrain
 tiles on disk. rect_cm is the UE X/Y extent of those tiles: keys are
@@ -43,7 +43,7 @@ def tile_keys(area):
 
 def area_files(area):
     """Content/OpenDrive-relative whole-area files for area: names ending in
-    _<area>[_test].<ext> (so gv_west never claims gv_east's), plus water tiles."""
+    _<area>[_test].<ext> (so one area never claims a same-prefix neighbour's), plus water tiles."""
     own = re.compile(rf".*_{re.escape(area)}(_test)?\.(bin|json|png)")
     out = [f"Masks/{p.name}" for p in MASKS.iterdir() if own.fullmatch(p.name)]
     out += [f"Masks/{p.name}" for p in MASKS.glob(f"water_{area}_test_tile_*.bin")]

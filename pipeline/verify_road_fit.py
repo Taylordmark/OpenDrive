@@ -63,7 +63,7 @@ import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns
+from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns, to_local
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -372,8 +372,29 @@ def check_poke_through():
     return ok
 
 
+FRAME_TOL_M = 1.0
+
+
+def check_station_frame():
+    """road_stations.json's east_m/north_m must be its own lat/lon through
+    the CURRENT test_areas frame (2026-10-14: green_valley/skagit_cascades
+    stations were 72/137 m off after the frame changed under them, so every
+    building/tree stage read against roads in the wrong place)."""
+    off = 0.0
+    for seg in json.loads(btmt.STATIONS_PATH.read_text())["segments"]:
+        e, n = to_local(np.asarray(seg["lon"]), np.asarray(seg["lat"]))
+        off = max(off, float(np.max(np.hypot(e - np.asarray(seg["east_m"]),
+                                              n - np.asarray(seg["north_m"])))))
+    ok = off <= FRAME_TOL_M
+    print(f"{'PASS' if ok else 'FAIL'} [STATION FRAME]: road_stations.json vs current "
+          f"test_areas frame, max offset {off:.2f} m (tolerance {FRAME_TOL_M} m)"
+          + ("" if ok else " - stale bake, rerun rebuild_area.py --from build_road_stations.py"))
+    return ok
+
+
 def main():
-    ok = check_road_vs_terrain_fit()
+    ok = check_station_frame()
+    ok = check_road_vs_terrain_fit() and ok
     ok = check_poke_through() and ok
     if not ok:
         sys.exit(1)

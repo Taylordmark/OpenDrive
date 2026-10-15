@@ -1030,20 +1030,31 @@ bool AODBuildingManager::ComputeBuildingZOffset(const FParsedBuilding& B, const 
 	// gets its base planted at the low side (minus EmbedMarginCm) rather than
 	// averaging (which would float the low corner) or using any single
 	// arbitrary corner (which could float the others).
-	float LowestGroundZ = TNumericLimits<float>::Max();
-	bool bFoundAny = false;
+	// Corners more than CornerPitMaxDropCm below the building's highest hit
+	// are ignored: one footprint can't span that much real relief, so it's a
+	// terrain spike (e.g. a DEM-void pit) that would sink the whole building.
+	TArray<float, TInlineAllocator<MaxCorners>> HitZs;
+	float HighestGroundZ = -TNumericLimits<float>::Max();
 	for (const FVector2D& XY : Corners)
 	{
 		float Z;
 		if (GroundAt(XY.X, XY.Y, Ignore, Z))
 		{
-			LowestGroundZ = FMath::Min(LowestGroundZ, Z);
-			bFoundAny = true;
+			HitZs.Add(Z);
+			HighestGroundZ = FMath::Max(HighestGroundZ, Z);
 		}
 	}
-	if (!bFoundAny)
+	if (HitZs.Num() == 0)
 	{
 		return false;
+	}
+	float LowestGroundZ = HighestGroundZ;
+	for (const float Z : HitZs)
+	{
+		if (Z >= HighestGroundZ - CornerPitMaxDropCm)
+		{
+			LowestGroundZ = FMath::Min(LowestGroundZ, Z);
+		}
 	}
 
 	OutOffsetCm = (LowestGroundZ - EmbedMarginCm) - BakedBaseZ;

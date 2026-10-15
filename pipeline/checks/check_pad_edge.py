@@ -16,7 +16,7 @@ over shipped ODR3 road tiles and asserts:
 
 Constants are parsed from the C++ and the material script.
 Usage:  python pipeline/checks/check_pad_edge.py [area ...]
-        (default: deals_gap near_gasquet sf_russian_hill)
+        (default: deals_gap far_gasquet sf_russian_hill)
 """
 import re
 import struct
@@ -352,7 +352,7 @@ def check_tile(chunks, rng, acc):
 
 
 def main():
-    areas = sys.argv[1:] or ["deals_gap", "near_gasquet", "sf_russian_hill"]
+    areas = sys.argv[1:] or ["deals_gap", "far_gasquet", "sf_russian_hill"]
     rng = np.random.default_rng(7)
     acc = dict(pads=0, covered=0, rim_len_m=0.0, w=[], err=[], err_signed=[], pad_pts=0, leak=0, rib_in=0, rib_out=0, rib_skip=0)
     for area in areas:

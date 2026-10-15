@@ -22,11 +22,6 @@ import os
 
 from world_frame import WORLD_DATUM_M, WORLDS, lcc_forward, lcc_inverse
 
-# (2026-10-05, step 3) gv_west/gv_east boundary, UE X cm in the california
-# frame: the 2 km terrain-tile edge nearest -118.45 at 34.535 N (218 m west
-# of it). tests/test_world_manifest.py re-derives it.
-_GV_CUT_X_CM = 14200000.0
-
 AREAS = {
     # Skagit Valley / North Cascades foothills, WA (2026-07-20 - 2026-07-26)
     # - the known-good reference config the whole open-world pipeline was
@@ -162,42 +157,6 @@ AREAS = {
         bbox_snwe=(41.835, -123.985, 41.860, -123.945),
         background_bbox_snwe=None,
         world="california",
-        elev_plausible_m=(0.0, 900.0),
-        max_building_levels=4,
-    ),
-    # green_valley split at -118.45 into two adjacent "california" members
-    # (2026-10-05, step 2: the first streamed pair). The meridian crosses
-    # CA-14, Sierra Hwy, Soledad/Bouquet/San Francisquito/Vasquez/Placerita
-    # Canyon Rds and Elizabeth Lake Rd. Elev range and building cap are
-    # green_valley's. green_valley itself stays as it was.
-    # (2026-10-05, step 3) Each half owns the tiles on its side of
-    # _GV_CUT_X_CM and bakes a halo 3.0-3.8 km past it (bbox edge -118.415 /
-    # -118.489), so roads and junctions at the cut have context;
-    # prune_unowned_tiles.py drops the halo's tiles.
-    "gv_west": dict(
-        bbox_snwe=(34.35, -118.62, 34.72, -118.415),
-        own_rect_cm=(None, None, _GV_CUT_X_CM, None),
-        background_bbox_snwe=None,
-        world="california",
-        elev_plausible_m=(0.0, 2200.0),
-        max_building_levels=8,
-    ),
-    "gv_east": dict(
-        bbox_snwe=(34.35, -118.489, 34.72, -118.28),
-        own_rect_cm=(_GV_CUT_X_CM, None, None, None),
-        background_bbox_snwe=None,
-        world="california",
-        elev_plausible_m=(0.0, 2200.0),
-        max_building_levels=8,
-    ),
-
-    # far_gasquet's control: same bbox in its own centred frame, so its
-    # tiles diff against far_gasquet's to isolate large-coordinate effects
-    # (expect an offset plus ~2.4 deg of meridian convergence between them).
-    "near_gasquet": dict(
-        bbox_snwe=(41.835, -123.985, 41.860, -123.945),
-        background_bbox_snwe=None,
-        origin_height_m=116.5,
         elev_plausible_m=(0.0, 900.0),
         max_building_levels=4,
     ),

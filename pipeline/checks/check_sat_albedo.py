@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MASKS = ROOT / "OpenDriveUE/Content/OpenDrive/Masks"
 TILE_CM = 200000.0
 LUMA = np.array([0.2126, 0.7152, 0.0722])
-AREAS = sys.argv[1:] or ["deals_gap", "near_gasquet", "sf_russian_hill"]
+AREAS = sys.argv[1:] or ["deals_gap", "far_gasquet", "sf_russian_hill"]
 
 src = (ROOT / "unreal/apply_terrain_real_materials.py").read_text(encoding="utf-8")
 C = {}

@@ -284,6 +284,8 @@ private:
 	// collide (see this class's own top comment), so a few cm of embed is
 	// invisible but a few cm of float over a rounding error is not.
 	static constexpr float EmbedMarginCm = 5.0f;
+	// ComputeBuildingZOffset ignores corner hits this far below the highest one.
+	static constexpr float CornerPitMaxDropCm = 5000.0f;   // 50 m
 
 	// Throttled visibility into the ground-snap gate (Tick()) and the
 	// per-building placement outcome - temporary QA instrumentation for the
