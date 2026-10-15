@@ -9,17 +9,19 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 /** One parsed building - plain data, safe to build off the game thread.
- *  Mirrors the ODU2 sidecar's per-building payload layout
+ *  Mirrors the ODU3 sidecar's per-building payload layout
  *  (pipeline/build_building_mesh.py / export_building_mesh_bin.py). */
 struct FParsedBuilding
 {
 	TArray<float> Verts;    // flat x,y,z (cm, UE world frame)
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
-	uint8 WallSet = 0;      // index into apply_building_material.py WALL_LAYERS
-	uint8 FlatRoof = 0;     // 1 = concrete flat roof, 0 = shingle
-	// Realistic pitched roof (PitchRoof, Track G): vertices from here on are
-	// the gable end walls, which get vertex alpha 0 (no windows)
+	uint8 WallSet = 0;      // index into apply_building_material*.py WALL_LAYERS
+	uint8 FlatRoof = 0;     // 1 = flat roof cap, 0 = pitched (baked by the pipeline)
+	uint8 RoofSet = 3;      // apply_building_material_real.py ROOF_LAYERS: tile, asphalt, metal, flat
+	uint8 RoofRgb[3] = {87, 87, 85};   // roof albedo, linear 0..255
+	// pitched roofs (building_roofs.py): vertices from here on are the gable
+	// end walls, which get vertex alpha 0 (no windows)
 	int32 NumSolidVerts = MAX_int32;
 };
 
@@ -30,7 +32,7 @@ struct FParsedBuildingTile
 {
 	TArray<FParsedBuilding> Buildings;
 
-	// pipeline/generation_id.py's per-run id, read from the ODU2 header
+	// pipeline/generation_id.py's per-run id, read from the ODU3 header
 	// (2026-08-21) - see AODBuildingManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
@@ -102,14 +104,6 @@ public:
 		}
 		return true;
 	}
-
-	/** Headless check of the Realistic pitched roofs (Track G): parses one
-	 *  ODU2 tile, runs PitchRoof over every building and returns the counts
-	 *  (compare with pipeline/tests/test_building_roofs.py --tiles) and the
-	 *  roof time in ms - the cost the async tile parse adds per tile. */
-	UFUNCTION(BlueprintCallable, Category = "Buildings")
-	static void ProfileRoofTile(const FString& Path, int32& Buildings, int32& Pitched,
-		int32& TrisBefore, int32& TrisAfter, float& RoofMs);
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin". */

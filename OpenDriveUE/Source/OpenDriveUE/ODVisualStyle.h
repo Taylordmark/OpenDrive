@@ -8,7 +8,7 @@
 /**
  * Graphics menu "Visual Style" (AODSettingsMenu row; persisted as
  * OpenDrive.Graphics / VisualStyle in GameUserSettings.ini): 0 Stylized,
- * 1 Realistic - the PLAN-VISUALS.md trial. Same shape as ODAssetDetail.h and
+ * 1 Realistic (the default since realism B3, 2026-10-15). Same shape as ODAssetDetail.h and
  * independent of it: Asset Detail picks polygon count, this picks the look.
  *
  * Realistic assets sit beside their stylized twin with a "_real" suffix
@@ -26,7 +26,7 @@ namespace ODVisualStyle
 
 	inline int32 Level()
 	{
-		int32 L = 0;
+		int32 L = 1;   // Realistic unless the player picked Stylized (realism B3)
 		GConfig->GetInt(ConfigSection, ConfigKey, L, GGameUserSettingsIni);
 		return FMath::Clamp(L, 0, 1);
 	}

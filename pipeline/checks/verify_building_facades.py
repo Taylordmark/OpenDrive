@@ -1,44 +1,38 @@
-"""Offline check of the ODU2 building tiles' per-building facade bytes
-(wall_set, flat_roof - build_building_mesh.py pick_facade()). Parses the
-SAME tiles AODBuildingManager::ParseBuildingTileFile reads, prints a
-wall_set x flat_roof histogram per height band, and asserts:
-  - magic is ODU2 in every tile, no trailing/short bytes
-  - wall_set in 0..4, flat_roof in {0,1}
-  - every building >= 8 stories tall (max z - min z of its verts) is
-    concrete (wall_set 4) with a flat roof
+"""Offline check of the ODU3 building tiles' per-building facade and roof
+bytes (build_building_mesh.py pick_facade / roof_shape / roof_look). Parses
+the SAME tiles AODBuildingManager::ParseBuildingTileFile reads (via
+building_roofs.read_tile), prints a wall_set x flat_roof histogram per height
+band, and asserts:
+  - magic is ODU3 in every tile, no trailing/short bytes
+  - wall_set < NumWallSets, flat_roof in {0,1}, roof_set < 4, n_solid <= verts
+  - every flat-roofed building >= 8 stories tall (max z - min z of its
+    verts) is concrete (wall_set 4)
 
 Usage:  python pipeline/checks/verify_building_facades.py [area]
         (area defaults to test_areas.AREA_NAME)
 Exits non-zero on any failure.
 """
-import struct
 import sys
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "pipeline"))
+from building_roofs import read_tile  # noqa: E402
 from test_areas import AREA_NAME  # noqa: E402
 
 MASKS = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 LEVEL_HEIGHT_CM = 320.0   # build_building_mesh.py LEVEL_HEIGHT_M
 HIGH_RISE_LEVELS = 8      # build_building_mesh.py HIGH_RISE_LEVELS
+NUM_WALL_SETS, NUM_ROOF_SETS = 7, 4
 BANDS = [("1-3 st", 0, 4), ("4-7 st", 4, 8), ("8+ st", 8, 10**6)]
 
 
 def parse_tile(path):
-    """Yields (wall_set, flat_roof, height_cm) per building."""
-    b = path.read_bytes()
-    assert b[:4] == b"ODU2", f"{path.name}: magic {b[:4]!r}, expected ODU2"
-    (count,) = struct.unpack_from("<I", b, 20)
-    o = 24
-    for _ in range(count):
-        vc, tc, wall_set, flat_roof = struct.unpack_from("<IIBB", b, o)
-        o += 10
-        zs = struct.unpack_from(f"<{vc * 3}f", b, o)[2::3]
-        o += vc * 12 + vc * 8 + tc * 12
-        yield wall_set, flat_roof, max(zs) - min(zs)
-    assert o == len(b), f"{path.name}: {len(b) - o} trailing/short bytes"
+    """Yields (wall_set, flat_roof, height_cm, building) per building."""
+    for b in read_tile(path):
+        zs = [v[2] for v in b["verts"]]
+        yield b["wall_set"], b["flat_roof"], max(zs) - min(zs), b
 
 
 def main():
@@ -50,23 +44,25 @@ def main():
     failures = []
     n = 0
     for path in tiles:
-        for wall_set, flat_roof, h in parse_tile(path):
+        for wall_set, flat_roof, h, b in parse_tile(path):
             n += 1
             levels = round(h / LEVEL_HEIGHT_CM)
             band = next(name for name, lo, hi in BANDS if lo <= levels < hi)
             hist[band][(wall_set, flat_roof)] += 1
-            if wall_set > 4 or flat_roof not in (0, 1):
-                failures.append(f"{path.name}: wall_set={wall_set} flat_roof={flat_roof}")
-            if h >= HIGH_RISE_LEVELS * LEVEL_HEIGHT_CM - 1.0 and (wall_set, flat_roof) != (4, 1):
+            if (wall_set >= NUM_WALL_SETS or flat_roof not in (0, 1) or b["roof_set"] >= NUM_ROOF_SETS
+                    or b["n_solid"] > len(b["verts"])):
+                failures.append(f"{path.name}: wall_set={wall_set} flat_roof={flat_roof} "
+                                f"roof_set={b['roof_set']} n_solid={b['n_solid']}/{len(b['verts'])}")
+            if flat_roof and h >= HIGH_RISE_LEVELS * LEVEL_HEIGHT_CM - 1.0 and wall_set != 4:
                 failures.append(f"{path.name}: {h / 100:.1f} m tall but "
                                 f"wall_set={wall_set} flat_roof={flat_roof}")
 
-    print(f"{area}: {n} buildings in {len(tiles)} ODU2 tile(s)")
-    print("band     " + " ".join(f"w{w}/{'flat' if f else 'shgl'}".rjust(9)
-                                  for w in range(5) for f in (0, 1)) + "    total")
+    print(f"{area}: {n} buildings in {len(tiles)} ODU3 tile(s)")
+    print("band     " + " ".join(f"w{w}/{'flat' if f else 'ptch'}".rjust(9)
+                                  for w in range(NUM_WALL_SETS) for f in (0, 1)) + "    total")
     for name, _, _ in BANDS:
         c = hist[name]
-        print(f"{name:8} " + " ".join(str(c[(w, f)]).rjust(9) for w in range(5) for f in (0, 1))
+        print(f"{name:8} " + " ".join(str(c[(w, f)]).rjust(9) for w in range(NUM_WALL_SETS) for f in (0, 1))
               + f" {sum(c.values()):8}")
 
     if failures:

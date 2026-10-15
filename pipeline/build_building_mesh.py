@@ -30,7 +30,9 @@ Reads   data/raw/<AREA_NAME>_test/osm_buildings.json
         data/road_tiles/<AREA_NAME>_test/settlement_tiles.json
 Outputs data/road_tiles/<AREA_NAME>_test/building_mesh.json
         {"buildings": [{"name","tile","vertices","uvs","triangles",
-                        "wall_set","flat_roof"}, ...]}
+                        "wall_set","flat_roof","roof_set","roof_rgb",
+                        "n_solid","levels","roof"}, ...]}
+        (roofs baked here since realism B3, see roof_shape below)
         (same {"vertices","uvs","triangles"} chunk schema
         road_mesh_common.build_road_chunks already produces, so
         export_building_mesh_bin.py can bucket it the same way
@@ -46,7 +48,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-from building_roofs import clean_ring, triangulate
+from building_roofs import clean_ring, make_roof, triangulate
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -173,6 +175,80 @@ def pick_facade(building_tag, levels, rng, region="generic"):
 
 
 REGION = AREA_REGION.get(AREA_NAME, "generic")
+
+# Roofs (realism B3, 2026-10-15): baked here, not pitched at runtime. Shape:
+# OSM roof:shape when tagged, else pitched for the categories pick_facade
+# leaves non-flat (houses, outbuildings, churches, small untagged) and for
+# any small low footprint, gable or hip by the region's HIP_SHARE; SF's row
+# houses are half flat. Footprints building_roofs.make_roof can't pitch stay
+# flat. roof_set indexes the roof material's sets (unreal/
+# apply_building_material_real.py ROOF_LAYERS); roof colour is linear RGB,
+# OSM roof:colour when tagged.
+ROOF_SHAPE_TAG = {
+    "flat": "flat",
+    **{t: "gable" for t in ("gabled", "skillion", "lean_to", "saltbox", "quadruple_saltbox", "gambrel")},
+    **{t: "hip" for t in ("hipped", "pyramidal", "hipped-and-gabled", "half-hipped", "equal_hipped",
+                          "side_hipped", "mansard")},
+}
+SMALL_PITCHED_M2 = 150.0
+HIP_SHARE = {"tropical": 0.7, "socal": 0.6, "sf": 0.3, "rockies": 0.25, "generic": 0.45}
+SF_FLAT_HOUSES = 0.5
+ROOF_TILE, ROOF_ASPHALT, ROOF_METAL, ROOF_FLAT = range(4)
+REGION_ROOF_SETS = {   # (pitched roof set, weight)
+    "tropical": [(ROOF_METAL, 0.35), (ROOF_ASPHALT, 0.45), (ROOF_TILE, 0.2)],
+    "socal": [(ROOF_TILE, 0.6), (ROOF_ASPHALT, 0.4)],
+    "sf": [(ROOF_ASPHALT, 0.8), (ROOF_TILE, 0.2)],
+    "rockies": [(ROOF_ASPHALT, 0.55), (ROOF_METAL, 0.45)],
+    "generic": [(ROOF_ASPHALT, 0.6), (ROOF_TILE, 0.15), (ROOF_METAL, 0.25)],
+}
+ROOF_MATERIAL_TAG = {
+    **{t: ROOF_TILE for t in ("roof_tiles", "tile", "tiles", "clay")},
+    **{t: ROOF_ASPHALT for t in ("asphalt", "asphalt_shingle", "shingle", "shake", "slate", "wood")},
+    **{t: ROOF_METAL for t in ("metal", "metal_sheet", "steel", "tin", "copper", "zinc")},
+}
+ROOF_COLOURS = {   # linear albedo
+    ROOF_TILE: [(0.30, 0.09, 0.04), (0.38, 0.14, 0.06), (0.25, 0.10, 0.06)],
+    ROOF_ASPHALT: [(0.06, 0.06, 0.06), (0.09, 0.085, 0.08), (0.12, 0.11, 0.10), (0.10, 0.07, 0.05),
+                   (0.05, 0.055, 0.065)],
+    ROOF_METAL: [(0.25, 0.05, 0.04), (0.07, 0.15, 0.08), (0.33, 0.33, 0.33), (0.18, 0.22, 0.26)],
+    ROOF_FLAT: [(0.34, 0.34, 0.33), (0.45, 0.45, 0.43), (0.27, 0.27, 0.26)],
+}
+ROOF_LUMA = (0.03, 0.6)   # a tagged "white" or "black" roof still reads as a material
+
+
+def roof_shape(b, flat, area_m2, levels, rng, region="generic"):
+    """"flat", "gable" or "hip" for one building (see the block above)."""
+    shape = ROOF_SHAPE_TAG.get(b.get("roof:shape"))
+    if shape:
+        return shape
+    pitched = levels < HIGH_RISE_LEVELS and (not flat or (area_m2 < SMALL_PITCHED_M2 and levels < 4))
+    if pitched and region == "sf" and rng.random() < SF_FLAT_HOUSES:
+        pitched = False
+    return ("hip" if rng.random() < HIP_SHARE[region] else "gable") if pitched else "flat"
+
+
+def parse_colour(value):
+    """OSM colour (name or #hex) -> linear RGB with luma in ROOF_LUMA, or None."""
+    from matplotlib.colors import to_rgb
+    try:
+        srgb = to_rgb(value.strip().lower())
+    except (AttributeError, ValueError):
+        return None
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb]
+    luma = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    k = min(max(luma, ROOF_LUMA[0]), ROOF_LUMA[1]) / max(luma, 1e-4)
+    return tuple(min(c * k, 1.0) if luma > 1e-4 else ROOF_LUMA[0] for c in lin)
+
+
+def roof_look(b, shape, rng, region="generic"):
+    """(roof_set, linear rgb) - OSM roof:material / roof:colour when tagged."""
+    roof_set = ROOF_FLAT
+    if shape != "flat":
+        roof_set = ROOF_MATERIAL_TAG.get(b.get("roof:material"))
+        if roof_set is None:
+            sets, weights = zip(*REGION_ROOF_SETS[region])
+            roof_set = rng.choices(sets, weights)[0]
+    return roof_set, parse_colour(b.get("roof:colour")) or rng.choice(ROOF_COLOURS[roof_set])
 FACADE_TILE_M = 4.0   # UV repeat period on walls/roof, matches this
                        # project's DETAIL_TILE_CM-style tiling convention
 
@@ -307,6 +383,7 @@ def main():
     out = []
     n_excluded_road = n_not_populated = 0
     facade_counts = defaultdict(int)
+    roof_counts = defaultdict(int)
     for bi, b in enumerate(buildings_raw):
         ring_xy_cm = rings[bi]
         cx_cm, cy_cm = centroids_cm[bi]
@@ -343,6 +420,8 @@ def main():
         ground_z_cm = road_ue_z_m(float(st_elev[nearest_i]), 0.0, ORIGIN_HEIGHT_M) * 100.0
 
         rng = random.Random(b["way_id"])
+        area_m2 = abs(sum(ring_xy_cm[i][0] * ring_xy_cm[i - 1][1] - ring_xy_cm[i - 1][0] * ring_xy_cm[i][1]
+                          for i in range(len(ring_xy_cm)))) / 2e4
         levels = known[bi]
         level_sources[level_source(b) or "estimated"] += 1
         if levels is None:
@@ -351,8 +430,6 @@ def main():
                 d, j = known_tree.query((cx_cm, cy_cm), k=min(NEIGHBOUR_K, len(known_idx)),
                                         distance_upper_bound=NEIGHBOUR_RADIUS_M * 100.0)
                 neighbours = [known[known_idx[i]] for i in np.atleast_1d(j)[np.isfinite(np.atleast_1d(d))]]
-            area_m2 = abs(sum(ring_xy_cm[i][0] * ring_xy_cm[i - 1][1] - ring_xy_cm[i - 1][0] * ring_xy_cm[i][1]
-                              for i in range(len(ring_xy_cm)))) / 2e4
             levels = estimate_levels(b.get("building_tag"), area_m2, neighbours, rng)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
         height_cm = levels * LEVEL_HEIGHT_M * 100.0
@@ -361,6 +438,16 @@ def main():
         facade_counts[(wall_set, flat_roof)] += 1
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
+        n_solid = len(verts)
+        shape = roof_shape(b, flat_roof, area_m2, levels, rng, REGION)
+        if shape != "flat":
+            roofed = make_roof(verts, uvs, tris, shape == "hip")
+            if roofed:
+                verts, uvs, tris, n_solid = roofed
+            else:
+                shape = "flat"
+        roof_set, roof_rgb = roof_look(b, shape, rng, REGION)
+        roof_counts[(shape, roof_set)] += 1
         out.append({
             "name": f"bldg_{b['way_id']}",
             "tile": tile_key,
@@ -368,7 +455,12 @@ def main():
             "uvs": [round(v, 4) for uv in uvs for v in uv],
             "triangles": [i for t in tris for i in t],
             "wall_set": wall_set,
-            "flat_roof": flat_roof,
+            "flat_roof": int(shape == "flat"),
+            "roof_set": roof_set,
+            "roof_rgb": [round(c * 255) for c in roof_rgb],
+            "n_solid": n_solid,
+            "levels": levels,
+            "roof": shape,
         })
 
     OUT_PATH.write_text(json.dumps({"buildings": out}))
@@ -376,6 +468,9 @@ def main():
           f"({n_not_populated} outside populated tiles, {n_excluded_road} "
           f"excluded - too close to the road) -> {OUT_PATH}")
     print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
+    n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
+    print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "
+          + ", ".join(f"{k}={roof_counts[k]}" for k in sorted(roof_counts)))
     print("facade (wall_set, flat_roof) counts: "
           + ", ".join(f"{k}={facade_counts[k]}" for k in sorted(facade_counts)))
 

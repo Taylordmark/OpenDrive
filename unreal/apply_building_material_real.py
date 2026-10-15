@@ -12,7 +12,10 @@ Same interface as the twin: UV0 (U = perimeter / 4 m, V = height / 4 m from
 pipeline/build_building_mesh.py, planar XY / 4 m on the roof cap), vertex
 color R = wall set bucket (WallSet encoding, (idx + 0.5) / 7), G = per-
 building seed, B = flat roof, A = 0 on pitched-roof gable end walls (no
-windows; ODBuildingManager PitchRoof, Realistic only). No parameters (the
+windows; pitched in the pipeline, building_roofs.py). Roof triangles carry
+their own colour instead: RGB = the roof's linear albedo, A = roof set
+bucket (ROOF_LAYERS, (idx + 0.5) / 4), both from build_building_mesh.py
+roof_look. No parameters (the
 twin has none), same physical material, two-sidedness and usage flags
 (copied from the twin).
 
@@ -31,9 +34,11 @@ What's added over the stylized graph:
     ceiling, floor shaded INTERIOR_SHADE_MIN..1, wall/floor tint and depth
     hashed per window, luma renormalised so the exposure check stays exact.
     Unlit windows stay glass.
-  - roofs (M_BuildingRoof_real): shingle roofs pick RoofingTiles007 (stylized), RoofingTiles009
-    (dark asphalt shingle) or CorrugatedSteel005 painted red/green/grey per
-    building; flat roofs stay concrete, darker.
+  - roofs (M_BuildingRoof_real, realism B3): the pipeline picks the set
+    per building and region (clay tile, asphalt shingle, painted steel,
+    flat concrete) and the colour (OSM roof:colour, else a regional
+    palette); the texture only adds its detail, albedo = vertex RGB x the
+    texture's luma over its mean (ROOF_MEAN_LUMA), clamped ROOF_DETAIL.
 Night comes from the sun itself: SkyAtmosphereLightDirection(0) is the sun
 (AODAtmosphereController keeps it atmosphere light 0), and the material
 applies AODDayNightController::NightFactor() to its elevation - so windows
@@ -125,11 +130,11 @@ PAINTS = [(0.70, 0.70, 0.66), (0.62, 0.55, 0.40), (0.30, 0.36, 0.28), (0.28, 0.3
 LIT_COLORS = [(1.0, 0.66, 0.34), (1.0, 0.86, 0.66), (0.80, 0.88, 1.0)]   # warm, neutral, cool (TV)
 LIT_COLOR_SPLIT = (0.7, 0.9)
 ROOM_DEPTH_M = (3.0, 6.0)  # interior-mapped room box behind each lit window: bay x floor x depth
-ROOF_SPLIT = (0.4, 0.7)  # RoofingTiles007 | RoofingTiles009 | CorrugatedSteel005
-SHINGLE_009_GAIN = 6.0   # RoofingTiles009 is near-black (0.012) -> ~0.07, weathered asphalt
-STEEL_MEAN = 0.335
-STEEL_PAINTS = [(0.25, 0.05, 0.04), (0.07, 0.15, 0.08), (0.335, 0.335, 0.335)]
-FLAT_ROOF_DARK = 0.7
+# roof sets, indexed by build_building_mesh.py ROOF_TILE/ASPHALT/METAL/FLAT
+ROOF_LAYERS = [(BUILDING_TEX_DIR, "RoofingTiles007"), (REAL_TEX_DIR, "RoofingTiles009"),
+               (REAL_TEX_DIR, "CorrugatedSteel005"), (BUILDING_TEX_DIR, "Concrete034")]
+ROOF_MEAN_LUMA = [0.058, 0.016, 0.329, 0.482]   # linear, 2K Color maps (512 px mean)
+ROOF_DETAIL = (0.3, 2.0)
 
 
 def log(msg):
@@ -382,8 +387,8 @@ def build_facade(mat):
     lo_v = g.lerp(WINDOW_MARGIN_V_UPPER[0], WINDOW_MARGIN_V_GROUND[0], ground)
     hi_v = g.lerp(WINDOW_MARGIN_V_UPPER[1], WINDOW_MARGIN_V_GROUND[1], ground)
     lo_u, hi_u = WINDOW_MARGIN_U
-    # vertex alpha 0 = a pitched roof's gable end wall (ODBuildingManager
-    # PitchRoof): plain wall, no windows, frames, sills or streaks
+    # vertex alpha 0 = a pitched roof's gable end wall (pipeline
+    # building_roofs.py): plain wall, no windows, frames, sills or streaks
     solid = g.mask(vc, r=True, a_out="A")
 
     opening = g.mul(g.mul(g.rect(bay_f, lo_u, hi_u), g.rect(floor_f, lo_v, hi_v)), solid)
@@ -472,23 +477,21 @@ return rgb * (clamp(sh, {INTERIOR_SHADE_MIN}, 1.0) / max(dot(rgb, float3(0.2126,
 
 def build_roof(mat):
     g = G(mat)
-    uv, vc, seed = inputs(g)
-    flat_roof = g.mask(vc, b=True)
-    s_roof = g.frac_hash(seed, 7.77, 0.13)
-    s_paint = g.frac_hash(seed, 17.31, 0.71)   # same per-building hash as the facade paint
-    roof_sets = [sample_set(g, load_set(BUILDING_TEX_DIR, "RoofingTiles007"), uv),
-                 sample_set(g, load_set(REAL_TEX_DIR, "RoofingTiles009"), uv),
-                 sample_set(g, load_set(REAL_TEX_DIR, "CorrugatedSteel005"), uv)]
-    roof_sets[1]["A"] = g.mul(roof_sets[1]["A"], SHINGLE_009_GAIN)
-    steel_paint = g.select(s_paint, [g.c3(tuple(c / STEEL_MEAN for c in p)) for p in STEEL_PAINTS], [0.33, 0.66])
-    roof_sets[2]["A"] = g.mul(roof_sets[2]["A"], steel_paint)
-    split = list(ROOF_SPLIT)
-    pitched = {k: g.select(s_roof, [s[k] for s in roof_sets], split) for k in ("A", "N", "R")}
-    concrete = sample_set(g, load_set(BUILDING_TEX_DIR, "Concrete034"), uv)
+    uv, vc, _ = inputs(g)
+    pick = g.mask(vc, a_out="A", r=True)   # VertexColor's A pin, as a scalar
+    n = len(ROOF_LAYERS)
+    sets = [sample_set(g, load_set(d, asset_id), uv) for d, asset_id in ROOF_LAYERS]
+    for s, mean in zip(sets, ROOF_MEAN_LUMA):
+        luma = g.dot(s["A"], g.c3((0.2126, 0.7152, 0.0722)))
+        s["D"] = g.unary(unreal.MaterialExpressionClamp, g.mul(luma, 1.0 / mean))
+        s["D"].set_editor_property("min_default", ROOF_DETAIL[0])
+        s["D"].set_editor_property("max_default", ROOF_DETAIL[1])
+    thr = [(i + 1) / n for i in range(n - 1)]
+    out = {k: g.select(pick, [s[k] for s in sets], thr) for k in ("D", "N", "R")}
     return {
-        unreal.MaterialProperty.MP_BASE_COLOR: g.lerp(pitched["A"], g.mul(concrete["A"], FLAT_ROOF_DARK), flat_roof),
-        unreal.MaterialProperty.MP_NORMAL: g.lerp(pitched["N"], concrete["N"], flat_roof),
-        unreal.MaterialProperty.MP_ROUGHNESS: g.lerp(pitched["R"], concrete["R"], flat_roof),
+        unreal.MaterialProperty.MP_BASE_COLOR: g.mul(g.mask(vc, r=True, gg=True, b=True), out["D"]),
+        unreal.MaterialProperty.MP_NORMAL: out["N"],
+        unreal.MaterialProperty.MP_ROUGHNESS: out["R"],
     }
 
 

@@ -127,9 +127,14 @@ def attach_ms_heights(buildings, ms):
     print(f"  {int((best > 0).sum())} of {len(buildings)} footprint(s) got a Microsoft height")
 
 
+# Realism B3: roof/wall look tags, kept only when set (build_building_mesh
+# honours roof:shape and the colours/materials)
+LOOK_TAGS = ("roof:shape", "roof:colour", "roof:material", "building:colour", "building:material")
+
+
 def building_entry(ring, tags, way_id):
     return {"nodes": ring, "levels": parse_levels(tags), "height_m": parse_height(tags), "way_id": way_id,
-            "building_tag": tags.get("building", "yes")}
+            "building_tag": tags.get("building", "yes"), **{k: tags[k] for k in LOOK_TAGS if k in tags}}
 
 
 def fetch_osm_buildings():

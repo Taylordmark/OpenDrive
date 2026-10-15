@@ -1,6 +1,6 @@
-"""Track G pitched roofs (pipeline/building_roofs.py, the mirror of
-AODBuildingManager's PitchRoof): on rectangles, squares, chamfered and odd
-convex footprints, both gable and hip,
+"""Pitched roofs (pipeline/building_roofs.py, baked by build_building_mesh):
+pitch_roof() on rectangles, squares, chamfered and odd convex footprints,
+both gable and hip,
   - the roof faces tile the footprint exactly (no overlap = no
     self-intersection, no hole) and all face up past the 0.55 roof cut,
   - roof + end walls are watertight: every edge is shared by two faces
@@ -8,21 +8,19 @@ convex footprints, both gable and hip,
     footprint (where the walls meet it),
   - end walls are vertical and keep the wall's U;
 dents and bays included; L-shapes, triangles, octagons, flat-roof buildings
-stay flat.
-With --tiles, also runs every ODU2 tile under Content/OpenDrive/Masks (or
-the ones given) through it: the same checks on every pitched building, the
-counts (compare with AODBuildingManager::ProfileRoofTile) and the time.
+stay flat there. cover_roof() then takes the L/T/U-shapes (rectangles on
+the footprint grid, each roofed, faces up, end walls vertical and facing out,
+>= COVER_MIN covered) and still leaves triangles and octagons flat.
 
-Run:  python pipeline/tests/test_building_roofs.py [--tiles [file ...]]"""
+Run:  python pipeline/tests/test_building_roofs.py"""
 import math
 import sys
-import time
 from pathlib import Path
 
 PIPE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPE))
 from build_building_mesh import extrude_footprint   # noqa: E402
-from building_roofs import pitch_roof, read_tile    # noqa: E402
+from building_roofs import COVER_MIN, cover_roof, make_roof, pitch_roof   # noqa: E402
 
 TOL = 1e-3   # cm, = building_roofs.EPS_WELD
 
@@ -145,39 +143,71 @@ def test_shapes():
                       f"{len(t) - len(walls_before)} roof+end tris")
 
 
-def test_tiles(paths):
-    total_t = 0.0
-    n_b = n_p = n_tri_before = n_tri_after = 0
-    worst = (0.0, None)
-    for path in paths:
-        t0 = time.perf_counter()
-        bs = read_tile(path)
-        res = [pitch_roof(v, uv, t, flat) for v, uv, t, _, flat in bs]
-        dt = time.perf_counter() - t0
-        total_t += dt
-        worst = max(worst, (dt, path.name))
-        n_b += len(bs)
-        for (v, uv, t, _, _), r in zip(bs, res):
-            n_tri_before += len(t)
-            if r is None:
-                n_tri_after += len(t)
+COVER = {
+    "L-shape": ([(0, 0), (1200, 0), (1200, 500), (500, 500), (500, 1000), (0, 1000)], 2),
+    "U-shape": ([(0, 0), (1500, 0), (1500, 1000), (1100, 1000), (1100, 400), (400, 400), (400, 1000),
+                 (0, 1000)], 3),
+    "T-shape rotated": ([(x * math.cos(0.4) - y * math.sin(0.4), x * math.sin(0.4) + y * math.cos(0.4))
+                         for x, y in [(0, 0), (1600, 0), (1600, 500), (1050, 500), (1050, 1200), (550, 1200),
+                                      (550, 500), (0, 500)]], 2),
+    "triangle": (SHAPES["triangle"][0], 0),
+    "octagon": (SHAPES["octagon"][0], 0),
+}
+
+
+def normal(a, b, c):
+    u = [b[i] - a[i] for i in range(3)]
+    v = [c[i] - a[i] for i in range(3)]
+    n = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+    ln = math.sqrt(sum(x * x for x in n))
+    return tuple(x / ln for x in n)
+
+
+def roof_z(p, tri):
+    """Height of roof triangle tri over point p, or -inf if p is outside it."""
+    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = tri
+    det = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay)
+    u = ((p[0] - ax) * (cy - ay) - (cx - ax) * (p[1] - ay)) / det
+    w = ((bx - ax) * (p[1] - ay) - (p[0] - ax) * (by - ay)) / det
+    return az + u * (bz - az) + w * (cz - az) if u >= 0 and w >= 0 and u + w <= 1 else -math.inf
+
+
+def test_cover():
+    for name, (ring, min_rects) in COVER.items():
+        for hip in (False, True):
+            verts, uvs, tris = extrude_footprint(ring, 500.0, 640.0, 0)
+            assert pitch_roof(verts, uvs, tris, 0, hip=hip) is None, f"{name}: not a pitch_roof shape"
+            res = cover_roof(verts, uvs, tris, hip=hip)
+            assert (res is not None) == (min_rects > 0), f"{name}: covered={res is not None}"
+            assert make_roof(verts, uvs, tris, hip) == res
+            if not res:
                 continue
-            n_p += 1
-            n_tri_after += len(r[2])
-            top = max(p[2] for p in v)
-            from building_roofs import clean_ring, footprint_ring
-            ring = clean_ring(footprint_ring(v, t, top)[0])
-            check(ring, *r, top)
-        print(f"  {path.name}: {len(bs)} buildings, {sum(r is not None for r in res)} pitched, {dt * 1e3:.1f} ms")
-    print(f"tiles {len(paths)}: buildings {n_b}, pitched {n_p} ({100 * n_p / max(n_b, 1):.0f}%), "
-          f"tris {n_tri_before} -> {n_tri_after}, python {total_t * 1e3:.0f} ms total, "
-          f"worst tile {worst[0] * 1e3:.0f} ms ({worst[1]})")
+            v, uv, t, n_solid = res
+            assert v[:len(verts)] == [tuple(p) for p in verts] and t[:len(tris)] == [tuple(x) for x in tris],                 "walls and flat cap kept"
+            new = t[len(tris):]
+            faces = [x for x in new if any(i < n_solid for i in x)]
+            ends = [x for x in new if all(i >= n_solid for i in x)]
+            assert len(faces) + len(ends) == len(new)
+            covered = sum(shoelace([v[i] for i in x]) for x in faces)
+            assert covered >= COVER_MIN * abs(shoelace(ring)) - 1.0, f"{name}: covers {covered:.0f}"
+            for x in faces:
+                assert normal(*(v[i] for i in x))[2] > 0.55, f"{name}: roof face up"
+            for x in ends:
+                n = normal(*(v[i] for i in x))
+                assert abs(n[2]) < 1e-6, f"{name}: end wall vertical"
+                assert not hip, "hips have no end walls"
+                c = [sum(v[i][k] for i in x) / 3 for k in range(3)]
+                inner = (c[0] - 5 * n[0], c[1] - 5 * n[1])
+                assert any(roof_z(inner, [v[i] for i in f]) > c[2] for f in faces), f"{name}: end wall faces out"
+            assert hip or len(ends) >= 2 * min_rects, f"{name}: {len(ends)} gable tris"
+            rise = max(p[2] for p in v) - 1140.0
+            assert 50.0 < rise <= 500.0, f"{name}: rise {rise:.0f}"
+            print(f"  {name:32s} {'hip' if hip else 'gable':5s} rise {rise:4.0f} cm  "
+                  f"{len(faces)} roof + {len(ends)} end tris, {covered / abs(shoelace(ring)):.0%} covered")
 
 
 if __name__ == "__main__":
     test_shapes()
     print("PASS shapes")
-    if "--tiles" in sys.argv:
-        given = [Path(a) for a in sys.argv[sys.argv.index("--tiles") + 1:]]
-        test_tiles(given or sorted((PIPE.parent / "OpenDriveUE/Content/OpenDrive/Masks").glob("buildings_*_tile_*.bin")))
-        print("PASS tiles")
+    test_cover()
+    print("PASS cover")

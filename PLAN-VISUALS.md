@@ -475,6 +475,10 @@ stylized meshes; a render of each species turntable from the generator.
   so the shape is hashed. Mirror + tests: `pipeline/building_roofs.py`,
   `pipeline/tests/test_building_roofs.py` (watertight, no self-intersection,
   all 534 tiles).
+  Superseded 2026-10-15 (realism B3): roofs are baked by the pipeline
+  (`building_roofs.make_roof`: OBB pitch, else a rect cover for L/T/U),
+  honour OSM roof:shape/roof:colour/roof:material, regional roof sets
+  (ODU3 roof_set + roof_rgb); the C++ PitchRoof is gone.
 - interior-mapped rooms in lit windows: one Custom HLSL node ray-casts a
   bay x floor x 3-6 m room per window (hashed tint/depth); PS 432 -> 488
   instr, no extra samples. Unlit windows stay glass.
