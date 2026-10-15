@@ -33,7 +33,8 @@ class UInputComponent;
  *
  * Layout (2026-10-09): one row per action with Keyboard | Gamepad columns
  * (Left/Right or a click picks the column), then "Reset to Defaults" and
- * "Back". 12 rows fit one screen, so no scrolling. The wheel-conditioning
+ * "Back". The rows + Reset scroll to follow the selection (ODRaceHUD::
+ * DrawRebindPanel, 2026-10-14) - the action list outgrew one screen. The wheel-conditioning
  * sliders moved to AODSettingsMenu's CONTROLS tab.
  */
 UCLASS()

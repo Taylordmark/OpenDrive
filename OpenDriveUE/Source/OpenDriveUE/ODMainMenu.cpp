@@ -27,6 +27,9 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UnrealClient.h"
+#include "ContentStreaming.h"
+#include "ShaderCompiler.h"
+#include "ODBuildingManager.h"
 
 #include "ODDayNightController.h"
 #include "ODEngineSynth.h"
@@ -534,7 +537,16 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		{
 			bRoadSettled = bRoadSettled && It->IsInitialStreamingSettled();
 		}
-		const bool bAllSettled = bPawnReady && bTerrainSettled && bRoadSettled;
+		// buildings too (2026-10-14: the screen used to drop with the city still
+		// popping in); a frozen (tick-disabled) manager can't progress, so skip it
+		bool bBuildingsSettled = true;
+		for (TActorIterator<AODBuildingManager> It(GetWorld()); It && Pawn; ++It)
+		{
+			bBuildingsSettled = bBuildingsSettled
+				&& (!It->IsActorTickEnabled() || It->IsInitialStreamingSettled(Pawn->GetActorLocation()));
+		}
+		const bool bAllSettled = bPawnReady && bTerrainSettled && bRoadSettled && bBuildingsSettled;
+		LoadingPhase = !(bPawnReady && bTerrainSettled && bRoadSettled) ? 0 : !bBuildingsSettled ? 1 : 2;
 
 		if (bAllSettled)
 		{
@@ -557,8 +569,8 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		{
 			UE_LOG(LogTemp, Warning,
 				TEXT("ODMainMenu: LOADSCREEN failsafe released after %.1fs (groundSnapped=%d, ")
-				TEXT("terrainSettled=%d, roadSettled=%d)"),
-				Elapsed, bPawnReady, bTerrainSettled, bRoadSettled);
+				TEXT("terrainSettled=%d, roadSettled=%d, buildingsSettled=%d)"),
+				Elapsed, bPawnReady, bTerrainSettled, bRoadSettled, bBuildingsSettled);
 			Stage = EODMenuStage::Playing;
 			SetCursorVisible(false);
 			return;
@@ -569,11 +581,17 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		// everything is already resident doesn't just flash the screen).
 		const bool bDebounced = LoadingSettledSinceTime != 0.0
 			&& (Now - LoadingSettledSinceTime) >= LoadingSettleDebounceSec;
-		if (bDebounced && Elapsed >= LoadingMinDisplaySec)
+		// then the renderer (2026-10-14): textures still streaming in / shaders
+		// still compiling read as a half-loaded first frame. Capped, since an
+		// open world may never report zero wanting textures.
+		const bool bRenderIdle = IStreamingManager::Get().GetNumWantingResources() == 0
+			&& (!GShaderCompilingManager || GShaderCompilingManager->GetNumRemainingJobs() == 0);
+		const bool bRenderReady = bRenderIdle || (bDebounced && Now - LoadingSettledSinceTime >= LoadingRenderWaitSec);
+		if (bDebounced && bRenderReady && Elapsed >= LoadingMinDisplaySec)
 		{
 			UE_LOG(LogTemp, Display,
-				TEXT("ODMainMenu: LOADSCREEN released after %.1fs (terrain settled, roads settled)"),
-				Elapsed);
+				TEXT("ODMainMenu: LOADSCREEN released after %.1fs (terrain, roads, buildings settled; render %s)"),
+				Elapsed, bRenderIdle ? TEXT("idle") : TEXT("wait capped"));
 			Stage = EODMenuStage::Playing;
 			SetCursorVisible(false);
 		}
@@ -1946,6 +1964,7 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad, const FTr
 	Stage = EODMenuStage::Loading;
 	LoadingStartTime = GetWorld()->GetTimeSeconds();
 	LoadingSettledSinceTime = 0.0;
+	LoadingPhase = 0;
 	SetCursorVisible(false);
 	UGameplayStatics::SetGamePaused(this, false);
 }

@@ -416,6 +416,17 @@ become new roads via `fetch_osm_network.py` (rebuild the area first).
   values fall back to stock. Cosmetics are still open.
 - **4.4** (§7.31): settings (11 rows, Off/TSR upscaler) and generated credits
   (30/30). Saved under `OpenDrive.Graphics` and `OpenDrive.Audio`.
+- **UI loose ends** (2026-10-14, compiled, not driven). Pause/settings
+  backdrop bars fixed at the root: `FMenuPaint::Fade` drew overlapping
+  translucent strips (double-blended seams); now one gradient quad. Loading
+  screen holds until ground + terrain + roads + buildings settle (1 s
+  debounce) and the renderer is idle (texture streaming + shader jobs, capped
+  4 s), shows phase labels and a monotonic eased bar, then fades out over
+  0.7 s real time. Race timer, nav panel, warnings and minimap place label
+  moved to Rajdhani (`ODHudStyle.h`); Rajdhani text needs a fallback `UFont`
+  on `FCanvasTextItem` or it silently never draws (also fixed in the gauge
+  cluster). Rebind list scrolls (arrows, d-pad, wheel); scroll math has
+  `static_assert` checks in `ODRaceHUD.cpp`.
 - **Area picker** (2026-10-05, not yet compiled or built). Garage Options tab
   has an Area row: every `/Game/Areas/OpenWorld_<area>` level (AssetRegistry)
   plus Tail of the Dragon and the current level. The row only picks; Drive /

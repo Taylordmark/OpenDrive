@@ -77,6 +77,32 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
+	/** Loading-gate readiness (2026-10-14, AODMainMenu's loading screen): every
+	 *  tile within SpawnRadius of AroundPos is built or known-missing and no
+	 *  building is still waiting on ground (those give up after
+	 *  PendingGiveUpAfterSec, so this can't hold forever). */
+	bool IsInitialStreamingSettled(const FVector& AroundPos) const
+	{
+		if (PendingBuildings.Num() > 0)
+		{
+			return false;
+		}
+		const FIntPoint Center(FMath::FloorToInt(AroundPos.X / TileSizeCm), FMath::FloorToInt(AroundPos.Y / TileSizeCm));
+		const int32 Reach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
+		for (int32 dy = -Reach; dy <= Reach; ++dy)
+		{
+			for (int32 dx = -Reach; dx <= Reach; ++dx)
+			{
+				const FIntPoint Key = Center + FIntPoint(dx, dy);
+				if (!Tiles.Contains(Key) && !MissingTiles.Contains(Key))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	/** Headless check of the Realistic pitched roofs (Track G): parses one
 	 *  ODU2 tile, runs PitchRoof over every building and returns the counts
 	 *  (compare with pipeline/tests/test_building_roofs.py --tiles) and the

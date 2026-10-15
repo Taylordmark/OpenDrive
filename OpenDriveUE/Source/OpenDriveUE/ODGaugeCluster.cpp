@@ -85,6 +85,9 @@ void Text(UCanvas* C, FVector2D Mid, const FString& S, float PxSize, const FLine
 	T.bCentreY = true;
 	const float Off = FMath::Max(1.0f, PxSize * 0.04f);
 	T.EnableShadow(FLinearColor(0, 0, 0, 0.6f * Col.A), FVector2D(Off, Off));
+	// HasValidText() wants a UFont even when the Slate font info draws: the
+	// file-loaded Rajdhani has none, so without this no cluster text drew
+	T.Font = GEngine->GetLargeFont();
 	C->DrawItem(T);
 }
 }

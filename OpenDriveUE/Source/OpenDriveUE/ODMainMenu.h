@@ -171,6 +171,9 @@ public:
 	 *  convention elsewhere in this project). */
 	void GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTotal,
 		int32& OutRoadReady, int32& OutRoadTotal) const;
+	/** Which loading gate Tick() is waiting on: 0 ground/terrain/roads,
+	 *  1 buildings, 2 renderer (textures/shaders) - the loading screen's label. */
+	int32 GetLoadingPhase() const { return LoadingPhase; }
 
 	/** The HUD computes the town nearest the mouse each frame (it owns the
 	 *  world->screen transform) and reports it here for the click handler. */
@@ -413,8 +416,14 @@ private:
 	// player on a black screen forever.
 	double LoadingStartTime = 0.0;
 	double LoadingSettledSinceTime = 0.0;
-	static constexpr double LoadingSettleDebounceSec = 0.5;
+	int32 LoadingPhase = 0;   // GetLoadingPhase()
+	// 0.5 -> 1.0 (2026-10-14, "hold back until everything is ready"): a tile's
+	// mesh lands a frame or two after its manager stops counting it pending
+	static constexpr double LoadingSettleDebounceSec = 1.0;
 	static constexpr double LoadingMinDisplaySec = 1.0;
+	// max extra wait, once the world is settled, for texture streaming and
+	// shader compiles to go idle (2026-10-14)
+	static constexpr double LoadingRenderWaitSec = 4.0;
 	// 25 -> 60 (2026-09-07, Taylor's cold-boot "screen is blank, game
 	// doesn't appear to be loading" report): a genuinely cold first load
 	// (disk cache empty) was still at road tiles=0 well past the old 25s

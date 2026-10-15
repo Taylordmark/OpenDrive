@@ -15,6 +15,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "ODCreditsMenu.h"
 #include "ODDayNightController.h"
 #include "ODGaugeCluster.h"
@@ -34,14 +35,6 @@
 #include "Rendering/SlateRenderer.h"
 
 using namespace ODHud;
-
-// Canvas text at Scale > 1 stretches a glyph bitmap rasterized at the font's
-// base size - blocky/blurry. Asking for the scaled point size instead makes
-// the runtime font cache rasterize glyphs at that size, so text stays crisp.
-static FSlateFontInfo CrispFont(const UFont* Font, float Scale)
-{
-	return FSlateFontInfo(Font, Font->LegacyFontSize * Scale);
-}
 
 static FString FormatTime(float T)
 {
@@ -561,6 +554,23 @@ float ParsePercent(const FString& V)
 	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
 }
 
+// First visible row of a Count-row list showing Shown rows: moves only as far
+// as needed to keep Sel in view (Sel outside 0..Count-1 = nothing to follow),
+// so a hover-select never scrolls the row out from under the mouse.
+constexpr int32 ScrollTop(int32 Top, int32 Sel, int32 Count, int32 Shown)
+{
+	if (Sel >= 0 && Sel < Count)
+	{
+		Top = FMath::Clamp(Top, Sel - Shown + 1, Sel);
+	}
+	return FMath::Clamp(Top, 0, FMath::Max(0, Count - Shown));
+}
+static_assert(ScrollTop(0, 20, 30, 10) == 11, "down just enough");
+static_assert(ScrollTop(11, 5, 30, 10) == 5, "up just enough");
+static_assert(ScrollTop(7, 12, 30, 10) == 7, "already visible: stays");
+static_assert(ScrollTop(25, -1, 30, 10) == 20, "clamped to the end");
+static_assert(ScrollTop(3, 2, 5, 10) == 0, "fits: no scroll");
+
 /** Canvas painter at menu scale S - sizes are 1080p units, positions pixels. */
 struct FMenuPaint
 {
@@ -588,7 +598,7 @@ struct FMenuPaint
 		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), Font(Size * S, W, Spacing), Col);
 		T.bCentreX = bCenterX;
 		T.bCentreY = true;
-		T.EnableShadow(FLinearColor(0, 0, 0, 0.45f), FVector2D(S, S));
+		T.EnableShadow(FLinearColor(0, 0, 0, 0.45f * Col.A), FVector2D(S, S));   // fades with the text
 		// HasValidText() needs a UFont even when SlateFontInfo is used; the
 		// file-loaded Rajdhani has no FontObject, so without this nothing drew
 		T.Font = GEngine->GetLargeFont();
@@ -625,17 +635,27 @@ struct FMenuPaint
 		C->DrawItem(T);
 	}
 
-	// horizontal fade, alpha A0 at X0 -> A1 at X1 (either direction), in strips
+	// horizontal fade, alpha A0 at X0 -> A1 at X1 (either direction): ONE quad
+	// with per-vertex alpha. (2026-10-14) It used to be ~6 px translucent
+	// strips overlapping by 0.5 px - every overlap column blended twice, so the
+	// full-height menu backdrop showed a comb of dark vertical bars across the
+	// whole left side, through the text (the pause menu report).
 	void Fade(float X0, float X1, float Y, float H, FLinearColor Col, float A0, float A1) const
 	{
-		const int32 N = FMath::Clamp(FMath::RoundToInt(FMath::Abs(X1 - X0) / (6.0f * S)), 1, 256);
-		const float Step = (X1 - X0) / N;
-		for (int32 i = 0; i < N; ++i)
-		{
-			Col.A = FMath::Lerp(A0, A1, (i + 0.5f) / N);
-			const float SX = X0 + Step * i;
-			Rect(FMath::Min(SX, SX + Step), Y, FMath::Abs(Step) + 0.5f, H, Col);
-		}
+		FLinearColor C0 = Col, C1 = Col;
+		C0.A = A0;
+		C1.A = A1;
+		TArray<FCanvasUVTri> Tris;
+		Tris.SetNum(2);
+		Tris[0].V0_Pos = FVector2D(X0, Y);     Tris[0].V0_Color = C0;
+		Tris[0].V1_Pos = FVector2D(X1, Y);     Tris[0].V1_Color = C1;
+		Tris[0].V2_Pos = FVector2D(X1, Y + H); Tris[0].V2_Color = C1;
+		Tris[1].V0_Pos = FVector2D(X0, Y);     Tris[1].V0_Color = C0;
+		Tris[1].V1_Pos = FVector2D(X1, Y + H); Tris[1].V1_Color = C1;
+		Tris[1].V2_Pos = FVector2D(X0, Y + H); Tris[1].V2_Color = C0;
+		FCanvasTriangleItem T(Tris, GWhiteTexture);
+		T.BlendMode = SE_BLEND_Translucent;
+		C->DrawItem(T);
 	}
 
 	// a key cap; returns its width
@@ -653,6 +673,13 @@ struct FMenuHint
 	const TCHAR* Key;
 	const TCHAR* Label;
 };
+
+// Top-left-anchored text at Sc x the old Roboto-large size: the world map and
+// QA map lines (2026-10-14, moved off the engine font onto Rajdhani)
+void HudText(UCanvas* C, const FString& Str, float X, float Y, float Sc, const FLinearColor& Col)
+{
+	FMenuPaint{C, 1.0f}.Text(Str, X, Y + 13.0f * Sc, 22.0f * Sc, EMenuWeight::SemiBold, Col);
+}
 
 // bottom-of-screen key hints, starting at the column's X
 void DrawHints(const FMenuPaint& P, float X, std::initializer_list<FMenuHint> Hints)
@@ -934,12 +961,7 @@ void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab
 	// added for the drawn rows only, with their global row ids.
 	const int32 MaxRows = FMath::Max(3, FMath::FloorToInt((Canvas->SizeY - Y - (22.0f + FooterH + 110.0f) * S) / H));
 	const int32 Shown = FMath::Min(Tab.Count, MaxRows);
-	if (Selected >= Tab.First && Selected < Tab.First + Tab.Count)
-	{
-		const int32 SelPos = Selected - Tab.First;
-		MenuScrollTop = FMath::Clamp(MenuScrollTop, SelPos - Shown + 1, SelPos);
-	}
-	MenuScrollTop = FMath::Clamp(MenuScrollTop, 0, Tab.Count - Shown);
+	MenuScrollTop = ScrollTop(MenuScrollTop, Selected - Tab.First, Tab.Count, Shown);
 	if (MenuScrollTop > 0)
 	{
 		P.Chevron(X + W * 0.5f, Y - 8.0f * S, -1.0f, DimCol);
@@ -1037,9 +1059,27 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 	P.Text(TEXT("GAMEPAD"), KX0 + CellW * 1.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
 	Y += 34.0f * S;
 
+	// scrolling (2026-10-14): the binding rows + Reset scroll as one list
+	// above the fixed Back footer, following the selection like DrawMenuPanel
+	// (arrows / d-pad move it; the wheel arrives as Up/Down via DispatchMenuMouse)
+	const int32 Count = Menu->ResetRow() + 1;
+	const int32 Shown = FMath::Min(Count,
+		FMath::Max(3, FMath::FloorToInt((Canvas->SizeY - Y - (22.0f + FooterH + 110.0f) * S) / H)));
+	RebindScrollTop = ScrollTop(RebindScrollTop, Menu->GetSelected(), Count, Shown);
+	if (RebindScrollTop > 0)
+	{
+		P.Chevron(X + W * 0.5f, Y - 8.0f * S, -1.0f, DimCol);
+	}
+	if (RebindScrollTop + Shown < Count)
+	{
+		P.Chevron(X + W * 0.5f, Y + Shown * H + 8.0f * S, +1.0f, DimCol);
+	}
+	const int32 Reset = Menu->ResetRow();
+	const int32 End = RebindScrollTop + Shown;
+
 	// capture pulse on real time - the game is paused, world time stands still
 	const float Pulse = 0.55f + 0.35f * FMath::Sin(FPlatformTime::Seconds() * 6.0);
-	for (int32 Row = 0; Row < Menu->ResetRow(); ++Row, Y += H)
+	for (int32 Row = RebindScrollTop; Row < FMath::Min(End, Reset); ++Row, Y += H)
 	{
 		const bool bRowSel = Row == Menu->GetSelected();
 		const float CY = Y + H * 0.5f;
@@ -1065,18 +1105,20 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 		}
 	}
 
-	// Reset row, then the Back footer
-	const int32 Reset = Menu->ResetRow();
-	const bool bResetSel = Menu->GetSelected() == Reset;
-	if (bResetSel)
+	// Reset row (the list's last, when scrolled into view), then the Back footer
+	if (End > Reset)
 	{
-		P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
-		P.Rect(X, Y, 4.0f * S, H, Accent);
+		const bool bResetSel = Menu->GetSelected() == Reset;
+		if (bResetSel)
+		{
+			P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
+			P.Rect(X, Y, 4.0f * S, H, Accent);
+		}
+		P.Text(Menu->GetLabel(Reset), X + 22.0f * S, Y + H * 0.5f, 21.0f,
+			bResetSel ? EMenuWeight::SemiBold : EMenuWeight::Medium, bResetSel ? FLinearColor::White : TextCol);
+		AddMenuHit(FODMenuHit::Row, Reset, -1, X, Y, W, H);
+		Y += H;
 	}
-	P.Text(Menu->GetLabel(Reset), X + 22.0f * S, Y + H * 0.5f, 21.0f,
-		bResetSel ? EMenuWeight::SemiBold : EMenuWeight::Medium, bResetSel ? FLinearColor::White : TextCol);
-	AddMenuHit(FODMenuHit::Row, Reset, -1, X, Y, W, H);
-	Y += H;
 	DrawMenuFooter(Menu->GetLabel(Menu->BackRow()), Menu->BackRow(), Menu->GetSelected() == Menu->BackRow(), X, Y + 22.0f * S, W);
 
 	if (Menu->IsCapturing())
@@ -1085,7 +1127,7 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 	}
 	else
 	{
-		DrawHints(P, X, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Rebind")}, {TEXT("Esc"), TEXT("Back")}});
+		DrawHints(P, X, {{TEXT("Arrows / Wheel"), TEXT("Select")}, {TEXT("Enter"), TEXT("Rebind")}, {TEXT("Esc"), TEXT("Back")}});
 	}
 }
 
@@ -1273,6 +1315,56 @@ void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
 		{TEXT("Arrows"), TEXT("Browse")}, {TEXT("Esc"), TEXT("Back")}});
 }
 
+// Loading screen (2026-10-14, "hold back until everything is up, no half-
+// loaded screens"): AODMainMenu::Tick gates the release on ground + terrain +
+// roads + buildings + an idle renderer; this keeps the screen itself calm -
+// opaque at once (the teleport stays hidden), its text eases in rather than
+// popping, the bar only ever eases forward (tiles 0-80 %, buildings 85,
+// renderer 95), and after release DrawHUD calls it again with Veil < 1 so the
+// whole thing fades off the finished world instead of cutting. Real time
+// throughout - world time may be paused or hitch while streaming.
+void AODRaceHUD::DrawLoadingScreen(const AODMainMenu* Menu, float Veil) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const double Now = FPlatformTime::Seconds();
+	if (Veil >= 1.0f && LoadingShownAt < 0.0)
+	{
+		LoadingShownAt = Now;
+		LoadingEndedAt = -1.0;
+		LoadingBarFrac = 0.0f;
+		LoadingLastPhase = 0;
+	}
+	P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(Ink.R, Ink.G, Ink.B, Veil));
+
+	float Target = 1.0f;
+	FString Status = TEXT("Ready");
+	if (Veil >= 1.0f && Menu)
+	{
+		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
+		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
+		LoadingLastPhase = Menu->GetLoadingPhase();
+		const int32 Total = TerrainTotal + RoadTotal;
+		Target = LoadingLastPhase == 0 ? 0.8f * (Total > 0 ? float(TerrainReady + RoadReady) / Total : 0.0f)
+			: LoadingLastPhase == 1 ? 0.85f : 0.95f;
+		Status = LoadingLastPhase == 0 ? TEXT("Building terrain and roads")
+			: LoadingLastPhase == 1 ? TEXT("Placing buildings") : TEXT("Streaming textures");
+	}
+	const float Dt = FMath::Min((float)FApp::GetDeltaTime(), 0.1f);
+	LoadingBarFrac = FMath::Max(LoadingBarFrac, FMath::Lerp(LoadingBarFrac, Target, 1.0f - FMath::Exp(-Dt / 0.3f)));
+
+	const float In = Veil < 1.0f ? 1.0f : FMath::SmoothStep(0.0f, 0.4f, float(Now - LoadingShownAt));
+	const float A = In * Veil * Veil;   // text leaves a little ahead of the backdrop
+	const float CX = Canvas->SizeX * 0.5f;
+	const float CY = Canvas->SizeY * 0.5f;
+	P.Text(TEXT("LOADING WORLD"), CX, CY - 24.0f * S, 40.0f, EMenuWeight::Bold, FLinearColor(1, 1, 1, A), true, 200);
+	const float BarW = 360.0f * S;
+	P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW, 3.0f * S, FLinearColor(1, 1, 1, 0.12f * A));
+	P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW * LoadingBarFrac, 3.0f * S, FLinearColor(Accent.R, Accent.G, Accent.B, A));
+	P.Text(Status.ToUpper(), CX, CY + 46.0f * S, 16.0f, EMenuWeight::SemiBold,
+		FLinearColor(DimCol.R, DimCol.G, DimCol.B, A), true, 120);
+}
+
 void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 	const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const
 {
@@ -1290,22 +1382,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	// around it, while a fresh area's road/terrain tiles are still streaming.
 	if (Menu->IsLoading())
 	{
-		P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(Ink.R, Ink.G, Ink.B, 1.0f));
-		const float CX = Canvas->SizeX * 0.5f;
-		const float CY = Canvas->SizeY * 0.5f;
-		P.Text(TEXT("LOADING WORLD"), CX, CY - 24.0f * S, 40.0f, EMenuWeight::Bold, FLinearColor::White, true, 200);
-
-		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
-		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
-		const float BarW = 360.0f * S;
-		P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW, 3.0f * S, FLinearColor(1, 1, 1, 0.12f));
-		if (TerrainTotal + RoadTotal > 0)
-		{
-			const float Frac = float(TerrainReady + RoadReady) / float(TerrainTotal + RoadTotal);
-			P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW * FMath::Clamp(Frac, 0.0f, 1.0f), 3.0f * S, Accent);
-			P.Text(FString::Printf(TEXT("Terrain %d/%d  ·  Roads %d/%d"), TerrainReady, TerrainTotal, RoadReady, RoadTotal),
-				CX, CY + 46.0f * S, 18.0f, EMenuWeight::Medium, DimCol, true);
-		}
+		DrawLoadingScreen(Menu, 1.0f);
 		return;
 	}
 
@@ -1363,13 +1440,10 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	}
 
 	// ---- map select (QA hook only): full route + clickable town nodes ----
-	UFont* Font = GEngine->GetLargeFont();
 	P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(0, 0, 0, 0.55f));
 	auto Text = [&](const FString& Str, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
+		HudText(Canvas, Str, X, Y, Sc, C);
 	};
 	const float FullSize = FMath::Min(Canvas->SizeY - 170.0f, Canvas->SizeX * 0.6f);
 	const float PanelX = (Canvas->SizeX - FullSize) * 0.5f;
@@ -1582,12 +1656,9 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		CloseWorldMap();
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
+		HudText(Canvas, S, X, Y, Sc, C);
 	};
 
 	// square panel covering the whole screen, centered - DrawStageMap's
@@ -1875,54 +1946,53 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	{
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
-	const float W = 380.0f, H = 76.0f;
-	const float X = Canvas->SizeX * 0.5f - W * 0.5f, Y = 18.0f;
-	FCanvasTileItem Bg(FVector2D(X, Y), FVector2D(W, H), FLinearColor(0.02f, 0.03f, 0.05f, 0.72f));
-	Bg.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Bg);
-	auto Text = [&](const FString& S, float TX, float TY, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
+	// (2026-10-14) restyled to the gauge cluster's look: Rajdhani, ink panel
+	// with a route-coloured edge bar, scaled from 1080p like the menus
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float W = 440.0f * S, H = 80.0f * S;
+	const float X = Canvas->SizeX * 0.5f - W * 0.5f, Y = 22.0f * S;
+	const FLinearColor RouteCol(1.0f, 0.55f, 0.9f);   // the map's route line
+	P.Fade(X, X + W, Y, H, Ink, 0.78f, 0.5f);
 	if (!RoadMgr->HasRoute())
 	{
-		Text(FString::Printf(TEXT("ARRIVED  ·  %s"), *RoadMgr->GetArrivedName()), X + 20.0f, Y + 22.0f, 1.5f,
-			FLinearColor(0.4f, 1.0f, 0.5f));
+		const FLinearColor Ok(0.4f, 1.0f, 0.5f);
+		P.Rect(X, Y, 4.0f * S, H, Ok);
+		P.Text(TEXT("ARRIVED"), X + 24.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, Ok, false, 80);
+		P.Text(RoadMgr->GetArrivedName(), X + 24.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, TextCol);
 		return;
 	}
+	P.Rect(X, Y, 4.0f * S, H, RouteCol);
 
 	// turn arrow: stem up from the bottom, then bent by the turn angle
 	// (+ = right = clockwise on screen); straight when no turn is coming
 	float TurnCm = 0.0f, TurnDeg = 0.0f;
 	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg);
 	const float A = FMath::DegreesToRadians(bTurn ? FMath::Clamp(TurnDeg, -135.0f, 135.0f) : 0.0f);
-	const FVector2D Knee(X + 38.0f, Y + 36.0f);
+	const FVector2D Knee(X + 48.0f * S, Y + 40.0f * S);
 	const FVector2D Dir(FMath::Sin(A), -FMath::Cos(A));
-	const FVector2D Tip = Knee + Dir * 20.0f;
+	const FVector2D Tip = Knee + Dir * 14.0f * S;
 	const FVector2D Side(-Dir.Y, Dir.X);
-	const FLinearColor ArrowCol(1.0f, 0.55f, 0.9f);
-	const FVector2D Lines[4][2] = {
-		{Knee + FVector2D(0, 26.0f), Knee}, {Knee, Tip},
-		{Tip, Tip - Dir * 9.0f + Side * 7.0f}, {Tip, Tip - Dir * 9.0f - Side * 7.0f}};
-	for (const auto& L : Lines)
+	auto Stroke = [&](const FVector2D& From, const FVector2D& To)
 	{
-		FCanvasLineItem Item(L[0], L[1]);
-		Item.SetColor(ArrowCol);
-		Item.LineThickness = 4.0f;
+		FCanvasLineItem Item(From, To);
+		Item.SetColor(RouteCol);
+		Item.LineThickness = 5.0f * S;
 		Canvas->DrawItem(Item);
-	}
+	};
+	Stroke(Knee + FVector2D(0, 26.0f * S), Knee);
+	Stroke(Knee, Tip);
+	const FVector2D Head[3] = {Tip + Dir * 12.0f * S, Tip + Side * 10.0f * S, Tip - Side * 10.0f * S};
+	ODHudDraw::Poly(Canvas, Head, RouteCol);
 
 	const float Abs = FMath::Abs(TurnDeg);
 	const TCHAR* Side2 = TurnDeg > 0.0f ? TEXT("right") : TEXT("left");
 	const FString Line1 = !bTurn ? FString(TEXT("Continue"))
 		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
 			Side2, *FormatNavDist(TurnCm, bMetric));
-	Text(Line1, X + 80.0f, Y + 10.0f, 1.5f, FLinearColor::White);
-	Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
-		X + 80.0f, Y + 44.0f, 1.05f, FLinearColor(1.0f, 0.7f, 0.92f));
+	P.Text(Line1.ToUpper(), X + 92.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
+	P.Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
+		X + 92.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol);
 }
 
 void AODRaceHUD::DrawHUD()
@@ -1933,6 +2003,41 @@ void AODRaceHUD::DrawHUD()
 		return;
 	}
 	MenuHits.Reset();   // refilled by whichever menu draws this frame
+
+	// loading-screen fade-out (2026-10-14): once AODMainMenu releases to
+	// Playing, a fading copy of the loading screen draws over everything else
+	// this frame (scope exit = last), over LoadingFadeSec of real time
+	if (LoadingShownAt >= 0.0)
+	{
+		const AODMainMenu* LoadMenu = nullptr;
+		for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
+		{
+			LoadMenu = *It;
+			break;
+		}
+		if (!LoadMenu || !LoadMenu->IsActive())
+		{
+			LoadingShownAt = -1.0;
+			LoadingEndedAt = FPlatformTime::Seconds();
+		}
+		else if (!LoadMenu->IsLoading())
+		{
+			LoadingShownAt = -1.0;   // back to a menu screen: no fade over it
+		}
+	}
+	ON_SCOPE_EXIT
+	{
+		constexpr float LoadingFadeSec = 0.7f;
+		const float T = LoadingEndedAt < 0.0 ? 1.0f : float(FPlatformTime::Seconds() - LoadingEndedAt) / LoadingFadeSec;
+		if (T < 1.0f)
+		{
+			DrawLoadingScreen(nullptr, 1.0f - FMath::SmoothStep(0.0f, 1.0f, T));
+		}
+		else
+		{
+			LoadingEndedAt = -1.0;
+		}
+	};
 
 	// AODRaceManager only exists on stages with a race/checkpoint framework
 	// (Tail of the Dragon) - nullptr on free-roam/open-world levels. Used to
@@ -2030,8 +2135,6 @@ void AODRaceHUD::DrawHUD()
 		return R.IsEmpty() ? C : R;
 	}();
 
-	UFont* Font = GEngine->GetLargeFont();
-
 	// draws PlaceLabelText just above the mini-map's top edge (the pause
 	// map draws its own in the menu font); no-ops on an empty
 	// label (RoadMgr missing, prefix unset, or no nearby label point yet).
@@ -2041,11 +2144,10 @@ void AODRaceHUD::DrawHUD()
 		{
 			return;
 		}
-		const float LS = MenuScale();
-		FCanvasTextItem LabelItem(FVector2D(PanelX, PanelTopY - 34.0f * LS),
-			FText::FromString(PlaceLabelText.ToUpper()), MenuFont(EMenuWeight::SemiBold, 17.0f * LS), TextCol);
-		LabelItem.EnableShadow(FLinearColor(0, 0, 0, 0.6f), FVector2D(LS, LS));
-		Canvas->DrawItem(LabelItem);
+		// via FMenuPaint (2026-10-14): a bare MenuFont text item has no UFont,
+		// fails HasValidText() and silently never drew
+		const FMenuPaint P{Canvas, MenuScale()};
+		P.Text(PlaceLabelText.ToUpper(), PanelX, PanelTopY - 22.0f * P.S, 17.0f, EMenuWeight::SemiBold, TextCol, false, 60);
 	};
 
 	// ---- pause menu (AODPauseMenu owns state): the shared left column, the
@@ -2090,53 +2192,60 @@ void AODRaceHUD::DrawHUD()
 
 	const float Now = GetWorld()->GetTimeSeconds();
 
+	// race timer, warnings (2026-10-14): Rajdhani + the cluster palette,
+	// centred and scaled from 1080p like the menus
+	const FMenuPaint HP{Canvas, MenuScale()};
+	const FLinearColor Go(0.3f, 1.0f, 0.4f);
+
 	// ---- race timer / gate progress (needs an actual race)
 	if (Race)
 	{
-		const float X = Canvas->SizeX * 0.5f - 90.0f;
-		float Y = 30.0f;
-
-		auto Line = [&](const FString& Text, const FLinearColor& Color, float Scale)
+		const float X = Canvas->SizeX * 0.5f;
+		float Y = 30.0f * HP.S;
+		auto Line = [&](const FString& Text, const FLinearColor& Color, float Size, EMenuWeight W, int32 Spacing)
 		{
-			FCanvasTextItem Item(FVector2D(X, Y), FText::FromString(Text), CrispFont(Font, Scale), Color);
-			Item.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Item);
-			Y += 26.0f * Scale;
+			HP.Text(Text, X, Y + Size * 0.6f * HP.S, Size, W, Color, true, Spacing);
+			Y += Size * 1.2f * HP.S;
 		};
 
 		if (Race->bRunning)
 		{
-			Line(FormatTime(Race->ElapsedTime()), FLinearColor::White, 2.0f);
-			Line(FString::Printf(TEXT("gate %d / %d"), Race->NextGate,
-				Race->Checkpoints.Num()), FLinearColor(1, 1, 0.3f), 1.2f);
+			Line(FormatTime(Race->ElapsedTime()), FLinearColor::White, 46.0f, EMenuWeight::Bold, 40);
+			Line(FString::Printf(TEXT("GATE %d / %d"), Race->NextGate, Race->Checkpoints.Num()),
+				Accent, 18.0f, EMenuWeight::SemiBold, 120);
 			if (Race->ElapsedTime() < 1.5f)
 			{
-				Line(TEXT("GO!"), FLinearColor(0.3f, 1, 0.3f), 2.4f);
+				Line(TEXT("GO!"), Go, 52.0f, EMenuWeight::Bold, 80);
 			}
 			else if (Now - Race->SplitShownAt < 3.0f)
 			{
 				// sector split vs best run: green = ahead, red = behind
-				const bool bAhead = Race->SplitDelta <= 0.0f;
-				Line(FString::Printf(TEXT("%+.2f"), Race->SplitDelta),
-					bAhead ? FLinearColor(0.3f, 1, 0.3f) : FLinearColor(1, 0.35f, 0.3f),
-					1.6f);
+				Line(FString::Printf(TEXT("%+.2f"), Race->SplitDelta), Race->SplitDelta <= 0.0f ? Go : Danger,
+					30.0f, EMenuWeight::Bold, 40);
 			}
 		}
 		else
 		{
-			Line(TEXT("cross the green gate to start"), FLinearColor(0.4f, 1, 0.4f), 1.2f);
+			Line(TEXT("CROSS THE GREEN GATE TO START"), Go, 20.0f, EMenuWeight::SemiBold, 80);
 			if (Race->LastTime > 0.0f)
 			{
-				Line(FString::Printf(TEXT("last  %s"), *FormatTime(Race->LastTime)),
-					FLinearColor::White, 1.2f);
+				Line(FString::Printf(TEXT("LAST  %s"), *FormatTime(Race->LastTime)), TextCol, 20.0f, EMenuWeight::SemiBold, 60);
 			}
 		}
 		if (Race->BestTime > 0.0f)
 		{
-			Line(FString::Printf(TEXT("best  %s"), *FormatTime(Race->BestTime)),
-				FLinearColor(0.5f, 0.8f, 1), 1.2f);
+			Line(FString::Printf(TEXT("BEST  %s"), *FormatTime(Race->BestTime)), Accent, 20.0f, EMenuWeight::SemiBold, 60);
 		}
 	}
+
+	// centred warning line on a soft ink band that fades out to both sides
+	auto Banner = [&](const FString& Text, float CY, const FLinearColor& Col)
+	{
+		const float CX = Canvas->SizeX * 0.5f, HW = 460.0f * HP.S, BH = 64.0f * HP.S;
+		HP.Fade(CX - HW, CX, CY - BH * 0.5f, BH, Ink, 0.0f, 0.6f);
+		HP.Fade(CX, CX + HW, CY - BH * 0.5f, BH, Ink, 0.6f, 0.0f);
+		HP.Text(Text.ToUpper(), CX, CY, 36.0f, EMenuWeight::Bold, Col, true, 80);
+	};
 
 	// ---- out-of-bounds countdown (2026-09-06) - warns while the car is past
 	// AODVehiclePawn::OobDistCm, before the reset teleports it back. Centered
@@ -2146,15 +2255,8 @@ void AODRaceHUD::DrawHUD()
 		const float Cd = Veh->GetOobCountdownSec();
 		if (Cd >= 0.0f)
 		{
-			FCanvasTextItem WarnText(
-				FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.28f),
-				FText::FromString(FString::Printf(
-					TEXT("%s - RETURNING IN %.0f"),
-					Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
-					FMath::CeilToFloat(Cd))),
-				CrispFont(Font, 2.2f), FLinearColor(1.0f, 0.35f, 0.2f));
-			WarnText.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(WarnText);
+			Banner(FString::Printf(TEXT("%s  ·  RETURNING IN %.0f"), Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
+				FMath::CeilToFloat(Cd)), Canvas->SizeY * 0.28f, Danger);
 		}
 	}
 
@@ -2165,10 +2267,7 @@ void AODRaceHUD::DrawHUD()
 	{
 		if (Now - It->WarningShownAt < 6.0f)
 		{
-			FCanvasTextItem WarnText(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
-				FText::FromString(It->WarningText), CrispFont(Font, 2.0f), FLinearColor(1.0f, 0.8f, 0.2f));
-			WarnText.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(WarnText);
+			Banner(It->WarningText, Canvas->SizeY * 0.18f, Warn);
 		}
 		break;
 	}

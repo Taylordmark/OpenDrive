@@ -189,5 +189,15 @@ private:
 	FVector2D LastMenuMouse = FVector2D::ZeroVector;
 	uint64 LastMenuMouseFrame = 0;
 	mutable int32 MenuScrollTop = 0;   // DrawMenuPanel: first visible row of a list too tall for the screen (2026-10-14)
+	mutable int32 RebindScrollTop = 0; // DrawRebindPanel's own (2026-10-14)
+
+	/** Loading screen (2026-10-14): opaque backdrop at once, its text fades in,
+	 *  the bar eases monotonically; once AODMainMenu releases, the whole screen
+	 *  fades out over the first frames of play (Veil < 1, drawn last). Real time. */
+	void DrawLoadingScreen(const AODMainMenu* Menu, float Veil) const;
+	mutable double LoadingShownAt = -1.0;   // real seconds the screen came up, -1 = not up
+	mutable double LoadingEndedAt = -1.0;   // real seconds it was released, -1 = no fade running
+	mutable float LoadingBarFrac = 0.0f;
+	mutable int32 LoadingLastPhase = 0;
 	bool bGlobeDrag = false;   // World screen: a mouse drag is spinning the globe
 };
