@@ -222,16 +222,30 @@ how traffic reacts to the player.
 ## Phase 6 — Wet weather (small–medium)
 
 1. A global wetness parameter (already used for the road) also drives the
-   terrain and foliage materials (darker, glossier).
+   terrain and foliage materials (darker, glossier). **Done (2026-10-09):**
+   `AODSeasonController::PushParamsToMIDs` pushes `Wetness` to the ground,
+   `M_Foliage` and the bark MIDs.
 2. Puddles: a deterministic noise mask × the road profile's sags (low
-   points between stations), only when wetness > 0.6.
-3. Rain streaks follow the car's velocity.
+   points between stations), only when wetness > 0.6. **Done (2026-10-09):**
+   per-vertex sag in UV3.x (`RoadSagCm`), pooled by `M_Road`'s puddle term.
+   `check_puddle_sag.py` also mirrors the mask (2026-10-14): none at
+   wetness ≤ 0.6, growing with wetness and sag. On Summit, 8.5% of stations
+   reach full sag.
+3. Rain streaks follow the car's velocity. **Done (2026-10-14):** the
+   streak slant uses the pawn's velocity (fixed 120 Hz physics) instead of
+   the per-frame camera delta.
 4. Lightning: a bolt mesh/flash plus a cloud flash, timed to the existing
-   thunder.
+   thunder. **Done (2026-10-09; timing 2026-10-14):** jagged bolt ISM plus
+   a flash directional light at atmosphere index 1. The strike keeps its
+   countdown overshoot, so the strike and thunder instants don't depend on
+   fps. The flash shows the envelope's mean over each frame, so every
+   frame rate gets the same light per strike (`check_lightning.py`).
 5. The Dragon's road gets wetness (it isn't an `AODRoadManager` mesh, so it
-   needs the parameter on its material).
+   needs the parameter on its material). **Done (2026-10-09):** its
+   `M_Road` slots share one MID (`Wetness`, `PuddleAmount` 0, since its
+   OBJ has no UV3).
 
-**Drive check:** a rain → clear cycle on Summit at night.
+**Drive check:** a rain → clear cycle on Summit at night. Not driven yet.
 
 ---
 

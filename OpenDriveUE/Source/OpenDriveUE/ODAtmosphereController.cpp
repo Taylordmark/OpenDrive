@@ -67,6 +67,24 @@ constexpr float BoltWidthPerKm = 1.5f;      // m wide per km away: stays a few p
 constexpr float BoltMinWidthM = 1.0f;
 constexpr float FlashLightScale = 0.15f;    // flash light = day sun x this x Flash (peak 1.5..6)
 constexpr float FlashLightFallbackLux = 10.0f;
+// Double flicker: bright stroke, a dip, a second stroke fading linearly out.
+constexpr float FlashStrokeS = 0.07f;
+constexpr float FlashDipEndS = 0.13f;
+constexpr float FlashDipLevel = 0.15f;
+constexpr float FlashTailLevel = 0.8f;
+
+// Integral of the flash envelope from 0 to T (0 before the strike). Tick
+// shows the envelope's MEAN over the frame, so every frame rate sees the
+// same light per strike and a slow frame can't skip the first stroke
+// (point-sampling did below ~15 fps).
+float FlashIntegral(float T)
+{
+	const float A = FMath::Clamp(T, 0.0f, FlashStrokeS);
+	const float B = FMath::Clamp(T, FlashStrokeS, FlashDipEndS) - FlashStrokeS;
+	const float Tail = FlashSeconds - FlashDipEndS;
+	const float C = FMath::Clamp(T, FlashDipEndS, FlashSeconds) - FlashDipEndS;
+	return A + FlashDipLevel * B + FlashTailLevel * (C - 0.5f * C * C / Tail);
+}
 
 // Appends N cylinder segments (/Engine/BasicShapes/Cylinder: 100 uu tall,
 // 100 uu across, centred) walking from A along Dir with sideways jitter;
@@ -632,10 +650,13 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 		StrikeCountdown -= DeltaSeconds;
 		if (StrikeCountdown <= 0.0f)
 		{
-			StrikeCountdown = FMath::FRandRange(8.0f, 30.0f);
+			// the strike happened -StrikeCountdown ago, inside this frame: the
+			// flash and the thunder delay both start from that instant
+			const float Late = -StrikeCountdown;
+			StrikeCountdown += FMath::FRandRange(8.0f, 30.0f);
 			const float DistM = FMath::FRandRange(500.0f, 8000.0f);
 			const float Near = 1.0f - (DistM - 500.0f) / 7500.0f;
-			FlashAge = 0.0f;
+			FlashAge = Late;
 			FlashPeak = FMath::Lerp(1.5f, 6.0f, Near);
 			Strike(DistM);
 			if (!AmbientMgr.IsValid())
@@ -644,7 +665,7 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 			}
 			if (AODAmbientSoundManager* Ambient = AmbientMgr.Get())
 			{
-				Ambient->QueueThunder(DistM / 343.0f, FMath::Lerp(0.35f, 1.0f, Near));
+				Ambient->QueueThunder(FMath::Max(DistM / 343.0f - Late, 0.0f), FMath::Lerp(0.35f, 1.0f, Near));
 			}
 			UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: lightning at %.0f m (flash x%.1f, thunder in %.1f s)"),
 				DistM, 1.0f + FlashPeak, DistM / 343.0f);
@@ -655,14 +676,12 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 		StrikeCountdown = 5.0f;   // first strike shortly after the storm builds
 	}
 
-	if (FlashAge < 0.0f || FlashAge > FlashSeconds)
+	// frame window [FlashAge - Dt, FlashAge]; done once it starts past the end
+	if (FlashAge < 0.0f || FlashAge - DeltaSeconds >= FlashSeconds)
 	{
 		FlashAge = -1.0f;
 		return 0.0f;
 	}
-	// Double flicker: bright stroke, a dip, a second stroke fading out.
-	const float Env = FlashAge < 0.07f ? 1.0f
-		: FlashAge < 0.13f ? 0.15f
-		: 0.8f * (1.0f - (FlashAge - 0.13f) / (FlashSeconds - 0.13f));
-	return FlashPeak * Env;
+	const float Dt = FMath::Max(DeltaSeconds, 1.0e-4f);
+	return FlashPeak * (FlashIntegral(FlashAge) - FlashIntegral(FlashAge - Dt)) / Dt;
 }

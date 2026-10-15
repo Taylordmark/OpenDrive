@@ -194,6 +194,6 @@ private:
 	TArray<float> PrecipFxSnowRoll;   // fixed [0,1) per instance: snow if < PrecipType
 	TArray<uint8> PrecipFxIsSnow;     // last custom-data value pushed per instance
 	FVector SnowFxCenter = FVector::ZeroVector;   // box center last tick
-	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (streak relative velocity)
+	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (box re-center + teleport test)
 	bool bSnowFxCentered = false;                 // false = next tick re-centers without shifting flakes
 };

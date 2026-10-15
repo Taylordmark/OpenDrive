@@ -5,6 +5,7 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "GameFramework/Pawn.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -640,7 +641,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 
 	// Weather W2: snow keeps its 260 cm/s fall and drifts at 0.1x wind; rain
 	// falls ~900 cm/s and is pushed at 0.5x wind, drawn as a thin sphere
-	// stretched along its velocity relative to the camera (2026-10-06: so at
+	// stretched along its velocity relative to the car (2026-10-06: so at
 	// speed the streaks lengthen and rake toward the lens - next steps.md
 	// "rain streaks ignore car speed").
 	constexpr float SnowFallCmS = 260.0f;
@@ -672,7 +673,13 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
 	const FVector SnowVel = WindDir * (0.1f * WindCmS) - FVector(0, 0, SnowFallCmS);
 	const FVector RainVel = WindDir * (0.5f * WindCmS) - FVector(0, 0, RainFallCmS);
-	const FVector RainRel = RainVel - CamVel;
+	// Streaks rake along rain velocity relative to the CAR (PLAN-REALISM
+	// Phase 6, 2026-10-14): the body's velocity comes from the fixed 120 Hz
+	// physics step, so the slant no longer jitters with the frame-to-frame
+	// camera delta (chase-cam lag, uneven frame times). No car (menus): the
+	// camera delta, as before.
+	const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0);
+	const FVector RainRel = RainVel - (Car ? Car->GetVelocity() : CamVel);
 	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainRel).ToQuat();
 	const float StreakCm = FMath::Clamp(RainRel.Size() * StreakSeconds, 50.0f, StreakMaxCm);
 	const float SnowType = Weather ? Weather->PrecipType : 1.0f;
