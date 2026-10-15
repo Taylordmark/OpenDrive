@@ -268,7 +268,8 @@ void AODTerrainManager::BeginPlay()
 		LoadGroundBands();
 		if (ODVisualStyle::IsRealistic())
 		{
-			LoadSatAlbedo();
+			SatTex = BindAreaTexture(TEXT("sat"), TEXT("Sat"));
+			PaveTex = BindAreaTexture(TEXT("pave"), TEXT("Pave"));
 		}
 	}
 
@@ -483,40 +484,42 @@ void AODTerrainManager::LoadRoadStationSidecar()
 		NumStations, *Path, *GenId);
 }
 
-void AODTerrainManager::LoadSatAlbedo()
+UTexture2D* AODTerrainManager::BindAreaTexture(const TCHAR* Kind, const TCHAR* Param)
 {
 	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
 	{
-		return;
+		return nullptr;
 	}
-	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/sat_") + TerrainTilePrefix.Mid(8);
+	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/") + Kind + TEXT("_") + TerrainTilePrefix.Mid(8);
 	FString Json;
 	TSharedPtr<FJsonObject> Meta;
 	if (!FFileHelper::LoadFileToString(Json, *ODTileSource::Fetch(Base + TEXT(".json")))
 		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
 	{
-		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no satellite albedo (%s.json) - biome tint only"), *Base);
-		return;
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no %s.json - %sAmount stays 0"), *Base, Param);
+		return nullptr;
 	}
-	SatTex = FImageUtils::ImportFileAsTexture2D(ODTileSource::Fetch(Base + TEXT(".png")));
-	if (!SatTex)
+	UTexture2D* Tex = FImageUtils::ImportFileAsTexture2D(ODTileSource::Fetch(Base + TEXT(".png")));
+	if (!Tex)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - biome tint only"), *Base);
-		return;
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - %sAmount stays 0"), *Base, Param);
+		return nullptr;
 	}
-	SatTex->SRGB = true;              // RGB = linear albedo, sRGB-encoded
-	SatTex->AddressX = TA_Clamp;      // 0-alpha border = no data outside the extent
-	SatTex->AddressY = TA_Clamp;
-	SatTex->UpdateResource();
+	Tex->SRGB = true;              // linear values, sRGB-encoded (matches the Color sampler)
+	Tex->AddressX = TA_Clamp;      // border texels = no data / no pave outside the extent
+	Tex->AddressY = TA_Clamp;
+	Tex->UpdateResource();
+	const FString P(Param);
 	const FVector Off = GetActorLocation();   // tiles sit at actor-relative positions
-	TerrainMID->SetTextureParameterValue(TEXT("SatTex"), SatTex);
-	TerrainMID->SetDoubleVectorParameterValue(TEXT("SatOrigin"),
+	TerrainMID->SetTextureParameterValue(*(P + TEXT("Tex")), Tex);
+	TerrainMID->SetDoubleVectorParameterValue(*(P + TEXT("Origin")),
 		FVector4(Meta->GetNumberField(TEXT("x_min_cm")) + Off.X, Meta->GetNumberField(TEXT("y_min_cm")) + Off.Y, 0.0, 0.0));
-	TerrainMID->SetVectorParameterValue(TEXT("SatSizeCm"),
+	TerrainMID->SetVectorParameterValue(*(P + TEXT("SizeCm")),
 		FLinearColor(Meta->GetNumberField(TEXT("size_x_cm")), Meta->GetNumberField(TEXT("size_y_cm")), 0.0f, 0.0f));
-	TerrainMID->SetScalarParameterValue(TEXT("SatAmount"), 1.0f);
-	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: satellite albedo %dx%d bound (%s)"),
-		SatTex->GetSizeX(), SatTex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
+	TerrainMID->SetScalarParameterValue(*(P + TEXT("Amount")), 1.0f);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: %s %dx%d bound (%s)"),
+		*Base, Tex->GetSizeX(), Tex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
+	return Tex;
 }
 
 void AODTerrainManager::LoadGroundBands()

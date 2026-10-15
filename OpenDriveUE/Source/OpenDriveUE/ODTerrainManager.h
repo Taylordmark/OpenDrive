@@ -502,10 +502,15 @@ private:
 	 *  build_sat_albedo.py), bound once on TerrainMID as SatTex/SatOrigin/
 	 *  SatSizeCm and SatAmount = 1. One texture over the baked extent, so
 	 *  tile borders are seamless; missing files leave SatAmount at its 0
-	 *  default = the old look. */
-	void LoadSatAlbedo();
+	 *  default = the old look.
+	 *  Realism eval T6: same contract for pave_<area>_test.* (pipeline/
+	 *  build_pave_mask.py) -> PaveTex/PaveOrigin/PaveSizeCm/PaveAmount, the
+	 *  material's paved-ground layer. Returns the bound texture or null. */
+	UTexture2D* BindAreaTexture(const TCHAR* Kind, const TCHAR* Param);
 	UPROPERTY()
 	TObjectPtr<UTexture2D> SatTex;
+	UPROPERTY()
+	TObjectPtr<UTexture2D> PaveTex;
 
 	void RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity);
 	void OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed);

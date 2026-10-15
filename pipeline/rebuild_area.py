@@ -193,6 +193,7 @@ STAGES = [
     (f"fetch_climate.py {AREA_NAME}_test", "fetch climate normals + storm weights -> climate_*.json"),
     ("build_ground_bands.py", "per-area ground bands (treeline/snow/sea) -> groundbands_*.json"),
     ("build_sat_albedo.py", "Sentinel-2 ground albedo over the near tiles -> sat_*.png/json (Realistic)"),
+    ("build_pave_mask.py", "OSM lots/plazas + WorldCover built-up -> pave_*.png/json (Realistic paved ground)"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
     ("build_far_forest.py", "WorldCover canopy cards + town street trees -> farforest_*.bin"),

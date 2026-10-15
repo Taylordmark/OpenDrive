@@ -175,6 +175,13 @@ SAT_STEEP_REF_LUMA = 0.05    # ... and on steep (rock) ground - both fitted by c
 SAT_VALUE_EXP = 0.6      # softens the luminance ratio (imagery also carries hill shading)
 SAT_VALUE_CLAMP = (0.6, 1.6)
 SAT_CHROMA_CLAMP = (0.5, 2.0)
+# paved ground (T6, pave_layer)
+PAVE_SET = "Concrete034"     # /Game/OpenDrive/Textures/Road (import_road_textures.py)
+PAVE_TILE_CM = 300.0
+PAVE_TINT = (0.63, 0.62, 0.60)        # Concrete034 (albedo 0.48) -> weathered concrete ~0.30 ...
+PAVE_ASPHALT_MUL = (0.27, 0.27, 0.28)  # ... to old asphalt ~0.13 (parking lots), by grime noise
+PAVE_GRIME_CM = 4000.0
+PAVE_FLAT_GAIN = 2.0         # flat_w is a soft power curve; slopes > ~45 deg stay ground
 
 # boulders (M_Rock030_real) - world-space triplanar, so the spherical UV0
 # seam of make_rock_meshes.py's boulders disappears
@@ -670,6 +677,7 @@ def build_ground():
     base["rough"] = g.lerp(base["rough"], g.c(SAND_ROUGHNESS), sand)
 
     base["albedo"] = sat_macro(g, base["albedo"], xy, depth, vtint, flat_w)
+    base = pave_layer(g, base, xy, var_w, dist_t, flat_w)
 
     # wetness: soil darkens and soaks it up (more in crevices), rock gets slick
     wet = g.scalar_param("Wetness", 0.0)
@@ -719,6 +727,36 @@ def sat_macro(g, albedo, xy, depth, vtint, flat_w):
     w = g.mul(g.mul(g.scalar_param("SatAmount", 0.0), g.c(SAT_STRENGTH)), g.mask(tex, r=True, a_out="A"))
     w = g.mul(w, g.lerp(g.c(SAT_NEAR_W), g.c(1.0), g.ramp(depth, SAT_NEAR_CM, SAT_FAR_CM)))
     return g.mul(albedo, g.lerp(g.c(1.0), g.mul(chroma, value), w))
+
+
+def pave_layer(g, base, xy, var_w, dist_t, flat_w):
+    """Realism eval T6: paved ground (lots, plazas, built-up blocks) from
+    pipeline/build_pave_mask.py -> AODTerrainManager PaveTex/PaveOrigin/
+    PaveSizeCm/PaveAmount (same extent contract as SatTex; grey = weight,
+    sRGB-encoded). Concrete034 (the road/bridge set, CC0) with noise between
+    light concrete and dark weathered asphalt; flat ground only. PaveAmount
+    0 by default = no pave (walls, areas without a mask). After sat_macro:
+    the satellite's colour would only smear grass hues onto the slab."""
+    white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
+    origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="PaveOrigin")
+    size = g.node(unreal.MaterialExpressionVectorParameter, parameter_name="PaveSizeCm",
+                  default_value=unreal.LinearColor(1.0, 1.0, 0.0, 0.0))
+    uv = g.div(g.sub(xy, g.mask(origin, r=True, gg=True)), g.mask(size, r=True, gg=True))
+    tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name="PaveTex", texture=white,
+                 sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
+    G.req(any(MEL.connect_material_expressions(uv, "", tex, p) for p in ("UVs", "Coordinates")), "PaveTex UV")
+    w = g.mul(g.mul(g.scalar_param("PaveAmount", 0.0), g.mask(tex, r=True, a_out="RGB")),
+              g.sat(g.mul(flat_w, g.c(PAVE_FLAT_GAIN))))
+    cdir = f"/Game/OpenDrive/Textures/Road/{PAVE_SET}"
+    s = {k: unreal.load_asset(f"{cdir}/T_{PAVE_SET}_{k}") for k in ("A", "N", "R")}
+    if None in s.values():
+        raise RuntimeError(f"{PAVE_SET} missing under {cdir} - run unreal/import_road_textures.py first")
+    s["AO"] = s["R"]      # no AO map in this set; the layer's ao is replaced below
+    pave = planar_layer(g, s, xy, var_w, dist_t, PAVE_TILE_CM)
+    grime = g.contrast(g.noise_xy(xy, PAVE_GRIME_CM, (43.0, 19.0)), 1.6)
+    pave["albedo"] = g.mul(pave["albedo"], g.lerp(g.c3(*PAVE_TINT), g.c3(*PAVE_ASPHALT_MUL), grime))
+    pave["ao"] = g.c(1.0)
+    return blend_layers(g, base, pave, w)
 
 
 def road_edge_blend(g, base, xy, flat_w, dirt):
