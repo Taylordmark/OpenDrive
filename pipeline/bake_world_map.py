@@ -1,6 +1,6 @@
 """World map for the front-end (2026-10-13): Open Drive / Track Select start
-on a three.js globe of every area (Content/OpenDrive/WorldMap/index.html, fed
-this file by AODMainMenu), clicking one zooms into it.
+on a globe of every area (AODMenuGlobe, in-engine since 2026-10-14; fed
+this file by AODMainMenu), picking one zooms into it.
 
 Usage:  python pipeline/bake_world_map.py
 Reads   data/raw/ne_10m_coastline.geojson (fetch_climate.py downloads it),
@@ -72,6 +72,17 @@ def read_towns(path):
     return [[k, round(a[0] / a[2]), round(a[1] / a[2])] for k, a in sorted(acc.items())]
 
 
+def rank(key):
+    """Identical-bbox tie-break: the earlier AREAS entry wins (far_gasquet, the
+    real-location world member, over near_gasquet, its centred control)."""
+    return list(AREAS).index(key)
+
+
+def inside(a, b):
+    """bbox_snwe a lies within b."""
+    return a[0] >= b[0] and a[1] >= b[1] and a[2] <= b[2] and a[3] <= b[3]
+
+
 def main():
     areas = {}
     for key, cfg in AREAS.items():
@@ -79,6 +90,12 @@ def main():
         lab = MASKS / f"labels_{key}_test.bin"
         areas[key] = {"ll": [round((w + e) / 2, 4), round((s + n) / 2, 4)],
                       "towns": read_towns(lab) if lab.exists() else []}
+        # (2026-10-14) a dev/test variant inside another area's bbox (gv_west/gv_east
+        # halves of green_valley, near_gasquet = far_gasquet's control) gets no globe pin
+        if any(o != key and inside(cfg["bbox_snwe"], c["bbox_snwe"]) and
+               (not inside(c["bbox_snwe"], cfg["bbox_snwe"]) or rank(o) < rank(key))
+               for o, c in AREAS.items()):
+            areas[key]["hidden"] = True
     out = {"coast": lines("ne_10m_coastline"),
            "borders": lines("ne_50m_admin_0_boundary_lines_land"),
            "states": lines("ne_50m_admin_1_states_provinces_lines"),

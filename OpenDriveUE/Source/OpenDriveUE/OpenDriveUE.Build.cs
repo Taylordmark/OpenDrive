@@ -27,9 +27,6 @@ public class OpenDriveUE : ModuleRules
 			// FSlateFontInfo / GWhiteTexture - menu panel text at real pixel
 			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
 			"SlateCore",
-			// SWebBrowser (CEF) - the Open Drive / Track Select globe, Content/OpenDrive/WorldMap
-			"Slate",
-			"WebBrowser",
 			"RenderCore",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
 			"Json",

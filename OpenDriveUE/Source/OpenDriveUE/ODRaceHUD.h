@@ -146,17 +146,22 @@ private:
 
 	/** Front-end menu (AODMainMenu): the current screen's panel, the loading
 	 *  overlay, or the QA town map. Takes over the whole screen when the menu is active - drawn
-	 *  instead of the in-game HUD, not on top of it. */
+	 *  instead of the in-game HUD, not on top of it. DrawAreaMap is the AreaMap
+	 *  screen's roads + start dots over the globe drape, DrawGlobePins the World screen's overlay (2026-10-14). */
 	void DrawAreaMap(const AODMainMenu* Menu) const;
+	void DrawGlobePins(const AODMainMenu* Menu) const;
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
 
 	// ---- menus (2026-10-09 redesign, see the comment above DrawMenuPanel in the .cpp)
 	/** One menu column: title, tab strip (when >1 tab), the active tab's rows
 	 *  (value between clickable arrows, % values as sliders) and the footer
-	 *  button. bRight mirrors it to the right edge (Scene vista). */
+	 *  button. bRight mirrors it to the right edge (Scene vista). Sub: a dim
+	 *  line under the title. Rows past the screen height scroll (MenuScrollTop)
+	 *  to keep Selected in view (2026-10-14). */
 	void DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
-		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight) const;
+		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight,
+		const FString& Sub = FString()) const;
 	/** Settings, or its Key Bindings / Credits sub-screen - drawn INSTEAD of
 	 *  the parent menu's panel, never stacked on it. */
 	void DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const;
@@ -164,18 +169,22 @@ private:
 	void DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const;
 	/** The one dim layer plus the dark edge gradient the column sits on. */
 	void DrawMenuBackdrop(float Dim, bool bRight) const;
-	/** Title + tab strip; returns the Y the rows start at. */
-	float DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X) const;
+	/** Title (+ Sub line) + tab strip; returns the Y the rows start at. */
+	float DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X,
+		const FString& Sub = FString()) const;
 	void DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float X, float Y, float W) const;
 	void AddMenuHit(FODMenuHit::EKind Kind, int32 Id, int32 Col, float X, float Y, float W, float H) const;
 	float MenuScale() const;                  // Canvas height / 1080
 	float MenuX(bool bRight, float W) const;  // column left edge
 	/** Hover selects, click activates / changes / switches tab, right-click
-	 *  backs out, wheel moves - against this frame's MenuHits. */
+	 *  backs out, wheel moves - against this frame's MenuHits. World screen:
+	 *  pin hover/pick, drag spins and wheel zooms the globe instead. */
 	void HandleMenuMouse(AODMainMenu* Menu);
 	void HandleMenuMouse(AODPauseMenu* Menu);
 
 	mutable TArray<FODMenuHit> MenuHits;
 	FVector2D LastMenuMouse = FVector2D::ZeroVector;
 	uint64 LastMenuMouseFrame = 0;
+	mutable int32 MenuScrollTop = 0;   // DrawMenuPanel: first visible row of a list too tall for the screen (2026-10-14)
+	bool bGlobeDrag = false;   // World screen: a mouse drag is spinning the globe
 };

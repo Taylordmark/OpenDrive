@@ -2,7 +2,9 @@
 area -> Content/OpenDrive/Masks/menu_spots.json, merged per area:
 
     {"summit_county": {"car_cm": [x, y, z], "car_yaw_deg": .., "view_yaw_deg": ..,
-                       "source": "auto" | "override"}, ...}
+                       "source": "auto" | "override",
+                       "starts": {"<town>": {"car_cm": [x, y, z], "car_yaw_deg": ..}}}, ...}
+    ("starts", 2026-10-14: town_starts below)
 
 UE cm in the area's own frame, as the baked tiles: X = east*100,
 Y = -north*100, Z = (road surface - ORIGIN_HEIGHT_M)*100. Yaws are UE yaw
@@ -38,7 +40,8 @@ the junction-pad XY snap - verify_road_fit._shipped_stations):
 Usage:  python build_menu_spots.py              (active area, OD_AREA)
         python build_menu_spots.py --all        (every area whose bake is complete)
         python build_menu_spots.py gv_east ...  (those areas)
-        add --png DIR for a top-down sanity plot per area.
+        add --png DIR for a top-down sanity plot per area,
+        --starts to only refresh each area's "starts" (town_starts) and keep its spot.
 """
 import json
 import os
@@ -303,6 +306,35 @@ def pick(st, h, bldg):
     return int(ci[b]), car_heading(rh[b], vh[b]), float(vh[b]), {k: v[b] for k, v in s.items()}, "auto"
 
 
+def town_starts(st):
+    """(2026-10-14) Area-screen starts: each town of labels_<area>_test.bin
+    (bake_world_map.read_towns, the menu's own names and centroids) -> the
+    nearest parkable station (step 1's RELAXED rung, owned, not a motorway),
+    facing along the road. The menu previews the car there and Drive spawns
+    there (AODMainMenu::StartAtTown), so a town centre's junction never is.
+    -> {name: {"car_cm": [x, y, z], "car_yaw_deg": ..}}"""
+    from scipy.spatial import cKDTree
+    from bake_world_map import read_towns
+    lab = MASKS / f"labels_{AREA_NAME}_test.bin"
+    e, n, z = st["e"], st["n"], st["z"]
+    idx = candidates(e, n, z, st["seg"], st["structural"], st["in_box"], *RELAXED)
+    idx = idx[owns(e[idx] * 100.0, -n[idx] * 100.0) & ~st["no_park"][idx]]
+    if not lab.exists() or not len(idx):
+        return {}
+    tree = cKDTree(np.c_[e[idx], n[idx]])
+    w = int(round(WINDOW_M / STATION_SPACING))   # candidates() keeps +-w inside the segment
+    out, far = {}, 0.0
+    for name, x, y in read_towns(lab):
+        d, k = tree.query((x / 100.0, -y / 100.0))
+        i = int(idx[k])
+        far = max(far, d)
+        out[name] = {"car_cm": [round(float(e[i]) * 100.0, 1), round(-float(n[i]) * 100.0, 1),
+                                round((float(z[i]) - ORIGIN_HEIGHT_M) * 100.0, 1)],
+                     "car_yaw_deg": ue_yaw(np.degrees(np.arctan2(e[i + w] - e[i - w], n[i + w] - n[i - w])))}
+    print(f"{len(out)} town start(s), farthest {far:.0f} m from its label centroid")
+    return out
+
+
 def plot(path, st, H, x0, y0, i, car_h, view_h):
     import matplotlib
     matplotlib.use("Agg")
@@ -337,11 +369,17 @@ def plot(path, st, H, x0, y0, i, car_h, view_h):
     plt.close(fig)
 
 
-def run_area(png_dir=None):
+def run_area(png_dir=None, starts_only=False):
     if not bake_complete(AREA_NAME):
         print(f"SKIP {AREA_NAME}: bake incomplete (missing stations/sidecar/terrain, or mixed generations)")
         return
     st = load_stations()
+    if starts_only:   # --starts: refresh the town starts, keep the picked spot
+        spots = json.loads(SPOTS_PATH.read_text()) if SPOTS_PATH.exists() else {}
+        if AREA_NAME in spots:
+            spots[AREA_NAME]["starts"] = town_starts(st)
+            SPOTS_PATH.write_text(json.dumps(spots, indent=1))
+        return
     h, H, x0, y0 = height_grid()
     got = pick(st, h, load_buildings())
     if got is None:
@@ -357,6 +395,7 @@ def run_area(png_dir=None):
     print(f"sea share {sea:.0%}")
     if sea >= SEA_SHARE:
         spots[AREA_NAME]["sea_z_cm"] = round(-ORIGIN_HEIGHT_M * 100.0, 1)
+    spots[AREA_NAME]["starts"] = town_starts(st)
     SPOTS_PATH.write_text(json.dumps(spots, indent=1))
     flags = [k for k in ("void", "blocked", "cliff") if s[k]] + (["buildings"] if s["buildings"] else [])
     print(f"{AREA_NAME}: {source} {st['name'][i]!r} at {st['lat'][i]:.5f}, {st['lon'][i]:.5f} "
@@ -375,13 +414,16 @@ if __name__ == "__main__":
     if "--png" in args:
         k = args.index("--png")
         png, args = args[k + 1], args[:k] + args[k + 2:]
+    starts = "--starts" in args
+    args = [a for a in args if a != "--starts"]
     if args and args != ["--one"]:
         # test_areas is import-time OD_AREA-driven: one subprocess per area
         areas = list(AREAS) if args == ["--all"] else args
         for area in areas:
             if args == ["--all"] and not list(MASKS.glob(f"terrain_{area}_test_tile_*.bin")):
                 continue
-            subprocess.run([sys.executable, __file__, "--one"] + (["--png", png] if png else []),
+            subprocess.run([sys.executable, __file__, "--one"] + (["--png", png] if png else [])
+                           + (["--starts"] if starts else []),
                            env={**os.environ, "OD_AREA": area}, check=True)
     else:
-        run_area(png)
+        run_area(png, starts)

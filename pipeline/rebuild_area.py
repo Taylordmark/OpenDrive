@@ -191,6 +191,8 @@ STAGES = [
     # (2026-10-05, step 3) after the last tile writer: the gates check owned tiles only
     ("prune_unowned_tiles.py", "delete tiles outside the area's owned rect (its halo)"),
     ("build_menu_spots.py", "pick the garage-menu backdrop spot -> menu_spots.json"),
+    # (2026-10-14) Area screen map panel; extent covers centerline_map_*.bin
+    ("bake_area_relief.py", "shaded-relief map backdrop -> relief_<area>.png + relief_<area>.json"),
     ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
     ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
     # (2026-10-05) after the gates: lists every baked world member, this one included

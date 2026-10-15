@@ -7,13 +7,15 @@
 #include "Components/StaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
-#include "Engine/GameViewportClient.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
-#include "Framework/Application/SlateApplication.h"
+#include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "ImageUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Materials/MaterialInterface.h"
@@ -24,15 +26,16 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
-#include "SWebBrowser.h"
 #include "UnrealClient.h"
 
 #include "ODDayNightController.h"
 #include "ODEngineSynth.h"
 #include "ODForestManager.h"
+#include "ODFurnitureManager.h"
 #include "ODGameMode.h"
 #include "ODGarageEnvironment.h"
+#include "ODGuardrailManager.h"
+#include "ODMenuGlobe.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -43,6 +46,7 @@
 #include "ODVehicleDef.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
+#include "ODWaterManager.h"
 #include "ODWeatherController.h"
 
 namespace
@@ -160,14 +164,12 @@ static_assert(UE_ARRAY_COUNT(WeatherNames) == (int32)EODWeatherState::Hurricane 
 const TCHAR* TimeConfigSection = TEXT("OpenDrive.TimeOfDay");
 const TCHAR* WeatherConfigSection = TEXT("OpenDrive.Weather");
 
-// Garage-menu vistas (2026-10-05) - tunables. Each area's copy is shifted so
-// its car spot lands at (VistaBaseXCm + i * VistaSpacingCm, 0): far outside
-// every real area (California is ~1e8 cm across), 200 km apart so no vista's
-// panorama tiles or sea plane reach another's (their Z frames differ - one
-// area's sea plane would flood a high area's terrain). Z stays real (the
-// atmosphere and the season snow line read absolute height).
+// Garage-menu vistas (2026-10-05) - tunables. The vista copy is shifted so
+// its car lands at (VistaBaseXCm, 0): far outside every real area (California
+// is ~1e8 cm across). One set at a time since 2026-10-14 (was one per area,
+// 200 km apart). Z stays real (the atmosphere and the season snow line read
+// absolute height).
 constexpr double VistaBaseXCm = 2.0e8;
-constexpr double VistaSpacingCm = 2.0e7;
 constexpr double VistaFarCm = 100000.0;        // full-detail wedge reach past the car
 // panorama trial: coarse/background terrain tiles in the same wedge out to
 // here (FODVistaRegion::PanoFarCm); 0 = off
@@ -185,6 +187,33 @@ constexpr double VistaCamBackCm = 700.0;
 constexpr double VistaCamSideCm = 250.0;
 constexpr double VistaCamHeightCm = 150.0;     // above the road surface
 constexpr double VistaCamPitchDeg = -4.0;
+// a town/track start's view yaw = its car yaw - this (2026-10-14), so the car
+// stands three-quarter to the camera, nose to screen right, like
+// pipeline/build_menu_spots.py car_heading does for the area's spot
+constexpr float StartViewOffsetDeg = 150.0f;
+
+// World screen (2026-10-14): the in-engine globe (AODMenuGlobe), parked like
+// the showroom - 30 km up, 10 km from it - so no streaming manager reaches it.
+// Altitudes in globe radii and timings are the old globe.gl page's.
+const FVector GlobeLocationCm(0.0, 1.0e6, 3.0e6);
+constexpr double WorldOverviewAlt = 1.7;
+constexpr float WorldShowSec = 0.9f;           // fly out to the overview on (re)entering World
+constexpr float WorldBrowseSec = 0.7f;         // arrows: fly to the next pin at 0.7 x overview
+constexpr double WorldPickAlt = 0.06;          // fly-in altitude for an area without a relief drape
+constexpr float WorldPickSec = 1.8f;           // picked pin: fly down onto the drape, then the AreaMap screen
+constexpr float WorldBlendSec = 0.5f;          // view target blend onto the globe camera
+// AreaMap framing (2026-10-14): the drape fits the screen left of the rows
+// panel (ODRaceHUD: ~62% of a 16:9 screen), its centre shifted into that part
+constexpr double AreaMapAspect = 16.0 / 9.0;   // AODMenuGlobe's FOVs assume 16:9
+constexpr double AreaMapFreeW = 0.6;           // fraction of the screen width the area fits in
+constexpr double AreaMapShiftW = 0.2;          // camera aims this fraction of the width east of the area centre
+constexpr double AreaFitMargin = 1.1;
+constexpr double AreaZoomIn = 0.125, AreaZoomOut = 1.5;   // wheel limits around the framing altitude
+constexpr float AreaTabSec = 1.0f;             // Q/E: fly to the sibling area's drape
+constexpr double StartVistaWaitSec = 6.0;      // Start: the globe stays up at most this long for the vista to stream
+constexpr float StartFadeSec = 0.15f;          // globe <-> vista: fade to black, cut, fade back in (each half)
+constexpr double DriveEaseSec = 1.0;           // Drive here: camera to the chase spot
+constexpr double DriveFadeSec = 0.5;           // Drive elsewhere: fade to black before OpenArea
 
 // Row ids: one global GetRow()/Adjust() switch; each screen's tabs show a slice.
 enum ERow : int32
@@ -194,14 +223,14 @@ enum ERow : int32
 	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
 	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
-	RowPick,                                                             // Area: RowPick + i = Picks[i]
+	RowPick,                                                             // AreaMap: RowPick + i = Picks[i]
 };
 const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // footer Quit
 const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};            // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
-const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // footer Drive
+const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
-// and the Area screen gets a tab per area (green_valley / gv_west / gv_east)
+// and the AreaMap screen gets a tab per area (green_valley / gv_west / gv_east)
 constexpr double ClusterDeg = 0.5;
 
 // same section pattern as Season/Time/Weather; VehicleIdx is read by AODVehiclePawn::BeginPlay
@@ -249,6 +278,7 @@ void AODMainMenu::BeginPlay()
 			AreaNames.RemoveAt(i);
 			AreaKeys.RemoveAt(i);
 			Spots.RemoveAt(i);
+			StartPoses.RemoveAt(i);
 		}
 	}
 	CurrentAreaIdx = AreaLevels.IndexOfByKey(UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName()));
@@ -416,12 +446,6 @@ void AODMainMenu::BeginPlay()
 	OpenMenu();
 }
 
-void AODMainMenu::EndPlay(const EEndPlayReason::Type Reason)
-{
-	HideWeb(true);
-	Super::EndPlay(Reason);
-}
-
 void AODMainMenu::OpenMenu()
 {
 	Stage = EODMenuStage::Menu;
@@ -570,11 +594,57 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		StartAtTown(TownPick);   // opened by Drive: straight to the picked start
 		return;
 	}
-	// a click on the globe focuses the page; hand the keys back to the game
-	// (WebKey forwards them) once the button is up, so a drag isn't cut off
-	if (Web && Web->HasAnyUserFocusOrFocusedDescendants() && FSlateApplication::Get().GetPressedMouseButtons().Num() == 0)
+	const double Now = GetWorld()->GetRealTimeSeconds();
+	if (DriveStart >= 0.0)
 	{
-		FSlateApplication::Get().SetAllUserFocusToGameViewport();
+		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
+		// (the spring arm's end), or let the fade run, then go
+		const float T = float((Now - DriveStart) / (bDriveHere ? DriveEaseSec : DriveFadeSec));
+		AODVehiclePawn* Pawn = FindPawn();
+		UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr;
+		const USpringArmComponent* Arm = Pawn ? Pawn->FindComponentByClass<USpringArmComponent>() : nullptr;
+		if (bDriveHere && Cam && Arm)
+		{
+			FTransform Xf;
+			Xf.Blend(DriveFrom, Arm->GetSocketTransform(USpringArmComponent::SocketName), FMath::SmoothStep(0.0f, 1.0f, T));
+			Cam->SetWorldTransform(Xf);
+		}
+		if (T >= 1.0f)
+		{
+			DriveStart = -1.0;
+			DriveGo();
+		}
+		return;
+	}
+	// World -> AreaMap (2026-10-14): enter once the picked pin's fly-in has
+	// landed on the drape (PickPin already focused its area)
+	if (Screen == EODMenuScreen::World && Globe.IsValid() && !Globe->IsFlying())
+	{
+		if (PickingPin != INDEX_NONE)
+		{
+			PickingPin = INDEX_NONE;
+			EnterArea(AreaIdx);
+		}
+		else
+		{
+			Globe->ClearDrape();   // flown back out (it faded with altitude on the way)
+		}
+	}
+	ClampAreaView();
+	// Start (2026-10-14): the globe holds until the vista has streamed (or the
+	// cap), then fades out, cuts to the vista camera and fades back in
+	if (FadeSwapAt >= 0.0 && Now >= FadeSwapAt)
+	{
+		CutTo(FindPawn());
+	}
+	else if (bGlobeView && FadeSwapAt < 0.0 && Screen == EODMenuScreen::Start
+		&& (IsStartVistaReady() || Now - AreaEnterTime > StartVistaWaitSec))
+	{
+		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0); PC && PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(0.0f, 1.0f, StartFadeSec, FLinearColor::Black, false, true);
+		}
+		FadeSwapAt = Now + StartFadeSec;
 	}
 	UpdateScene();
 }
@@ -664,10 +734,14 @@ void AODMainMenu::EnterCarConfig()
 		{
 			GarageCamXf = Cam->GetComponentTransform();
 		}
-		ShownVista = INDEX_NONE;
-		if (!bAutoStart)
+		ShownVista = INDEX_NONE;   // the start vista spawns on demand (ShowStartVista)
+		// the car sits in the garage room now: freeze the real managers at once
+		// (as SpawnVistas did here), not only when the first vista spawns
+		AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+		if (!bAutoStart && !bVistasSpawned && GM)
 		{
-			SpawnVistas();
+			bVistasSpawned = true;
+			GM->FreezeStreaming(true);
 		}
 	}
 	bEntered = true;
@@ -675,15 +749,17 @@ void AODMainMenu::EnterCarConfig()
 
 // ---- input ---------------------------------------------------------------
 
-bool AODMainMenu::WebKey(const TCHAR* Key)
+bool AODMainMenu::BrowsePin(int32 Dir)
 {
 	if (Stage != EODMenuStage::Menu || Screen != EODMenuScreen::World)
 	{
 		return false;
 	}
-	if (Web && bWebReady)
+	if (const int32 N = Globe.IsValid() ? Globe->GetPins().Num() : 0; N > 0 && PickingPin == INDEX_NONE)
 	{
-		Web->ExecuteJavascript(FString::Printf(TEXT("od.key('%s')"), Key));
+		SetFocusedPin((FocusedPin + Dir + N) % N);
+		const FODGlobePin& P = Globe->GetPins()[FocusedPin];
+		Globe->FlyTo(P.Lat, P.Lng, WorldOverviewAlt * 0.7, WorldBrowseSec);
 	}
 	return true;
 }
@@ -695,7 +771,7 @@ void AODMainMenu::Up()
 		if (SettingsMenu) { SettingsMenu->MoveSelection(-1); }
 		return;
 	}
-	if (WebKey(TEXT("ArrowUp")))
+	if (BrowsePin(-1))
 	{
 		return;
 	}
@@ -712,7 +788,7 @@ void AODMainMenu::Down()
 		if (SettingsMenu) { SettingsMenu->MoveSelection(+1); }
 		return;
 	}
-	if (WebKey(TEXT("ArrowDown")))
+	if (BrowsePin(+1))
 	{
 		return;
 	}
@@ -741,15 +817,15 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 	{
 	case EODMenuScreen::Garage: return GarageTabs;
 	case EODMenuScreen::Sound: return SoundTabs;
-	case EODMenuScreen::Area: return AreaTabs;
-	case EODMenuScreen::Conditions: return ConditionsTabs;
+	case EODMenuScreen::AreaMap: return AreaTabs;
+	case EODMenuScreen::Start: return ConditionsTabs;
 	default: return MainTabs;   // World draws no panel
 	}
 }
 
 int32 AODMainMenu::GetFooterRow() const
 {
-	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Conditions ? RowDrive : RowBack;
+	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Start ? RowDrive : RowBack;
 }
 
 FString AODMainMenu::GetScreenTitle() const
@@ -758,15 +834,16 @@ FString AODMainMenu::GetScreenTitle() const
 	{
 	case EODMenuScreen::Garage: return TEXT("Garage");
 	case EODMenuScreen::Sound: return TEXT("Exhaust Sound");
-	case EODMenuScreen::Area: return bTrackMode ? TEXT("Track Select") : TEXT("Open Drive");
-	case EODMenuScreen::Conditions: return AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : TEXT("Conditions");
+	case EODMenuScreen::World:
+	case EODMenuScreen::AreaMap: return bTrackMode ? TEXT("Track Select") : TEXT("Open Drive");
+	case EODMenuScreen::Start: return AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : TEXT("Conditions");
 	default: return TEXT("OpenDrive");
 	}
 }
 
 int32 AODMainMenu::GetSelectedPick() const
 {
-	return Screen == EODMenuScreen::Area && Picks.IsValidIndex(Selected - RowPick) ? Selected - RowPick : INDEX_NONE;
+	return Screen == EODMenuScreen::AreaMap && Picks.IsValidIndex(Selected - RowPick) ? Selected - RowPick : INDEX_NONE;
 }
 
 void AODMainMenu::SetScreen(EODMenuScreen NewScreen, int32 Row)
@@ -799,9 +876,10 @@ void AODMainMenu::SetTab(int32 Tab)
 	if (Stage == EODMenuStage::Menu && GetTabs().IsValidIndex(Tab))
 	{
 		TabIdx = Tab;
-		if (Screen == EODMenuScreen::Area)
+		if (Screen == EODMenuScreen::AreaMap && Siblings[Tab] != AreaIdx)
 		{
-			FocusArea(Siblings[Tab]);   // tabs are the cluster's areas
+			FocusArea(Siblings[Tab]);   // tabs are the cluster's areas: re-drape and fly there
+			FlyToArea(AreaTabSec);
 		}
 		Selected = GetTabs()[TabIdx].First;
 	}
@@ -814,13 +892,13 @@ void AODMainMenu::Left()
 		Adjust(-1);
 		return;
 	}
-	if (WebKey(TEXT("ArrowLeft")))
+	if (BrowsePin(-1))
 	{
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
 	{
-		Screen == EODMenuScreen::Area ? SwitchTab(-1) : Adjust(-1);
+		Screen == EODMenuScreen::AreaMap ? SwitchTab(-1) : Adjust(-1);
 	}
 }
 
@@ -831,13 +909,13 @@ void AODMainMenu::Right()
 		Adjust(+1);
 		return;
 	}
-	if (WebKey(TEXT("ArrowRight")))
+	if (BrowsePin(+1))
 	{
 		return;
 	}
 	if (Stage == EODMenuStage::Menu)
 	{
-		Screen == EODMenuScreen::Area ? SwitchTab(+1) : Adjust(+1);
+		Screen == EODMenuScreen::AreaMap ? SwitchTab(+1) : Adjust(+1);
 	}
 }
 
@@ -851,11 +929,12 @@ void AODMainMenu::Activate()
 		}
 		return;
 	}
-	if (WebKey(TEXT("Enter")))
+	if (Stage == EODMenuStage::Menu && Screen == EODMenuScreen::World)
 	{
+		PickPin(FocusedPin);
 		return;
 	}
-	if (Stage == EODMenuStage::Menu)
+	if (Stage == EODMenuStage::Menu && DriveStart < 0.0)
 	{
 		switch (Selected)
 		{
@@ -875,13 +954,22 @@ void AODMainMenu::Activate()
 				EQuitPreference::Quit, false);
 			break;
 		case RowBack: Back(); break;
-		case RowDrive: DriveNow(); break;
+		case RowDrive:
+			// not while the globe still waits on the vista (2026-10-14): a double
+			// Enter / A on a pick would skip the Start screen and drive blind
+			if (!IsStartLoading())
+			{
+				DriveNow();
+			}
+			break;
 		default:
 			if (const int32 Pick = GetSelectedPick(); Pick != INDEX_NONE)
 			{
 				TownPick = Picks[Pick].Town;     // one of the two is always empty:
 				TrackPick = Picks[Pick].Track;   // Open Drive is free roam, a track starts at its line
-				SetScreen(EODMenuScreen::Conditions, RowDrive);
+				ShowStartVista(AreaIdx, Pick);   // the globe holds until it streams (Tick)
+				AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // the cap counts from here, reused set or not
+				SetScreen(EODMenuScreen::Start, RowDrive);
 			}
 			else
 			{
@@ -911,7 +999,7 @@ void AODMainMenu::Back()
 		Stage = EODMenuStage::Menu;
 		SetScreen(EODMenuScreen::Main, RowOpenDrive);
 	}
-	else if (Stage != EODMenuStage::Menu)
+	else if (Stage != EODMenuStage::Menu || DriveStart >= 0.0)
 	{
 		return;
 	}
@@ -923,20 +1011,36 @@ void AODMainMenu::Back()
 	{
 		ResumeFromGarage();   // the pause menu's garage: Back resumes driving
 	}
-	else if (Screen == EODMenuScreen::Conditions)
+	else if (Screen == EODMenuScreen::Start)
 	{
-		// back onto the row that was picked, on its area's tab
+		// back onto the row that was picked, on its area's tab, over the drape
 		const int32 Pick = Picks.IndexOfByPredicate([this](const FODMenuPick& K) { return K.Town == TownPick && K.Track == TrackPick; });
-		SetScreen(EODMenuScreen::Area, RowPick + FMath::Max(0, Pick));
+		SetScreen(EODMenuScreen::AreaMap, RowPick + FMath::Max(0, Pick));
 		TabIdx = FMath::Max(0, Siblings.IndexOfByKey(AreaIdx));
+		ClearStartVista();
+		if (!bGlobeView)
+		{
+			CutTo(Globe.Get());   // no fade-out: the pawn camera is already back in the garage room
+		}
+		else if (FadeSwapAt >= 0.0)
+		{
+			FadeSwapAt = -1.0;   // still on the globe: drop the pending cut and its fade
+			if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0); PC && PC->PlayerCameraManager)
+			{
+				PC->PlayerCameraManager->StopCameraFade();
+			}
+		}
 	}
-	else if (Screen == EODMenuScreen::Area)
+	else if (Screen == EODMenuScreen::AreaMap)
 	{
-		ShowWorld();
+		ShowWorld();   // flies back out; Tick clears the drape once there
 	}
 	else if (Screen != EODMenuScreen::Main)
 	{
-		HideWeb(false);
+		if (Screen == EODMenuScreen::World)
+		{
+			ViewFrom(FindPawn(), 0.0f);   // straight back into the garage room
+		}
 		SetScreen(EODMenuScreen::Main, Screen == EODMenuScreen::Garage ? RowGarage
 			: bTrackMode ? RowTrackSelect : RowOpenDrive);
 	}
@@ -945,87 +1049,181 @@ void AODMainMenu::Back()
 
 // ---- Open Drive / Track Select (2026-10-13) ---------------------------------
 
-void AODMainMenu::WebReady()
-{
-	bWebReady = true;
-	if (Web)
-	{
-		Web->ExecuteJavascript(FString::Printf(TEXT("od.init(%s, %s)"),
-			WorldMapJson.IsEmpty() ? TEXT("{\"coast\":[],\"borders\":[],\"states\":[]}") : *WorldMapJson, *WorldOpts()));
-	}
-}
-
-void AODMainMenu::WebPick(const FString& Key)
-{
-	if (const int32 Area = AreaKeys.IndexOfByKey(Key); Area != INDEX_NONE && Screen == EODMenuScreen::World)
-	{
-		EnterArea(Area);
-	}
-}
-
-void AODMainMenu::WebBack()
-{
-	if (Screen == EODMenuScreen::World)
-	{
-		Back();
-	}
-}
-
 void AODMainMenu::ShowWorld()
 {
 	SetScreen(EODMenuScreen::World, RowBack);
-	if (!Web)
+	PickingPin = INDEX_NONE;
+	if (!Globe.IsValid())
 	{
-		bWebReady = false;   // WebReady() inits the page once it has loaded
-		const FString Page = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("OpenDrive/WorldMap/index.html"));
-		Web = SNew(SWebBrowser)
-			.InitialURL(TEXT("file:///") + Page.Replace(TEXT(" "), TEXT("%20")))
-			.ShowControls(false)
-			.ShowAddressBar(false)
-			.BackgroundColor(FColor(5, 7, 12))
-			.BrowserFrameRate(60);
-		Web->BindUObject(TEXT("od"), this, true);
-		if (GEngine && GEngine->GameViewport)
+		Globe = GetWorld()->SpawnActor<AODMenuGlobe>(GlobeLocationCm, FRotator::ZeroRotator);
+		if (!Globe.IsValid())
 		{
-			GEngine->GameViewport->AddViewportWidgetContent(Web.ToSharedRef(), 50);
+			return;
 		}
+		Globe->SetLines(WorldLines[0], WorldLines[1], WorldLines[2]);
+	}
+	// one pin per cluster, at its first area (rebuilt: Track Select lists only
+	// areas with tracks); focus the picked area's cluster
+	TArray<FODGlobePin> Pins;
+	int32 Focus = 0;
+	for (int32 i = 0; i < AreaKeys.Num(); ++i)
+	{
+		const TArray<int32> Cluster = AreaListed(i) ? ClusterOf(i) : TArray<int32>();
+		if (Cluster.IsEmpty() || Cluster[0] != i)
+		{
+			continue;
+		}
+		TArray<FString> Names;
+		int32 Count = 0;
+		for (const int32 A : Cluster)
+		{
+			Names.Add(AreaNames[A]);
+			Count += bTrackMode
+				? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
+				: AreaTowns[A].Num();
+			Focus = A == AreaIdx ? Pins.Num() : Focus;
+		}
+		FODGlobePin& Pin = Pins.AddDefaulted_GetRef();
+		Pin.Key = AreaKeys[i];
+		Pin.Name = FString::Join(Names, TEXT(" / "));
+		Pin.Sub = FString::Printf(TEXT("%d %s"), Count,
+			bTrackMode ? (Count == 1 ? TEXT("track") : TEXT("tracks")) : (Count == 1 ? TEXT("town") : TEXT("towns")));
+		Pin.Lat = AreaLL[i].Y;
+		Pin.Lng = AreaLL[i].X;
+	}
+	Globe->SetPins(Pins);
+	FocusedPin = INDEX_NONE;
+	if (Pins.IsValidIndex(Focus))
+	{
+		SetFocusedPin(Focus);
+		Globe->FlyTo(Pins[Focus].Lat, Pins[Focus].Lng, WorldOverviewAlt, WorldShowSec);
+	}
+	ViewFrom(Globe.Get(), WorldBlendSec);
+}
+
+void AODMainMenu::SetFocusedPin(int32 Pin)
+{
+	if (!Globe.IsValid() || !Globe->GetPins().IsValidIndex(Pin) || Pin == FocusedPin
+		|| PickingPin != INDEX_NONE)   // flying in: the picked pin stays focused
+	{
 		return;
 	}
-	Web->SetVisibility(EVisibility::Visible);
-	if (bWebReady)
+	FocusedPin = Pin;   // no vista on hover (2026-10-14): ShowStartVista, once a start is picked
+}
+
+void AODMainMenu::PickPin(int32 Pin)
+{
+	if (Stage != EODMenuStage::Menu || Screen != EODMenuScreen::World || PickingPin != INDEX_NONE
+		|| !Globe.IsValid() || !Globe->GetPins().IsValidIndex(Pin))
 	{
-		Web->ExecuteJavascript(FString::Printf(TEXT("od.show(%s)"), *WorldOpts()));
+		return;
+	}
+	const int32 Area = AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key);
+	if (Area == INDEX_NONE)
+	{
+		return;
+	}
+	SetFocusedPin(Pin);
+	// the cluster's last-picked area if it is in it, else the pin's own
+	// (2026-10-14): drape its relief and fly down onto it; Tick enters AreaMap once landed
+	FocusArea(ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area);
+	PickingPin = Pin;
+	FlyToArea(WorldPickSec);
+}
+
+void AODMainMenu::FlyToArea(float Seconds)
+{
+	if (!Globe.IsValid() || !AreaKeys.IsValidIndex(AreaIdx))
+	{
+		return;
+	}
+	const FString& Key = AreaKeys[AreaIdx];
+	const TArray<FVector2D>* LL = ReliefCorners.Find(Key);   // (lat, lng) NW, NE, SE, SW
+	const TObjectPtr<UTexture2D>* Tex = ReliefTex.Find(Key);
+	if (!LL || !Tex || !*Tex)
+	{
+		// no relief baked: the old fly-in over the area's centre, no drape
+		const FVector2D C(AreaLL[AreaIdx].Y, AreaLL[AreaIdx].X);
+		Globe->ClearDrape();
+		AreaFitAlt = WorldPickAlt;
+		AreaViewBox = FBox2D(C, C);
+		Globe->FlyTo(C.X, C.Y, WorldPickAlt, Seconds);
+		return;
+	}
+	// fit the drape's N-S / E-W extent into the free part of the screen (as a
+	// vertical span at 16:9), the camera aimed east of its centre so it sits left
+	FBox2D Box(ForceInit);
+	for (const FVector2D& C : *LL)
+	{
+		Box += C;
+	}
+	const FVector2D Mid = Box.GetCenter(), Size = Box.GetSize();
+	const double KmPerDeg = FMath::DegreesToRadians(6371.0);
+	const double KmPerDegLng = KmPerDeg * FMath::Cos(FMath::DegreesToRadians(Mid.X));
+	const double SpanKm = AreaFitMargin * FMath::Max(Size.X * KmPerDeg, Size.Y * KmPerDegLng / (AreaMapAspect * AreaMapFreeW));
+	const double ShiftLng = AreaMapShiftW * SpanKm * AreaMapAspect / KmPerDegLng;
+	AreaFitAlt = AODMenuGlobe::FitAltitude(SpanKm);
+	AreaViewBox = FBox2D(Box.Min, Box.Max + FVector2D(0.0, ShiftLng));
+	Globe->SetDrape(*Tex, *LL);
+	Globe->FlyTo(Mid.X, Mid.Y + ShiftLng, AreaFitAlt, Seconds);
+}
+
+void AODMainMenu::ClampAreaView()
+{
+	// AreaMap drag / wheel (ODRaceHUD): the camera centre stays over the area, its zoom near the framing
+	if (Screen != EODMenuScreen::AreaMap || !Globe.IsValid() || Globe->IsFlying() || !AreaViewBox.bIsValid)
+	{
+		return;
+	}
+	const FVector V = Globe->GetView();
+	const FVector C(FMath::Clamp(V.X, AreaViewBox.Min.X, AreaViewBox.Max.X), FMath::Clamp(V.Y, AreaViewBox.Min.Y, AreaViewBox.Max.Y),
+		FMath::Clamp(V.Z, AreaFitAlt * AreaZoomIn, AreaFitAlt * AreaZoomOut));
+	if (!C.Equals(V, 1e-9))
+	{
+		Globe->FlyTo(C.X, C.Y, C.Z, 0.0f);
 	}
 }
 
-void AODMainMenu::HideWeb(bool bDestroy)
+void AODMainMenu::CutTo(AActor* Target)
 {
-	if (!Web)
+	FadeSwapAt = -1.0;
+	ViewFrom(Target, 0.0f);
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0); PC && PC->PlayerCameraManager)
 	{
-		return;
+		PC->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, StartFadeSec, FLinearColor::Black);
 	}
-	if (!bDestroy)
+}
+
+bool AODMainMenu::AreaCmToScreen(const APlayerController* PC, const FVector2D& Cm, FVector2D& OutScreen) const
+{
+	// bilinear in the relief's corners (pipeline/bake_area_relief.py): u west -> east, v north (min Y) -> south
+	const FString Key = AreaKeys.IsValidIndex(AreaIdx) ? AreaKeys[AreaIdx] : FString();
+	const FBox2D* Box = ReliefBox.Find(Key);
+	const TArray<FVector2D>* C = ReliefCorners.Find(Key);
+	if (!Globe.IsValid() || !Box || !Box->bIsValid || !C)
 	{
-		Web->SetVisibility(EVisibility::Collapsed);   // kept loaded: Back from Area returns instantly
+		return false;
 	}
-	else
+	const FVector2D UV = (Cm - Box->Min) / Box->GetSize();
+	const FVector2D LL = FMath::Lerp(FMath::Lerp((*C)[0], (*C)[1], UV.X), FMath::Lerp((*C)[3], (*C)[2], UV.X), UV.Y);
+	return Globe->LatLngToScreen(PC, LL.X, LL.Y, OutScreen);
+}
+
+void AODMainMenu::ViewFrom(AActor* Target, float BlendSec)
+{
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0); PC && Target)
 	{
-		if (GEngine && GEngine->GameViewport)
-		{
-			GEngine->GameViewport->RemoveViewportWidgetContent(Web.ToSharedRef());
-		}
-		Web.Reset();
-		bWebReady = false;
+		// lock outgoing: leaving the vista swaps the pawn camera back to the garage
+		// room (UpdateScene) mid-blend; the blend should leave the vista instead
+		PC->SetViewTargetWithBlend(Target, BlendSec, VTBlend_EaseInOut, 2.0f, true);
 	}
-	if (FSlateApplication::IsInitialized())
-	{
-		FSlateApplication::Get().SetAllUserFocusToGameViewport();
-	}
+	bGlobeView = Target && Target == Globe.Get();
 }
 
 bool AODMainMenu::AreaListed(int32 Area) const
 {
-	return !bTrackMode || Tracks.ContainsByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[Area]; });
+	return !(AreaHidden.IsValidIndex(Area) && AreaHidden[Area])
+		&& (!bTrackMode || Tracks.ContainsByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[Area]; }));
 }
 
 TArray<int32> AODMainMenu::ClusterOf(int32 Area) const
@@ -1041,63 +1239,44 @@ TArray<int32> AODMainMenu::ClusterOf(int32 Area) const
 	return Out;
 }
 
-FString AODMainMenu::WorldOpts() const
-{
-	// one pin per cluster, at its first area; focus the picked area's cluster
-	TArray<TSharedPtr<FJsonValue>> Pins;
-	FString Focus;
-	for (int32 i = 0; i < AreaKeys.Num(); ++i)
-	{
-		const TArray<int32> Cluster = AreaListed(i) && AreaLL.IsValidIndex(i) ? ClusterOf(i) : TArray<int32>();
-		if (Cluster.IsEmpty() || Cluster[0] != i)
-		{
-			continue;
-		}
-		TArray<FString> Names;
-		int32 Count = 0;
-		for (const int32 A : Cluster)
-		{
-			Names.Add(AreaNames[A]);
-			Count += bTrackMode
-				? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == AreaKeys[A]; }).Num()
-				: AreaTowns[A].Num();
-			Focus = A == AreaIdx ? AreaKeys[i] : Focus;
-		}
-		const TSharedRef<FJsonObject> Pin = MakeShared<FJsonObject>();
-		Pin->SetStringField(TEXT("key"), AreaKeys[i]);
-		Pin->SetStringField(TEXT("name"), FString::Join(Names, TEXT(" / ")));
-		Pin->SetStringField(TEXT("sub"), FString::Printf(TEXT("%d %s"), Count,
-			bTrackMode ? (Count == 1 ? TEXT("track") : TEXT("tracks")) : (Count == 1 ? TEXT("town") : TEXT("towns"))));
-		Pin->SetNumberField(TEXT("lng"), AreaLL[i].X);
-		Pin->SetNumberField(TEXT("lat"), AreaLL[i].Y);
-		Pins.Add(MakeShared<FJsonValueObject>(Pin));
-	}
-	const TSharedRef<FJsonObject> Opts = MakeShared<FJsonObject>();
-	Opts->SetStringField(TEXT("title"), bTrackMode ? TEXT("Track Select") : TEXT("Open Drive"));
-	Opts->SetStringField(TEXT("hint"), TEXT("<b>Click</b> pick &nbsp; <b>Drag</b> spin &nbsp; <b>Wheel</b> zoom &nbsp; <b>Arrows</b> browse &nbsp; <b>Esc</b> back"));
-	Opts->SetStringField(TEXT("focus"), Focus);
-	Opts->SetArrayField(TEXT("areas"), Pins);
-	FString Out;
-	FJsonSerializer::Serialize(Opts, TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out));
-	return Out;
-}
-
 void AODMainMenu::LoadWorldMap()
 {
 	// {"coast", "borders", "states": [[lon, lat, ...]], "areas": {"<area>": {"ll": [lon, lat],
-	// "towns": [[name, x_cm, y_cm]]}}} (pipeline/bake_world_map.py); lines only go to the page
+	// "towns": [[name, x_cm, y_cm]]}}} (pipeline/bake_world_map.py); lines go to the globe, lat first
 	AreaLL.Init(FVector2D::ZeroVector, AreaKeys.Num());
+	AreaHidden.Init(false, AreaKeys.Num());
 	AreaTowns.Reset();
 	AreaTowns.SetNum(AreaKeys.Num());
+	FString Text;
 	TSharedPtr<FJsonObject> Root;
 	const TSharedPtr<FJsonObject>* Areas = nullptr;
-	if (!FFileHelper::LoadFileToString(WorldMapJson, *(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worldmap.json")))
-		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(WorldMapJson), Root) || !Root.IsValid()
+	if (!FFileHelper::LoadFileToString(Text, *(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worldmap.json")))
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) || !Root.IsValid()
 		|| !Root->TryGetObjectField(TEXT("areas"), Areas))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODMainMenu: no Masks/worldmap.json - run pipeline/bake_world_map.py"));
-		WorldMapJson.Empty();
 		return;
+	}
+	const TCHAR* LineSets[] = {TEXT("coast"), TEXT("borders"), TEXT("states")};
+	for (int32 k = 0; k < 3; ++k)
+	{
+		WorldLines[k].Reset();
+		const TArray<TSharedPtr<FJsonValue>>* Lines = nullptr;
+		if (!Root->TryGetArrayField(LineSets[k], Lines))
+		{
+			continue;
+		}
+		for (const TSharedPtr<FJsonValue>& L : *Lines)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& V = L->AsArray();
+			TArray<float>& Out = WorldLines[k].AddDefaulted_GetRef();
+			Out.Reserve(V.Num());
+			for (int32 i = 0; i + 1 < V.Num(); i += 2)
+			{
+				Out.Add((float)V[i + 1]->AsNumber());   // lon, lat -> lat, lng
+				Out.Add((float)V[i]->AsNumber());
+			}
+		}
 	}
 	for (int32 i = 0; i < AreaKeys.Num(); ++i)
 	{
@@ -1108,6 +1287,7 @@ void AODMainMenu::LoadWorldMap()
 		{
 			continue;
 		}
+		(*A)->TryGetBoolField(TEXT("hidden"), AreaHidden[i]);   // a test variant inside another area
 		if ((*A)->TryGetArrayField(TEXT("ll"), LL) && LL->Num() == 2)
 		{
 			AreaLL[i] = FVector2D((*LL)[0]->AsNumber(), (*LL)[1]->AsNumber());
@@ -1128,7 +1308,6 @@ void AODMainMenu::LoadWorldMap()
 
 void AODMainMenu::EnterArea(int32 Area)
 {
-	HideWeb(false);
 	Siblings = ClusterOf(Area);
 	if (Siblings.IsEmpty())
 	{
@@ -1143,8 +1322,8 @@ void AODMainMenu::EnterArea(int32 Area)
 			: AreaTowns[A].Num() + 1;
 		AreaTabs.Add({*AreaNames[A], RowPick, N});
 	}
-	SetScreen(EODMenuScreen::Area, RowPick);
-	SetTab(Siblings.IndexOfByKey(Area));
+	SetScreen(EODMenuScreen::AreaMap, RowPick);
+	SetTab(Siblings.IndexOfByKey(Area));   // Area == AreaIdx (PickPin focused it): no re-fly
 }
 
 void AODMainMenu::FocusArea(int32 Area)
@@ -1169,6 +1348,58 @@ void AODMainMenu::FocusArea(int32 Area)
 		}
 	}
 
+	// AreaMap drape (2026-10-14): shaded relief, cached per area, and a line of stats
+	if (!ReliefBox.Contains(Key))
+	{
+		// relief_<area>.json = {"min_cm": [x, y], "max_cm": [x, y], "corners_ll": [[lat, lng] NW, NE, SE, SW]}:
+		// the png's area-local cm rect and where it lies on the globe
+		const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/relief_") + Key;
+		FString Text;
+		TSharedPtr<FJsonObject> Json;
+		const TArray<TSharedPtr<FJsonValue>>* Lo = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Hi = nullptr;
+		UTexture2D* Tex = nullptr;
+		FBox2D Box(ForceInit);
+		if (FFileHelper::LoadFileToString(Text, *(Base + TEXT(".json")))
+			&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Json) && Json.IsValid()
+			&& Json->TryGetArrayField(TEXT("min_cm"), Lo) && Lo->Num() == 2
+			&& Json->TryGetArrayField(TEXT("max_cm"), Hi) && Hi->Num() == 2)
+		{
+			Box = FBox2D(FVector2D((*Lo)[0]->AsNumber(), (*Lo)[1]->AsNumber()), FVector2D((*Hi)[0]->AsNumber(), (*Hi)[1]->AsNumber()));
+			Tex = FImageUtils::ImportFileAsTexture2D(Base + TEXT(".png"));
+			const TArray<TSharedPtr<FJsonValue>>* Corners = nullptr;
+			if (Json->TryGetArrayField(TEXT("corners_ll"), Corners) && Corners->Num() == 4)
+			{
+				TArray<FVector2D>& LL = ReliefCorners.Add(Key);
+				for (const TSharedPtr<FJsonValue>& C : *Corners)
+				{
+					const TArray<TSharedPtr<FJsonValue>>& V = C->AsArray();
+					LL.Add(V.Num() == 2 ? FVector2D(V[0]->AsNumber(), V[1]->AsNumber()) : FVector2D::ZeroVector);
+				}
+			}
+		}
+		ReliefTex.Add(Key, Tex);
+		ReliefBox.Add(Key, Box);
+	}
+	double RoadCm = 0.0;
+	for (int32 i = 1; i < AreaMap.Num(); ++i)
+	{
+		if (!AreaMap[i].ContainsNaN() && !AreaMap[i - 1].ContainsNaN())
+		{
+			RoadCm += FVector2D::Distance(AreaMap[i], AreaMap[i - 1]);
+		}
+	}
+	// ponytail: no elevation range - nothing loaded here knows the area's heights
+	const int32 Starts = bTrackMode
+		? Tracks.FilterByPredicate([&](const FTrackInfo& T) { return T.Area == Key; }).Num()
+		: AreaTowns[Area].Num() + 1;
+	AreaBlurb = FString::Printf(TEXT("%d %s"), Starts,
+		bTrackMode ? (Starts == 1 ? TEXT("track") : TEXT("tracks")) : (Starts == 1 ? TEXT("start") : TEXT("starts")));
+	if (RoadCm > 0.0)
+	{
+		AreaBlurb = FString::Printf(TEXT("%d km of road  \u00B7  %s"), FMath::RoundToInt(RoadCm / 1.0e5), *AreaBlurb);
+	}
+
 	Picks.Reset();
 	if (!bTrackMode)
 	{
@@ -1179,6 +1410,17 @@ void AODMainMenu::FocusArea(int32 Area)
 			K.Label = K.Town = T.Key;
 			K.bHasPos = true;
 			K.Pos = T.Value;
+		}
+		// road-snapped starts (2026-10-14), "" = the area's menu spot: the dot
+		// sits where the car will
+		for (FODMenuPick& K : Picks)
+		{
+			if (const FTransform* Pose = StartPoses[Area].Find(K.Town))
+			{
+				K.bHasStart = true;
+				K.Start = *Pose;
+				K.Pos = FVector2D(Pose->GetLocation());
+			}
 		}
 		return;
 	}
@@ -1200,6 +1442,14 @@ void AODMainMenu::FocusArea(int32 Area)
 			K.bHasPos = true;
 			K.Pos = K.Line[0];
 		}
+		if (K.Line.Num() >= 2 && Gates.Num() > 0)
+		{
+			// StartAt's track start: the line's first point facing its second; Z = the first gate's road
+			const FVector2D D = K.Line[1] - K.Line[0];
+			K.bHasStart = true;
+			K.Start = FTransform(FRotator(0.0, FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X)), 0.0),
+				FVector(K.Line[0], Gates[0].GetLocation().Z));
+		}
 		if (const UODRaceSave* Save = Cast<UODRaceSave>(
 				UGameplayStatics::LoadGameFromSlot(FString::Printf(TEXT("OpenDrive_track_%s"), *T.Name), 0)))
 		{
@@ -1210,8 +1460,24 @@ void AODMainMenu::FocusArea(int32 Area)
 
 void AODMainMenu::DriveNow()
 {
-	SavePicks();
-	if (AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx)
+	SavePicks();   // (Activate holds Drive until the cut, so no fade is pending here)
+	DriveStart = GetWorld()->GetRealTimeSeconds();   // Tick runs the ease / fade, then DriveGo
+	bDriveHere = !(AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx);
+	const AODVehiclePawn* Pawn = FindPawn();
+	if (const UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr)
+	{
+		DriveFrom = Cam->GetComponentTransform();
+	}
+	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	if (!bDriveHere && PC && PC->PlayerCameraManager)
+	{
+		PC->PlayerCameraManager->StartCameraFade(0.0f, 1.0f, (float)DriveFadeSec, FLinearColor::Black, false, true);
+	}
+}
+
+void AODMainMenu::DriveGo()
+{
+	if (!bDriveHere)
 	{
 		OpenArea();   // that level's menu auto-starts (bAutoStart) at TownPick / the track
 		return;
@@ -1223,6 +1489,12 @@ void AODMainMenu::DriveNow()
 void AODMainMenu::StartAtTown(const FString& Town)
 {
 	DestroyVistas();   // the vista copies carry the same town names
+	// the road-snapped start its vista showed (2026-10-14), "" = the menu spot
+	if (const FTransform* Pose = StartPoses.IsValidIndex(AreaIdx) ? StartPoses[AreaIdx].Find(Town) : nullptr)
+	{
+		StartAt(-1, nullptr, Pose);   // a picked track still overrides it, as before
+		return;
+	}
 	for (TActorIterator<AODRoadManager> It(GetWorld()); It && !Town.IsEmpty(); ++It)
 	{
 		if (const int32 i = It->GetTownNodes().IndexOfByPredicate([&](const FTownNode& N) { return N.Name == Town; });
@@ -1487,9 +1759,9 @@ void AODMainMenu::SetWeatherClimate(int32 Vista)
 	{
 		return;
 	}
-	const bool bVista = Spots.IsValidIndex(Vista);
-	Weather->SetVistaClimate(bVista ? &Spots[Vista].Climate : nullptr,
-		bVista ? Spots[Vista].Forest.Get() : nullptr, bVista ? FVector2D(Spots[Vista].CarCm) : FVector2D::ZeroVector);
+	const bool bVista = Vista != INDEX_NONE && Vista == VistaArea;   // the live start vista (2026-10-14)
+	Weather->SetVistaClimate(bVista ? &VistaSpot.Climate : nullptr,
+		bVista ? VistaSpot.Forest.Get() : nullptr, bVista ? FVector2D(VistaSpot.CarCm) : FVector2D::ZeroVector);
 	// Auto re-rolls in the new climate; a vista also drops a forced state its
 	// area never produces. Home keeps it: the pick is for the area about to
 	// load (its level re-checks).
@@ -1586,20 +1858,26 @@ void AODMainMenu::GoToMap()
 	SetCursorVisible(true);
 }
 
-void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad)
+void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad, const FTransform* Pose)
 {
 	AODVehiclePawn* Pawn = FindPawn();
 	if (!Pawn)
 	{
 		return;
 	}
-	HideWeb(true);
+	ViewFrom(Pawn, 0.0f);   // off the globe, if Drive came before the vista streamed
 	DestroyVistas();   // and un-freeze the real area streaming before the teleport
 
 	FVector2D Target = FVector2D::ZeroVector;   // only read when bHaveTarget is true
 	float Yaw = Pawn->GetActorRotation().Yaw;
 	bool bHaveTarget = false;
-	if (const AODRoadManager* Road = InRoad ? InRoad : FindActor<AODRoadManager>(GetWorld());
+	if (Pose)
+	{
+		Target = FVector2D(Pose->GetLocation());
+		Yaw = (float)Pose->Rotator().Yaw;
+		bHaveTarget = true;
+	}
+	else if (const AODRoadManager* Road = InRoad ? InRoad : FindActor<AODRoadManager>(GetWorld());
 		Road && Road->GetTownNodes().IsValidIndex(TownIdx))
 	{
 		FVector2D Snap;
@@ -1759,7 +2037,6 @@ void AODMainMenu::OpenArea()
 	// the car picks also ride the travel URL, read back in BeginPlay (this
 	// class; odengine= also triggers bAutoStart) and AODVehiclePawn::BeginPlay
 	// (odvehidx=). The new level starts at its default spawn.
-	HideWeb(true);
 	SavePicks();
 	FString Options = FString::Printf(TEXT("odengine=%d?oddrive=%d"), EngineIdx, DriveIdx);
 	if (const AODVehiclePawn* Pawn = FindPawn())
@@ -1855,11 +2132,13 @@ void AODMainMenu::DriveTrack(const FString& Name, const AODRoadManager* InRoad)
 
 void AODMainMenu::LoadMenuSpots()
 {
-	// {"<area>": {"car_cm": [x, y, z], "car_yaw_deg", "view_yaw_deg", "source"}}
-	// (pipeline/build_menu_spots.py). An area without a spot is dropped from
-	// the Area row by BeginPlay.
+	// {"<area>": {"car_cm": [x, y, z], "car_yaw_deg", "view_yaw_deg", "source",
+	// "starts": {"<town>": {"car_cm", "car_yaw_deg"}}}} (pipeline/build_menu_spots.py).
+	// An area without a spot is dropped from the Area row by BeginPlay.
 	Spots.Reset();
 	Spots.SetNum(AreaLevels.Num());
+	StartPoses.Reset();
+	StartPoses.SetNum(AreaLevels.Num());
 	FString Text;
 	TSharedPtr<FJsonObject> Root;
 	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/menu_spots.json");
@@ -1868,98 +2147,139 @@ void AODMainMenu::LoadMenuSpots()
 	{
 		return;
 	}
+	auto ReadPose = [](const TSharedPtr<FJsonObject>& O, FTransform& Out)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Car = nullptr;
+		double Yaw = 0.0;
+		if (!O->TryGetArrayField(TEXT("car_cm"), Car) || Car->Num() != 3 || !O->TryGetNumberField(TEXT("car_yaw_deg"), Yaw))
+		{
+			return false;
+		}
+		Out = FTransform(FRotator(0.0, Yaw, 0.0), FVector((*Car)[0]->AsNumber(), (*Car)[1]->AsNumber(), (*Car)[2]->AsNumber()));
+		return true;
+	};
 	for (int32 i = 0; i < AreaKeys.Num(); ++i)
 	{
 		const TSharedPtr<FJsonObject>* Spot = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Car = nullptr;
-		double CarYaw = 0.0, ViewYaw = 0.0;
-		if (!Root->TryGetObjectField(AreaKeys[i], Spot)
-			|| !(*Spot)->TryGetArrayField(TEXT("car_cm"), Car) || Car->Num() != 3
-			|| !(*Spot)->TryGetNumberField(TEXT("car_yaw_deg"), CarYaw)
+		FTransform Car;
+		double ViewYaw = 0.0;
+		if (!Root->TryGetObjectField(AreaKeys[i], Spot) || !ReadPose(*Spot, Car)
 			|| !(*Spot)->TryGetNumberField(TEXT("view_yaw_deg"), ViewYaw))
 		{
 			continue;
 		}
 		FODMenuSpot& S = Spots[i];
 		S.bValid = true;
-		S.CarCm = FVector((*Car)[0]->AsNumber(), (*Car)[1]->AsNumber(), (*Car)[2]->AsNumber());
-		S.CarYawDeg = (float)CarYaw;
+		S.CarCm = Car.GetLocation();
+		S.CarYawDeg = (float)Car.Rotator().Yaw;
 		S.ViewYawDeg = (float)ViewYaw;
 		double SeaZ = 0.0;
 		S.bHasSea = (*Spot)->TryGetNumberField(TEXT("sea_z_cm"), SeaZ);
 		S.SeaZCm = SeaZ;
+		// road-snapped town starts (2026-10-14); "" = the spot itself, the Default Start
+		StartPoses[i].Add(FString(), Car);
+		const TSharedPtr<FJsonObject>* Starts = nullptr;
+		if ((*Spot)->TryGetObjectField(TEXT("starts"), Starts))
+		{
+			for (const auto& [Town, Value] : (*Starts)->Values)
+			{
+				const TSharedPtr<FJsonObject>* O = nullptr;
+				FTransform Pose;
+				if (Value->TryGetObject(O) && ReadPose(*O, Pose))
+				{
+					StartPoses[i].Add(FString(Town), Pose);
+				}
+			}
+		}
 	}
 }
 
-FVector AODMainMenu::VistaCarWorld(int32 Area) const
+FVector AODMainMenu::VistaCarWorld() const
 {
-	return FVector(VistaBaseXCm + Area * VistaSpacingCm, 0.0, Spots[Area].CarCm.Z);
+	return FVector(VistaBaseXCm, 0.0, VistaSpot.CarCm.Z);
 }
 
-void AODMainMenu::SpawnVistas()
+FODVistaRegion AODMainMenu::VistaRegion() const
+{
+	const double ViewRad = FMath::DegreesToRadians((double)VistaSpot.ViewYawDeg);
+	FODVistaRegion Region;
+	Region.bActive = true;
+	Region.Focus = VistaSpot.CarCm;
+	Region.Dir = FVector2D(FMath::Cos(ViewRad), FMath::Sin(ViewRad));
+	Region.BackCm = VistaCamBackCm;
+	Region.FarCm = VistaFarCm;
+	Region.PatchCm = VistaPatchCm;
+	Region.HalfAngleRad = FMath::DegreesToRadians(VistaHalfAngleDeg);
+	Region.PanoFarCm = VistaPanoFarCm;
+	return Region;
+}
+
+void AODMainMenu::ShowStartVista(int32 Area, int32 PickIdx)
 {
 	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
-	if (bVistasSpawned || !GM)
+	if (!GM || !bEntered || bAutoStart || !Spots.IsValidIndex(Area) || !Spots[Area].bValid)
 	{
 		return;
 	}
-	bVistasSpawned = true;
-	for (int32 i = 0; i < Spots.Num(); ++i)
+	if (Area != AreaIdx)
 	{
-		if (!Spots[i].bValid)
+		FocusArea(Area);   // Picks are AreaIdx's rows
+	}
+	if (!Picks.IsValidIndex(PickIdx) || (Area == VistaArea && PickIdx == VistaPick))
+	{
+		return;   // reuse the live set
+	}
+	ClearStartVista();
+	// the pick's road-snapped pose (the Drive spawn's, StartAtTown), else the area's spot
+	const FODMenuPick& K = Picks[PickIdx];
+	VistaSpot = Spots[Area];
+	if (K.bHasStart && !(K.Town.IsEmpty() && K.Track.IsEmpty()))   // the Default Start keeps the spot's view
+	{
+		VistaSpot.CarCm = K.Start.GetLocation();
+		VistaSpot.CarYawDeg = (float)K.Start.Rotator().Yaw;
+		VistaSpot.ViewYawDeg = VistaSpot.CarYawDeg - StartViewOffsetDeg;
+	}
+	VistaArea = Area;
+	VistaPick = PickIdx;
+	bVistaDirty = true;
+	AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // Tick's vista-stream wait cap
+	AODWeatherController::LoadClimateFile(AreaKeys[Area] + TEXT("_test"), VistaSpot.Climate);
+	for (AActor* A : GM->SpawnVistaSet(AreaKeys[Area], VistaCarWorld() - VistaSpot.CarCm, VistaRegion()))
+	{
+		VistaActors.Add(A);
+		if (AODForestManager* Forest = Cast<AODForestManager>(A))
 		{
-			continue;
-		}
-		AODWeatherController::LoadClimateFile(AreaKeys[i] + TEXT("_test"), Spots[i].Climate);
-		const double ViewRad = FMath::DegreesToRadians((double)Spots[i].ViewYawDeg);
-		FODVistaRegion Region;
-		Region.bActive = true;
-		Region.Focus = Spots[i].CarCm;
-		Region.Dir = FVector2D(FMath::Cos(ViewRad), FMath::Sin(ViewRad));
-		Region.BackCm = VistaCamBackCm;
-		Region.FarCm = VistaFarCm;
-		Region.PatchCm = VistaPatchCm;
-		Region.HalfAngleRad = FMath::DegreesToRadians(VistaHalfAngleDeg);
-		Region.PanoFarCm = VistaPanoFarCm;
-		for (AActor* A : GM->SpawnVistaSet(AreaKeys[i], VistaCarWorld(i) - Spots[i].CarCm, Region))
-		{
-			VistaActors.Add(A);
-			if (AODForestManager* Forest = Cast<AODForestManager>(A))
-			{
-				Spots[i].Forest = Forest;
-			}
-		}
-		if (Spots[i].bHasSea)
-		{
-			const FVector Car = VistaCarWorld(i);
-			if (AStaticMeshActor* Sea = GetWorld()->SpawnActor<AStaticMeshActor>(
-					FVector(Car.X, Car.Y, Spots[i].SeaZCm), FRotator::ZeroRotator))
-			{
-				UStaticMeshComponent* Comp = Sea->GetStaticMeshComponent();
-				Comp->SetMobility(EComponentMobility::Movable);   // runtime mesh swap needs it
-				Comp->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
-				Comp->SetMaterial(0, LoadObject<UMaterialInterface>(nullptr,
-					TEXT("/Game/OpenDrive/Materials/M_WaterStylized.M_WaterStylized")));
-				Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-				Comp->SetCastShadow(false);
-				Sea->SetActorScale3D(FVector(VistaSeaHalfCm / 50.0, VistaSeaHalfCm / 50.0, 1.0));   // Plane = 100 uu
-				VistaActors.Add(Sea);
-			}
+			VistaSpot.Forest = Forest;
 		}
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: spawned %d vista manager(s)"), VistaActors.Num());
-	if (VistaActors.Num() > 0)
+	if (VistaSpot.bHasSea)
 	{
+		const FVector Car = VistaCarWorld();
+		if (AStaticMeshActor* Sea = GetWorld()->SpawnActor<AStaticMeshActor>(
+				FVector(Car.X, Car.Y, VistaSpot.SeaZCm), FRotator::ZeroRotator))
+		{
+			UStaticMeshComponent* Comp = Sea->GetStaticMeshComponent();
+			Comp->SetMobility(EComponentMobility::Movable);   // runtime mesh swap needs it
+			Comp->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
+			Comp->SetMaterial(0, LoadObject<UMaterialInterface>(nullptr,
+				TEXT("/Game/OpenDrive/Materials/M_WaterStylized.M_WaterStylized")));
+			Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Comp->SetCastShadow(false);
+			Sea->SetActorScale3D(FVector(VistaSeaHalfCm / 50.0, VistaSeaHalfCm / 50.0, 1.0));   // Plane = 100 uu
+			VistaActors.Add(Sea);
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: start vista %s '%s' at (%.0f, %.0f, %.0f) yaw %.0f (%d actor(s))"),
+		*AreaKeys[Area], *K.Label, VistaSpot.CarCm.X, VistaSpot.CarCm.Y, VistaSpot.CarCm.Z, VistaSpot.CarYawDeg, VistaActors.Num());
+	if (!bVistasSpawned)
+	{
+		bVistasSpawned = true;
 		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
 	}
 }
 
-void AODMainMenu::DestroyVistas()
+void AODMainMenu::ClearStartVista()
 {
-	if (!bVistasSpawned)
-	{
-		return;
-	}
 	for (AActor* A : VistaActors)
 	{
 		if (IsValid(A))
@@ -1968,16 +2288,56 @@ void AODMainMenu::DestroyVistas()
 		}
 	}
 	VistaActors.Reset();
-	bVistasSpawned = false;
 	if (ShownVista != INDEX_NONE)
 	{
 		SetWeatherClimate(INDEX_NONE);   // its forest copy is gone
 	}
-	ShownVista = INDEX_NONE;
+	VistaSpot.Forest = nullptr;
+	VistaArea = VistaPick = INDEX_NONE;
+	bVistaDirty = true;   // UpdateScene: back to the garage room unless a new set follows
+}
+
+void AODMainMenu::DestroyVistas()
+{
+	ClearStartVista();
+	ShownVista = INDEX_NONE;   // StartAt teleports the car anyway
+	if (!bVistasSpawned)
+	{
+		return;
+	}
+	bVistasSpawned = false;
 	if (AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>())
 	{
 		GM->FreezeStreaming(false);
 	}
+}
+
+bool AODMainMenu::IsStartVistaReady() const
+{
+	if (VistaArea == INDEX_NONE)
+	{
+		return false;
+	}
+	for (const AActor* A : VistaActors)
+	{
+		const AODTerrainManager* T = Cast<AODTerrainManager>(A);
+		const AODRoadManager* R = Cast<AODRoadManager>(A);
+		if ((T && !T->IsInitialStreamingSettled(VistaSpot.CarCm)) || (R && !R->IsInitialStreamingSettled()))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+FTransform AODMainMenu::VistaCamGoal() const
+{
+	// behind the car along the view yaw, shifted right so the car sits left of centre
+	const FVector Car = VistaCarWorld();   // road surface under the car
+	const FVector Fwd = FRotator(0.0, VistaSpot.ViewYawDeg, 0.0).Vector();
+	const FVector Right = FRotator(0.0, VistaSpot.ViewYawDeg + 90.0, 0.0).Vector();
+	return FTransform(FRotator(VistaCamPitchDeg, VistaSpot.ViewYawDeg, 0.0),
+		Car - Fwd * VistaCamBackCm + Right * VistaCamSideCm + FVector(0.0, 0.0, VistaCamHeightCm));
 }
 
 void AODMainMenu::UpdateScene()
@@ -1986,9 +2346,9 @@ void AODMainMenu::UpdateScene()
 	{
 		return;
 	}
-	const int32 Want = (Screen == EODMenuScreen::Area || Screen == EODMenuScreen::Conditions) && VistaActors.Num() > 0 && Spots.IsValidIndex(AreaIdx) && Spots[AreaIdx].bValid
-		? AreaIdx : INDEX_NONE;
-	if (Want == ShownVista)
+	// the start vista on the Start screen (2026-10-14: AreaMap is the globe's)
+	const int32 Want = Screen == EODMenuScreen::Start && VistaArea == AreaIdx ? AreaIdx : INDEX_NONE;
+	if (Want == ShownVista && !bVistaDirty)
 	{
 		return;
 	}
@@ -1998,6 +2358,7 @@ void AODMainMenu::UpdateScene()
 		return;
 	}
 	ShownVista = Want;
+	bVistaDirty = false;
 	UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>();
 	AODGarageEnvironment* Garage = EnsureGarageEnvironment();
 	if (Want == INDEX_NONE)
@@ -2021,21 +2382,14 @@ void AODMainMenu::UpdateScene()
 	{
 		Garage->SetActive(false);
 	}
-	const FODMenuSpot& S = Spots[Want];
-	const FVector Car = VistaCarWorld(Want);   // road surface under the car
 	const UODVehicleMovement* Move = FindMovement();
-	Pawn->PlaceInShowroom(Car + FVector(0.0, 0.0, Move ? Move->GetRestGroundClearanceCm() : 0.0f));
-	Pawn->SetActorRotation(FRotator(0.0f, S.CarYawDeg, 0.0f));
+	Pawn->PlaceInShowroom(VistaCarWorld() + FVector(0.0, 0.0, Move ? Move->GetRestGroundClearanceCm() : 0.0f));
+	Pawn->SetActorRotation(FRotator(0.0f, VistaSpot.CarYawDeg, 0.0f));
 	Pawn->SetShowroom(true);   // detaches the camera; placed for the vista below
 	SetWeatherClimate(Want);   // this vista's climate (2026-10-05)
 	if (Cam)
 	{
-		const FRotator View(0.0, S.ViewYawDeg, 0.0);
-		const FVector Fwd = View.Vector();
-		const FVector Right = FRotator(0.0, S.ViewYawDeg + 90.0, 0.0).Vector();
-		const FVector CamPos = Car - Fwd * VistaCamBackCm + Right * VistaCamSideCm
-			+ FVector(0.0, 0.0, VistaCamHeightCm);
-		Cam->SetWorldLocationAndRotation(CamPos, FRotator(VistaCamPitchDeg, S.ViewYawDeg, 0.0));
+		Cam->SetWorldTransform(VistaCamGoal());
 	}
 }
 
