@@ -73,7 +73,10 @@ constexpr int32 NumShrubSpecies = UE_ARRAY_COUNT(ShrubMeshPaths);
  *  nothing outside this module needs them.
  *
  *  SpeciesWeight order: Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca,
- *  CanyonOak. ShrubWeight order: Bush, Sagebrush. Species mix (2026-08-27,
+ *  CanyonOak, Palm, TreeFern, Broadleaf, BroadleafGiant (rows may stop at
+ *  7 - the tropical four zero-fill). Tropical biomes (Savanna, Rainforest, TropicalCoast,
+ *  LavaField) carry no Colorado species - Blob in particular is the only
+ *  LeafDrop slot, and tropical canopy is evergreen. ShrubWeight order: Bush, Sagebrush. Species mix (2026-08-27,
  *  see FBiomeRecipe's comment for why this changed from a fixed 3-mesh
  *  set): DeciduousForest/EvergreenForest/Rainforest/Wetland keep their
  *  original blob/olive/conifer character basically unchanged (a sliver of
@@ -113,13 +116,15 @@ const FBiomeRecipe BiomeRecipeTable[] = {
 	/* AlpineBare       */ {{0.15f, 0.20f, 0.35f, 0.10f, 0.05f, 0.00f, 0.15f}, {0.60f, 0.40f}, 0.05f, 0.1f, 2.00f, 0.3f},
 	/* ArcticTundra     */ {{0.10f, 0.50f, 0.30f, 0.05f, 0.00f, 0.00f, 0.05f}, {0.30f, 0.70f}, 0.02f, 0.3f, 1.30f, 0.4f},
 	/* Farmland         */ {{0.20f, 0.55f, 0.15f, 0.05f, 0.00f, 0.00f, 0.05f}, {0.80f, 0.20f}, 0.10f, 0.5f, 0.05f, 0.2f},
-	/* Savanna          */ {{0.35f, 0.35f, 0.05f, 0.10f, 0.05f, 0.00f, 0.10f}, {0.60f, 0.40f}, 0.20f, 0.9f, 0.30f, 0.6f},
-	/* Rainforest       */ {{0.65f, 0.05f, 0.15f, 0.05f, 0.00f, 0.00f, 0.10f}, {0.95f, 0.05f}, 1.2f, 0.9f, 0.10f, 1.3f},
+	/* Savanna          */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.35f, 0.00f, 0.55f, 0.10f}, {0.60f, 0.40f}, 0.20f, 0.9f, 0.30f, 0.6f},
+	/* Rainforest       */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.20f, 0.30f, 0.45f, 0.05f}, {0.95f, 0.05f}, 1.2f, 0.9f, 0.10f, 1.3f},
 	/* CoastalDune      */ {{0.05f, 0.55f, 0.05f, 0.05f, 0.15f, 0.00f, 0.15f}, {0.30f, 0.70f}, 0.05f, 0.9f, 0.20f, 0.7f},
 	/* CanyonBadlands   */ {{0.02f, 0.03f, 0.03f, 0.35f, 0.05f, 0.03f, 0.49f}, {0.25f, 0.75f}, 0.10f, 0.3f, 2.20f, 0.2f, 0.20f},
 	/* RockyFoothill    */ {{0.10f, 0.35f, 0.35f, 0.10f, 0.00f, 0.00f, 0.10f}, {0.70f, 0.30f}, 0.5f, 0.6f, 1.60f, 0.7f},
+	/* TropicalCoast    */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.75f, 0.00f, 0.20f, 0.05f}, {0.60f, 0.40f}, 0.15f, 0.9f, 0.20f, 0.7f, 0.08f},
+	/* LavaField        */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.50f, 0.50f}, {0.80f, 0.20f}, 0.03f, 0.1f, 0.40f, 0.1f, 0.05f},
 };
-static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::LavaField + 1,
 	"BiomeRecipeTable must have one entry per EODBiome value, in enum order");
 
 /** Grass ring density per EODBiome (2026-10-07), x GrassPerSqM - open
@@ -128,9 +133,9 @@ const float GrassBiomeScale[] = {
 	/* DeciduousForest */ 0.8f, /* EvergreenForest */ 0.6f, /* Chaparral */ 0.35f, /* DesertScrub */ 0.15f,
 	/* PlainsGrassland */ 1.0f, /* Wetland */ 1.0f, /* AlpineBare */ 0.4f, /* ArcticTundra */ 0.6f,
 	/* Farmland */ 0.9f, /* Savanna */ 0.9f, /* Rainforest */ 0.7f, /* CoastalDune */ 0.3f,
-	/* CanyonBadlands */ 0.1f, /* RockyFoothill */ 0.55f,
+	/* CanyonBadlands */ 0.1f, /* RockyFoothill */ 0.55f, /* TropicalCoast */ 0.35f, /* LavaField */ 0.03f,
 };
-static_assert(UE_ARRAY_COUNT(GrassBiomeScale) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(GrassBiomeScale) == (uint8)EODBiome::LavaField + 1,
 	"GrassBiomeScale must have one entry per EODBiome value, in enum order");
 
 // ---- Terrain variety V2/V5 (2026-09-25, next steps.md sec 7.35) ----
@@ -160,7 +165,7 @@ constexpr float AspenMaxShare = 0.75f;          // max fraction of the tree mix 
 FBiomeRecipe LerpRecipe(const FBiomeRecipe& A, const FBiomeRecipe& B, float T)
 {
 	FBiomeRecipe R = A;
-	for (int32 s = 0; s < 7; ++s) { R.SpeciesWeight[s] = FMath::Lerp(A.SpeciesWeight[s], B.SpeciesWeight[s], T); }
+	for (int32 s = 0; s < NumTreeSpecies; ++s) { R.SpeciesWeight[s] = FMath::Lerp(A.SpeciesWeight[s], B.SpeciesWeight[s], T); }
 	for (int32 s = 0; s < 2; ++s) { R.ShrubWeight[s] = FMath::Lerp(A.ShrubWeight[s], B.ShrubWeight[s], T); }
 	R.TreeDensityScale = FMath::Lerp(A.TreeDensityScale, B.TreeDensityScale, T);
 	R.BushDensityScale = FMath::Lerp(A.BushDensityScale, B.BushDensityScale, T);
@@ -202,7 +207,7 @@ FBiomeRecipe VarietyRecipe(EODBiome Biome, float Northness, float Moisture, floa
 	return R;
 }
 
-// PickWeightedIndex (used both for the 7-way tree pick and the 2-way shrub
+// PickWeightedIndex (used both for the tree-species pick and the 2-way shrub
 // pick below) now lives in ODBinSidecarUtil.h - see this file's
 // ExtendedTreeMeshPaths comment above for why it moved.
 }
@@ -1455,7 +1460,7 @@ void AODForestManager::BlendAt(double WorldX, double WorldY,
 	// found via BuildTile()'s species-mix verification log showing
 	// scrubOak/manzanita/yucca/sagebrush stuck at 0 in every Chaparral/
 	// DesertScrub tile despite BiomeRecipeTable specifying otherwise.
-	float WeightSum = 0.0f, SpeciesAcc[7] = {};
+	float WeightSum = 0.0f, SpeciesAcc[NumTreeSpecies] = {};
 	float ShrubAcc[2] = {};
 	float TreeScaleAcc = 0.0f, BushScaleAcc = 0.0f, ForestWeightAcc = 0.0f;
 	// ground cover (2026-08-26): accumulated the same inverse-square-distance
@@ -2186,12 +2191,13 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// LogTemp to Verbose to get the per-tile mix back.
 		UE_LOG(LogTemp, Verbose,
 			TEXT("ODForestManager: tile (%d,%d) biome=%s species blob=%d olive=%d "
-			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | "
+			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d palm=%d fern=%d broadleaf=%d giant=%d | "
 			     "shrub bush=%d sagebrush=%d"),
 			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
 			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
 			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
-			SpeciesInstanceCounts[6], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
+			SpeciesInstanceCounts[6], SpeciesInstanceCounts[7], SpeciesInstanceCounts[8],
+			SpeciesInstanceCounts[9], SpeciesInstanceCounts[10], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
 	}
 
 	// gated stat log (2026-08-26) - same 5 s cadence as UpdateCollision()'s

@@ -346,7 +346,7 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 	// BuildTile() uses) instead of always uniform-random among the classic 3.
 	// Tree-vs-bush odds (25% bush) match the original RandRange(0,3)==3 case
 	// exactly, just decided before the species roll instead of folded into
-	// one 4-way roll, since bush isn't part of the 7-way SpeciesWeight table.
+	// one 4-way roll, since bush isn't part of the SpeciesWeight table.
 	int32 SpeciesInstanceCounts[NumExtendedTreeSpecies] = {};
 	int32 BushInstanceCount = 0;
 	// Batched per-HISM (2026-09-07 frame-drop pass): AddInstance one at a
@@ -401,11 +401,12 @@ void AODBarrierManager::FinalizeTile(const FIntPoint& Key, FParsedBarrierTile&& 
 			(Key.X + 0.5) * (double)TileSizeCm, (Key.Y + 0.5) * (double)TileSizeCm);
 		UE_LOG(LogTemp, Verbose,
 			TEXT("ODBarrierManager: tile (%d,%d) biome=%s windbreak species blob=%d olive=%d "
-			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | bush=%d"),
+			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d palm=%d fern=%d broadleaf=%d giant=%d | bush=%d"),
 			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)TileBiome),
 			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
 			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
-			SpeciesInstanceCounts[6], BushInstanceCount);
+			SpeciesInstanceCounts[6], SpeciesInstanceCounts[7], SpeciesInstanceCounts[8],
+			SpeciesInstanceCounts[9], SpeciesInstanceCounts[10], BushInstanceCount);
 	}
 
 	// 2026-09-06 (AUDIT.md 5.4/rec. 5, direction confirmed): the invisible

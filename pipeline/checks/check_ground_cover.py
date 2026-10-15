@@ -16,13 +16,14 @@ import struct
 # --- mirror of ODGroundCover.cpp --------------------------------------------
 BIOMES = ["DeciduousForest", "EvergreenForest", "Chaparral", "DesertScrub", "PlainsGrassland", "Wetland",
           "AlpineBare", "ArcticTundra", "Farmland", "Savanna", "Rainforest", "CoastalDune",
-          "CanyonBadlands", "RockyFoothill"]
+          "CanyonBadlands", "RockyFoothill", "TropicalCoast", "LavaField"]
 BIOME_TABLE = [
     [0.50, 0.80, 0.60, 0.30, 0.05], [0.35, 0.50, 0.60, 0.50, 0.10], [0.40, 0.30, 0.90, 0.80, 0.65],
     [0.30, 0.15, 0.70, 1.00, 0.90], [1.00, 0.70, 0.30, 0.20, 0.30], [1.00, 0.90, 0.50, 0.10, 0.00],
     [0.15, 0.15, 0.10, 1.00, 0.40], [0.20, 0.20, 0.20, 0.60, 0.50], [0.80, 0.80, 0.30, 0.20, 0.25],
     [1.00, 0.40, 0.40, 0.40, 0.70], [0.60, 1.00, 0.80, 0.10, 0.00], [0.50, 0.10, 0.30, 0.20, 0.60],
-    [0.15, 0.10, 0.40, 1.00, 0.80], [0.40, 0.30, 0.40, 0.90, 0.35],
+    [0.15, 0.10, 0.40, 1.00, 0.80], [0.40, 0.30, 0.40, 0.90, 0.35], [0.50, 0.20, 0.40, 0.20, 0.40],
+    [0.05, 0.05, 0.10, 0.60, 0.70],
 ]
 PER_SQM = [0.30, 0.12, 0.015, 0.10]
 DETAIL_DENSITY = [0.5, 1.0, 1.6]
@@ -55,7 +56,7 @@ def clamp(v, lo, hi):
 
 
 def place(key, x0, y0, step, n, z, good, biome, detail, seed, shoulder, road_edge):
-    b = BIOME_TABLE[min(biome, 13)]
+    b = BIOME_TABLE[min(biome, len(BIOME_TABLE) - 1)]
     area = (step / 100.0) ** 2
     half_diag = step * 0.7072
     w = n + 1

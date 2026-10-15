@@ -33,9 +33,11 @@ enum class EODBiome : uint8
 	Farmland,           // sparse bush (hedgerows/fencelines), open fields
 	Savanna,            // sparse scattered trees over grass - E Africa feel
 	Rainforest,         // Blob-heavy, densest - tropical jungle canopy
-	CoastalDune,        // sparse bush only - beach/dune grass, no trees
+	CoastalDune,        // sparse bush only - temperate beach/dune grass
 	CanyonBadlands,     // near-barren, sparse olive scrub - Dragon-style rock cut
 	RockyFoothill,      // Conifer+olive, sparse-medium - plains/alpine transition
+	TropicalCoast,      // palms over sand - CoastalDune's |lat| < 23.5 twin
+	LavaField,          // near-barren basalt, sparse fern/ohia colonizers
 };
 
 /** One biome's recipe against the extended 7-species/2-shrub mesh set -
@@ -54,12 +56,13 @@ enum class EODBiome : uint8
  *  trees. */
 struct FBiomeRecipe
 {
-	// Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak - order
+	// Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak, Palm,
+	// TreeFern, Broadleaf, BroadleafGiant - order
 	// MUST match AODForestManager::TreeMeshes (loaded from
 	// ExtendedTreeMeshPaths in ODForestManager.cpp). All 7 are "woody":
 	// BuildTile() gives every one of them a trunk collision capsule, same as
-	// the original 3.
-	float SpeciesWeight[7] = {1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+	// the original 3. Unlisted trailing entries zero-fill.
+	float SpeciesWeight[NumExtendedTreeSpecies] = {1.f};
 	// Bush, Sagebrush - order MUST match AODForestManager::ShrubMeshes.
 	// Neither gets trunk collision (same as the plain bush always has) -
 	// sagebrush is shrub-class specifically so it never enters the
@@ -539,8 +542,9 @@ private:
 	void ReleaseTile(const FIntPoint& Key);
 	void UpdateCollision(const FVector& PlayerLoc);
 
-	// 7 entries, order = FBiomeRecipe::SpeciesWeight (Blob, Olive, Conifer,
-	// ScrubOak, Manzanita, Yucca, CanyonOak) - loaded from
+	// NumExtendedTreeSpecies entries, order = FBiomeRecipe::SpeciesWeight
+	// (Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak, Palm,
+	// TreeFern, Broadleaf, BroadleafGiant) - loaded from
 	// ExtendedTreeMeshPaths in ODForestManager.cpp, NOT the shared
 	// TreeMeshPaths[3] in ODBinSidecarUtil.h (that array stays the classic 3
 	// so ODBarrierManager.cpp, its other consumer, is unaffected).

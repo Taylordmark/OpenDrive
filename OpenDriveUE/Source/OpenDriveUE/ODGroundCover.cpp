@@ -10,7 +10,7 @@ namespace ODGroundCover
 {
 	// Per EODBiome, in enum order: grass, weed, shrub, pebble density scale,
 	// then dryness (0 lush green .. 1 straw; also the sagebrush share of shrubs).
-	static const float BiomeTable[14][5] = {
+	static const float BiomeTable[16][5] = {
 		/* DeciduousForest */ {0.50f, 0.80f, 0.60f, 0.30f, 0.05f},
 		/* EvergreenForest */ {0.35f, 0.50f, 0.60f, 0.50f, 0.10f},
 		/* Chaparral       */ {0.40f, 0.30f, 0.90f, 0.80f, 0.65f},
@@ -25,6 +25,8 @@ namespace ODGroundCover
 		/* CoastalDune     */ {0.50f, 0.10f, 0.30f, 0.20f, 0.60f},
 		/* CanyonBadlands  */ {0.15f, 0.10f, 0.40f, 1.00f, 0.80f},
 		/* RockyFoothill   */ {0.40f, 0.30f, 0.40f, 0.90f, 0.35f},
+		/* TropicalCoast   */ {0.50f, 0.20f, 0.40f, 0.20f, 0.40f},
+		/* LavaField       */ {0.05f, 0.05f, 0.10f, 0.60f, 0.70f},
 	};
 	static constexpr float PerSqM[4] = {0.30f, 0.12f, 0.015f, 0.10f};   // grass, weed, shrub, pebble at Model Detail High
 	static constexpr float DetailDensity[3] = {0.5f, 1.0f, 1.6f};       // Standard, High, Ultra
@@ -46,7 +48,7 @@ namespace ODGroundCover
 
 	void Place(const FCell& C, TArray<FPlaced> (&Out)[NumSlots])
 	{
-		const float* B = BiomeTable[FMath::Min<int32>(C.Biome, 13)];
+		const float* B = BiomeTable[FMath::Min<int32>(C.Biome, UE_ARRAY_COUNT(BiomeTable) - 1)];
 		const int32 D = FMath::Clamp(C.Detail, 0, 2);
 		const float Area = FMath::Square(C.Step / 100.0);
 		const float HalfDiag = C.Step * 0.7072;

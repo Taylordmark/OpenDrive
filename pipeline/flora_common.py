@@ -72,7 +72,8 @@ def sway_uv(x, y, z, height, reach):
     """(U, V) for a vertex of a mesh `height` cm tall reaching `reach` cm
     from the trunk axis (trunk base at the origin). U: trunk bend, 0 at the
     base, (z/height)^2 scaled by tree height. V: extra for branch tips,
-    (r/reach)^2 scaled by crown radius."""
-    u = (max(z, 0.0) / height) ** 2 * height / SWAY_REF_H
-    v = min(1.0, (x * x + y * y) ** 0.5 / reach) ** 2 * reach / SWAY_REF_R
+    (r/reach)^2 scaled by crown radius - capped at the material's bounds, so
+    a wider/taller tree (the monkeypod giant) sways like a 6 m / 22 m one."""
+    u = (max(z, 0.0) / height) ** 2 * min(height / SWAY_REF_H, SWAY_U_MAX)
+    v = min(1.0, (x * x + y * y) ** 0.5 / reach) ** 2 * min(reach / SWAY_REF_R, SWAY_V_MAX)
     return u, v

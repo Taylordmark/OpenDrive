@@ -224,8 +224,10 @@ const FBiomeGroundTint BiomeGroundTintTable[] = {
 	/* CoastalDune      */ { FLinearColor(0.50f, 0.46f, 0.32f) },
 	/* CanyonBadlands   */ { FLinearColor(0.48f, 0.34f, 0.22f) },
 	/* RockyFoothill    */ { FLinearColor(0.28f, 0.30f, 0.24f) }, // grey-green transition
+	/* TropicalCoast    */ { FLinearColor(0.55f, 0.50f, 0.36f) }, // pale coral sand
+	/* LavaField        */ { FLinearColor(0.05f, 0.05f, 0.055f) }, // fresh basalt, near black
 };
-static_assert(UE_ARRAY_COUNT(BiomeGroundTintTable) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(BiomeGroundTintTable) == (uint8)EODBiome::LavaField + 1,
 	"BiomeGroundTintTable must have one entry per EODBiome value, in enum order");
 
 // HashLattice/ValueNoise2D moved to ODBinSidecarUtil.h (2026-09-25) -

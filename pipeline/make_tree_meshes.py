@@ -33,6 +33,10 @@ for why that's a C++-side follow-up, out of scope for this pass):
     bush             -> Willow/streamside scrub bush (multi-stem, low)
     sagebrush        -> Sagebrush (foliage-only, no bark slot)
     grass_tuft       -> alpine grass tuft (foliage-only, unchanged role)
+    tree_palm        -> Coconut-style palm (tropical; Rainforest/Savanna/Coastal)
+    tree_fern        -> Hapu'u tree fern (tropical rainforest understory)
+    tree_broadleaf   -> Evergreen tropical canopy tree (ohia/kukui-style)
+    tree_broadleaf_giant -> Occasional huge emergent broadleaf (monkeypod/banyan)
 
 Detail tiers (Graphics menu "Asset Detail"): every mesh is written three
 times - <name> (Standard, the shipped look), <name>_high, <name>_ultra - the
@@ -942,6 +946,131 @@ def real_ground_cards(name, sfx, seed, n, r, pitch, h, w, cell, crown_z, roll=0.
     m.save(name + "_real" + sfx, {"foliage": REAL_TEX["foliage"]})
 
 
+# ---------------------------------------------------------------------------
+# Tropical slots (tree_palm, tree_fern): one builder serves both modes - the
+# geometry is identical, only textures/normals differ. Each uses its own rng,
+# so the global stylized stream (and every mesh above) is untouched. No new
+# atlas cells: palm leaflets reuse willow_leaf, fern pinnae reuse fir_needle.
+
+def _frond_crown(m, crown, n, L, pitch, droop, cell, leaf_w, leaf_sag, bark, r_rachis, sk, dens, csize):
+    """`n` arching fronds radiating from `crown`: a rachis tube (polyline
+    whose pitch falls by `droop` deg tip-ward) with a hinged pair of leaflet
+    cards per station, both sagging `leaf_sag` below horizontal."""
+    for k in range(n):
+        az = 2 * math.pi * (k + sk.uniform(-0.3, 0.3)) / n
+        p0, dr = math.radians(sk.uniform(*pitch)), math.radians(sk.uniform(*droop))
+        ln = L * sk.uniform(0.85, 1.1)
+        pts = [np.asarray(crown, float)]
+        for i in range(4):
+            pts.append(pts[-1] + _dir(az, p0 - dr * (i + 0.5) / 4) * ln / 4)
+        real_tube(m, pts, r_rachis, r_rachis * 0.25, bark, 3)
+        nst = max(3, int(round(ln / 45 * dens)))
+        step = ln * 0.88 / nst
+        for i in range(nst):
+            f = 0.12 + 0.88 * i / nst
+            q, up = _poly_at(pts, f)
+            flat = _unit(np.cross(up, [0.0, 0.0, 1.0]))
+            w = (leaf_w * (1 - 0.55 * f) + 15) * csize
+            for s in (-1, 1):
+                out = _unit(flat * s + [0, 0, -leaf_sag])
+                m.quad(q, q + out * w, q + out * w + up * step * 1.4, q + up * step * 1.4,
+                       cell_uv_rect(cell), "foliage")
+
+
+def _tropical(name, sfx, real, seed, H, r0, bend, bark, n, L, pitch, droop, cell, leaf_w, leaf_sag,
+              r_rachis, profile):
+    dens, csize, xsides = REAL_TIERS[sfx][:3] if real else (DENS, CARD, 0)
+    sk = np.random.default_rng(seed)
+    az = sk.uniform(0, 2 * math.pi)
+
+    def lean(h):
+        d = bend * (h / H) ** 2
+        return (math.cos(az) * d, math.sin(az) * d)
+
+    m = Mesh()
+    top, _ = m.trunk([(h * H, r * r0) for h, r in profile], bark, sides=6 + xsides,
+                     u_repeat=max(1, round(2 * math.pi * r0 / BARK_TILE_CM)), v_repeat=H / BARK_TILE_CM, lean=lean)
+    crown = top + [0, 0, -r0 * 0.5]
+    _frond_crown(m, crown, n, L, pitch, droop, cell, leaf_w, leaf_sag, bark, r_rachis, sk, dens, csize)
+    if real:
+        real_normals(m, lambda p: p - crown + [0, 0, 0.3 * L])
+        m.save(name + "_real" + sfx, {bark: REAL_TEX[bark], "foliage": REAL_TEX["foliage"]})
+    else:
+        m.tris.sort(key=lambda t: t[0] == "foliage")   # bark first: slot 0
+        m.save(name + sfx, {bark: BARK_TEX[bark], "foliage": FOLIAGE_TEX})
+
+
+def build_palm(name, sfx="", real=False):
+    """Coconut-style palm: ~13 m slender trunk bowing to one side, a crown of
+    14 long arching fronds with drooping leaflets."""
+    _tropical(name, sfx, real, 1111, H=1300, r0=17, bend=110, bark="bark_willow", n=14, L=370,
+              pitch=(25, 65), droop=(85, 125), cell="willow_leaf", leaf_w=80, leaf_sag=0.7,
+              r_rachis=3.0, profile=[(0, 1.4), (0.05, 1.0), (0.5, 0.88), (1.0, 0.75)])
+
+
+def build_tree_fern(name, sfx="", real=False):
+    """Hapu'u-style tree fern: ~4 m thick fibrous trunk under a spreading
+    rosette of 12 feathery fronds that arch up and droop at the tips."""
+    _tropical(name, sfx, real, 1212, H=420, r0=17, bend=25, bark="bark_conifer", n=12, L=270,
+              pitch=(30, 65), droop=(85, 115), cell="fir_needle", leaf_w=70, leaf_sag=0.3,
+              r_rachis=2.5, profile=[(0, 1.6), (0.1, 1.05), (0.9, 0.95), (1.0, 1.1)])
+
+
+def build_broadleaf(name, sfx="", real=False, seed=1313, r0=28, hc=800, limbs=7,
+                    pitch=(30, 55), L=(290, 350), leaves=8, card=(150, 135), twigs=2, spread=50, H=1250):
+    """Evergreen tropical canopy tree (ohia/kukui-style): buttress-flared
+    trunk (radius r0) forking at hc into `limbs` spreading limbs under a
+    broad, flat-topped crown of leaf clusters. Evergreen by slot - only
+    tree_blob gets LeafDrop."""
+    dens, csize, xsides = REAL_TIERS[sfx][:3] if real else (DENS, CARD, 0)
+    sk = np.random.default_rng(seed)
+    m = Mesh()
+    m.trunk([(0, r0 * 2.0), (40, r0 * 1.3), (150, r0), (hc, r0 * 0.75)], "bark_aspen",
+            sides=7 + xsides, u_repeat=max(1, round(2 * math.pi * r0 / BARK_TILE_CM)),
+            v_repeat=hc / BARK_TILE_CM)
+    fork = np.array([0.0, 0.0, hc])
+    tips = []
+    for k in range(limbs):
+        a = 2 * math.pi * (k + sk.uniform(-0.25, 0.25)) / limbs
+        p = math.radians(sk.uniform(*pitch))
+        ln = sk.uniform(*L)
+        mid = fork + _dir(a, p) * ln * 0.55
+        end = mid + _dir(a + sk.uniform(-0.3, 0.3), p * 0.45) * ln * 0.45
+        real_tube(m, [fork, mid, end], r0 * 0.5, 3.0, "bark_aspen", 4)
+        tips.append((end, _unit(end - mid)))
+        for _ in range(twigs):                              # twigs off the outer half
+            q, tan = _poly_at([fork, mid, end], sk.uniform(0.5, 0.85))
+            d = _unit(tan + _dir(a + sk.choice([-1, 1]) * sk.uniform(0.7, 1.2), 0.2) * 0.9)
+            tl = sk.uniform(100, 150)
+            real_tube(m, [q, q + d * tl], 4.0, 1.0, "bark_aspen", 3)
+            tips.append((q + d * tl, d))
+    top = np.array([0.0, 0.0, H - 250.0])                  # short leader fills the crown's middle
+    real_tube(m, [fork, top], r0 * 0.4, 3.0, "bark_aspen", 4)
+    tips += [(top, np.array([0.0, 0.0, 1.0]))] * 2
+    ctr = np.array([0.0, 0.0, (hc + H) / 2])
+    for end, d in tips:                                     # flat-topped leaf mass
+        for _ in range(max(3, int(round(leaves * dens)))):
+            q = end + sk.normal(0, spread, 3) * [1, 1, 0.45]
+            q[2] = min(q[2], H)               # flat-topped crown
+            sc = csize * sk.uniform(0.85, 1.2)
+            real_card(m, q, _unit(d * 0.5 + [0, 0, 0.8] + sk.normal(0, 0.4, 3)), sk.uniform(-math.pi, math.pi),
+                      card[0] * sc, card[1] * sc, "aspen_leaf", q - ctr)
+    if real:
+        real_normals(m, lambda p: (p - ctr) * [1, 1, 1.4] + [0, 0, 150])
+        m.save(name + "_real" + sfx, {"bark_aspen": REAL_TEX["bark_aspen"], "foliage": REAL_TEX["foliage"]})
+    else:
+        m.tris.sort(key=lambda t: t[0] == "foliage")   # bark first: slot 0
+        m.save(name + sfx, {"bark_aspen": BARK_TEX["bark_aspen"], "foliage": FOLIAGE_TEX})
+
+
+def build_broadleaf_giant(name, sfx="", real=False):
+    """The occasional monkeypod (Samanea saman): short ~1.2 m trunk splitting
+    at 4 m into 9 massive limbs that arch up and out under a dome crown
+    ~24 m across and ~16 m tall - wider than it is tall."""
+    build_broadleaf(name, sfx, real, seed=1414, r0=60, hc=400, limbs=9, pitch=(45, 60),
+                    L=(1050, 1200), leaves=12, card=(210, 190), twigs=4, spread=110, H=1600)
+
+
 # slot -> builder; slots not listed keep their stylized mesh in Realistic
 # (they still render the _real atlas through M_Foliage_real's season MID).
 REAL_SPECIES = {
@@ -971,6 +1100,10 @@ REAL_SPECIES = {
     "grass_tuft": lambda s: real_ground_cards(     # same 35-55 cm tuft as stylized
         "grass_tuft", s, 1010, n=6, r=10, pitch=(66, 84), h=(36, 54), w=(26, 38),
         cell="grass_blade", crown_z=60),
+    "tree_palm": lambda s: build_palm("tree_palm", s, real=True),
+    "tree_fern": lambda s: build_tree_fern("tree_fern", s, real=True),
+    "tree_broadleaf": lambda s: build_broadleaf("tree_broadleaf", s, real=True),
+    "tree_broadleaf_giant": lambda s: build_broadleaf_giant("tree_broadleaf_giant", s, real=True),
 }
 # Per-slot triangle budgets where REAL_TRI_BUDGET (trees) doesn't fit:
 # ground cover is drawn in the hundreds of thousands, so it stays close to
@@ -1009,6 +1142,10 @@ def build_all(sfx):
     build_willow_scrub("bush" + sfx, tree_form=False)
     build_sagebrush("sagebrush" + sfx)
     build_grass_tuft("grass_tuft" + sfx)
+    build_palm("tree_palm", sfx)
+    build_tree_fern("tree_fern", sfx)
+    build_broadleaf("tree_broadleaf", sfx)
+    build_broadleaf_giant("tree_broadleaf_giant", sfx)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ namespace
 	constexpr float HURRICANE_HOLD_S[2] = { 600.0f, 1200.0f };
 
 	// per EODBiome: { precip, fog, dust } multipliers; NEUTRAL_MULT = no biome data
-	constexpr float BIOME_MULT[14][3] = {
+	constexpr float BIOME_MULT[16][3] = {
 		{ 1.0f, 1.0f, 0.0f },   // DeciduousForest
 		{ 1.1f, 1.3f, 0.0f },   // EvergreenForest
 		{ 0.9f, 0.8f, 0.5f },   // Chaparral
@@ -66,9 +66,11 @@ namespace
 		{ 1.0f, 1.8f, 0.3f },   // CoastalDune
 		{ 0.6f, 0.3f, 1.3f },   // CanyonBadlands
 		{ 1.0f, 0.8f, 0.3f },   // RockyFoothill
+		{ 1.2f, 1.2f, 0.2f },   // TropicalCoast
+		{ 0.9f, 0.8f, 0.6f },   // LavaField (vog haze reads as dust)
 	};
 	constexpr float NEUTRAL_MULT[3] = { 1.0f, 1.0f, 1.0f };
-	static_assert(UE_ARRAY_COUNT(BIOME_MULT) == (int32)EODBiome::RockyFoothill + 1, "one row per EODBiome");
+	static_assert(UE_ARRAY_COUNT(BIOME_MULT) == (int32)EODBiome::LavaField + 1, "one row per EODBiome");
 
 	// Per-state scalar targets (not mirrored - the sim only needs states):
 	// { PrecipIntensity, PrecipType, Wind m/s, Visibility m, CloudCover, Dust, StormTint }

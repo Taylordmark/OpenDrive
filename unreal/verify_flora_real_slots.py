@@ -16,7 +16,7 @@ import unreal
 
 TREE_DIR = "/Game/OpenDrive/Trees"
 SLOTS = ("tree_blob", "tree_olive", "tree_conifer", "tree_scrub_oak", "tree_manzanita",
-         "tree_yucca", "tree_canyon_oak", "bush", "sagebrush", "grass_tuft")
+         "tree_yucca", "tree_canyon_oak", "tree_palm", "tree_fern", "tree_broadleaf", "tree_broadleaf_giant", "bush", "sagebrush", "grass_tuft")
 EAL = unreal.EditorAssetLibrary
 
 
