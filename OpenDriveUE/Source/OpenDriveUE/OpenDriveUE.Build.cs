@@ -20,6 +20,9 @@ public class OpenDriveUE : ModuleRules
 			"AudioMixer",
 			"GeometryFramework",
 			"GeometryCore",
+			// ODFarForest.cpp's runtime-built canopy card mesh (BuildFromMeshDescriptions)
+			"MeshDescription",
+			"StaticMeshDescription",
 			"AssetRegistry",
 			// FDisplayMetrics (Settings menu's "Native" resolution row, Arc 4.4) -
 			// lives in ApplicationCore, not Engine/Core.

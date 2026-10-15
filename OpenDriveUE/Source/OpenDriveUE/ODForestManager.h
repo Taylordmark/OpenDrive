@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GenericPlatform/GenericPlatformFile.h" // IFileHandle (far forest)
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
 #include "ODGroundCover.h"
@@ -156,6 +157,19 @@ public:
 	 *  baked data instead of falling back to guesses. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float SpawnRadius = 50000.0f;
+
+	/** Far forest (realism eval T3, 2026-10-15): pipeline/build_far_forest.py's
+	 *  farforest_<area>_test.bin (prefix derived from ElevationFilePrefix) -
+	 *  one 8-tri cross-card canopy instance per ESA WorldCover tree cell
+	 *  (20 m), streamed in 1 km chunks out to this radius, plus town street
+	 *  trees (real species meshes, trunk collision). 0 = off. Cards in the
+	 *  near scatter's road band hide while it covers their chunk. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float FarForestRadius = 500000.0f;
+
+	/** Game-thread ms per tick for far chunk builds (at least one per tick). */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float FarBuildMsBudget = 2.0f;
 
 	/** Trees per m^2 at forest weight 1. Thinned 0.075 -> 0.05 (2026-07-25) so
 	 *  the roadside canopy reads as forest, not a wall right over the camera. */
@@ -541,6 +555,27 @@ private:
 	TMultiMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GroundCoverCells;
 	void ReleaseTile(const FIntPoint& Key);
 	void UpdateCollision(const FVector& PlayerLoc);
+
+	// Far forest (ODFarForest.cpp) - see FarForestRadius
+	struct FFarChunk
+	{
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player
+		TArray<FVector> Trunks;   // off-band cards + street trees (collision)
+		bool bBandVisible = true;
+	};
+	bool LoadFarForest();
+	void BuildFarChunk(const FIntPoint& Key);
+	void UpdateFarForest(const FVector& Loc);
+	UStaticMesh* MakeCardMesh(int32 AtlasRow, int32 AtlasCol);
+	TUniquePtr<IFileHandle> FarFile;
+	TMap<FIntPoint, TPair<int64, int32>> FarTileRecs;   // 2 km tile -> (record byte offset, count)
+	TMap<FIntPoint, FFarChunk> FarChunks;
+	UPROPERTY()
+	TArray<TObjectPtr<UStaticMesh>> CardMeshes;   // [0] needle (pine cell), [1] broadleaf (aspen cell)
+	double FarLogTime = 0.0;
+	double FarBuildMs = 0.0, FarBuildMaxMs = 0.0;
+	int32 FarBuilt = 0;
 
 	// NumExtendedTreeSpecies entries, order = FBiomeRecipe::SpeciesWeight
 	// (Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak, Palm,

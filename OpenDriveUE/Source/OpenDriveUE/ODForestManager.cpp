@@ -356,6 +356,7 @@ void AODForestManager::BeginPlay()
 	// instance) skips straight to the Landscape-mask path unchanged.
 	bUsePointBiomes = LoadBiomePoints();
 	bReady = bUsePointBiomes || LoadMask();
+	LoadFarForest();   // realism T3 far canopy cards + street trees (ODFarForest.cpp)
 	if (!bReady)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -2551,6 +2552,24 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 			}
 		}
 	}
+	// far forest cards + street trees (ODFarForest.cpp): the player's chunk and its neighbours
+	const FIntPoint FarC(FMath::FloorToInt(PlayerLoc.X / 100000.0), FMath::FloorToInt(PlayerLoc.Y / 100000.0));
+	for (int32 dy = -1; dy <= 1; ++dy)
+	{
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			if (const FFarChunk* C = FarChunks.Find(FarC + FIntPoint(dx, dy)))
+			{
+				for (const FVector& T : C->Trunks)
+				{
+					if (const float D2 = FVector::DistSquared2D(T, PlayerLoc); D2 < R2)
+					{
+						Near.Add({T + FVector(0, 0, TrunkHalfHeight * 1.2f), TrunkRadius * 1.2f, TrunkHalfHeight * 1.2f, D2});
+					}
+				}
+			}
+		}
+	}
 	Near.Sort([](const FNear& A, const FNear& B) { return A.DistSq < B.DistSq; });
 	const int32 NumNear = Near.Num();
 	Near.SetNum(FMath::Min(NumNear, Pool.Num()));
@@ -2741,6 +2760,7 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
+	UpdateFarForest(Loc);   // vista too: the backdrop's hills are what it shows
 	if (Vista.bActive)
 	{
 		return;
