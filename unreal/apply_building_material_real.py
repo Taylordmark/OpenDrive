@@ -11,7 +11,8 @@ twin's single material.
 Same interface as the twin: UV0 (U = perimeter / 4 m, V = height / 4 m from
 pipeline/build_building_mesh.py, planar XY / 4 m on the roof cap), vertex
 color R = wall set bucket (WallSet encoding, (idx + 0.5) / 7), G = per-
-building seed, B = flat roof, A = 0 on pitched-roof gable end walls (no
+building seed, B = facade archetype in Realistic ((idx + 0.5) / 5, see
+FACADE_FLOORS; the stylized twin reads B as flat roof), A = 0 on pitched-roof gable end walls (no
 windows; pitched in the pipeline, building_roofs.py). Roof triangles carry
 their own colour instead: RGB = the roof's linear albedo, A = roof set
 bucket (ROOF_LAYERS, (idx + 0.5) / 4), both from build_building_mesh.py
@@ -34,6 +35,12 @@ What's added over the stylized graph:
     ceiling, floor shaded INTERIOR_SHADE_MIN..1, wall/floor tint and depth
     hashed per window, luma renormalised so the exposure check stays exact.
     Unlit windows stay glass.
+  - facade archetypes (realism B2), picked per building by the pipeline:
+    punched windows, house (garage / entry doors on the ground floor),
+    storefront (tall glazed ground floor, sign band, shop doors, lit at
+    night), glass curtain wall (mullions, spandrels, tinted glass) and
+    balcony tower (slab, railing and shaded recess per bay column), each
+    with its own ground / upper floor heights and bay width.
   - roofs (M_BuildingRoof_real, realism B3): the pipeline picks the set
     per building and region (clay tile, asphalt shingle, painted steel,
     flat concrete) and the colour (OSM roof:colour, else a regional
@@ -81,8 +88,6 @@ REAL_SRC_DIR = Path(__file__).resolve().parent.parent / "content_src" / "realist
 
 # ---- geometry contract (identical to apply_building_material.py) ----------
 FACADE_TILE_M = 4.0
-FLOOR_HEIGHT_M = 3.2
-BAY_WIDTH_M = 2.5
 WALL_LAYERS = ["Bricks074", "Bricks053", "WoodSiding001", "Plaster001", "Concrete034",
                "stacked_stone_wall", "wood_trunk_wall"]
 # albedo gain per layer (realism B4): WoodSiding001 is near-black (0.020) and
@@ -101,10 +106,37 @@ LIT_NITS = 4.0           # lit window luminance (cd/m^2) before the per-room 0.8
 LIT_JITTER_MIN = 0.8
 INTERIOR_SHADE_MIN = 0.75   # darkest room face (floor) seen through a lit window, x LIT_NITS
 
+# ---- facade archetypes (realism B2): vertex B in Realistic = (idx + 0.5) / 5,
+# baked by build_building_mesh.py pick_archetype; the floor heights are its
+# FACADE_FLOORS too (pipeline/tests/test_building_facades.py checks) --------
+# punched (generic), house, storefront, glass curtain wall, balcony tower
+FACADE_FLOORS = [(3.6, 3.2), (2.9, 2.8), (4.5, 3.3), (5.0, 3.8), (4.0, 3.0)]   # (ground, upper) m
+FACADE_BAY_M = [2.5, 3.0, 3.0, 1.5, 3.0]
+# window opening (u0, u1, v0, v1) in bay / floor fractions
+FACADE_WINDOW_GROUND = [(0.15, 0.85, 0.06, 0.92), (0.20, 0.80, 0.30, 0.80), (0.04, 0.96, 0.09, 0.70),
+                        (0.03, 0.97, 0.0, 0.88), (0.10, 0.90, 0.06, 0.85)]
+FACADE_WINDOW_UPPER = [(0.15, 0.85, 0.30, 0.82), (0.20, 0.80, 0.30, 0.80), (0.15, 0.85, 0.30, 0.82),
+                       (0.03, 0.97, 0.20, 0.985), (0.08, 0.92, 0.07, 0.90)]
+GARAGE_SHARE, ENTRY_SHARE = 0.2, 0.18   # house ground-floor bays: garage door, entry door, else window
+GARAGE_RECT = (0.06, 0.94, 0.0, 0.76)   # ~2.6 x 2.2 m
+ENTRY_RECT = (0.34, 0.66, 0.0, 0.74)    # ~1 x 2.1 m
+GARAGE_PANEL_M, GARAGE_GROOVE = 0.53, 0.06
+DOOR_COLORS = [(0.60, 0.60, 0.57), (0.45, 0.40, 0.32), (0.06, 0.05, 0.045), (0.28, 0.07, 0.05)]
+SHOP_DOOR_SHARE = 0.25   # storefront bays whose glass runs to the floor
+SHOP_LIT_FRACTION = 0.8  # shop windows lit at full night
+FASCIA_V = (0.75, 0.95)  # sign band over the shopfront, ground-floor fraction
+SIGN_COLORS = [(0.03, 0.03, 0.03), (0.25, 0.03, 0.02), (0.02, 0.05, 0.14), (0.03, 0.11, 0.05),
+               (0.55, 0.50, 0.40)]
+SPANDREL = (0.045, 0.05, 0.06)   # curtain wall's opaque band per floor
+CURTAIN_GLASS = [(0.012, 0.020, 0.026), (0.018, 0.018, 0.018), (0.020, 0.016, 0.011)]   # blue, grey, bronze
+MULLION, MULLION_ROUGH = (0.12, 0.12, 0.12), 0.35
+BALCONY_SHARE = 0.75     # bay columns with balconies on a balcony tower
+SLAB_V, RAIL_V, RAIL_TOP_V = 0.06, 0.40, 0.025   # slab, railing top, top rail (floor fraction, ~3 m)
+BALUSTER_M, BALUSTER_W = 0.12, 0.25
+SLAB_COLOR, RAIL_COLOR = (0.50, 0.50, 0.47), (0.55, 0.55, 0.53)
+RECESS_DARK, SLAB_SHADOW = 0.2, 0.3   # balcony recess, and under the slab above
+
 # ---- look ------------------------------------------------------------------
-WINDOW_MARGIN_U = (0.15, 0.85)
-WINDOW_MARGIN_V_UPPER = (0.30, 0.82)
-WINDOW_MARGIN_V_GROUND = (0.06, 0.92)
 EDGE_SHARPNESS = 120.0   # bay/floor-fraction units: ~2-3 cm soft edge
 FRAME_U, FRAME_V = 0.03, 0.025   # frame width, bay / floor fraction (~7.5 cm)
 BAR_HALF_U, BAR_HALF_V = 0.012, 0.01
@@ -377,37 +409,33 @@ def build_facade(mat):
     splash = g.sat(g.sub(1.0, g.mul(v, FACADE_TILE_M / SPLASH_M)))
     wall_a = g.mul(wall_a, g.sub(1.0, g.mul(splash, SPLASH_DARK)))
 
-    # ---- window grid (same cells as the twin)
-    bay_u = g.mul(u, FACADE_TILE_M / BAY_WIDTH_M)
-    floor_v = g.mul(v, FACADE_TILE_M / FLOOR_HEIGHT_M)
+    # ---- facade archetype (realism B2): vertex B = (idx + 0.5) / N
+    n_arch = len(FACADE_FLOORS)
+    arch = g.mask(vc, b=True)
+    athr = [i / n_arch for i in range(1, n_arch)]
+
+    def per_arch(values):
+        return g.select(arch, [g.c(x) for x in values], athr)
+
+    house, store, curtain, balc = (g.rect(arch, i / n_arch, (i + 1) / n_arch, 1000.0) for i in range(1, 5))
+    not_curtain = g.sub(1.0, curtain)
+
+    # ---- window grid: a taller ground floor, then equal upper floors
+    ground_h = per_arch([f[0] for f in FACADE_FLOORS])
+    upper_h = per_arch([f[1] for f in FACADE_FLOORS])
+    h_m = g.mul(v, FACADE_TILE_M)
+    above = g.sub(h_m, ground_h)
+    upper = g.step(above, 0.0)
+    ground = g.sub(1.0, upper)
+    up_v = g.div(g.maxv(above, 0.0), upper_h)
+    floor_idx = g.mul(upper, g.add(g.floorv(up_v), 1.0))
+    floor_f = g.lerp(g.div(h_m, ground_h), g.fracv(up_v), upper)
+    bay_w = per_arch(FACADE_BAY_M)
+    bay_u = g.div(g.mul(u, FACADE_TILE_M), bay_w)
     bay_idx, bay_f = g.floorv(bay_u), g.fracv(bay_u)
-    floor_idx, floor_f = g.floorv(floor_v), g.fracv(floor_v)
-    ground = g.sat(g.sub(1.0, g.mul(floor_idx, 10.0)))
-    upper = g.sub(1.0, ground)
-    lo_v = g.lerp(WINDOW_MARGIN_V_UPPER[0], WINDOW_MARGIN_V_GROUND[0], ground)
-    hi_v = g.lerp(WINDOW_MARGIN_V_UPPER[1], WINDOW_MARGIN_V_GROUND[1], ground)
-    lo_u, hi_u = WINDOW_MARGIN_U
     # vertex alpha 0 = a pitched roof's gable end wall (pipeline
     # building_roofs.py): plain wall, no windows, frames, sills or streaks
     solid = g.mask(vc, r=True, a_out="A")
-
-    opening = g.mul(g.mul(g.rect(bay_f, lo_u, hi_u), g.rect(floor_f, lo_v, hi_v)), solid)
-    outer = g.mul(g.mul(g.rect(bay_f, lo_u - FRAME_U, hi_u + FRAME_U),
-                        g.rect(floor_f, g.sub(lo_v, FRAME_V), g.add(hi_v, FRAME_V))), solid)
-    bars = g.mul(g.sat(g.add(g.rect(bay_f, 0.5 - BAR_HALF_U, 0.5 + BAR_HALF_U),
-                             g.rect(floor_f, TRANSOM_V - BAR_HALF_V, TRANSOM_V + BAR_HALF_V))), upper)
-    glass = g.mul(opening, g.sub(1.0, bars))
-    frame = g.sat(g.sub(outer, glass))
-    sill = g.mul(g.mul(g.rect(bay_f, lo_u - SILL_OVERHANG_U, hi_u + SILL_OVERHANG_U),
-                       g.rect(floor_f, g.sub(lo_v, FRAME_V + SILL_V), g.sub(lo_v, FRAME_V))), g.mul(upper, solid))
-    trim = g.sat(g.add(frame, sill))
-
-    # rain streaks under each sill, in columns
-    below = g.sub(g.sub(lo_v, FRAME_V + SILL_V), floor_f)   # > 0 under the sill
-    streak_fade = g.mul(g.sat(g.mul(below, 50.0)), g.sat(g.sub(1.0, g.div(below, STREAK_LEN_V))))
-    columns = g.value_noise(g.append(g.mul(bay_u, STREAK_COLUMNS), g.mul(floor_idx, 3.1)))
-    streak = g.mul(g.mul(g.mul(streak_fade, columns), g.rect(bay_f, lo_u, hi_u, 40.0)), g.mul(upper, solid))
-    wall_a = g.mul(wall_a, g.sub(1.0, g.mul(streak, STREAK_DARK)))
 
     # per-window hashes, decorrelated per building (same cell as the twin)
     cell = g.append(g.add(bay_idx, g.mul(seed, 37.0)), g.add(floor_idx, g.mul(seed, 13.0)))
@@ -415,23 +443,98 @@ def build_facade(mat):
     h_var = g.frac_hash(h_lit, 13.7, 0.0)
     h_col = g.frac_hash(h_lit, 7.3, 0.0)
     h_blind = g.frac_hash(h_lit, 29.1, 0.37)
+    h_mod = g.frac_hash(h_lit, 41.3, 0.17)
+    h_column = g.hash2(g.append(g.add(bay_idx, g.mul(seed, 37.0)), g.mul(seed, 13.0)))
+
+    # modules: house garage / entry doors, shop doors, balcony columns
+    garage = g.mul(g.mul(house, ground), g.sub(1.0, g.step(h_mod, GARAGE_SHARE)))
+    entry = g.mul(g.mul(g.mul(house, ground), g.step(h_mod, GARAGE_SHARE)),
+                  g.sub(1.0, g.step(h_mod, GARAGE_SHARE + ENTRY_SHARE)))
+    shop_door = g.mul(g.mul(store, ground), g.sub(1.0, g.step(h_mod, SHOP_DOOR_SHARE)))
+    bal = g.mul(g.mul(balc, upper), g.sub(1.0, g.step(h_column, BALCONY_SHARE)))
+    plain_bal = g.mul(g.mul(balc, upper), g.step(h_column, BALCONY_SHARE))
+    no_win = g.sat(g.add(garage, entry))
+
+    def bound(k):
+        b = g.lerp(per_arch([w[k] for w in FACADE_WINDOW_UPPER]), per_arch([w[k] for w in FACADE_WINDOW_GROUND]),
+                   ground)
+        return g.lerp(b, FACADE_WINDOW_UPPER[0][k], plain_bal)   # balcony-tower bays without a balcony
+
+    lo_u, hi_u, lo_v, hi_v = (bound(k) for k in range(4))
+    lo_v = g.mul(lo_v, g.sub(1.0, shop_door))
+
+    def rect4(r):
+        return g.mul(g.rect(bay_f, r[0], r[1]), g.rect(floor_f, r[2], r[3]))
+
+    door = g.mul(g.sat(g.add(g.mul(garage, rect4(GARAGE_RECT)), g.mul(entry, rect4(ENTRY_RECT)))), solid)
+    win = g.mul(solid, g.sub(1.0, no_win))
+    opening = g.mul(g.mul(g.rect(bay_f, lo_u, hi_u), g.rect(floor_f, lo_v, hi_v)), win)
+    outer = g.mul(g.mul(g.rect(bay_f, g.sub(lo_u, FRAME_U), g.add(hi_u, FRAME_U)),
+                        g.rect(floor_f, g.sub(lo_v, FRAME_V), g.add(hi_v, FRAME_V))), win)
+    punched = g.mul(g.mul(upper, not_curtain), g.sub(1.0, bal))   # mullion, transom, sill, streaks
+    bars = g.mul(g.sat(g.add(g.rect(bay_f, 0.5 - BAR_HALF_U, 0.5 + BAR_HALF_U),
+                             g.rect(floor_f, TRANSOM_V - BAR_HALF_V, TRANSOM_V + BAR_HALF_V))), punched)
+    glass = g.mul(opening, g.sub(1.0, bars))
+    frame = g.sat(g.sub(outer, glass))
+    sill = g.mul(g.mul(g.rect(bay_f, g.sub(lo_u, SILL_OVERHANG_U), g.add(hi_u, SILL_OVERHANG_U)),
+                       g.rect(floor_f, g.sub(lo_v, FRAME_V + SILL_V), g.sub(lo_v, FRAME_V))), g.mul(punched, solid))
+    trim = g.sat(g.add(frame, sill))
+
+    # rain streaks under each sill, in columns
+    below = g.sub(g.sub(lo_v, FRAME_V + SILL_V), floor_f)   # > 0 under the sill
+    streak_fade = g.mul(g.sat(g.mul(below, 50.0)), g.sat(g.sub(1.0, g.div(below, STREAK_LEN_V))))
+    columns = g.value_noise(g.append(g.mul(bay_u, STREAK_COLUMNS), g.mul(floor_idx, 3.1)))
+    streak = g.mul(g.mul(g.mul(streak_fade, columns), g.rect(bay_f, lo_u, hi_u, 40.0)), g.mul(punched, solid))
+    wall_a = g.mul(wall_a, g.sub(1.0, g.mul(streak, STREAK_DARK)))
+    # a curtain wall has no masonry: spandrel panels between the glass
+    wall_a = g.lerp(wall_a, g.c3(SPANDREL), curtain)
+    wall_rough = g.lerp(wall_rough, MULLION_ROUGH, curtain)
+    wall_n = g.lerp(wall_n, g.c3((0.0, 0.0, 1.0)), curtain)
 
     frame_col = g.select(s_frame, [g.c3(FRAME_COLORS[0][0]), g.c3(FRAME_COLORS[1][0])], [0.5])
+    frame_col = g.lerp(frame_col, g.c3(MULLION), curtain)
     frame_rough = g.lerp(FRAME_COLORS[0][1], FRAME_COLORS[1][1], g.step(s_frame, 0.5))
     trim_col = g.lerp(frame_col, g.c3(SILL_COLOR), sill)
     trim_rough = g.lerp(frame_rough, SILL_ROUGH, sill)
-    glass_col = g.lerp(g.c3(GLASS), g.c3(BLINDS), g.sub(1.0, g.step(h_blind, BLINDS_FRACTION)))
+    glass_col = g.lerp(g.c3(GLASS), g.c3(BLINDS), g.mul(g.sub(1.0, g.step(h_blind, BLINDS_FRACTION)), not_curtain))
+    s_tint = g.frac_hash(seed, 23.7, 0.41)
+    tint = g.select(s_tint, [g.c3(c) for c in CURTAIN_GLASS], [i / len(CURTAIN_GLASS) for i in range(1, len(CURTAIN_GLASS))])
+    glass_col = g.lerp(glass_col, tint, curtain)
     glass_rough = g.lerp(GLASS_ROUGH[0], GLASS_ROUGH[1], h_var)
 
     facade_a = g.lerp(g.lerp(wall_a, trim_col, trim), glass_col, glass)
     facade_r = g.lerp(g.lerp(wall_rough, trim_rough, trim), glass_rough, glass)
-    facade_n = g.lerp(wall_n, g.c3((0.0, 0.0, 1.0)), g.sat(g.add(trim, glass)))
+    flat_w = g.sat(g.add(trim, glass))
+
+    # house doors (garage panels grooved), shop sign band
+    s_door = g.frac_hash(seed, 31.9, 0.23)
+    door_col = g.select(s_door, [g.c3(c) for c in DOOR_COLORS], [i / len(DOOR_COLORS) for i in range(1, len(DOOR_COLORS))])
+    groove = g.mul(g.rect(g.fracv(g.mul(h_m, 1.0 / GARAGE_PANEL_M)), -1.0, GARAGE_GROOVE), garage)
+    facade_a = g.lerp(facade_a, g.mul(door_col, g.sub(1.0, g.mul(groove, 0.5))), door)
+    fascia = g.mul(g.mul(g.mul(store, ground), g.rect(floor_f, FASCIA_V[0], FASCIA_V[1])), solid)
+    sign = g.select(g.frac_hash(seed, 19.3, 0.61), [g.c3(c) for c in SIGN_COLORS],
+                    [i / len(SIGN_COLORS) for i in range(1, len(SIGN_COLORS))])
+    facade_a = g.lerp(facade_a, sign, fascia)
+    facade_r = g.lerp(facade_r, 0.45, g.sat(g.add(door, fascia)))
+
+    # balconies: slab, railing (top rail + balusters) over a shaded recess
+    slab = g.mul(bal, g.sub(1.0, g.step(floor_f, SLAB_V)))
+    rail_zone = g.rect(floor_f, SLAB_V, RAIL_V)
+    balusters = g.mul(rail_zone, g.rect(g.fracv(g.mul(u, FACADE_TILE_M / BALUSTER_M)), -1.0, BALUSTER_W))
+    rail = g.mul(bal, g.sat(g.add(balusters, g.rect(floor_f, RAIL_V - RAIL_TOP_V, RAIL_V))))
+    shade = g.add(RECESS_DARK, g.mul(g.step(floor_f, 0.85), SLAB_SHADOW))
+    facade_a = g.mul(facade_a, g.sub(1.0, g.mul(g.mul(bal, g.sub(1.0, slab)), shade)))
+    facade_a = g.lerp(g.lerp(facade_a, g.c3(RAIL_COLOR), rail), g.c3(SLAB_COLOR), slab)
+    facade_r = g.lerp(facade_r, 0.6, g.sat(g.add(rail, slab)))
+    flat_w = g.sat(g.add(g.add(flat_w, door), g.add(g.add(fascia, rail), slab)))
+    facade_n = g.lerp(wall_n, g.c3((0.0, 0.0, 1.0)), flat_w)
 
     # lit rooms: a window is on once LIT_MAX_FRACTION * night passes its hash,
-    # so rooms switch on one by one through dusk
-    lit = g.sat(g.mul(g.sub(g.mul(night, LIT_MAX_FRACTION), h_lit), 50.0))
+    # so rooms switch on one by one through dusk; shops stay lit
+    lit_frac = g.lerp(LIT_MAX_FRACTION, SHOP_LIT_FRACTION, g.mul(store, ground))
+    lit = g.sat(g.mul(g.sub(g.mul(night, lit_frac), h_lit), 50.0))
     lit_col = g.select(h_col, [g.c3(luma_normalised(c)) for c in LIT_COLORS], list(LIT_COLOR_SPLIT))
-    nits = g.mul(g.lerp(LIT_NITS * LIT_JITTER_MIN, LIT_NITS, h_var), g.mul(lit, glass))
+    nits = g.mul(g.lerp(LIT_NITS * LIT_JITTER_MIN, LIT_NITS, h_var), g.mul(lit, g.mul(glass, g.sub(1.0, rail))))
     # interior mapping: ray from the glass into a bay x floor x depth room box
     # (tangent along +U, sign from screen derivatives so mirrored rings work)
     room = g.custom(INTERIOR_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT3,
@@ -440,7 +543,8 @@ def build_facade(mat):
                     N=g.node(unreal.MaterialExpressionVertexNormalWS),
                     P=g.node(unreal.MaterialExpressionWorldPosition, world_position_shader_offset=
                              unreal.WorldPositionIncludedOffsets.WPT_CAMERA_RELATIVE),
-                    U=u, H=g.frac_hash(h_lit, 5.1, 0.11), Col=lit_col)
+                    U=u, H=g.frac_hash(h_lit, 5.1, 0.11), Col=lit_col,
+                    BW=bay_w, FH=g.lerp(upper_h, ground_h, ground))
     emissive = g.mul(room, nits)
 
     return {
@@ -458,7 +562,7 @@ float s = dot(ddx(P), T) * ddx(U) + dot(ddy(P), T) * ddy(U);
 T *= s < 0 ? -1.0 : 1.0;
 float3 V = -D;
 float depth = lerp({ROOM_DEPTH_M[0]}, {ROOM_DEPTH_M[1]}, frac(H * 7.7));
-float3 d = float3(dot(V, T) / {BAY_WIDTH_M}, V.z / {FLOOR_HEIGHT_M}, max(-dot(V, N), 0.05) / depth);
+float3 d = float3(dot(V, T) / BW, V.z / FH, max(-dot(V, N), 0.05) / depth);
 d += (abs(d) < 1e-4) * 1e-4;
 float3 p = float3(Cell, 0);
 float3 t3 = (step(0, d) - p) / d;

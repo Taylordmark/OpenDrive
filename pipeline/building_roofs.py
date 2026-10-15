@@ -528,22 +528,22 @@ def make_roof(verts, uvs, tris, hip):
 
 def read_tile(path):
     """Building tile -> [dict(verts, uvs, tris, wall_set, flat_roof, roof_set,
-    roof_rgb, n_solid)] (ODU3; see export_building_mesh_bin.py)."""
+    roof_rgb, facade, n_solid)] (ODU4; see export_building_mesh_bin.py)."""
     import struct
     data = open(path, "rb").read()
-    assert data[:4] == b"ODU3", f"{path}: magic {data[:4]!r}"
+    assert data[:4] == b"ODU4", f"{path}: magic {data[:4]!r}"
     off = 4 + 16
     (count,) = struct.unpack_from("<I", data, off)
     off += 4
     out = []
     for _ in range(count):
-        vc, tc, wall, flat, roof_set, r, g, b, n_solid = struct.unpack_from("<IIBBBBBBI", data, off)
-        off += 18
+        vc, tc, wall, flat, roof_set, r, g, b, facade, n_solid = struct.unpack_from("<IIBBBBBBBI", data, off)
+        off += 19
         v = struct.unpack_from(f"<{vc * 3}f", data, off); off += vc * 12
         uv = struct.unpack_from(f"<{vc * 2}f", data, off); off += vc * 8
         t = struct.unpack_from(f"<{tc * 3}I", data, off); off += tc * 12
         out.append(dict(verts=[v[i:i + 3] for i in range(0, len(v), 3)], uvs=[uv[i:i + 2] for i in range(0, len(uv), 2)],
                         tris=[t[i:i + 3] for i in range(0, len(t), 3)], wall_set=wall, flat_roof=flat,
-                        roof_set=roof_set, roof_rgb=(r, g, b), n_solid=n_solid))
+                        roof_set=roof_set, roof_rgb=(r, g, b), facade=facade, n_solid=n_solid))
     assert off == len(data), f"{path}: {len(data) - off} trailing/short bytes"
     return out

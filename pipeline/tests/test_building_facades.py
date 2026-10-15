@@ -3,7 +3,10 @@ Rockies get wood/log/stone, SF gets painted wood + stucco, and every
 wall_set index exists in both material scripts and the C++ R encoding.
 Roofs (realism B3): OSM roof:shape / roof:material / roof:colour win, houses
 pitch and shops stay flat otherwise, regional roof sets, and every roof_set
-exists in the roof material and the C++ A encoding."""
+exists in the roof material and the C++ A encoding.
+Facade archetypes (realism B2): towers get curtain walls or balconies, shops
+storefronts, houses garage / entry doors, and the floor heights and archetype
+count match the Realistic material and the C++ B encoding."""
 import random
 import re
 import sys
@@ -12,6 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "pipeline"))
+from build_building_mesh import (FACADE_BALCONY, FACADE_CURTAIN, FACADE_FLOORS, FACADE_HOUSE, FACADE_PUNCHED,
+                                 FACADE_STOREFRONT, facade_height_m, pick_archetype)
 from build_building_mesh import (REGION_PALETTE, REGION_ROOF_SETS, ROOF_ASPHALT, ROOF_FLAT, ROOF_METAL,
                                  ROOF_TILE, parse_colour, pick_facade, roof_look, roof_shape)
 
@@ -70,4 +75,28 @@ white, black = parse_colour("White"), parse_colour("black")
 assert abs(0.2126 * white[0] + 0.7152 * white[1] + 0.0722 * white[2] - 0.6) < 1e-6 and black == (0.03,) * 3
 assert parse_colour("#FFFFFCC") is None and parse_colour(None) is None
 assert roof_look({}, "gable", random.Random(1), "sf")[0] in (ROOF_ASPHALT, ROOF_TILE)
+
+cpp = (ROOT / "OpenDriveUE/Source/OpenDriveUE/ODBuildingManager.cpp").read_text()
+assert eval(re.search(r"^FACADE_FLOORS = (\[.*?\])", real, re.M).group(1)) == FACADE_FLOORS
+assert int(re.search(r"NumFacades = (\d+);", cpp).group(1)) == len(FACADE_FLOORS) == FACADE_BALCONY + 1
+for name in ("FACADE_BAY_M", "FACADE_WINDOW_GROUND", "FACADE_WINDOW_UPPER"):
+    table = eval(re.search(rf"^{name} = (\[.*?\])", real, re.M | re.S).group(1))
+    assert len(table) == len(FACADE_FLOORS), name
+    assert all(0 <= w[0] < w[1] <= 1 and 0 <= w[2] < w[3] <= 1 for w in table if name != "FACADE_BAY_M"), name
+assert all(ground >= upper for ground, upper in FACADE_FLOORS)
+rng = random.Random(5)
+assert pick_archetype("office", 20, "flat", True, rng) == FACADE_CURTAIN
+assert pick_archetype("apartments", 20, "flat", True, rng) == FACADE_BALCONY
+assert pick_archetype("apartments", 6, "flat", True, rng) == FACADE_BALCONY
+assert pick_archetype("retail", 1, "flat", True, rng) == FACADE_STOREFRONT
+assert pick_archetype("house", 2, "gable", False, rng) == FACADE_HOUSE
+assert pick_archetype("yes", 1, "hip", False, rng) == FACADE_HOUSE
+assert pick_archetype("yes", 3, "flat", False, rng) == FACADE_PUNCHED
+towers = Counter(pick_archetype("yes", 12, "flat", True, random.Random(i), "tropical") for i in range(400))
+assert set(towers) == {FACADE_BALCONY, FACADE_CURTAIN} and towers[FACADE_BALCONY] > towers[FACADE_CURTAIN], towers
+city = sum(pick_archetype("yes", 3, "flat", True, random.Random(i)) == FACADE_STOREFRONT for i in range(400))
+assert 0.25 < city / 400 < 0.45, city
+assert pick_archetype("yes", 3, "flat", False, random.Random(1)) == FACADE_PUNCHED
+assert abs(facade_height_m(FACADE_STOREFRONT, 3) - (4.5 + 2 * 3.3)) < 1e-9
+assert facade_height_m(FACADE_HOUSE, 1) < facade_height_m(FACADE_PUNCHED, 1) < facade_height_m(FACADE_CURTAIN, 1)
 print("ok")

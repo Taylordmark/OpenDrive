@@ -59,13 +59,15 @@ namespace
 	 *        read as lit between buildings that would otherwise share the
 	 *        same per-window hash pattern from a coincidentally similar
 	 *        facade UV phase)
-	 *    B - roof type: 1 = concrete flat roof, 0 = shingle (ODU2 FlatRoof
-	 *        byte; the material lerps its roof set on this)
+	 *    B - Stylized: roof type, 1 = concrete flat roof, 0 = shingle (the
+	 *        material lerps its roof set on this); Realistic (roofs in their
+	 *        own section): facade archetype, (Facade + 0.5) / NumFacades
+	 *        (realism B2, apply_building_material_real.py FACADE_FLOORS)
 	 *  G is hashed from the footprint's own baked centroid (deterministic,
 	 *  unique per building's location) rather than any RNG, so
 	 *  re-finalizing the same building (e.g. after a pending-retry) always
 	 *  yields the exact same seed. */
-	FVector4f BuildingVertexColorForFacade(const FParsedBuilding& B)
+	FVector4f BuildingVertexColorForFacade(const FParsedBuilding& B, bool bRealistic)
 	{
 		const uint32 VCount = B.Verts.Num() / 3;
 		double CentroidX = 0.0, CentroidY = 0.0;
@@ -88,7 +90,11 @@ namespace
 		// (pipeline/tests/test_building_facades.py checks).
 		constexpr uint8 NumWallSets = 7;
 		const float R = (FMath::Min<uint8>(B.WallSet, NumWallSets - 1) + 0.5f) / NumWallSets;
-		return FVector4f(R, HashToUnitFloat(H2), B.FlatRoof ? 1.0f : 0.0f, 1.0f);
+		// MUST match len(FACADE_FLOORS) (test_building_facades.py checks)
+		constexpr uint8 NumFacades = 5;
+		const float Bch = bRealistic ? (FMath::Min<uint8>(B.Facade, NumFacades - 1) + 0.5f) / NumFacades
+			: (B.FlatRoof ? 1.0f : 0.0f);
+		return FVector4f(R, HashToUnitFloat(H2), Bch, 1.0f);
 	}
 
 	/** Realistic roof triangles (their own section, M_BuildingRoof_real):
@@ -182,14 +188,15 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 {
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || (Bin[3] != '2' && Bin[3] != '3'))
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || Bin[3] < '2' || Bin[3] > '4')
 	{
 		return false;
 	}
-	// ODU3 (realism B3) adds the baked roof's look and end-wall split; an old
-	// ODU2 tile still loads, with flat-roof defaults
-	const bool bOdu3 = Bin[3] == '3';
-	const int64 HeaderBytes = bOdu3 ? 18 : 10;
+	// ODU3 (realism B3) adds the baked roof's look and end-wall split, ODU4
+	// (B2) the facade archetype; an old tile still loads, with defaults
+	const bool bOdu3 = Bin[3] >= '3';
+	const bool bOdu4 = Bin[3] == '4';
+	const int64 HeaderBytes = bOdu4 ? 19 : bOdu3 ? 18 : 10;
 
 	const uint8* Cur = Bin.GetData() + 4;
 	const uint8* End = Bin.GetData() + Bin.Num();
@@ -223,10 +230,12 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 		uint8 RoofSet = FlatRoof ? 3 : 1;
 		uint8 RoofRgb[3] = {87, 87, 85};   // ~0.34 linear concrete
 		uint32 NumSolid = MAX_uint32;
+		uint8 Facade = 0;
 		if (bOdu3)
 		{
 			RoofSet = *Cur++;
 			RoofRgb[0] = *Cur++; RoofRgb[1] = *Cur++; RoofRgb[2] = *Cur++;
+			Facade = bOdu4 ? *Cur++ : 0;
 			NumSolid = ReadU32LE(Cur); Cur += 4;
 		}
 		const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)TCount * 12;
@@ -244,6 +253,7 @@ bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuild
 		Building.WallSet = WallSet;
 		Building.FlatRoof = FlatRoof;
 		Building.RoofSet = RoofSet;
+		Building.Facade = Facade;
 		FMemory::Memcpy(Building.RoofRgb, RoofRgb, 3);
 		Building.NumSolidVerts = (int32)FMath::Min<uint32>(NumSolid, MAX_int32);
 		Building.Verts.SetNumUninitialized(VCount * 3);
@@ -580,7 +590,7 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 			// architecture's instancing-safe variation channel - and why
 			// merging costs nothing: the variation already travels
 			// per-vertex, not per-component).
-			const FVector4f FacadeColor = BuildingVertexColorForFacade(B);
+			const FVector4f FacadeColor = BuildingVertexColorForFacade(B, MatId != nullptr);
 
 			TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
 			TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);

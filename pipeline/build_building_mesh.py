@@ -31,7 +31,7 @@ Reads   data/raw/<AREA_NAME>_test/osm_buildings.json
 Outputs data/road_tiles/<AREA_NAME>_test/building_mesh.json
         {"buildings": [{"name","tile","vertices","uvs","triangles",
                         "wall_set","flat_roof","roof_set","roof_rgb",
-                        "n_solid","levels","roof"}, ...]}
+                        "facade","n_solid","levels","roof"}, ...]}
         (roofs baked here since realism B3, see roof_shape below)
         (same {"vertices","uvs","triangles"} chunk schema
         road_mesh_common.build_road_chunks already produces, so
@@ -175,6 +175,48 @@ def pick_facade(building_tag, levels, rng, region="generic"):
 
 
 REGION = AREA_REGION.get(AREA_NAME, "generic")
+
+# Facade archetypes (realism B2, 2026-10-15): the module set the Realistic
+# wall material draws (unreal/apply_building_material_real.py FACADE_FLOORS,
+# same order) and the (ground, upper) floor heights the building is extruded
+# with - a shop's 4.5 m ground floor, a house's 2.8 m storeys, an office
+# tower's 3.8 m. Towers: apartments / residential get balconies, offices and
+# shops a glass curtain wall, untagged ones by the region's share; shops get
+# a storefront, as do a share of the untagged low/mid buildings at a City
+# tile's sidewalk (within STOREFRONT_SETBACK_M of the road);
+# houses, outbuildings and small pitched buildings get garage / entry doors.
+FACADE_PUNCHED, FACADE_HOUSE, FACADE_STOREFRONT, FACADE_CURTAIN, FACADE_BALCONY = range(5)
+FACADE_FLOORS = [(3.6, 3.2), (2.9, 2.8), (4.5, 3.3), (5.0, 3.8), (4.0, 3.0)]
+TOWER_BALCONY_SHARE = {"tropical": 0.6, "socal": 0.4, "sf": 0.4, "rockies": 0.5, "generic": 0.4}
+CITY_STOREFRONT_SHARE = 0.35
+STOREFRONT_SETBACK_M = 6.0   # SF street-front buildings sit 4-6 m from the carriageway edge
+STOREFRONT_MAX_LEVELS = 6
+
+
+def pick_archetype(building_tag, levels, shape, city_street, rng, region="generic"):
+    """FACADE_* for one building (see the block above)."""
+    cat = BUILDING_CATEGORY.get(building_tag)
+    if levels >= HIGH_RISE_LEVELS:
+        if cat in ("apartments", "house"):
+            return FACADE_BALCONY
+        if cat in ("civic", "commercial"):
+            return FACADE_CURTAIN
+        return FACADE_BALCONY if rng.random() < TOWER_BALCONY_SHARE[region] else FACADE_CURTAIN
+    if cat == "commercial":
+        return FACADE_STOREFRONT
+    if cat in ("house", "outbuilding") or (cat is None and shape != "flat" and levels <= 2):
+        return FACADE_HOUSE
+    if cat == "apartments" and levels >= 5:
+        return FACADE_BALCONY
+    if (cat is None and city_street and levels <= STOREFRONT_MAX_LEVELS
+            and rng.random() < CITY_STOREFRONT_SHARE):
+        return FACADE_STOREFRONT
+    return FACADE_PUNCHED
+
+
+def facade_height_m(archetype, levels):
+    ground, upper = FACADE_FLOORS[archetype]
+    return ground + (levels - 1) * upper
 
 # Roofs (realism B3, 2026-10-15): baked here, not pitched at runtime. Shape:
 # OSM roof:shape when tagged, else pitched for the categories pick_facade
@@ -384,14 +426,15 @@ def main():
     n_excluded_road = n_not_populated = 0
     facade_counts = defaultdict(int)
     roof_counts = defaultdict(int)
+    archetype_counts = defaultdict(int)
     for bi, b in enumerate(buildings_raw):
         ring_xy_cm = rings[bi]
         cx_cm, cy_cm = centroids_cm[bi]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
         tile_key = f"{tx},{ty}"
-        archetype = settlement.get(tile_key)
-        if archetype is None:
+        archetype_tile = settlement.get(tile_key)
+        if archetype_tile is None:
             n_not_populated += 1
             continue
 
@@ -407,7 +450,7 @@ def main():
         clearance_cm = min(
             float(np.min(np.hypot(st_x_cm[cand] - x, st_y_cm[cand] - y) - st_half_w_cm[cand]))
             for x, y in ring_xy_cm)
-        min_clear_m = CITY_ROAD_CLEARANCE_M if archetype == "City" else ROAD_CLEARANCE_M
+        min_clear_m = CITY_ROAD_CLEARANCE_M if archetype_tile == "City" else ROAD_CLEARANCE_M
         if clearance_cm / 100.0 < min_clear_m:
             n_excluded_road += 1
             continue
@@ -432,14 +475,19 @@ def main():
                 neighbours = [known[known_idx[i]] for i in np.atleast_1d(j)[np.isfinite(np.atleast_1d(d))]]
             levels = estimate_levels(b.get("building_tag"), area_m2, neighbours, rng)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
-        height_cm = levels * LEVEL_HEIGHT_M * 100.0
         # drawn AFTER the levels roll so existing heights don't shift
         wall_set, flat_roof = pick_facade(b.get("building_tag"), levels, rng, REGION)
         facade_counts[(wall_set, flat_roof)] += 1
+        shape = roof_shape(b, flat_roof, area_m2, levels, rng, REGION)
+        # own stream, so the facade / roof rolls above stay as they were
+        city_street = archetype_tile == "City" and clearance_cm / 100.0 < STOREFRONT_SETBACK_M
+        archetype = pick_archetype(b.get("building_tag"), levels, shape, city_street,
+                                   random.Random(b["way_id"] ^ 0x5F3759DF), REGION)
+        archetype_counts[archetype] += 1
+        height_cm = facade_height_m(archetype, levels) * 100.0
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
         n_solid = len(verts)
-        shape = roof_shape(b, flat_roof, area_m2, levels, rng, REGION)
         if shape != "flat":
             roofed = make_roof(verts, uvs, tris, shape == "hip")
             if roofed:
@@ -458,6 +506,7 @@ def main():
             "flat_roof": int(shape == "flat"),
             "roof_set": roof_set,
             "roof_rgb": [round(c * 255) for c in roof_rgb],
+            "facade": archetype,
             "n_solid": n_solid,
             "levels": levels,
             "roof": shape,
@@ -471,6 +520,8 @@ def main():
     n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
     print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "
           + ", ".join(f"{k}={roof_counts[k]}" for k in sorted(roof_counts)))
+    print("facade archetypes (punched, house, storefront, curtain, balcony): "
+          + ", ".join(str(archetype_counts[i]) for i in range(len(FACADE_FLOORS))))
     print("facade (wall_set, flat_roof) counts: "
           + ", ".join(f"{k}={facade_counts[k]}" for k in sorted(facade_counts)))
 

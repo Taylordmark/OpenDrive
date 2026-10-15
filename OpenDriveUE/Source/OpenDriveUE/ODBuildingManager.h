@@ -9,7 +9,7 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 /** One parsed building - plain data, safe to build off the game thread.
- *  Mirrors the ODU3 sidecar's per-building payload layout
+ *  Mirrors the ODU4 sidecar's per-building payload layout
  *  (pipeline/build_building_mesh.py / export_building_mesh_bin.py). */
 struct FParsedBuilding
 {
@@ -20,6 +20,7 @@ struct FParsedBuilding
 	uint8 FlatRoof = 0;     // 1 = flat roof cap, 0 = pitched (baked by the pipeline)
 	uint8 RoofSet = 3;      // apply_building_material_real.py ROOF_LAYERS: tile, asphalt, metal, flat
 	uint8 RoofRgb[3] = {87, 87, 85};   // roof albedo, linear 0..255
+	uint8 Facade = 0;       // apply_building_material_real.py FACADE_FLOORS archetype (realism B2)
 	// pitched roofs (building_roofs.py): vertices from here on are the gable
 	// end walls, which get vertex alpha 0 (no windows)
 	int32 NumSolidVerts = MAX_int32;
@@ -32,7 +33,7 @@ struct FParsedBuildingTile
 {
 	TArray<FParsedBuilding> Buildings;
 
-	// pipeline/generation_id.py's per-run id, read from the ODU3 header
+	// pipeline/generation_id.py's per-run id, read from the ODU4 header
 	// (2026-08-21) - see AODBuildingManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
