@@ -285,6 +285,7 @@ then read `OpenDriveUE/Saved/Logs/OpenDriveUE.log` (manager heartbeats:
 ## Data credits (release requirement)
 
 - Road geometry: © OpenStreetMap contributors, ODbL.
+- Building heights: Microsoft Global ML Building Footprints, ODbL.
 - Elevation: USGS 3DEP via AWS Terrain Tiles; imagery: USGS — public domain,
   credit courtesy.
 - Climate normals: NASA POWER.

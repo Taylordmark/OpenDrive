@@ -141,6 +141,9 @@ def build_lines():
     add("Licensed under the Open Database License (ODbL) v1.0.")
     add("https://www.openstreetmap.org/copyright")
     add("https://opendatacommons.org/licenses/odbl/1-0/")
+    add("Building heights: Microsoft Global ML Building Footprints, (C) Microsoft.")
+    add("Licensed under the Open Database License (ODbL) v1.0.")
+    add("https://github.com/microsoft/GlobalMLBuildingFootprints")
     add()
     # DEM/imagery source - as documented by pipeline/terrain_common.py and
     # README.md's "Data & licensing" section (public domain; no attribution

@@ -44,6 +44,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from building_roofs import clean_ring, triangulate
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
@@ -61,24 +62,21 @@ ROAD_CLEARANCE_M = SKIRT_EXTRA
 CITY_ROAD_CLEARANCE_M = 1.5
 
 LEVEL_HEIGHT_M = 3.2
-# stories, when the OSM way has no building:levels/height tag (parsed in
-# fetch_osm_buildings.py, which still wins over all of this whenever a way
-# actually has one).
-#
-# Keyed by the building's OWN `building=*` tag first (2026-09-03 fix - see
-# test_areas.py's MAX_BUILDING_LEVELS docstring for the full story): a real
-# small mountain town like Frisco/Breckenridge has no reliable settlement-
-# density signal to lean on the way Honolulu-vs-Kailua did (see
-# classify_settlements.py) - the overwhelming majority of ITS buildings,
-# residential and commercial alike, are tagged generic untyped
-# `building=yes`, so classify_settlements.py's "City" archetype fired on
-# ordinary downtown blocks and this module's old archetype-only defaulting
-# put them at genuine-high-rise heights (8-35 stories). Per-building-type
-# defaults use the actual tag on each way when it names a real type;
-# ARCHETYPE_LEVEL_RANGE is now only the fallback for the untyped/unknown
-# remainder, same as before this fix. MAX_BUILDING_LEVELS (test_areas.py)
-# is the final backstop, applied below to every level count regardless of
-# where it came from.
+# Storeys per building (realism B1, 2026-10-15), first hit wins:
+#   1. OSM building:levels / levels (fetch_osm_buildings.py);
+#   2. OSM height=*, else Microsoft Global ML Buildings' imagery-derived
+#      height (ms_height_m, ~80% of US footprints), both to the roof top:
+#      levels_from_height() takes ROOF_ALLOWANCE_M off first, or a 9 m
+#      two-storey house with a pitched roof reads as three storeys;
+#   3. estimate_levels(): small-house types roll their BUILDING_TYPE range;
+#      anything else copies a random one of its K nearest neighbours with
+#      real data (1. or 2.) within NEIGHBOUR_RADIUS_M - so it lands on the
+#      town's own height mix - capped by footprint area (a 9 m x 9 m
+#      footprint is not a tower); no neighbours -> its type range or 1-2.
+# Replaces the uniform 1..MAX_BUILDING_LEVELS roll City tiles used to get,
+# which built ~21.7k 8+ storey towers on Oahu (OSM tags ~500), 8-12 storeys
+# on Russian Hill and 5-6 in Frisco/Breck. MAX_BUILDING_LEVELS
+# (test_areas.py) stays the final backstop.
 BUILDING_TYPE_LEVEL_RANGE = {
     # small residential / outbuildings - one or two stories, never more
     "house": (1, 2), "detached": (1, 2), "semidetached_house": (1, 2),
@@ -95,56 +93,41 @@ BUILDING_TYPE_LEVEL_RANGE = {
     "government": (2, 3), "fire_station": (1, 2), "office": (3, 6),
     "hotel": (3, 5),
 }
-# Fallback when the way's building=* tag isn't in the table above (mainly
-# the generic/untyped "yes", this dataset's majority tag in every populated
-# tile checked so far - real downtown AND ordinary town alike, see
-# classify_settlements.py's own 2026-07-28 finding) or archetype is unknown.
-#
-# Scaled off MAX_BUILDING_LEVELS (test_areas.py) rather than a fixed (8, 35)
-# per-archetype constant, and in two stages, both found live against the
-# actual summit_county bake (2026-09-03):
-#
-#   1st attempt - a fixed downtown-Honolulu-tuned "City" floor of 8 stories,
-#   clamped down to the area cap AFTER rolling the dice, didn't work: every
-#   "City"-tile untyped building rolled well above the cap and got
-#   flattened to one single monotonous height (the cap value itself) - a
-#   range whose floor already exceeds the area's cap can't produce anything
-#   but the cap.
-#
-#   2nd attempt - deriving the range's floor from the cap too (e.g.
-#   max_levels // 2 .. max_levels) fixed the flattening but, checked live
-#   at Frisco's North 6th Ave spawn, still read as a uniform wall of 3-6
-#   story mid-rises: real downtown Frisco/Breckenridge is mostly 1-3
-#   stories with only the occasional taller lodge/condo block, not "always
-#   at least half the area cap".
-#
-# So the "City" range now spans the FULL 1..max_levels band and leans on
-# the RNG jitter itself (uniform, not weighted) to make tall buildings the
-# minority outcome rather than the guaranteed floor - a summit_county
-# roll (1..6) is low-story roughly 2 times out of 3, occasionally hits the
-# 4-6 "taller block" range, and never exceeds the area cap; Oahu's roll
-# (1..40) still comes out looking like a real Honolulu high-rise district
-# in aggregate (mean story count ~20) while no longer making literally
-# every untyped building implausibly tall.
-# "City"-tile overrides for multi-storey types whose small-town range above
-# reads wrong in a real downtown (2026-10-14, Honolulu): untagged
-# apartments there are mostly condo towers, offices/hotels mid-to-high
-# rise, commercial blocks taller than a storefront. Scaled off the area
-# cap for the same reason as archetype_level_range below.
-def city_type_level_range(building_tag, max_levels):
-    hi = {"apartments": max_levels // 2, "dormitory": max_levels // 4,
-          "office": max_levels // 2, "hotel": max_levels // 2,
-          "commercial": max_levels // 4}.get(building_tag)
-    if hi is None:
-        return None
-    lo, base_hi = BUILDING_TYPE_LEVEL_RANGE[building_tag]
-    return lo, max(base_hi, hi)   # never shorter than the small-town range
+NEIGHBOUR_K = 12
+NEIGHBOUR_RADIUS_M = 250.0
+# (footprint m2 below which, max storeys) - sheds, houses, flats, mid-rise
+AREA_LEVEL_CAPS = ((40.0, 1), (100.0, 2), (250.0, 4), (500.0, 10))
 
 
-def archetype_level_range(archetype, max_levels):
-    if archetype == "City":
-        return 1, max_levels
-    return 1, min(3, max_levels)
+ROOF_ALLOWANCE_M = 1.5
+
+
+def levels_from_height(h):
+    return max(1, round((h - ROOF_ALLOWANCE_M) / LEVEL_HEIGHT_M))
+
+
+def level_source(b):
+    return next((k for k in ("levels", "height_m", "ms_height_m") if b.get(k)), None)
+
+
+def known_levels(b):
+    """OSM levels, else OSM / Microsoft height in storeys, else None."""
+    k = level_source(b)
+    return None if k is None else b[k] if k == "levels" else levels_from_height(b[k])
+
+
+def estimate_levels(building_tag, area_m2, neighbour_levels, rng):
+    """Storeys for a building with no height data (see the table above)."""
+    tag_range = BUILDING_TYPE_LEVEL_RANGE.get(building_tag)
+    if tag_range and tag_range[1] <= 2:
+        return rng.randint(*tag_range)
+    levels = rng.choice(neighbour_levels) if neighbour_levels else rng.randint(*(tag_range or (1, 2)))
+    for max_area, cap in AREA_LEVEL_CAPS:
+        if area_m2 < max_area:
+            return min(levels, cap)
+    return levels
+
+
 # Facade pick per building: (wall_set choices, flat_roof). wall_set indexes
 # WALL_LAYERS in unreal/apply_building_material.py (0 red brick, 1 tan
 # brick, 2 wood siding, 3 plaster, 4 concrete); flat_roof 1 = concrete flat
@@ -293,17 +276,24 @@ def main():
     settlement = json.loads(SETTLEMENT_PATH.read_text())["tiles"]
     buildings_raw = json.loads(BUILDINGS_PATH.read_text())
 
-    out = []
-    n_excluded_road = n_not_populated = 0
-    facade_counts = defaultdict(int)
+    rings = []
     for b in buildings_raw:
         ring_ll = b["nodes"]
         east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
                                    np.array([lat for lat, _ in ring_ll]))
-        ring_xy_cm = [(e * 100.0, -n * 100.0) for e, n in zip(east_m.tolist(), north_m.tolist())]
+        rings.append([(e * 100.0, -n * 100.0) for e, n in zip(east_m.tolist(), north_m.tolist())])
+    centroids_cm = np.array([[sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)] for r in rings])
+    known = [known_levels(b) for b in buildings_raw]
+    known_idx = np.array([i for i, lv in enumerate(known) if lv], dtype=np.int64)
+    known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
+    level_sources = defaultdict(int)
 
-        cx_cm = sum(p[0] for p in ring_xy_cm) / len(ring_xy_cm)
-        cy_cm = sum(p[1] for p in ring_xy_cm) / len(ring_xy_cm)
+    out = []
+    n_excluded_road = n_not_populated = 0
+    facade_counts = defaultdict(int)
+    for bi, b in enumerate(buildings_raw):
+        ring_xy_cm = rings[bi]
+        cx_cm, cy_cm = centroids_cm[bi]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
         tile_key = f"{tx},{ty}"
@@ -337,12 +327,17 @@ def main():
         ground_z_cm = road_ue_z_m(float(st_elev[nearest_i]), 0.0, ORIGIN_HEIGHT_M) * 100.0
 
         rng = random.Random(b["way_id"])
-        levels = b["levels"]
+        levels = known[bi]
+        level_sources[level_source(b) or "estimated"] += 1
         if levels is None:
-            tag_range = ((archetype == "City" and city_type_level_range(b.get("building_tag"), MAX_BUILDING_LEVELS))
-                         or BUILDING_TYPE_LEVEL_RANGE.get(b.get("building_tag")))
-            lo, hi = tag_range if tag_range is not None else archetype_level_range(archetype, MAX_BUILDING_LEVELS)
-            levels = rng.randint(lo, hi)
+            neighbours = []
+            if known_tree is not None:
+                d, j = known_tree.query((cx_cm, cy_cm), k=min(NEIGHBOUR_K, len(known_idx)),
+                                        distance_upper_bound=NEIGHBOUR_RADIUS_M * 100.0)
+                neighbours = [known[known_idx[i]] for i in np.atleast_1d(j)[np.isfinite(np.atleast_1d(d))]]
+            area_m2 = abs(sum(ring_xy_cm[i][0] * ring_xy_cm[i - 1][1] - ring_xy_cm[i - 1][0] * ring_xy_cm[i][1]
+                              for i in range(len(ring_xy_cm)))) / 2e4
+            levels = estimate_levels(b.get("building_tag"), area_m2, neighbours, rng)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
         height_cm = levels * LEVEL_HEIGHT_M * 100.0
         # drawn AFTER the levels roll so existing heights don't shift
@@ -364,6 +359,7 @@ def main():
     print(f"{len(buildings_raw)} footprint(s) -> {len(out)} building(s) built "
           f"({n_not_populated} outside populated tiles, {n_excluded_road} "
           f"excluded - too close to the road) -> {OUT_PATH}")
+    print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
     print("facade (wall_set, flat_roof) counts: "
           + ", ".join(f"{k}={facade_counts[k]}" for k in sorted(facade_counts)))
 
