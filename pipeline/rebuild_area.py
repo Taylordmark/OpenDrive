@@ -177,6 +177,9 @@ STAGES = [
     # TUNNELS: bore + headwalls + light strips from road_stations.json's
     # is_tunnel runs (the terrain bake opens the portals from the same runs)
     ("build_tunnels.py", "export tunnel tiles -> Content/OpenDrive/Masks/tunnel_*.bin, tunnellights_*.bin"),
+    # town sidewalks + the first 30 m of OSM service driveways, concrete
+    # slabs on the shipped road edge / terrain (PLAN-REALISM Phase 1b)
+    ("build_sidewalks.py", "export sidewalk tiles -> Content/OpenDrive/Masks/sidewalk_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),

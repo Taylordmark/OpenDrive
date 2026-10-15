@@ -316,12 +316,13 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 		Bridge->BridgeTilePrefix = FString::Printf(TEXT("bridge_%s_test"), *Area);
 		Finish(Bridge);
 	}
-	// Tunnel bores + light strips (pipeline/build_tunnels.py): two more
-	// wall-manager instances, spawned directly since the home level already
-	// places one AODWallManager (Begin() would skip the class).
+	// Tunnel bores + light strips (pipeline/build_tunnels.py) and sidewalks +
+	// driveway stubs (pipeline/build_sidewalks.py): more wall-manager
+	// instances, spawned directly since the home level already places one
+	// AODWallManager (Begin() would skip the class).
 	if (!Vista)
 	{
-		for (const TCHAR* Kind : {TEXT("tunnel"), TEXT("tunnellights")})
+		for (const TCHAR* Kind : {TEXT("tunnel"), TEXT("tunnellights"), TEXT("sidewalk")})
 		{
 			AODWallManager* T = World->SpawnActorDeferred<AODWallManager>(AODWallManager::StaticClass(), Xf);
 			T->WallTilePrefix = FString::Printf(TEXT("%s_%s_test"), Kind, *Area);
