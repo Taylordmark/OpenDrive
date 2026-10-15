@@ -110,6 +110,17 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "DayNight")
 	float TimeOfDay = 10.0f;
 
+	/** Day of week the session starts on, 0 = Monday (weekday, for 3c
+	 *  traffic). -odday=<0..6> overrides. */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	int32 StartDayOfWeek = 0;
+
+	/** Midnights passed since BeginPlay. */
+	int32 DayCount = 0;
+
+	/** 0 = Monday .. 6 = Sunday (build_traffic_demand DOW_FACTOR order). */
+	int32 GetDayOfWeek() const { return ((StartDayOfWeek + DayCount) % 7 + 7) % 7; }
+
 	/** Last headlight state Tick applied (sun below HeadlightElevation) - 
 	 *  AODFurnitureManager lights its street lamps with it. */
 	bool bHeadlightsOn = false;

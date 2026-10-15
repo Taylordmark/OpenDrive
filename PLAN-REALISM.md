@@ -103,6 +103,29 @@ drives show it:
   curve can't produce it; the TMG factor groups can.
 
 ### 3c. Traffic runtime (`AODTrafficManager`)
+Built 2026-10-14 with 3d and 3e (see `status.md`; compiled, not driven):
+`ODTrafficManager.cpp` merges the ODG1 edges into directed links, fills the
+range from `demand_vph()` on the fundamental diagram, and runs IDM at a fixed
+20 Hz. `AODDayNightController` counts days (Monday on a fresh start,
+`-odday=`). Check: `pipeline/tests/test_traffic_runtime.py`. Built
+differently from the plan below, or left:
+- **One tier, no CTM.** IDM agents out to 800 m (max 1500), drawn as
+  instanced meshes. The FD congested speed caps each link's desired speed,
+  which holds a jam in place. A far CTM tier (and its handoff test) only if a
+  full jam outgrows the agent cap or the 1.5 ms budget. The log prints the
+  peak ms every 5 s.
+- Mandatory lane change only where a lane ends (MOBIL safety test, else wait
+  at the lane end). No lane-up before a split or exit, and no discretionary
+  changes.
+- Junctions: signals are fixed-cycle by approach axis, stop signs are a full
+  stop then gap acceptance, give-way is gap acceptance. Equal-priority
+  approaches don't check each other inside the junction box. Signal heads in
+  the furniture aren't synced to the cycle.
+- Wrecks are physics props. Traffic doesn't brake for them, and they have no
+  wheels.
+- No seam handoff: the manager swaps to the nearest area's graph and refills.
+- No trucks: a truck counts as 2 cars in the density but is drawn as a car.
+
 - **Clock:** `AODDayNightController` has `TimeOfDay` but no day count. Add
   a day counter (it ticks when the hour wraps) so weekday/weekend works.
   Weekdays are the default on a fresh start.
@@ -146,6 +169,9 @@ drives show it:
   area's edge.
 
 ### 3d. Look and sound
+Built 2026-10-14 apart from paint: M_CarBody samples a palette texture and
+has no colour parameter. Random paint needs that material change (shared
+with 4.3).
 - The five car meshes with a random paint parameter (shared with 4.3
   cosmetics). Headlights at night, and brake lights from IDM deceleration
   (far tier: from the cell speed dropping). A jam at night reads as a river
@@ -154,6 +180,9 @@ drives show it:
   A jam adds an idle-traffic ambient bed, scaled by nearby density.
 
 ### 3e. Modes
+Built 2026-10-14: off when any `AODRaceManager` has gates, `-odtraffic=0`,
+and a Settings > Game > Traffic On/Off row (D4: no density knob). Snowplows
+are still to do.
 - Race (D3): the race manager turns traffic off on a stage.
 - There's no density setting (D4). The only knob is a hidden
   `-odtraffic=0` QA flag.

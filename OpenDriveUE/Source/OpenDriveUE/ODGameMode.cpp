@@ -22,6 +22,7 @@
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODTerrainManager.h"
+#include "ODTrafficManager.h"
 #include "ODVehiclePawn.h"
 #include "ODWallManager.h"
 #include "ODWeatherController.h"
@@ -72,6 +73,11 @@ void AODGameMode::BeginPlay()
 	if (!HomeArea.IsEmpty())
 	{
 		SpawnAreaSet(HomeArea);
+		// 3c ambient traffic: follows the nearest open-world area itself, off in races
+		if (GetWorld() && !TActorIterator<AODTrafficManager>(GetWorld()))
+		{
+			GetWorld()->SpawnActor<AODTrafficManager>();
+		}
 	}
 	EnsureAtmosphereController();
 	EnsureSeasonController();

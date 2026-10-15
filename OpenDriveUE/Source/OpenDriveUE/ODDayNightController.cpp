@@ -30,6 +30,7 @@ void AODDayNightController::BeginPlay()
 	// without waiting out a full CycleSeconds run.
 	FParse::Value(FCommandLine::Get(), TEXT("odhour="), StartHour);
 	TimeOfDay = StartHour;
+	FParse::Value(FCommandLine::Get(), TEXT("odday="), StartDayOfWeek);
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{
 		Sun = *It;
@@ -124,7 +125,9 @@ void AODDayNightController::BeginPlay()
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	TimeOfDay = FMath::Fmod(TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f, 24.0f);
+	const float NextHour = TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f;
+	DayCount += NextHour >= 24.0f ? 1 : 0;
+	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
 
 	const float DayPhase = (TimeOfDay - 6.0f) / 12.0f * PI;  // 6h->0, 12h->pi/2
 	const float Elevation = FMath::Sin(DayPhase) * MaxElevation;

@@ -13,6 +13,7 @@
 #include "ODInputConfig.h"
 #include "ODRaceHUD.h"
 #include "ODRebindMenu.h"
+#include "ODTrafficManager.h"
 #include "ODVehicleAudio.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
@@ -84,16 +85,16 @@ enum ESettingsRow : int32
 {
 	RowResolution, RowWindowMode, RowQuality, RowUpscaling, RowRenderScale, RowVSync, RowAssetDetail, RowVisualStyle,
 	RowMaster, RowVehicle, RowAmbient,
-	RowTraction, RowAbs, RowMiniMap, RowUnits, RowCredits,
+	RowTraction, RowAbs, RowMiniMap, RowUnits, RowTraffic, RowCredits,
 	RowInputDevice, RowSteerDeadzone, RowSteerSensitivity, RowPedalDeadzone, RowBindings,
 	RowClose,
 	NumSettingsRows,
 };
-static_assert(NumSettingsRows == 22, "keep AODSettingsMenu::NumRows() in sync");
+static_assert(NumSettingsRows == 23, "keep AODSettingsMenu::NumRows() in sync");
 const FODMenuTab SettingsTabs[] = {
 	{TEXT("DISPLAY"), RowResolution, 8},
 	{TEXT("AUDIO"), RowMaster, 3},
-	{TEXT("GAME"), RowTraction, 5},
+	{TEXT("GAME"), RowTraction, 6},
 	{TEXT("CONTROLS"), RowInputDevice, 5},
 };
 
@@ -242,6 +243,9 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 		{
 			Hud->SetMetric(!Hud->IsMetric());
 		}
+		break;
+	case RowTraffic:    // 3e: on / off only (D4: density follows the clock)
+		AODTrafficManager::SetEnabledSetting(!AODTrafficManager::IsEnabledSetting());
 		break;
 	case RowInputDevice: ApplyInputDevice(Dir); break;
 	// wheel conditioning (Arc 6) - moved here from the Key Bindings screen
@@ -676,6 +680,10 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 		{
 			OutValue = Hud->IsMetric() ? TEXT("Metric") : TEXT("Imperial");
 		}
+		break;
+	case RowTraffic:
+		OutLabel = TEXT("Traffic");
+		OutValue = AODTrafficManager::IsEnabledSetting() ? TEXT("On") : TEXT("Off");
 		break;
 	case RowCredits:
 		OutLabel = TEXT("Credits");

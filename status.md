@@ -371,6 +371,25 @@ become new roads via `fetch_osm_network.py` (rebuild the area first).
     Summit), so the route line follows the road. Pause-menu "Mini-Map" row:
     North / Travel (heading-up, view shifted ahead of the car, red north tick
     on the bezel), saved under `OpenDrive.HUD`.
+  - Traffic runtime (2026-10-14, PLAN-REALISM.md 3c-3e, compiled, not driven):
+    `AODTrafficManager` (spawned by the game mode in free roam) loads the
+    nearest area's ODG1 lane block and ODT1 demand. It merges the 5 m edges
+    into directed links (they break at junctions and at lane/speed/class
+    changes) and fills 800 m around the player to the fundamental-diagram
+    density for the clock's hour and weekday. Above capacity that is the
+    congested branch. IDM runs at a fixed 20 Hz with the player as a
+    possible leader. Signals, stop signs and give-way are strict (D5), and a
+    lane drop forces a merge or a wait. Drawn with instanced meshes: the five
+    road car meshes, with brake lamps from IDM braking and head/tail lamps
+    at night. The 4 nearest cars get engine synths, plus an idle bed in a
+    jam. The 12 nearest cars carry collision boxes, and a hit turns that car
+    into a physics wreck. Off in races, with `-odtraffic=0`, or with
+    Settings > Game > Traffic Off. The day/night clock now counts days
+    (Monday start, `-odday=`). Check: `pipeline/tests/test_traffic_runtime.py`
+    (constants vs `build_traffic_demand`, FD density, IDM). A 160k AADT
+    3-lane freeway at 17:00 targets 50 veh/km/lane at 23 km/h, and the IDM
+    equilibrium there is 21 km/h. Not done: CTM far tier, paint,
+    truck meshes, snowplows (PLAN-REALISM 3c-3e).
   - Traffic demand (2026-10-14, PLAN-REALISM.md Phase 3b, offline only):
     `pipeline/build_traffic_demand.py` (rebuild stage after the lane graph)
     fetches FHWA HPMS sections per state (Census geocoder for the state,

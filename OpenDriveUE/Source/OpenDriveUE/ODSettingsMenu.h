@@ -60,7 +60,7 @@ public:
 	// DISPLAY, AUDIO, GAME (assists, mini-map, units, Credits), CONTROLS (device,
 	// wheel conditioning, Key Bindings), then the Close footer - see
 	// ESettingsRow in the .cpp.
-	int32 NumRows() const { return 22; }
+	int32 NumRows() const { return 23; }
 	int32 GetSelected() const { return Selected; }
 	/** Up/Down: rows of the active tab + Close; forwards to the Key Bindings
 	 *  sub-screen, or scrolls Credits, while one of those is open. */
