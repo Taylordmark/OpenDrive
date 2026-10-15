@@ -116,7 +116,10 @@ private:
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
 
 	TArray<FKey> LastODManagedKeys;
-	bool bMiniMapHeadingUp = false;
+	// heading-up by default: a turn on the map is then a turn the same way
+	// on the road (saved choice still wins)
+	bool bMiniMapHeadingUp = true;
+	float MiniMapSpeedZoom = 1.0f;   // smoothed speed multiplier on MiniMapZoomM
 	bool bMetric = false;
 	double TripCm = 0.0;   // gauge trip odometer, this level
 

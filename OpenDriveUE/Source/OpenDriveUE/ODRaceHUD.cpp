@@ -16,6 +16,7 @@
 #include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "ODCreditsMenu.h"
+#include "ODDayNightController.h"
 #include "ODGaugeCluster.h"
 #include "ODGhost.h"
 #include "ODInputConfig.h"
@@ -29,7 +30,10 @@
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
 #include "ODWeatherController.h"
+#include "ODHudStyle.h"
 #include "Rendering/SlateRenderer.h"
+
+using namespace ODHud;
 
 // Canvas text at Scale > 1 stretches a glyph bitmap rasterized at the font's
 // base size - blocky/blurry. Asking for the scaled point size instead makes
@@ -227,7 +231,7 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 			// angle Yaw on screen; rotate by -90-Yaw to point it up
 			const float Yaw = FMath::DegreesToRadians(Pawn->GetActorRotation().Yaw);
 			Rot = FVector2D(FMath::Cos(-HALF_PI - Yaw), FMath::Sin(-HALF_PI - Yaw));
-			Center += FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * (ZoomRadiusM * 100.0f * 0.35f);
+			Center += FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * (ZoomRadiusM * 100.0f * 0.45f);
 		}
 	}
 	else
@@ -262,17 +266,10 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		const FVector2D D = (FVector2D(W) - Center) * Scale;
 		return PanelMid + FVector2D(D.X * Rot.X - D.Y * Rot.Y, D.X * Rot.Y + D.Y * Rot.X);
 	};
-	// inverse of ToMap (screen offset from PanelMid -> world), for texture UVs
-	auto ScreenToWorld = [&](const FVector2D& S)
-	{
-		const FVector2D D = (S - PanelMid) / Scale;
-		return Center + FVector2D(D.X * Rot.X + D.Y * Rot.Y, -D.X * Rot.Y + D.Y * Rot.X);
-	};
+	const float UiS = MenuScale();
 	auto Dot = [&](const FVector2D& M, float R, const FLinearColor& C)
 	{
-		FCanvasTileItem T(M - FVector2D(R, R), FVector2D(2 * R, 2 * R), C);
-		T.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(T);
+		ODHudDraw::Disc(Canvas, M, R * UiS, C);
 	};
 	auto InPanel = [&](const FVector2D& M)
 	{
@@ -300,39 +297,25 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 
 	if (bCircular)
 	{
-		// filled disc via triangle fan - corners stay untouched/transparent,
-		// so the 3D scene shows through instead of a square black tile
-		const int32 Segs = 40;
 		const float R = PanelSize * 0.5f;
-		const FTexture* WhiteTex =
-			Canvas->DefaultTexture ? Canvas->DefaultTexture->GetResource() : nullptr;
-		if (bHaveMapTexture)
+		// No terrain on the minimap (it's for reading the road ahead): a plain
+		// neutral lens, light by day and deep by night. Radial (centre clearer,
+		// rim heavier) and lit from the top so it doesn't read as a flat sticker.
+		float Night = 0.0f;
+		for (TActorIterator<AODDayNightController> It(GetWorld()); It; ++It)
 		{
-			const FTexture* TexRes = MapTex->GetResource();
-			const FVector2D CenterUV = WorldToUV(Center);
-			for (int32 i = 0; i < Segs && TexRes; ++i)
-			{
-				const float A0 = 2.0f * PI * i / Segs, A1 = 2.0f * PI * (i + 1) / Segs;
-				const FVector2D P0 = PanelMid + R * FVector2D(FMath::Cos(A0), FMath::Sin(A0));
-				const FVector2D P1 = PanelMid + R * FVector2D(FMath::Cos(A1), FMath::Sin(A1));
-				FCanvasTriangleItem TriItem(PanelMid, P0, P1,
-					CenterUV, WorldToUV(ScreenToWorld(P0)),
-					WorldToUV(ScreenToWorld(P1)), TexRes);
-				TriItem.BlendMode = SE_BLEND_Translucent;
-				Canvas->DrawItem(TriItem);
-			}
+			Night = It->GetNight();
+			break;
 		}
-		for (int32 i = 0; i < Segs && WhiteTex; ++i)
+		const FLinearColor Wash = FMath::Lerp(FLinearColor(0.5f, 0.51f, 0.53f, 0.78f),
+			FLinearColor(0.012f, 0.015f, 0.024f, 0.82f), Night);
+		ODHudDraw::Ring(Canvas, PanelMid, 0.0f, R, 0.0f, 2.0f * PI, [&](float A, float T)
 		{
-			const float A0 = 2.0f * PI * i / Segs, A1 = 2.0f * PI * (i + 1) / Segs;
-			FCanvasTriangleItem TriItem(PanelMid,
-				PanelMid + R * FVector2D(FMath::Cos(A0), FMath::Sin(A0)),
-				PanelMid + R * FVector2D(FMath::Cos(A1), FMath::Sin(A1)),
-				WhiteTex);
-			TriItem.BlendMode = SE_BLEND_Translucent;
-			TriItem.SetColor(FLinearColor(0, 0, 0, bHaveMapTexture ? TexDimAlpha : BgAlpha));
-			Canvas->DrawItem(TriItem);
-		}
+			const float Lit = FMath::Cos(A) * T;   // +1 at the top rim .. -1 at the bottom
+			FLinearColor C = Wash * (1.0f + 0.2f * Lit - 0.15f * T);
+			C.A = FMath::Clamp(Wash.A + 0.1f * T, 0.0f, 1.0f);
+			return C;
+		});
 	}
 	else
 	{
@@ -401,7 +384,7 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	const TArray<FVector2D> FallbackSmooth =
 		(!bHaveCenterline && bHaveGates) ? SmoothPolyline(*Gates) : TArray<FVector2D>();
 	const TArray<FVector2D>& Smooth = bHaveCenterline ? *Centerline : FallbackSmooth;
-	auto DrawRoads = [&](const TArray<FVector2D>& Line)
+	auto DrawRoads = [&](const TArray<FVector2D>& Line, const FLinearColor& Col, float Thick)
 	{
 		for (int32 i = 1; i < Line.Num(); ++i)
 		{
@@ -420,47 +403,54 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 				continue;
 			}
 			FCanvasLineItem Seg(A, B);
-			Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
-			Seg.LineThickness = 3.0f;
+			Seg.SetColor(Col);
+			Seg.LineThickness = Thick;
 			Canvas->DrawItem(Seg);
 		}
 	};
-	DrawRoads(Smooth);
-	// every other streamed area's map centerline too (2026-10-05, large
+	// Google-style cased roads: every dark casing first, then every light
+	// fill, so junctions merge instead of each road cutting across the next
+	// plus every other streamed area's map centerline (2026-10-05, large
 	// world); the bbox fit above and the map texture stay home-only
+	TArray<const TArray<FVector2D>*, TInlineAllocator<8>> RoadLines{&Smooth};
 	if (RoadMgr)
 	{
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
 			if (*It != RoadMgr && &It->MapCenterline != Centerline)
 			{
-				DrawRoads(It->MapCenterline);
+				RoadLines.Add(&It->MapCenterline);
 			}
 		}
 	}
+	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.02f, 0.025f, 0.035f, 0.6f), 5.5f * UiS); }
+	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.96f, 0.97f, 0.98f, 0.95f), 3.0f * UiS); }
 
 	// navigation route (SS7.37) - on every map panel (mini, pause, world);
 	// from the nav (nearest) road manager (2026-10-05, large world)
 	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr && NavMgr->HasRoute())
 	{
 		const TArray<FVector2D>& R = NavMgr->GetRoutePoints();
-		for (int32 i = 1; i < R.Num(); ++i)
+		for (int32 Pass = 0; Pass < 2; ++Pass)
 		{
-			FVector2D A = ToMap(FVector(R[i - 1], 0));
-			FVector2D B = ToMap(FVector(R[i], 0));
-			if (!ClipToPanel(A, B))
+			for (int32 i = 1; i < R.Num(); ++i)
 			{
-				continue;
+				FVector2D A = ToMap(FVector(R[i - 1], 0));
+				FVector2D B = ToMap(FVector(R[i], 0));
+				if (!ClipToPanel(A, B))
+				{
+					continue;
+				}
+				FCanvasLineItem Seg(A, B);
+				Seg.SetColor(Pass == 0 ? FLinearColor(0.02f, 0.025f, 0.035f, 0.6f) : Accent.CopyWithNewOpacity(0.95f));
+				Seg.LineThickness = (Pass == 0 ? 7.5f : 5.0f) * UiS;
+				Canvas->DrawItem(Seg);
 			}
-			FCanvasLineItem Seg(A, B);
-			Seg.SetColor(FLinearColor(1.0f, 0.3f, 0.85f, 0.95f));
-			Seg.LineThickness = 5.0f;
-			Canvas->DrawItem(Seg);
 		}
 		const FVector2D DestM = ToMap(FVector(R.Last(), 0));
 		if (!bCircular || InPanel(DestM))
 		{
-			Dot(DestM, 6.0f, FLinearColor(1.0f, 0.3f, 0.85f));
+			Dot(DestM, 6.0f, Accent);
 			Dot(DestM, 2.5f, FLinearColor::White);
 		}
 	}
@@ -509,34 +499,30 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		const FVector2D W(FMath::Cos(Yaw), FMath::Sin(Yaw));
 		const FVector2D Fwd(W.X * Rot.X - W.Y * Rot.Y, W.X * Rot.Y + W.Y * Rot.X);
 		const FVector2D Side(-Fwd.Y, Fwd.X);
-		const FVector2D Tri2[3] = {P + Fwd * 9.0f,
-			P - Fwd * 5.0f + Side * 5.0f, P - Fwd * 5.0f - Side * 5.0f};
-		for (int32 i = 0; i < 3; ++i)
-		{
-			FCanvasLineItem L(Tri2[i], Tri2[(i + 1) % 3]);
-			L.SetColor(FLinearColor::White);
-			L.LineThickness = 2.0f;
-			Canvas->DrawItem(L);
-		}
+		const float A = 10.5f * UiS;
+		const FVector2D Tri2[3] = {P + Fwd * A * 1.6f, P - Fwd * A + Side * A, P - Fwd * A - Side * A};
+		ODHudDraw::Poly(Canvas, Tri2, FLinearColor(0, 0, 0, 0.55f), 3.0f * UiS);
+		ODHudDraw::Poly(Canvas, Tri2, FLinearColor::White);
+		// dark core, white edge: reads on the light day lens and the dark night
+		// one alike. 0.7 about the centroid leaves a ~2 px edge (inradius 0.69 A)
+		const FVector2D Mid3 = (Tri2[0] + Tri2[1] + Tri2[2]) / 3.0f;
+		const FVector2D Core[3] = {Mid3 + (Tri2[0] - Mid3) * 0.7f, Mid3 + (Tri2[1] - Mid3) * 0.7f,
+			Mid3 + (Tri2[2] - Mid3) * 0.7f};
+		ODHudDraw::Poly(Canvas, Core, FLinearColor(0.02f, 0.025f, 0.035f));
 	}
 
 	if (bCircular)
 	{
-		// bezel: a colored ring on top of everything, segment-drawn (Canvas
-		// has no native circle primitive)
-		const int32 Segs = 48;
-		const float R = PanelSize * 0.5f - 1.5f;
-		FVector2D Prev = PanelMid + R * FVector2D(1, 0);
-		for (int32 i = 1; i <= Segs; ++i)
+		// thin ring bezel over a soft outer shadow
+		const float R = PanelSize * 0.5f;
+		ODHudDraw::Ring(Canvas, PanelMid, R, R + 10.0f * UiS, 0.0f, 2.0f * PI, [](float, float T)
 		{
-			const float A = 2.0f * PI * i / Segs;
-			const FVector2D Cur = PanelMid + R * FVector2D(FMath::Cos(A), FMath::Sin(A));
-			FCanvasLineItem L(Prev, Cur);
-			L.SetColor(FLinearColor(1.0f, 0.8f, 0.3f, 0.9f));
-			L.LineThickness = 3.0f;
-			Canvas->DrawItem(L);
-			Prev = Cur;
-		}
+			return FLinearColor(0, 0, 0, 0.35f * (1.0f - T));
+		});
+		ODHudDraw::Ring(Canvas, PanelMid, R - 2.0f * UiS, R, 0.0f, 2.0f * PI, [](float, float)
+		{
+			return FLinearColor(1, 1, 1, 0.85f);
+		});
 		// north tick on the bezel when the map rotates (world north = -Y)
 		if (bHeadingUp)
 		{
@@ -557,11 +543,6 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 
 namespace
 {
-const FLinearColor Accent(1.0f, 0.68f, 0.25f);
-const FLinearColor TextCol(0.88f, 0.91f, 0.95f);
-const FLinearColor DimCol(0.52f, 0.58f, 0.65f);
-const FLinearColor Ink(0.012f, 0.016f, 0.028f);   // backdrop, and text on an accent fill
-
 // 1080p layout units (multiplied by MenuScale())
 constexpr float ColX = 96.0f;      // column inset from the screen edge
 constexpr float ColW = 640.0f;
@@ -578,39 +559,6 @@ float ParsePercent(const FString& V)
 		return -1.0f;
 	}
 	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
-}
-
-enum class EMenuWeight : uint8 { Medium, SemiBold, Bold };
-
-// Rajdhani (SIL OFL, Content/Slate/Fonts) straight from its TTF - no UFont
-// asset (editor-agnostic); DefaultGame.ini stages the folder. One composite
-// font per weight, built once: the Slate font cache keys on it, so a fresh
-// one per call would re-rasterize glyphs every frame.
-FSlateFontInfo MenuFont(EMenuWeight Weight, float Size)
-{
-	static TSharedPtr<const FCompositeFont> Fonts[3];
-	static bool bTried[3] = {};
-	const int32 I = static_cast<int32>(Weight);
-	if (!bTried[I])
-	{
-		bTried[I] = true;
-		static const TCHAR* const Files[] = {
-			TEXT("Rajdhani-Medium.ttf"), TEXT("Rajdhani-SemiBold.ttf"), TEXT("Rajdhani-Bold.ttf")};
-		const FString Path = FPaths::ProjectContentDir() / TEXT("Slate/Fonts") / Files[I];
-		if (FPaths::FileExists(Path))
-		{
-			Fonts[I] = MakeShared<FCompositeFont>(NAME_None, Path, EFontHinting::Default, EFontLoadingPolicy::LazyLoad);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ODRaceHUD: menu font missing (%s) - using the engine font"), *Path);
-		}
-	}
-	if (Fonts[I])
-	{
-		return FSlateFontInfo(Fonts[I], Size);
-	}
-	return FSlateFontInfo(GEngine->GetLargeFont(), Size, Weight == EMenuWeight::Medium ? FName("Regular") : FName("Bold"));
 }
 
 /** Canvas painter at menu scale S - sizes are 1080p units, positions pixels. */
@@ -2093,9 +2041,10 @@ void AODRaceHUD::DrawHUD()
 		{
 			return;
 		}
-		FCanvasTextItem LabelItem(FVector2D(PanelX, PanelTopY - 26.0f),
-			FText::FromString(PlaceLabelText), Font, FLinearColor(0.9f, 0.9f, 0.85f));
-		LabelItem.EnableShadow(FLinearColor::Black);
+		const float LS = MenuScale();
+		FCanvasTextItem LabelItem(FVector2D(PanelX, PanelTopY - 34.0f * LS),
+			FText::FromString(PlaceLabelText.ToUpper()), MenuFont(EMenuWeight::SemiBold, 17.0f * LS), TextCol);
+		LabelItem.EnableShadow(FLinearColor(0, 0, 0, 0.6f), FVector2D(LS, LS));
 		Canvas->DrawItem(LabelItem);
 	};
 
@@ -2197,15 +2146,15 @@ void AODRaceHUD::DrawHUD()
 		const float Cd = Veh->GetOobCountdownSec();
 		if (Cd >= 0.0f)
 		{
-			FCanvasTextItem Warn(
+			FCanvasTextItem WarnText(
 				FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.28f),
 				FText::FromString(FString::Printf(
 					TEXT("%s - RETURNING IN %.0f"),
 					Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
 					FMath::CeilToFloat(Cd))),
 				CrispFont(Font, 2.2f), FLinearColor(1.0f, 0.35f, 0.2f));
-			Warn.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Warn);
+			WarnText.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(WarnText);
 		}
 	}
 
@@ -2216,10 +2165,10 @@ void AODRaceHUD::DrawHUD()
 	{
 		if (Now - It->WarningShownAt < 6.0f)
 		{
-			FCanvasTextItem Warn(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
+			FCanvasTextItem WarnText(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
 				FText::FromString(It->WarningText), CrispFont(Font, 2.0f), FLinearColor(1.0f, 0.8f, 0.2f));
-			Warn.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Warn);
+			WarnText.EnableShadow(FLinearColor::Black);
+			Canvas->DrawItem(WarnText);
 		}
 		break;
 	}
@@ -2231,7 +2180,6 @@ void AODRaceHUD::DrawHUD()
 		{
 			FODGaugeData G;
 			G.SpeedCmS = FMath::Abs(Mv->GetForwardSpeed());
-			G.TopSpeedCmS = Mv->GetGearedTopSpeed();
 			// sum of v*dt: frame-rate independent; world dt is 0 while paused
 			TripCm += G.SpeedCmS * GetWorld()->GetDeltaSeconds();
 			G.TripCm = TripCm;
@@ -2250,7 +2198,7 @@ void AODRaceHUD::DrawHUD()
 				G.AirTempC = It->AirTempC;
 				break;
 			}
-			ODGaugeCluster::Draw(Canvas, Font, G, Now);
+			ODGaugeCluster::Draw(Canvas, G, Now);
 		}
 	}
 
@@ -2262,11 +2210,19 @@ void AODRaceHUD::DrawHUD()
 	// as-is.
 	if (bShowMiniMap)
 	{
-		DrawPlaceLabel(24.0f, Canvas->SizeY - MiniMapSize - 24.0f);
+		const float MapS = MenuScale();
+		const float MapSize = MiniMapSize * MapS, MapX = 40.0f * MapS, MapY = Canvas->SizeY - MapSize - 28.0f * MapS;
+		DrawPlaceLabel(MapX, MapY);
+		// zoom out with speed so the road ahead covers a similar look-ahead
+		// time (x2 by ~65 mph, x3 by ~130); eased so it breathes, not jumps
+		const APawn* MapPawn = GetOwningPawn();
+		const float SpeedMs = MapPawn ? MapPawn->GetVelocity().Size() * 0.01f : 0.0f;
+		const float Target = 1.0f + SpeedMs / 29.0f;
+		MiniMapSpeedZoom = FMath::Lerp(Target, MiniMapSpeedZoom,
+			FMath::Exp(-GetWorld()->GetDeltaSeconds() / 0.8f));
 		DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
-			Race ? Race->NextGate : INDEX_NONE, 24.0f,
-			Canvas->SizeY - MiniMapSize - 24.0f, MiniMapSize, 0.55f,
-			MiniMapZoomM, true, RoadMgr);
+			Race ? Race->NextGate : INDEX_NONE, MapX, MapY, MapSize, 0.55f,
+			MiniMapZoomM * MiniMapSpeedZoom, true, RoadMgr);
 	}
 
 	// ---- navigation next-turn / distance panel (SS7.37)

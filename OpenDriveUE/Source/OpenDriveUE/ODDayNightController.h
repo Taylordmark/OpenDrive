@@ -114,6 +114,9 @@ public:
 	 *  AODFurnitureManager lights its street lamps with it. */
 	bool bHeadlightsOn = false;
 
+	/** NightFactor() as of the last Tick (0 before the first). */
+	float GetNight() const { return FMath::Max(LastNight, 0.0f); }
+
 private:
 	void UpdateHeadlights(bool bOn);
 
