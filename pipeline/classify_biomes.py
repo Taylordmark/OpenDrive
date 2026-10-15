@@ -13,6 +13,9 @@ stares at most, so a coarse GRID_SPACING_M grid over the whole terrain bbox
 is now classified too (corridor samples unchanged), plus V2 per-sample
 aspect (northness) / valley-bottom moisture from a z12 DEM.
 
+ESA WorldCover 2021 (2026-10-14) now backs up the imagery where colour
+fails - tropical pasture/ag and dark lava rock; see fetch_worldcover().
+
 Usage:  python classify_biomes.py     (needs road_stations.json first)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json
@@ -32,13 +35,14 @@ without the other silently reclassifies every biome.
 
 import json
 import math
+import zlib
 from io import BytesIO
 from pathlib import Path
 
 import mercantile
 import numpy as np
 import requests
-from PIL import Image
+from PIL import Image, TiffImagePlugin
 
 from scipy import ndimage
 from scipy.spatial import cKDTree
@@ -78,10 +82,121 @@ OUT_PATH = STATIONS_PATH.parent / "road_biomes.json"
 (BIOME_DECIDUOUS, BIOME_EVERGREEN, BIOME_CHAPARRAL, BIOME_DESERT,
  BIOME_PLAINS, BIOME_WETLAND, BIOME_ALPINE, BIOME_ARCTIC, BIOME_FARMLAND,
  BIOME_SAVANNA, BIOME_RAINFOREST, BIOME_COASTAL, BIOME_CANYON,
- BIOME_FOOTHILL) = range(14)
+ BIOME_FOOTHILL, BIOME_TROPICAL_COAST, BIOME_LAVA) = range(16)
 BIOME_NAMES = ["Deciduous", "Evergreen", "Chaparral", "Desert", "Plains",
                "Wetland", "Alpine", "Arctic", "Farmland", "Savanna",
-               "Rainforest", "Coastal", "Canyon", "Foothill"]
+               "Rainforest", "Coastal", "Canyon", "Foothill", "TropicalCoast", "Lava"]
+
+# ESA WorldCover 2021 v200 (10 m, CC-BY 4.0, (c) ESA WorldCover project 2021 /
+# Contains modified Copernicus Sentinel data (2021) processed by ESA
+# WorldCover consortium), added 2026-10-14. Used only where imagery colour
+# fails: Hawaii's blue-cast USGS imagery reads dim pasture/ag on the central
+# Oahu plateau as w_forest leftover (Rainforest), and Mauna Loa basalt reads
+# the same as Volcano rainforest (val ~0.26, chroma ~0.03). Read straight from
+# the public S3 COGs by HTTP range (no rasterio): PIL parses the TIFF header,
+# zlib inflates the 1024 px DEFLATE tiles.
+WC_URL = ("https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/"
+          "ESA_WorldCover_10m_2021_v200_{tile}_Map.tif")
+WC_HEADER_BYTES = 65536   # all 7 IFDs + tile offset tables sit in the first 64 KB
+WC_OVERVIEW = 1           # IFD 1 = 20 m, ~IMG_ZOOM's 19 m/px
+WC_SHRUB, WC_GRASS, WC_CROP, WC_BUILT, WC_BARE = 20, 30, 40, 50, 60
+# Lava (tropics only) = dark imagery where WorldCover says bare/sparse, or
+# grass/shrub with no green and little colour at all: WorldCover maps young
+# Hawaiian flows mostly as grass (Mauna Loa 1984: 80% class 30, 13% bare).
+# ponytail: tropics-only because dark bare scree reads the same - at any
+# latitude summit_county got 631 Lava points. Iceland-style flows need more.
+LAVA_MAX_VAL = 0.32
+LAVA_MAX_GREEN = 0.0      # g - max(r, b); Oahu pasture median +0.03
+LAVA_MAX_CHROMA = 0.075   # grass route only: Waianae's blue-cast shadowed
+                          # slopes run 0.08-0.14, flows 0.02-0.07
+LAVA_SMOOTH_PX = 41       # ~700 m box at z13 - flows are km-scale; Oahu's dim
+                          # bare fields near Waipio drop 0.022 -> 0.003
+
+
+def _wc_range(session, url, start, end):
+    """Bytes [start, end) of url; b"" for a 3 deg tile WorldCover never
+    published (open ocean)."""
+    for attempt in range(4):
+        try:
+            r = session.get(url, headers={**HEADERS, "Range": f"bytes={start}-{end - 1}"},
+                            timeout=60)
+            if r.status_code in (403, 404):
+                return b""
+            r.raise_for_status()
+            return r.content
+        except requests.RequestException:
+            if attempt == 3:
+                raise
+
+
+def fetch_worldcover(west, south, east, north, ovr=WC_OVERVIEW):
+    """WorldCover class grid (uint8, 0 = no data) over the bbox, plate
+    carree -> (grid, (w, s, e, n)) snapped to whole pixels."""
+    ppd, span = 12000 >> ovr, 3 * (12000 >> ovr)   # px per degree, px per 3 deg file
+    c0, c1 = math.floor((west + 180) * ppd), math.ceil((east + 180) * ppd)
+    r0, r1 = math.floor((90 - north) * ppd), math.ceil((90 - south) * ppd)
+    grid = np.zeros((r1 - r0, c1 - c0), np.uint8)
+    session = requests.Session()
+    for fr in range(r0 // span, (r1 - 1) // span + 1):
+        for fc in range(c0 // span, (c1 - 1) // span + 1):
+            lat_s, lon_w = 90 - 3 * (fr + 1), 3 * fc - 180   # files are named by SW corner
+            name = (f"{'N' if lat_s >= 0 else 'S'}{abs(lat_s):02d}"
+                    f"{'E' if lon_w >= 0 else 'W'}{abs(lon_w):03d}")
+            url = WC_URL.format(tile=name)
+            hdr = cached_bytes("worldcover", f"{name}/header",
+                               lambda: _wc_range(session, url, 0, WC_HEADER_BYTES))
+            if not hdr:
+                continue
+            tif = TiffImagePlugin.TiffImageFile(BytesIO(hdr))   # no bomb check: header only
+            tif.seek(ovr)
+            tw, size = tif.tag_v2[322], tif.tag_v2[256]
+            offs, cnts = tif.tag_v2[324], tif.tag_v2[325]
+            ntx = -(-size // tw)
+            fr0, fc0 = fr * span, fc * span   # file origin, global px
+            for iy in range(max(0, (r0 - fr0) // tw), min(ntx, (r1 - 1 - fr0) // tw + 1)):
+                for ix in range(max(0, (c0 - fc0) // tw), min(ntx, (c1 - 1 - fc0) // tw + 1)):
+                    k = iy * ntx + ix
+                    if not cnts[k]:
+                        continue
+                    raw = cached_bytes("worldcover", f"{name}/o{ovr}/{iy}_{ix}",
+                                       lambda: _wc_range(session, url, offs[k], offs[k] + cnts[k]))
+                    tile = np.frombuffer(zlib.decompress(raw), np.uint8).reshape(tw, tw)
+                    ty0, tx0 = fr0 + iy * tw, fc0 + ix * tw
+                    ya, yb = max(ty0, r0), min(ty0 + tw, r1, fr0 + size)
+                    xa, xb = max(tx0, c0), min(tx0 + tw, c1, fc0 + size)
+                    grid[ya - r0:yb - r0, xa - c0:xb - c0] = tile[ya - ty0:yb - ty0, xa - tx0:xb - tx0]
+    print(f"worldcover {grid.shape[1]}x{grid.shape[0]} px at {10 << ovr} m")
+    return grid, (c0 / ppd - 180, 90 - r1 / ppd, c1 / ppd - 180, 90 - r0 / ppd)
+
+
+def sample_nearest_ll(grid, bounds, lon, lat):
+    """Nearest-pixel lookup in a plate-carree grid (classes don't blend)."""
+    w, s, e, n = bounds
+    h, wd = grid.shape
+    x = np.clip(((lon - w) / (e - w) * wd).astype(int), 0, wd - 1)
+    y = np.clip(((n - lat) / (n - s) * h).astype(int), 0, h - 1)
+    return grid[y, x]
+
+
+def lava_weight(mosaic, bounds, wc_grid, wc_bounds):
+    """Local lava fraction (0..1, LAVA_SMOOTH_PX box) on the imagery mosaic's
+    own pixel grid - see LAVA_MAX_VAL."""
+    w, s, e, n = bounds
+    h, wd = mosaic.shape[:2]
+    if abs(s + n) / 2 >= 23.5:
+        return np.zeros((h, wd), np.float32)
+    lon = w + (np.arange(wd) + 0.5) / wd * (e - w)
+    merc = lambda phi: np.log(np.tan(np.pi / 4 + np.radians(phi) / 2))
+    y = merc(n) - (np.arange(h) + 0.5) / h * (merc(n) - merc(s))
+    lat = np.degrees(2 * np.arctan(np.exp(y))) - 90.0
+    wc = sample_nearest_ll(wc_grid, wc_bounds, lon[None, :], lat[:, None])
+    f = mosaic.astype(np.float32) / 255.0
+    dark = f.max(axis=2) < LAVA_MAX_VAL
+    green = f[..., 1] - np.maximum(f[..., 0], f[..., 2])
+    chroma = f.max(axis=2) - f.min(axis=2)
+    lava = dark & ((wc == WC_BARE) | (np.isin(wc, (WC_SHRUB, WC_GRASS))
+                                      & (green < LAVA_MAX_GREEN) & (chroma < LAVA_MAX_CHROMA)))
+    return ndimage.uniform_filter(lava.astype(np.float32), LAVA_SMOOTH_PX)
 
 
 def _fetch_imagery_tile(session, z, x, y):
@@ -280,7 +395,7 @@ ARID_MAX_PRECIP_MM = 500.0
 
 
 def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
-                grade=1.0, area_elev_min_m=0.0, annual_precip_mm=0.0):
+                grade=1.0, area_elev_min_m=0.0, annual_precip_mm=0.0, wc=0, w_lava=0.0):
     """Elevation/latitude bands tuned for the Skagit/Cascades loop specifically
     (see module docstring) - not a general-purpose elevation->biome model. A
     real per-region model is the ESA WorldCover + climate-raster work (7.3).
@@ -329,13 +444,17 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
     abs_lat = abs(lat_deg)
     arid = annual_precip_mm < ARID_MAX_PRECIP_MM   # see ARID_MAX_PRECIP_MM
     alpine_floor_m = max(1200.0, area_elev_min_m + ALPINE_RISE_ABOVE_VALLEY_M)
+    # `wc`/`w_lava` (2026-10-14): ESA WorldCover class at the point (0 = none)
+    # and lava_weight(); the defaults leave every branch as before.
+    if w_lava > 0.5:
+        return BIOME_LAVA
     if w_rock > 0.35 and grade > CANYON_GRADE_MIN:
         if elev_m > alpine_floor_m or (elev_m > 500.0 and abs_lat > 35.0
                                         and elev_m - area_elev_min_m > 500.0):
             return BIOME_ALPINE
         return BIOME_CANYON
     if elev_m < 5.0 and 0.1 < w_water <= 0.4:
-        return BIOME_COASTAL
+        return BIOME_TROPICAL_COAST if abs_lat < 23.5 else BIOME_COASTAL
     # grade gate (2026-09-25, V1): the dark+blue-ish w_water signature also
     # matches shadowed north-facing conifer slopes - the first full-bbox grid
     # classified 21% of summit_county's grid as Wetland, mean northness +0.36
@@ -363,6 +482,11 @@ def pick_biome(w_forest, w_grass, w_rock, w_water, w_bare, elev_m, lat_deg,
     # gate above) already handle those correctly once this stops eating them.
     if arid and w_bare > 0.35 and w_forest < 0.6 and elev_m < MONTANE_CUTOFF_M:
         return BIOME_DESERT
+    # Tropics only: dim blue-cast pasture/ag reads as the w_forest leftover.
+    # Built-up too - towns (Wahiawa: 936 of the Dole plateau's 1552 samples)
+    # are lawns + scattered big trees, not jungle.
+    if abs_lat < 23.5 and wc in (WC_GRASS, WC_CROP, WC_BUILT):
+        return BIOME_FARMLAND if wc == WC_CROP else BIOME_SAVANNA
     if w_forest >= w_grass:
         if abs_lat < 23.5:
             return BIOME_RAINFOREST
@@ -466,7 +590,10 @@ def main():
 
     mosaic, bounds = fetch_mosaic(west, south, east, north)
     w_forest, w_grass, w_rock, w_water, w_bare = classify_rgb(mosaic)
-    del mosaic
+    wc_grid, wc_bounds = fetch_worldcover(west, south, east, north)
+    wc = sample_nearest_ll(wc_grid, wc_bounds, lon, lat)
+    sl = sample_bilinear(lava_weight(mosaic, bounds, wc_grid, wc_bounds), bounds, lon, lat)
+    del mosaic, wc_grid
 
     sf = sample_bilinear(w_forest, bounds, lon, lat)
     sg = sample_bilinear(w_grass, bounds, lon, lat)
@@ -476,7 +603,7 @@ def main():
 
     biomes = [pick_biome(float(sf[i]), float(sg[i]), float(sr[i]), float(sw[i]),
                           float(sb[i]), float(elev[i]), float(lat[i]), float(grade[i]),
-                          area_elev_min_m, annual_precip_mm)
+                          area_elev_min_m, annual_precip_mm, int(wc[i]), float(sl[i]))
               for i in range(len(lon))]
     forest_weight = np.clip(sf + 0.3 * sg, 0, 1)   # density signal, not just the forest channel
 
