@@ -3,14 +3,14 @@ M_BuildingFacade (unreal/apply_building_material.py), saved beside it so
 ODVisualStyle::Pick (AODBuildingManager::BeginPlay) finds it, and
 M_BuildingRoof_real, which has no stylized twin: in Realistic,
 AODBuildingManager puts roof triangles (normal Z > ROOF_MASK_THRESHOLD) in a
-second mesh section with this material, so walls sample only the 5 wall sets
-(15 samples per pixel) and roofs only the roof sets (12), instead of one
+second mesh section with this material, so walls sample only the 7 wall sets
+(21 samples per pixel) and roofs only the roof sets (12), instead of one
 material sampling all 24 everywhere. Stylized keeps one section and the
 twin's single material.
 
 Same interface as the twin: UV0 (U = perimeter / 4 m, V = height / 4 m from
 pipeline/build_building_mesh.py, planar XY / 4 m on the roof cap), vertex
-color R = wall set bucket (WallSet encoding, (idx + 0.5) / 5), G = per-
+color R = wall set bucket (WallSet encoding, (idx + 0.5) / 7), G = per-
 building seed, B = flat roof, A = 0 on pitched-roof gable end walls (no
 windows; ODBuildingManager PitchRoof, Realistic only). No parameters (the
 twin has none), same physical material, two-sidedness and usage flags
@@ -78,8 +78,14 @@ REAL_SRC_DIR = Path(__file__).resolve().parent.parent / "content_src" / "realist
 FACADE_TILE_M = 4.0
 FLOOR_HEIGHT_M = 3.2
 BAY_WIDTH_M = 2.5
-WALL_LAYERS = ["Bricks074", "Bricks053", "WoodSiding001", "Plaster001", "Concrete034"]
-WALL_MEAN_LUMA = [0.177, 0.500, 0.020, 0.665, 0.490]   # linear, measured off the 2K Color maps
+WALL_LAYERS = ["Bricks074", "Bricks053", "WoodSiding001", "Plaster001", "Concrete034",
+               "stacked_stone_wall", "wood_trunk_wall"]
+# albedo gain per layer (realism B4): WoodSiding001 is near-black (0.020) and
+# read as soot on every wood house; x6 is weathered grey-brown timber
+WALL_GAIN = [1.0, 1.0, 6.0, 1.0, 1.0, 1.5, 1.6]
+WALL_MEAN_LUMA = [0.177, 0.500, 0.120, 0.665, 0.490, 0.107, 0.086]   # linear, 2K Color maps x WALL_GAIN
+LAYER_TILE_M = {"stacked_stone_wall": 2.0, "wood_trunk_wall": 1.25}   # real-world size of non-4 m sets
+PAINTED = (2, 3)   # siding and plaster take a paint colour
 ROOF_MASK_THRESHOLD = 0.55
 
 # ---- night (pipeline/check_night_exposure.py parses these) -----------------
@@ -339,15 +345,22 @@ def build_facade(mat):
     night = g.mul(g.mul(t, t), g.sub(3.0, g.mul(t, 2.0)))
 
     # ---- walls (hard per-building pick on R, like the twin)
-    sets = [sample_set(g, load_set(BUILDING_TEX_DIR, a), uv) for a in WALL_LAYERS]
+    sets = [sample_set(g, load_set(BUILDING_TEX_DIR, a),
+                       g.mul(uv, FACADE_TILE_M / LAYER_TILE_M[a]) if a in LAYER_TILE_M else uv)
+            for a in WALL_LAYERS]
+    for s, gain in zip(sets, WALL_GAIN):
+        if gain != 1.0:
+            s["A"] = g.mul(s["A"], gain)
     thr = [i / len(WALL_LAYERS) for i in range(1, len(WALL_LAYERS))]
     wall_a = g.select(wall_r, [s["A"] for s in sets], thr)
     wall_n = g.select(wall_r, [s["N"] for s in sets], thr)
     wall_rough = g.select(wall_r, [s["R"] for s in sets], thr)
 
-    # paint siding (bucket 2, R = 0.5) and plaster (bucket 3, R = 0.7), keeping the texture's detail
-    paintable = g.sat(g.mul(g.sub(0.15, g.absv(g.sub(wall_r, 0.6))), 20.0))
-    mean = g.lerp(WALL_MEAN_LUMA[2], WALL_MEAN_LUMA[3], g.step(wall_r, 0.6))
+    # paint siding and plaster (buckets PAINTED, R = (i + 0.5) / N), keeping the texture's detail
+    n = len(WALL_LAYERS)
+    mid = (PAINTED[0] + PAINTED[1] + 1) / 2 / n   # bucket edge between the two
+    paintable = g.sat(g.mul(g.sub(1.0 / n, g.absv(g.sub(wall_r, mid))), 20.0 * n))
+    mean = g.lerp(WALL_MEAN_LUMA[PAINTED[0]], WALL_MEAN_LUMA[PAINTED[1]], g.step(wall_r, mid))
     detail = g.maxv(g.minv(g.div(g.dot(wall_a, g.c3((0.2126, 0.7152, 0.0722))), mean), 1.6), 0.4)
     paint_pick = g.div(g.sub(s_paint, 1.0 - PAINT_FRACTION), PAINT_FRACTION)   # [0,1) over the painted share
     paint = g.select(paint_pick, [g.c3(p) for p in PAINTS], [i / len(PAINTS) for i in range(1, len(PAINTS))])

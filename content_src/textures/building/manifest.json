@@ -68,6 +68,52 @@
       "local_dir": "content_src/textures/building/RoofingTiles007",
       "maps": ["Color", "NormalGL", "Roughness", "AmbientOcclusion"],
       "notes": "Shingle roof - applied to top-facing (roof) triangles via vertex-normal Z mask."
+    },
+    {
+      "role": "wall_stone",
+      "asset_id": "stacked_stone_wall",
+      "display_name": "Stacked Stone Wall",
+      "author": "Poly Haven",
+      "source_url": "https://polyhaven.com/a/stacked_stone_wall",
+      "files": {
+        "Color": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/stacked_stone_wall/stacked_stone_wall_diff_2k.jpg",
+        "NormalGL": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/stacked_stone_wall/stacked_stone_wall_nor_gl_2k.jpg",
+        "Roughness": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/stacked_stone_wall/stacked_stone_wall_rough_2k.jpg",
+        "AmbientOcclusion": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/stacked_stone_wall/stacked_stone_wall_ao_2k.jpg"
+      },
+      "license": "CC0 1.0 (Poly Haven)",
+      "local_dir": "content_src/textures/building/stacked_stone_wall",
+      "tile_m": 2.0,
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Realism B4: dry-stacked stone - Rockies lodges, civic buildings and church fronts. 2 m x 2 m real-world tile."
+    },
+    {
+      "role": "wall_log",
+      "asset_id": "wood_trunk_wall",
+      "display_name": "Wood Trunk Wall",
+      "author": "Poly Haven",
+      "source_url": "https://polyhaven.com/a/wood_trunk_wall",
+      "files": {
+        "Color": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wood_trunk_wall/wood_trunk_wall_diff_2k.jpg",
+        "NormalGL": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wood_trunk_wall/wood_trunk_wall_nor_gl_2k.jpg",
+        "Roughness": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wood_trunk_wall/wood_trunk_wall_rough_2k.jpg",
+        "AmbientOcclusion": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wood_trunk_wall/wood_trunk_wall_ao_2k.jpg"
+      },
+      "license": "CC0 1.0 (Poly Haven)",
+      "local_dir": "content_src/textures/building/wood_trunk_wall",
+      "tile_m": 1.25,
+      "maps": [
+        "Color",
+        "NormalGL",
+        "Roughness",
+        "AmbientOcclusion"
+      ],
+      "notes": "Realism B4: round-log cabin wall - Rockies houses and outbuildings. 1.25 m x 1.25 m real-world tile."
     }
   ]
 }

@@ -85,8 +85,9 @@ namespace
 		const uint32 Hy = FCrc::MemCrc32(&CentroidY, sizeof(CentroidY));
 		const uint32 H2 = HashCombine32(Hy, HashCombine32(Hx, 0x2545F491u));
 
-		// MUST match len(WALL_LAYERS) in unreal/apply_building_material.py.
-		constexpr uint8 NumWallSets = 5;
+		// MUST match len(WALL_LAYERS) in unreal/apply_building_material*.py
+		// (pipeline/tests/test_building_facades.py checks).
+		constexpr uint8 NumWallSets = 7;
 		const float R = (FMath::Min<uint8>(B.WallSet, NumWallSets - 1) + 0.5f) / NumWallSets;
 		return FVector4f(R, HashToUnitFloat(H2), B.FlatRoof ? 1.0f : 0.0f, 1.0f);
 	}

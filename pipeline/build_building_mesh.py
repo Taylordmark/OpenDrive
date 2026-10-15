@@ -128,35 +128,51 @@ def estimate_levels(building_tag, area_m2, neighbour_levels, rng):
     return levels
 
 
-# Facade pick per building: (wall_set choices, flat_roof). wall_set indexes
-# WALL_LAYERS in unreal/apply_building_material.py (0 red brick, 1 tan
-# brick, 2 wood siding, 3 plaster, 4 concrete); flat_roof 1 = concrete flat
-# roof, 0 = shingle. Anything 8+ stories is always concrete + flat.
-_RESIDENTIAL_FACADE = ([2, 3, 0, 1], 0)
-_OUTBUILDING_FACADE = ([2, 4], 0)
-BUILDING_TYPE_FACADE = {
-    **{t: ([4, 3, 0, 1], 1) for t in ("office", "government", "public", "school")},
-    **{t: ([0, 1, 3, 4], 1) for t in ("apartments", "hotel", "dormitory")},
-    **{t: ([0, 1, 3], 1) for t in ("commercial", "retail", "shop")},
-    **{t: _RESIDENTIAL_FACADE for t in (
+# Facade pick per building: wall_set indexes WALL_LAYERS in
+# unreal/apply_building_material*.py (0 red brick, 1 tan brick, 2 wood
+# siding, 3 plaster/stucco, 4 concrete, 5 stacked stone, 6 log); flat_roof
+# 1 = concrete flat roof, 0 = shingle. Anything 8+ stories is concrete + flat.
+# Realism B4 (2026-10-15): the wall palette is per region, not one national
+# brick-heavy mix - stucco/CMU for Oahu and SoCal, painted wood flats and
+# stucco for SF, wood/log/stone for the Rockies. Repeats in a list weight it.
+BUILDING_CATEGORY = {
+    **{t: "civic" for t in ("office", "government", "public", "school")},
+    **{t: "apartments" for t in ("apartments", "hotel", "dormitory")},
+    **{t: "commercial" for t in ("commercial", "retail", "shop")},
+    **{t: "house" for t in (
         "house", "detached", "semidetached_house", "residential", "terrace",
         "bungalow", "cabin", "farm", "static_caravan", "houseboat",
         "construction")},
-    **{t: _OUTBUILDING_FACADE for t in ("garage", "shed", "carport", "greenhouse", "roof")},
-    "church": ([0, 1, 3], 0),
+    **{t: "outbuilding" for t in ("garage", "shed", "carport", "greenhouse", "roof")},
+    "church": "church",
 }
+CATEGORY_FLAT = {"civic": 1, "apartments": 1, "commercial": 1, "mid": 1}   # the rest pitched
+REGION_PALETTE = {
+    "generic": dict(house=[2, 3, 0, 1], outbuilding=[2, 4], commercial=[0, 1, 3], apartments=[0, 1, 3, 4],
+                    civic=[4, 3, 0, 1], church=[0, 1, 3], mid=[0, 3, 4], low=[0, 1, 2, 3, 4]),
+    "tropical": dict(house=[3, 3, 3, 3, 2, 2, 4], outbuilding=[2, 3, 4], commercial=[3, 3, 4, 4, 1],
+                     apartments=[3, 4, 4], civic=[4, 3, 3], church=[3, 3, 5], mid=[3, 4, 4], low=[3, 3, 3, 2, 4]),
+    "socal": dict(house=[3, 3, 3, 3, 3, 3, 2, 1], outbuilding=[3, 2, 4], commercial=[3, 3, 4, 1],
+                  apartments=[3, 3, 4], civic=[4, 3, 1], church=[3, 3, 1], mid=[3, 4], low=[3, 3, 3, 3, 2, 1]),
+    "sf": dict(house=[2, 2, 2, 3, 3], outbuilding=[2, 3], commercial=[0, 1, 3, 2], apartments=[3, 3, 2, 0, 1],
+               civic=[4, 1, 3, 5], church=[5, 1, 3], mid=[3, 0, 1, 4], low=[2, 2, 3, 3, 0]),
+    "rockies": dict(house=[2, 2, 2, 6, 6, 5, 3], outbuilding=[2, 6, 2], commercial=[2, 0, 5, 6, 1],
+                    apartments=[2, 3, 5, 4, 2], civic=[5, 4, 0, 2], church=[5, 0, 2], mid=[2, 3, 5, 4],
+                    low=[2, 2, 6, 6, 5, 3]),
+}
+AREA_REGION = {"oahu": "tropical", "green_valley": "socal", "sf_russian_hill": "sf", "summit_county": "rockies"}
 HIGH_RISE_LEVELS = 8
 
 
-def pick_facade(building_tag, levels, rng):
-    """(wall_set, flat_roof) for one building - see BUILDING_TYPE_FACADE."""
+def pick_facade(building_tag, levels, rng, region="generic"):
+    """(wall_set, flat_roof) for one building - see REGION_PALETTE."""
     if levels >= HIGH_RISE_LEVELS:
         return 4, 1
-    choices, flat = BUILDING_TYPE_FACADE.get(building_tag) or (
-        ([0, 3, 4], 1) if levels >= 4 else ([0, 1, 2, 3, 4], 0))
-    return rng.choice(choices), flat
+    cat = BUILDING_CATEGORY.get(building_tag) or ("mid" if levels >= 4 else "low")
+    return rng.choice(REGION_PALETTE[region][cat]), CATEGORY_FLAT.get(cat, 0)
 
 
+REGION = AREA_REGION.get(AREA_NAME, "generic")
 FACADE_TILE_M = 4.0   # UV repeat period on walls/roof, matches this
                        # project's DETAIL_TILE_CM-style tiling convention
 
@@ -341,7 +357,7 @@ def main():
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
         height_cm = levels * LEVEL_HEIGHT_M * 100.0
         # drawn AFTER the levels roll so existing heights don't shift
-        wall_set, flat_roof = pick_facade(b.get("building_tag"), levels, rng)
+        wall_set, flat_roof = pick_facade(b.get("building_tag"), levels, rng, REGION)
         facade_counts[(wall_set, flat_roof)] += 1
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
