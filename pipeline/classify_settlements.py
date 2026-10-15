@@ -111,7 +111,9 @@ def main():
         frac = residential_counts[(tx, ty)] / n
         tiles[f"{tx},{ty}"] = pick_archetype(n, frac)
 
-    OUT_PATH.write_text(json.dumps({"tiles": tiles}))
+    # building count per tile too: build_traffic_demand.py's population proxy
+    OUT_PATH.write_text(json.dumps({"tiles": tiles,
+                                    "counts": {f"{tx},{ty}": n for (tx, ty), n in counts.items()}}))
     print(f"{len(counts)} tile(s) with any buildings, {len(tiles)} populated "
           f"(>= {MIN_BUILDINGS_PER_TILE} buildings) -> {OUT_PATH}")
     for k, v in tiles.items():

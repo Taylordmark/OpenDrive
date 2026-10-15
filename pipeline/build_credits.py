@@ -152,6 +152,7 @@ def build_lines():
     add("U.S. Geological Survey data - public domain.")
     add("Ground colour (Realistic style): Contains modified Copernicus Sentinel data")
     add("2023-2025. Sentinel-2 L2A via Element84 Earth Search on AWS.")
+    add("Traffic volumes: FHWA Highway Performance Monitoring System (HPMS) - public domain.")
     add()
 
     # ---- content_src/**/manifest.json walk ----

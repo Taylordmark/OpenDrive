@@ -93,27 +93,14 @@ in `next steps.md` §2. 3c has to merge the 5 m station edges into lane
 polylines between junctions; the file has no polyline of its own.
 
 ### 3b. Traffic demand (pipeline, D4)
-Density comes from real volumes and real daily patterns, not a setting.
-- **Volumes:** FHWA HPMS AADT (annual average daily traffic) for each
-  federal-aid road segment. It's public domain and nationwide, and covers
-  I-5, US/state routes and major arterials. A new fetch goes in the §7.50
-  cache. Match it to OSM chains by `ref` plus distance along the
-  centerline. Add it to README § Data credits / `build_credits.py`
-  (decision 6).
-- **Fallback for unmatched roads** (locals, most residential): AADT from
-  highway class × the population around it. Population comes from the US
-  Census block-group density raster (public domain), sampled per station.
-  This also replaces the settlement guess for local streets.
-- **Hourly and weekly shape:** the FHWA Traffic Monitoring Guide hourly and
-  day-of-week factors (urban vs rural, weekday vs weekend). Urban
-  interstates get the two-peak commute curve (7–9 and 16–19), with the
-  peak direction set by the side of the edge facing the city centre.
-- **Per directed edge, store:** AADT, direction split, the urban/rural
-  profile id and capacity (lanes × ~1,900 veh/h/lane on freeways, less on
-  arterials). Put it next to 3a's ODG1 lane block.
-- **Check:** a test that I-5 near a city at 17:30 on a weekday has demand
-  above capacity (so it jams) and is free-flowing at 03:00. A per-area plot
-  of demand / capacity by hour goes in `scratchpad/`.
+Built 2026-10-14 (see `status.md`): `build_traffic_demand.py` writes
+`traffic_<area>_test.bin` (ODT1) per lane-graph edge from FHWA HPMS, with the
+hourly/weekly curves and `demand_vph()` that 3c mirrors. What's left, only if
+drives show it:
+- Census block-group population for unmatched local streets (buildings per
+  2 km tile stand in now).
+- Recreational profiles (I-70's Sunday ski jam): one national urban/rural
+  curve can't produce it; the TMG factor groups can.
 
 ### 3c. Traffic runtime (`AODTrafficManager`)
 - **Clock:** `AODDayNightController` has `TimeOfDay` but no day count. Add

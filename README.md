@@ -288,5 +288,7 @@ then read `OpenDriveUE/Saved/Logs/OpenDriveUE.log` (manager heartbeats:
 - Elevation: USGS 3DEP via AWS Terrain Tiles; imagery: USGS — public domain,
   credit courtesy.
 - Climate normals: NASA POWER.
+- Traffic volumes: FHWA HPMS (geo.dot.gov), state lookup via the US Census
+  geocoder — public domain.
 - Planned (Arc 7): ESA WorldCover (CC-BY 4.0), PRISM/WorldClim — credit when
   integrated.

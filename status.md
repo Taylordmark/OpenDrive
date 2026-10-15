@@ -371,6 +371,19 @@ become new roads via `fetch_osm_network.py` (rebuild the area first).
     Summit), so the route line follows the road. Pause-menu "Mini-Map" row:
     North / Travel (heading-up, view shifted ahead of the car, red north tick
     on the bezel), saved under `OpenDrive.HUD`.
+  - Traffic demand (2026-10-14, PLAN-REALISM.md Phase 3b, offline only):
+    `pipeline/build_traffic_demand.py` (rebuild stage after the lane graph)
+    fetches FHWA HPMS sections per state (Census geocoder for the state,
+    `data/cache/hpms/`) and gives each ODG1 edge the nearest section within
+    30 m (80 m for motorway/trunk carriageways) whose bearing, functional
+    class and ramp-ness fit. Unmatched edges get a class AADT scaled by the
+    tile's building count (`settlement_tiles.json` now carries `counts`).
+    Writes `traffic_<area>_test.bin` (ODT1: hour/weekday curves, then per edge
+    AADT, peak-direction %, truck %, urban/matched/inbound flags).
+    `demand_vph()` counts a truck as 2 cars (HCM). Motorway km matched:
+    Summit 96%, Green Valley 99.8%. Green Valley's busiest I-5 edge
+    (194k/day, 5 lanes) reaches 1.01x capacity at 17:00 Friday, 0.06x at
+    03:00. Check: `pipeline/tests/test_traffic_demand.py`.
   - Directed lane graph (2026-10-06, PLAN-REALISM.md Phase 3a, compiled, not
     driven): ODG1 gains an optional lane block (README, "Route / lane graph") with
     node Z from the pad-patched shipped surface, junction control (OSM

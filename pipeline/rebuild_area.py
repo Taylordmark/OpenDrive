@@ -159,6 +159,7 @@ STAGES = [
     # after furniture (2026-10-06): the ODG1 lane block reads road_furniture.json
     # `controls`; run earlier it shipped 0 OSM signals/stops
     ("export_road_centerline_bin.py", "export centerline_*.bin / centerline_map_*.bin / routegraph_*.bin"),
+    ("build_traffic_demand.py", "FHWA HPMS volumes per lane-graph edge -> traffic_*.bin (reads routegraph_*.bin)"),
     # EMBANKMENTS (2026-09-07): reuses road_stations.json's own in_junction_box
     # field (Arc 7.18) plus the same DEM-probe drop detection guardrails use -
     # sits right after guardrails for the same "needs terrain's sample_dem
