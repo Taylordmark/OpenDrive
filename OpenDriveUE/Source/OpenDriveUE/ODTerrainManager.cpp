@@ -1,4 +1,5 @@
 #include "ODTerrainManager.h"
+#include "UObject/Package.h" // ODVisualStyle.h uses UPackage (non-unity builds)
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
@@ -11,6 +12,7 @@
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
 #include "ImageUtils.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -126,7 +128,11 @@ static constexpr float ConflictMinGapCm = 100.0f;   // CONFLICT_MIN_GAP_M (1 m)
 // material's own below-treeline look: full "rich/dark low green" bias now
 // holds everywhere below real treeline, only starting to greigh out right
 // where the material itself starts blending toward scree.
-static constexpr float ElevLowCm = -8530.0f;   // ~3350 m (=TREELINE_LOW_M) - at/below: full "rich/dark low green" bias
+// 2026-10-15 (realism eval T1): ElevLowCm/ElevHighCm are now per area -
+// FODGroundBands::ElevLowCm/ElevHighCm from groundbands_<area>_test.json
+// (pipeline/build_ground_bands.py: treeline low .. +765 m, climate-derived),
+// passed into ApplyBiomeTint (summit_county's file reproduces the values the
+// comments here describe, give or take the climate fit).
 // 2026-09-04 RETUNE #1 (§7.15 background-slope follow-up): was 40000 (~3835 m),
 // which put FULL grey bias well BELOW unreal/apply_ground_material.py's own
 // TREELINE_HIGH_M=3650 - i.e. this vertex-tint elevation gradient was already
@@ -135,7 +141,6 @@ static constexpr float ElevLowCm = -8530.0f;   // ~3350 m (=TREELINE_LOW_M) - at
 // logic had even started blending toward scree. Raised so full grey doesn't
 // land until just above the real treeline instead of a third of the way up
 // the valley wall.
-static constexpr float ElevHighCm = 68000.0f;   // ~4115 m - at/above: full "grey/rocky" bias
 static const FLinearColor ElevLowBias(0.02f, 0.10f, 0.02f);
 static const FLinearColor ElevHighBias(0.40f, 0.40f, 0.40f);
 
@@ -260,6 +265,7 @@ void AODTerrainManager::BeginPlay()
 	if (TerrainMat)
 	{
 		TerrainMID = UMaterialInstanceDynamic::Create(TerrainMat, this);
+		LoadGroundBands();
 		if (ODVisualStyle::IsRealistic())
 		{
 			LoadSatAlbedo();
@@ -511,6 +517,53 @@ void AODTerrainManager::LoadSatAlbedo()
 	TerrainMID->SetScalarParameterValue(TEXT("SatAmount"), 1.0f);
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: satellite albedo %dx%d bound (%s)"),
 		SatTex->GetSizeX(), SatTex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
+}
+
+void AODTerrainManager::LoadGroundBands()
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return;
+	}
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/groundbands_")
+		+ TerrainTilePrefix.Mid(8) + TEXT(".json"));
+	FString Json;
+	TSharedPtr<FJsonObject> O;
+	if (!FFileHelper::LoadFileToString(Json, *Path)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), O) || !O.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s missing - no treeline/snow/beach bands (run pipeline/build_ground_bands.py)"), *Path);
+	}
+	else
+	{
+		FODGroundBands& B = GroundBands;
+		const auto Read = [&O](const TCHAR* Key, float& Out) { double V; if (O->TryGetNumberField(Key, V)) { Out = (float)V; } };
+		Read(TEXT("sea_z_cm"), B.SeaZCm);
+		Read(TEXT("treeline_low_cm"), B.TreelineLowCm);
+		Read(TEXT("treeline_high_cm"), B.TreelineHighCm);
+		Read(TEXT("elev_low_cm"), B.ElevLowCm);
+		Read(TEXT("elev_high_cm"), B.ElevHighCm);
+		Read(TEXT("snow_summer_low_cm"), B.SnowSummerLowCm);
+		Read(TEXT("snow_summer_high_cm"), B.SnowSummerHighCm);
+		Read(TEXT("snow_winter_low_cm"), B.SnowWinterLowCm);
+		Read(TEXT("snow_winter_high_cm"), B.SnowWinterHighCm);
+	}
+	// tiles sit at actor-relative positions; the material reads world Z
+	const float Dz = (float)GetActorLocation().Z;
+	FODGroundBands& W = GroundBandsWorld;
+	W = GroundBands;
+	for (float* F : { &W.SeaZCm, &W.TreelineLowCm, &W.TreelineHighCm, &W.ElevLowCm, &W.ElevHighCm,
+		&W.SnowSummerLowCm, &W.SnowSummerHighCm, &W.SnowWinterLowCm, &W.SnowWinterHighCm })
+	{
+		*F += Dz;
+	}
+	TerrainMID->SetScalarParameterValue(TEXT("SeaLevelZCm"), W.SeaZCm);
+	TerrainMID->SetScalarParameterValue(TEXT("TreelineLowZCm"), W.TreelineLowCm);
+	TerrainMID->SetScalarParameterValue(TEXT("TreelineHighZCm"), W.TreelineHighCm);
+	TerrainMID->SetScalarParameterValue(TEXT("SnowLineLowZCm"), W.SnowSummerLowCm);
+	TerrainMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), W.SnowSummerHighCm);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: ground bands sea=%.0f treeline=%.0f..%.0f snow summer=%.0f..%.0f winter=%.0f..%.0f (world cm)"),
+		W.SeaZCm, W.TreelineLowCm, W.TreelineHighCm, W.SnowSummerLowCm, W.SnowSummerHighCm, W.SnowWinterLowCm, W.SnowWinterHighCm);
 }
 
 void AODTerrainManager::LoadBiomeSidecar()
@@ -1083,7 +1136,7 @@ void AODTerrainManager::VerifyCarveGuarantee(const FParsedTerrainTile& Tile, con
 
 void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
 	const FBiomeSpatialHash& BiomeHash, const FStationSpatialHash& StationHash,
-	float TintStrength, int32& OutVertsTinted, int32& OutDistinctBiomes,
+	float TintStrength, const FODGroundBands& Bands, int32& OutVertsTinted, int32& OutDistinctBiomes,
 	float& OutMinLuma, float& OutMaxLuma)
 {
 	OutVertsTinted = 0;
@@ -1200,7 +1253,7 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 
 		// ---- ELEVATION: subtle shift, richer/darker low, greyer/rockier
 		// high - smoothstep across the bands so there's no visible seam. ----
-		const float ElevT = FMath::Clamp((Z - ElevLowCm) / (ElevHighCm - ElevLowCm), 0.0f, 1.0f);
+		const float ElevT = FMath::Clamp((Z - Bands.ElevLowCm) / (Bands.ElevHighCm - Bands.ElevLowCm), 0.0f, 1.0f);
 		const float ElevS = ElevT * ElevT * (3.0f - 2.0f * ElevT);
 		const FLinearColor LowBiased = FMath::Lerp(GroundTint, ElevLowBias, 0.45f);
 		const FLinearColor HighBiased = FMath::Lerp(GroundTint, ElevHighBias, 0.55f);
@@ -1323,7 +1376,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath,
 		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve, bRuntimeCarve,
-		HashForTint, bTintEnabled, TintStrengthValue]()
+		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands]()
 	{
 		FParsedTerrainTile Parsed;
 		// Check existence first rather than just trying-then-falling-back -
@@ -1418,7 +1471,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 			ApplyBiomeTint(Parsed, Key, CarveTileSizeCm,
 				HashForTint.IsValid() ? *HashForTint : EmptyBiomeHash,
 				HashForCarve.IsValid() ? *HashForCarve : EmptyStationHash,
-				TintStrengthValue, VertsTinted, DistinctBiomes, MinLuma, MaxLuma);
+				TintStrengthValue, Bands, VertsTinted, DistinctBiomes, MinLuma, MaxLuma);
 			if (VertsTinted > 0)
 			{
 				UE_LOG(LogTemp, Display,

@@ -191,6 +191,7 @@ STAGES = [
     # ODWeatherController's mild default climate. Needs road_test_meta.json +
     # road_biomes.json (storm weights); this area only, not its no-arg "all".
     (f"fetch_climate.py {AREA_NAME}_test", "fetch climate normals + storm weights -> climate_*.json"),
+    ("build_ground_bands.py", "per-area ground bands (treeline/snow/sea) -> groundbands_*.json"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
     # (2026-10-05, step 3) after the last tile writer: the gates check owned tiles only

@@ -1,4 +1,5 @@
 #include "ODSeasonController.h"
+#include "UObject/Package.h" // ODVisualStyle.h uses UPackage (non-unity builds)
 #include "ODVisualStyle.h"
 
 #include "Camera/PlayerCameraManager.h"
@@ -30,8 +31,13 @@ namespace
 	// constants it needs (e.g. AODTerrainManager's own carve-radius
 	// constants), with a comment tying the two together so a future area
 	// swap is at least discoverable from either side.
-	constexpr float SnowLineLowBaseCm = 6470.0f;
-	constexpr float SnowLineHighBaseCm = 51470.0f;
+	// 2026-10-15 (realism eval T1): these are now PER AREA - each terrain
+	// manager's FODGroundBands (groundbands_<area>_test.json, pipeline/
+	// build_ground_bands.py, climate-derived): SnowSummer* = the SnowCover 0
+	// baseline ("Base" below), SnowWinter* = the SnowCover 1 floor ("Floor"
+	// below). Oahu/Green Valley/SF get lines above their highest terrain, so
+	// no snow in any season; summit's summer line is only patchy from ~3900 m.
+	// The comments below still describe summit_county's old fixed values.
 
 	// Floor band the snow line sweeps down to at full winter (SnowCover=1) -
 	// same 45000 cm band WIDTH as the baseline (so the material's own 40 m
@@ -40,8 +46,6 @@ namespace
 	// real valley floor (Dillon Reservoir, ~2765 m ASL -> world Z ~= -67030 cm)
 	// sits comfortably above SnowLineHighFloorCm, i.e. fully inside the "100%
 	// covered" band, not partway up the noise-broken transition.
-	constexpr float SnowLineLowFloorCm = -125000.0f;
-	constexpr float SnowLineHighFloorCm = -80000.0f;
 
 	// ---- 2026-09-07 polish pass: melt-compression fix -------------------
 	// Bug found via -odseason=winter -odseasonphase=0.5: with SnowLineLowZCm/
@@ -109,17 +113,17 @@ namespace
 	constexpr float SnowMeltBlendInEnd = 0.15f;     // below this, blend from SnowLineLowBaseCm into the identity curve
 	constexpr float SnowMeltBlendOutStart = 0.85f;  // above this, blend from the identity curve down to SnowLineLowFloorCm (well short of the collapse point)
 
-	float SnowLineHighForCover(float SnowCover)
+	float SnowLineHighForCover(const FODGroundBands& B, float SnowCover)
 	{
-		return FMath::Lerp(SnowLineHighBaseCm, SnowLineHighFloorCm, SnowCover);
+		return FMath::Lerp(B.SnowSummerHighCm, B.SnowWinterHighCm, SnowCover);
 	}
 
 	// Identity-ramp solve (see comment block above) - valid away from the
 	// SnowCover=1 singularity, which the caller keeps clear of via
 	// SnowMeltBlendOutStart.
-	float SnowLineLowIdentity(float SnowCover, float RefZ)
+	float SnowLineLowIdentity(const FODGroundBands& B, float SnowCover, float RefZ)
 	{
-		const float High = SnowLineHighForCover(SnowCover);
+		const float High = SnowLineHighForCover(B, SnowCover);
 		const float Denom = FMath::Max(1.0f - SnowCover, 0.01f);
 		return (RefZ - SnowCover * High) / Denom;
 	}
@@ -134,19 +138,32 @@ namespace
 	// comment block above: identity ramp in the middle, smoothly blended back
 	// to the exact baked baseline at SnowCover=0 and to the exact proven-safe
 	// floor at SnowCover=1 so both endpoints stay byte-identical to before.
-	float SnowLineLowForCover(float SnowCover, float RefZ)
+	float SnowLineLowIdentityRamp(const FODGroundBands& B, float SnowCover, float RefZ)
 	{
 		if (SnowCover <= SnowMeltBlendInEnd)
 		{
 			const float W = SmoothStep01(SnowCover / SnowMeltBlendInEnd);
-			return FMath::Lerp(SnowLineLowBaseCm, SnowLineLowIdentity(SnowMeltBlendInEnd, RefZ), W);
+			return FMath::Lerp(B.SnowSummerLowCm, SnowLineLowIdentity(B, SnowMeltBlendInEnd, RefZ), W);
 		}
 		if (SnowCover >= SnowMeltBlendOutStart)
 		{
 			const float W = SmoothStep01((SnowCover - SnowMeltBlendOutStart) / (1.0f - SnowMeltBlendOutStart));
-			return FMath::Lerp(SnowLineLowIdentity(SnowMeltBlendOutStart, RefZ), SnowLineLowFloorCm, W);
+			return FMath::Lerp(SnowLineLowIdentity(B, SnowMeltBlendOutStart, RefZ), B.SnowWinterLowCm, W);
 		}
-		return SnowLineLowIdentity(SnowCover, RefZ);
+		return SnowLineLowIdentity(B, SnowCover, RefZ);
+	}
+
+	// The identity ramp forces coverage AT RefZ to equal SnowCover, which is
+	// only right where full winter actually covers RefZ - on Oahu it would
+	// paint 50% snow under the car mid-transition. So it's weighted by how
+	// covered RefZ is at SnowCover 1; below the winter line it's a plain
+	// summer->winter lerp (2026-10-15, per-area bands).
+	float SnowLineLowForCover(const FODGroundBands& B, float SnowCover, float RefZ)
+	{
+		const float WinterAtRef = FMath::Clamp((RefZ - B.SnowWinterLowCm)
+			/ FMath::Max(B.SnowWinterHighCm - B.SnowWinterLowCm, 1.0f), 0.0f, 1.0f);
+		return FMath::Lerp(FMath::Lerp(B.SnowSummerLowCm, B.SnowWinterLowCm, SnowCover),
+			SnowLineLowIdentityRamp(B, SnowCover, RefZ), WinterAtRef);
 	}
 }
 
@@ -421,8 +438,9 @@ void AODSeasonController::PushParamsToMIDs()
 			{
 				RefZ = Player->GetActorLocation().Z;
 			}
-			const float Low = SnowLineLowForCover(Cover, RefZ);
-			const float High = SnowLineHighForCover(Cover);
+			const FODGroundBands& Bands = Terrain->GetGroundBandsWorld();
+			const float Low = SnowLineLowForCover(Bands, Cover, RefZ);
+			const float High = SnowLineHighForCover(Bands, Cover);
 			if (FParse::Param(FCommandLine::Get(), TEXT("odtrace")) && !bLoggedSnowDebugOnce)
 			{
 				bLoggedSnowDebugOnce = true;

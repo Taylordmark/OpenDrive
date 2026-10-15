@@ -117,7 +117,8 @@ STRATA_WARP_AMP_CM = 400.0      # ... by up to +-2 m
 STRATA_DARK = (0.72, 0.68, 0.64)
 STRATA_LIGHT = (1.18, 1.10, 0.98)
 
-# elevation bands - identical to apply_ground_material.py
+# elevation bands - identical to apply_ground_material.py; only the summit_county
+# defaults of the per-area Treeline*/SnowLine*/SeaLevelZCm params (AODTerrainManager)
 TREELINE_LOW_CM = (3350.0 - ORIGIN_HEIGHT_M) * 100.0
 TREELINE_HIGH_CM = (3650.0 - ORIGIN_HEIGHT_M) * 100.0
 ALPINE_BARE_MAX_BLEND = 0.55
@@ -149,6 +150,7 @@ SAND_COLOR = (0.76, 0.69, 0.52)
 SAND_ROUGHNESS = 0.55
 BEACH_BAND_CM = 3.0 * 0.3048 * 100.0
 SEA_LEVEL_Z_CM = -ORIGIN_HEIGHT_M * 100.0
+OFF_Z_CM = 1.0e7     # param defaults = no treeline/snow/beach (walls use the raw asset)
 WET_DARKEN = 0.6
 WET_ROUGHNESS_FLAT = 0.5
 WET_ROUGHNESS_STEEP = 0.25
@@ -645,7 +647,9 @@ def build_ground():
     veg["albedo"] = g.lerp(g.desat(veg["albedo"]), veg["albedo"], g.add(one, g.mul(far_t, g.c(FAR_SAT_BOOST))))
     veg["albedo"] = g.mul(veg["albedo"], g.sub(one, g.mul(far_t, g.c(FAR_DARKEN))))
 
-    treeline_t = g.ramp(z, TREELINE_LOW_CM, TREELINE_HIGH_CM)
+    # per-area (groundbands_<area>_test.json via AODTerrainManager), see the stylized twin
+    tl_lo, tl_hi = g.scalar_param("TreelineLowZCm", OFF_Z_CM), g.scalar_param("TreelineHighZCm", OFF_Z_CM + 30000.0)
+    treeline_t = g.sat(g.div(g.sub(z, tl_lo), g.sub(tl_hi, tl_lo)))
     veg = blend_layers(g, veg, scree, g.height_blend(g.mul(treeline_t, g.c(ALPINE_BARE_MAX_BLEND)),
                                                      veg["ao"], scree["ao"]))
 
@@ -660,7 +664,7 @@ def build_ground():
     base = road_edge_blend(g, base, xy, flat_w, L["dirt"])
 
     # sand / beach (stylized parity; no-op inland)
-    sand = g.mul(g.sat(g.div(g.sub(g.c(BEACH_BAND_CM), g.sub(z, g.scalar_param("SeaLevelZCm", SEA_LEVEL_Z_CM))),
+    sand = g.mul(g.sat(g.div(g.sub(g.c(BEACH_BAND_CM), g.sub(z, g.scalar_param("SeaLevelZCm", -OFF_Z_CM))),
                              g.c(BEACH_BAND_CM))), flat_w)
     base["albedo"] = g.lerp(base["albedo"], g.c3(*SAND_COLOR), sand)
     base["rough"] = g.lerp(base["rough"], g.c(SAND_ROUGHNESS), sand)
@@ -674,7 +678,7 @@ def build_ground():
     base["rough"] = g.lerp(base["rough"], g.minv(base["rough"], wet_rough), wet)
 
     # snow: same altitude params, noise patches, fills crevices first
-    lo, hi = g.scalar_param("SnowLineLowZCm", SNOW_LOW_CM), g.scalar_param("SnowLineHighZCm", SNOW_HIGH_CM)
+    lo, hi = g.scalar_param("SnowLineLowZCm", OFF_Z_CM), g.scalar_param("SnowLineHighZCm", OFF_Z_CM + 45000.0)
     snow_t = g.sat(g.add(g.sat(g.div(g.sub(z, lo), g.sub(hi, lo))),
                          g.mul(g.sub(g.noise_xy(xy, SNOW_NOISE_SCALE_CM, (91.0, 37.0)), g.c(0.5)),
                                g.c(SNOW_NOISE_STRENGTH))))
