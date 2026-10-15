@@ -941,6 +941,58 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
     return cap.reshape(n, n)
 
 
+# a pavement-ceiling cut deeper than this under a carved road is handed to a
+# wall (build_road_embankments' own "terrain meets the road" drop, 2.5 m)
+CEILING_CLIFF_WALL_M = 2.5
+
+
+def ceiling_cliff_pairs(east, north, elev, exclude, clamp_r, seg_ids):
+    """(i, j) wall pairs where pavement_ceiling's cap from a lower road j's
+    cells cuts the ground more than CEILING_CLIFF_WALL_M under carved station
+    i (2026-10-15, Green Valley Valencia Blvd: carriageways 8.5 m apart edge
+    to edge, 4.1 m apart vertically - edge grade 0.48, under WALL_MIN_GRADE,
+    so no wall, but the lower road's capped corners reach one 7.8 m cell
+    over and left the upper 3.5 m above its ground). Evaluates the real cap
+    grid only at candidates: another road's non-structure pavement within a
+    cell diagonal, >= CEILING_CLIFF_WALL_M lower."""
+    from scipy.spatial import cKDTree
+    hw = clamp_r - SKIRT_EXTRA
+    struct = _get_struct_mask(len(east))
+    cell = TERRAIN_TILE_SIZE_CM / (NEAR_GRID_N - 1)
+    reach = cell / 100.0 * math.sqrt(2.0)
+    ok = np.nonzero(~exclude & ~struct)[0]
+    tree = cKDTree(np.c_[east, north])
+    cand = {}
+    for i, js in zip(ok, tree.query_ball_point(np.c_[east[ok], north[ok]], hw[ok] + hw.max() + reach)):
+        js = np.asarray(js, dtype=np.int64)
+        js = js[(seg_ids[js] != seg_ids[i]) & ~struct[js] & (elev[js] <= elev[i] - CEILING_CLIFF_WALL_M)
+                & (np.hypot(east[js] - east[i], north[js] - north[i]) - hw[i] - hw[js] < reach)]
+        if len(js):
+            cand[int(i)] = int(js[np.argmin(elev[js])])
+    if not cand:
+        return []
+    sx, sy = east * 100.0, -north * 100.0
+    buckets = _get_pavement_points(sx, sy, elev, clamp_r, station_bank(east, north))
+    by_tile = defaultdict(list)
+    for i in cand:
+        by_tile[(int(sx[i] // TERRAIN_TILE_SIZE_CM), int(sy[i] // TERRAIN_TILE_SIZE_CM))].append(i)
+    pairs = []
+    for (tx, ty), idx in by_tile.items():
+        x0, y0 = tx * TERRAIN_TILE_SIZE_CM, ty * TERRAIN_TILE_SIZE_CM
+        cap = pavement_ceiling(NEAR_GRID_N, x0, x0 + TERRAIN_TILE_SIZE_CM, y0, y0 + TERRAIN_TILE_SIZE_CM,
+                               buckets, tx, ty, PAVEMENT_CEIL_MARGIN_NEAR_M)
+        for i in idx:
+            fi, fj = (sx[i] - x0) / cell, (sy[i] - y0) / cell
+            a, b = min(int(fi), NEAR_GRID_N - 2), min(int(fj), NEAR_GRID_N - 2)
+            u, v = fi - a, fj - b
+            c = np.where(np.isfinite(cap[b:b + 2, a:a + 2]), cap[b:b + 2, a:a + 2], elev[i])
+            h = (c[0, 0] * (1 - u) * (1 - v) + c[0, 1] * u * (1 - v)
+                 + c[1, 0] * (1 - u) * v + c[1, 1] * u * v)
+            if elev[i] - TERRAIN_CARVE_DROP_M - h > CEILING_CLIFF_WALL_M:
+                pairs.append((min(i, cand[i]), max(i, cand[i])))
+    return pairs
+
+
 def load_stations():
     """Returns (east, north, elev, exclude, clamp_r, wall_pairs).
     `exclude` is True for any station the terrain carve must skip (real
@@ -989,6 +1041,13 @@ def load_stations():
               f"excluded from the terrain carve the same way is_bridge "
               f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
+    have = set(wall_pairs)
+    cliff = [p for p in ceiling_cliff_pairs(east, north, elev, exclude, clamp_r, seg_ids) if p not in have]
+    if cliff:
+        print(f"ceiling_cliff_pairs: {len(cliff)} pavement-ceiling cliff(s) > "
+              f"{CEILING_CLIFF_WALL_M} m handed to walls")
+        wall_pairs = list(wall_pairs) + cliff
+        exclude[np.array(cliff).ravel()] = True
     return east, north, elev, exclude, clamp_r, wall_pairs
 
 
