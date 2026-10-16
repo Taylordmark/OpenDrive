@@ -1602,6 +1602,7 @@ UDynamicMeshComponent* AODRoadManager::CreateChunkMeshComponent(
 	const uint32 TCount = Chunk.Tris.Num() / 3;
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
 	// Large-world precision (2026-10-02): vertices are stored relative to the
 	// chunk's first vertex so a chunk hundreds of km from the world origin
