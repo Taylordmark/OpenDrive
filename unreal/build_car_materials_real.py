@@ -278,8 +278,10 @@ float tail = saturate(-N.x * 1.5 - 0.3) * step(P.x, xr) * (1.0 - smoothstep(30.0
 float m = saturate(max(max(low, fan), 0.8 * tail) + 0.6 * arch + 0.5 * under);
 float grime = smoothstep(1.0 - Dirt, 1.25 - Dirt, m * lerp(0.6, 1.0, mac));
 float3 dirtCol = float3(0.20, 0.16, 0.12) * lerp(1.0, 0.45, Wet);   // dust, or mud when wet
-// snow settles on the up-facing panels
-float snow = smoothstep(0.35, 0.75, N.z) * saturate(Snow * 1.5 - (1.0 - mac) * 0.5);
+// snow settles on the near-flat panels (roof, bonnet, boot - not the sloped
+// door tops), patchy at low cover; fresh snow is a cool near-white
+float snow = smoothstep(0.65, 0.9, N.z) * saturate(Snow * 1.5 - (1.0 - mac) * 0.5);
+float3 snowCol = float3(0.92, 0.95, 0.98) * lerp(0.9, 1.0, mac);
 """
 BEAD = """
 float4 dr = Texture2DSampleLevel(Drops, DropsSampler, P.yz * 0.05, mip) * w.x
@@ -345,14 +347,15 @@ float occ = ao * gap;
 // pearl: the colour slides toward its neighbour hue at grazing angles
 float pe = Pearl * pow(1.0 - saturate(abs(dot(normalize(NW), V))), 2.0);
 float3 Alb2 = lerp(Alb, Alb.brg * 0.8 + Alb * 0.2, pe);
-F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 - k);
+F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 - k)
+     + snow * 0.5 * pow(saturate(fd.z), 24.0);   // ice-crystal glints
 Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
 CoatR = lerp(CoatR0 * lerp(0.7, 1.6, fm) + 0.12 * Dirt, CoatR0 * 0.6, Wet);
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
 // tangent-space tilt under the coat; any tangent basis will do for random flakes
 BotN = normalize(float3(fd.xy * Strength, 1.0));
-return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), 0.85, snow);
+return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
 """
     O = [("F0o", F3), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3), ("BotN", F3)]
     c = g.custom(code, F3, outputs=O, P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(),
@@ -394,7 +397,7 @@ rgh = lerp(rgh, 0.9, front * hole);
 float k = max(grime, snow);
 Rough = lerp(lerp(rgh, 0.85, grime), 0.75, snow);
 MetalO = met * (1.0 - k);
-return lerp(lerp(alb, dirtCol * ao, grime), 0.85, snow);
+return lerp(lerp(alb, dirtCol * ao, grime), snowCol, snow);
 """
         c = g.custom(code, F3, outputs=[("Rough", F1), ("MetalO", F1)],
                      P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(), Flake=g.tex(flake),

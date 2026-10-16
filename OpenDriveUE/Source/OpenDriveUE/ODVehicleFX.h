@@ -4,7 +4,6 @@
 #include "Components/ActorComponent.h"
 #include "ODVehicleFX.generated.h"
 
-class AODSeasonController;
 class AODWeatherController;
 class UInstancedStaticMeshComponent;
 class UPhysicalMaterial;
@@ -66,8 +65,9 @@ public:
 	 *  ground, m/s. Wetness: AODWeatherController::Wetness, 0..1. */
 	static FODFxRates Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness);
 
-	/** Grime/wet/snow + axles into the car meshes' custom primitive data. */
-	void PushCarState();
+	/** Grime/wet/snow + axles into the car meshes' custom primitive data;
+	 *  Dt > 0 also advances the car's own snow load (CarSnow). */
+	void PushCarState(float Dt = 0.0f);
 
 private:
 	struct FPuff
@@ -89,13 +89,13 @@ private:
 	TObjectPtr<UInstancedStaticMeshComponent> Pool;
 
 	TArray<FPuff> Puffs;
+	float CarSnow = 0.0f;           // 0..1 snow on the car: builds in snowfall, blows off at speed, melts
 	int32 Next = 0;                 // ring cursor: a full pool recycles the oldest-spawned slot
 	TArray<float> Debt;             // NumWheels x 3 effects, fractional puffs owed
 	FRandomStream Rng{ 0x0DF7 };
 	bool bDrawnLive = false;        // last Draw had live puffs (so one more clears them)
 
 	TWeakObjectPtr<AODWeatherController> WeatherCtl;
-	TWeakObjectPtr<AODSeasonController> SeasonCtl;
 	double LastWeatherSearch = -10.0;
 
 	// scratch for Draw (kept to avoid per-frame allocs)

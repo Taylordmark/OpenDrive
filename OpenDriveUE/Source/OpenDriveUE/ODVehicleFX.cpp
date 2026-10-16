@@ -4,7 +4,6 @@
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "Materials/MaterialInterface.h"
-#include "ODSeasonController.h"
 #include "ODVehicleMovement.h"
 #include "ODVisualStyle.h"
 #include "ODWeatherController.h"
@@ -170,7 +169,7 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	PushCarState();
+	PushCarState(DeltaTime);
 	AActor* Owner = GetOwner();
 	if (!Pool || !Owner || DeltaTime <= 0.0f)
 	{
@@ -246,7 +245,7 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 	Draw(bAnyLive);
 }
 
-void UODVehicleFX::PushCarState()
+void UODVehicleFX::PushCarState(float Dt)
 {
 	AActor* Owner = GetOwner();
 	UWorld* World = GetWorld();
@@ -255,17 +254,26 @@ void UODVehicleFX::PushCarState()
 	{
 		return;
 	}
-	if ((!WeatherCtl.IsValid() || !SeasonCtl.IsValid()) && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
+	if (!WeatherCtl.IsValid() && World->GetTimeSeconds() - LastWeatherSearch > 2.0)
 	{
 		LastWeatherSearch = World->GetTimeSeconds();
 		for (TActorIterator<AODWeatherController> It(World); It; ++It) { WeatherCtl = *It; break; }
-		for (TActorIterator<AODSeasonController> It(World); It; ++It) { SeasonCtl = *It; break; }
 	}
 	const AODWeatherController* Wx = WeatherCtl.Get();
-	// the snow cover AODSeasonController::PushParamsToMIDs gives the ground
-	// and foliage: season cover, or fresh roadside snow at full by 15 cm
-	const float Snow = FMath::Max(SeasonCtl.IsValid() ? SeasonCtl->SnowCover : 0.0f,
-		Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f);
+	// snow on the car is its own load, not the ground's cover (a driven car
+	// in a white landscape is clean, Taylor 2026-10-16): full after ~4 min of
+	// heavy snowfall, sheds above ~30 km/h (half in ~30 s at 100 km/h), melts
+	// over ~10 min above freezing. Exponential steps, so frame-rate independent.
+	if (Dt > 0.0f && Wx)
+	{
+		const float Fall = Wx->PrecipIntensity * Wx->PrecipType;
+		const float SpeedMs = Owner->GetVelocity().Size() / 100.0f;
+		const float Off = FMath::Max(SpeedMs - 8.0f, 0.0f) / 900.0f + (Wx->AirTempC > 0.5f ? 1.0f / 600.0f : 0.0f);
+		const float On = Fall / 240.0f;
+		const float Target = On / FMath::Max(On + Off, 1e-6f);
+		CarSnow = Target + (CarSnow - Target) * FMath::Exp(-(On + Off) * Dt);
+	}
+	const float Snow = CarSnow;
 	const bool bOut = !(Wx && Wx->IsIndoors());   // the garage shows the car clean and dry
 	const float State[6] = { bOut ? Move->GetDirt() : 0.0f, Wx && bOut ? Wx->Wetness : 0.0f, bOut ? Snow : 0.0f,
 		Move->GetWheelAttachXY(0).X, Move->GetWheelAttachXY(2).X, Move->GetWheelRadius(0) };
