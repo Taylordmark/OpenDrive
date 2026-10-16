@@ -239,6 +239,7 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 		const uint32 TCount = W.Tris.Num() / 3;
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		const FVector3d Origin = VCount ? FVector3d(W.Verts[0], W.Verts[1], 0.0) : FVector3d::ZeroVector;
 		Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)

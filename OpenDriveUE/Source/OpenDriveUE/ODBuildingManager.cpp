@@ -524,6 +524,7 @@ void AODBuildingManager::AppendBuildingsToTileMesh(FBuildingTile& Tile, bool bNe
 	if (!CompSlot)
 	{
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		const TArray<float>& V0 = Batch[0].Key->Verts;
 		if (V0.Num() >= 3)

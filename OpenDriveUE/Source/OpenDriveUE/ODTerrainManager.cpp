@@ -1694,6 +1694,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	const uint32 TCount = Parsed.Tris.Num() / 3;
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
 	const FVector3d Origin = VCount ? FVector3d(Parsed.Verts[0], Parsed.Verts[1], 0.0) : FVector3d::ZeroVector;
 	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
@@ -1782,6 +1783,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 		const uint32 WTCount = Parsed.WallTris.Num() / 3;
 
 		auto* WallComp = NewObject<UDynamicMeshComponent>(this);
+		WallComp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		WallComp->SetupAttachment(RootComponent);
 		const FVector3d WallOrigin(Parsed.WallVerts[0], Parsed.WallVerts[1], 0.0);
 		WallComp->SetRelativeLocation(WallOrigin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
@@ -2178,6 +2180,7 @@ void AODTerrainManager::LoadHorizon()
 		return;
 	}
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
 	Comp->SetRelativeLocation(FVector(Parsed.Verts[0], Parsed.Verts[1], 0.0));   // FillTileMesh's local origin
 	Comp->SetCollisionProfileName(TEXT("NoCollision"));

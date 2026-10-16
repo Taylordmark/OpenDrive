@@ -185,6 +185,7 @@ void AODParkingManager::CreateLotComponent(FParkingTile& Tile, const FParsedPark
 	const uint32 TCount = Lot.Tris.Num() / 3;
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
 	const FVector3d Origin = VCount ? FVector3d(Lot.Verts[0], Lot.Verts[1], 0.0) : FVector3d::ZeroVector;
 	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)

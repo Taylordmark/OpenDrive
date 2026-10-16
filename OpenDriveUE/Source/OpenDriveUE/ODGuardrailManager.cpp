@@ -291,6 +291,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 		bJersey ? ++NumJersey : ++NumWBeam;
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();

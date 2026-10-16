@@ -85,50 +85,60 @@ UStaticMesh* AODForestManager::MakeCardMesh(int32 AtlasRow, int32 AtlasCol)
 	const float U0 = (AtlasCol + M) / 4.0f, U1 = (AtlasCol + 1 - M) / 4.0f;
 	const float VTop = (AtlasRow + M) / 2.0f, VBot = (AtlasRow + 1 - M) / 2.0f;
 
-	FMeshDescription Desc;
-	FStaticMeshAttributes Attr(Desc);
-	Attr.Register();
-	TVertexAttributesRef<FVector3f> Pos = Attr.GetVertexPositions();
-	TVertexInstanceAttributesRef<FVector3f> Nrm = Attr.GetVertexInstanceNormals();
-	TVertexInstanceAttributesRef<FVector3f> Tan = Attr.GetVertexInstanceTangents();
-	TVertexInstanceAttributesRef<float> Sign = Attr.GetVertexInstanceBinormalSigns();
-	TVertexInstanceAttributesRef<FVector2f> UVs = Attr.GetVertexInstanceUVs();
-	const FPolygonGroupID PG = Desc.CreatePolygonGroup();
-	Attr.GetPolygonGroupMaterialSlotNames()[PG] = TEXT("Foliage");
-	const FVector2f T[4] = {{U0, VBot}, {U1, VBot}, {U1, VTop}, {U0, VTop}};
-	auto Quad = [&](const FVector3f (&P)[4])
+	// LOD0: 3 cards + cap (8 tris). LOD1: 2 crossed cards + cap (6 tris) once
+	// a tree is ~10 px tall - the silhouette and top-down canopy both stay.
+	FMeshDescription Descs[2];
+	for (int32 Lod = 0; Lod < 2; ++Lod)
 	{
-		FVertexInstanceID Vi[4];
-		for (int32 k = 0; k < 4; ++k)
+		const int32 NumCards = Lod == 0 ? 3 : 2;
+		FMeshDescription& Desc = Descs[Lod];
+		FStaticMeshAttributes Attr(Desc);
+		Attr.Register();
+		TVertexAttributesRef<FVector3f> Pos = Attr.GetVertexPositions();
+		TVertexInstanceAttributesRef<FVector3f> Nrm = Attr.GetVertexInstanceNormals();
+		TVertexInstanceAttributesRef<FVector3f> Tan = Attr.GetVertexInstanceTangents();
+		TVertexInstanceAttributesRef<float> Sign = Attr.GetVertexInstanceBinormalSigns();
+		TVertexInstanceAttributesRef<FVector2f> UVs = Attr.GetVertexInstanceUVs();
+		const FPolygonGroupID PG = Desc.CreatePolygonGroup();
+		Attr.GetPolygonGroupMaterialSlotNames()[PG] = TEXT("Foliage");
+		const FVector2f T[4] = {{U0, VBot}, {U1, VBot}, {U1, VTop}, {U0, VTop}};
+		auto Quad = [&](const FVector3f (&P)[4])
 		{
-			const FVertexID V = Desc.CreateVertex();
-			Pos[V] = P[k];
-			Vi[k] = Desc.CreateVertexInstance(V);
-			Nrm[Vi[k]] = FVector3f(0, 0, 1);
-			Tan[Vi[k]] = FVector3f(1, 0, 0);
-			Sign[Vi[k]] = 1.0f;
-			UVs.Set(Vi[k], 0, T[k]);
+			FVertexInstanceID Vi[4];
+			for (int32 k = 0; k < 4; ++k)
+			{
+				const FVertexID V = Desc.CreateVertex();
+				Pos[V] = P[k];
+				Vi[k] = Desc.CreateVertexInstance(V);
+				Nrm[Vi[k]] = FVector3f(0, 0, 1);
+				Tan[Vi[k]] = FVector3f(1, 0, 0);
+				Sign[Vi[k]] = 1.0f;
+				UVs.Set(Vi[k], 0, T[k]);
+			}
+			const FVertexInstanceID A[3] = {Vi[0], Vi[1], Vi[2]};
+			const FVertexInstanceID B[3] = {Vi[0], Vi[2], Vi[3]};
+			Desc.CreateTriangle(PG, A);
+			Desc.CreateTriangle(PG, B);
+		};
+		for (int32 i = 0; i < NumCards; ++i)
+		{
+			const float Ang = i * UE_PI / NumCards;
+			const FVector3f D(FMath::Cos(Ang) * 50.0f, FMath::Sin(Ang) * 50.0f, 0.0f);
+			const FVector3f Up(0, 0, 100);
+			Quad({-D, D, D + Up, -D + Up});
 		}
-		const FVertexInstanceID A[3] = {Vi[0], Vi[1], Vi[2]};
-		const FVertexInstanceID B[3] = {Vi[0], Vi[2], Vi[3]};
-		Desc.CreateTriangle(PG, A);
-		Desc.CreateTriangle(PG, B);
-	};
-	for (int32 i = 0; i < 3; ++i)
-	{
-		const float Ang = i * UE_PI / 3.0f;
-		const FVector3f D(FMath::Cos(Ang) * 50.0f, FMath::Sin(Ang) * 50.0f, 0.0f);
-		const FVector3f Up(0, 0, 100);
-		Quad({-D, D, D + Up, -D + Up});
+		Quad({{-50, -50, 55}, {50, -50, 55}, {50, 50, 55}, {-50, 50, 55}});
 	}
-	Quad({{-50, -50, 55}, {50, -50, 55}, {50, 50, 55}, {-50, 50, 55}});
 
 	UStaticMesh* Mesh = NewObject<UStaticMesh>(this);
 	Mesh->GetStaticMaterials().Add(FStaticMaterial(FoliageSeasonMID, TEXT("Foliage"), TEXT("Foliage")));
 	UStaticMesh::FBuildMeshDescriptionsParams Params;
 	Params.bBuildSimpleCollision = false;
 	Params.bFastBuild = true;
-	Mesh->BuildFromMeshDescriptions({&Desc}, Params);
+	Mesh->BuildFromMeshDescriptions({&Descs[0], &Descs[1]}, Params);
+	// sphere ~15 m for a needle card: 0.02 is ~1.5 km at the game's FOV. The
+	// build's default (0.75^LOD) would drop to LOD1 at ~40 m.
+	Mesh->GetRenderData()->ScreenSize[1].Default = 0.02f;
 	return Mesh;
 }
 
@@ -299,7 +309,7 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 			}
 		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODForestManager: far forest chunks=%d cards=%d (%d tris) street=%d bandHidden=%d | built %d chunk(s) last 5s, %.2f ms total, %.2f ms max"),
+			TEXT("ODForestManager: far forest chunks=%d cards=%d (%d LOD0 tris) street=%d bandHidden=%d | built %d chunk(s) last 5s, %.2f ms total, %.2f ms max"),
 			FarChunks.Num(), NumCards, NumCards * 8, NumStreet, NumBandHidden, FarBuilt, FarBuildMs, FarBuildMaxMs);
 		FarBuilt = 0;
 		FarBuildMs = FarBuildMaxMs = 0.0;
