@@ -41,8 +41,11 @@ namespace
 	TArray<FDev> GDevs;
 	int32 GPrimary = INDEX_NONE;
 	bool GStarted = false;
-	double GNextEnum = 0.0;
-	int32 GLastHid = -2;   // CountHidControllers at the last Enumerate; -2 = never
+	// EnumDevices stalls the game thread 85-98 ms even with nothing attached
+	// (measured 2026-10-16), so it runs only at startup and on Rescan (pause
+	// menu open / input type change) - never during a drive.
+	bool GScanPending = true;
+	bool GLost = false;   // a device stopped answering since the last scan
 	double GLastForceCall = -1.0;
 	double GLastActivity = 0.0;
 	bool GForceZeroed = true;
@@ -246,38 +249,6 @@ namespace
 		Eff->SetParameters(&E, DIEP_TYPESPECIFICPARAMS);
 	}
 
-	// HID joysticks / gamepads / multi-axis controllers attached now, from the
-	// raw input device list (~0.015 ms); -1 if the list can't be read.
-	int32 CountHidControllers()
-	{
-		UINT N = 0;
-		if (GetRawInputDeviceList(nullptr, &N, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1)
-		{
-			return -1;
-		}
-		TArray<RAWINPUTDEVICELIST> List;
-		List.SetNumUninitialized(N);
-		N = GetRawInputDeviceList(List.GetData(), &N, sizeof(RAWINPUTDEVICELIST));
-		if (N == (UINT)-1)
-		{
-			return -1;
-		}
-		int32 Count = 0;
-		for (UINT i = 0; i < N; ++i)
-		{
-			RID_DEVICE_INFO Info = {};
-			Info.cbSize = sizeof(Info);
-			UINT Size = sizeof(Info);
-			if (List[i].dwType == RIM_TYPEHID
-				&& GetRawInputDeviceInfoW(List[i].hDevice, RIDI_DEVICEINFO, &Info, &Size) != (UINT)-1
-				&& Info.hid.usUsagePage == 1 && (Info.hid.usUsage == 4 || Info.hid.usUsage == 5 || Info.hid.usUsage == 8))
-			{
-				++Count;
-			}
-		}
-		return Count;
-	}
-
 	bool Tick(float)
 	{
 		const double Now = FPlatformTime::Seconds();
@@ -314,17 +285,11 @@ namespace
 				GLastActivity = bCount && Dv.Btn[b] && !Dv.PrevBtn[b] ? Now : GLastActivity;
 			}
 		}
-		if ((GDevs.Num() == 0 || bAnyLost) && Now >= GNextEnum)
+		GLost |= bAnyLost;
+		if (GScanPending && Enumerate())   // false = no window yet; retry next tick
 		{
-			GNextEnum = Now + 2.0;   // ponytail: no hot-add while a wheel is open; replug = relaunch
-			// EnumDevices stalls the game thread 85-98 ms even with nothing
-			// attached (measured 2026-10-16) - with no wheel that was a skip
-			// every 2 s. Only re-enumerate when the HID controller count changes.
-			const int32 Hid = CountHidControllers();
-			if (bAnyLost || Hid < 0 || Hid != GLastHid)
-			{
-				GLastHid = Enumerate() ? Hid : GLastHid;
-			}
+			GScanPending = false;
+			GLost = false;
 		}
 		// watchdog: nobody driving the force -> zero it, drop the soft lock
 		if (!GForceZeroed && Now - GLastForceCall > 0.1)
@@ -379,6 +344,16 @@ void FODWheelDevice::Start()
 			GDI = nullptr;
 		}
 	});
+}
+
+void FODWheelDevice::Rescan()
+{
+	GScanPending = true;
+}
+
+bool FODWheelDevice::IsLost()
+{
+	return GLost;
 }
 
 uint32 FODWheelDevice::PrimaryVidPid()
@@ -481,6 +456,8 @@ void FODWheelDevice::SetForce(float Command, float Damping, float SoftLockFrac)
 #else
 
 void FODWheelDevice::Start() {}
+void FODWheelDevice::Rescan() {}
+bool FODWheelDevice::IsLost() { return false; }
 uint32 FODWheelDevice::PrimaryVidPid() { return 0; }
 float FODWheelDevice::Axis(uint32, int32) { return 0.0f; }
 bool FODWheelDevice::Button(uint32, int32) { return false; }
