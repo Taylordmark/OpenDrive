@@ -8,7 +8,7 @@ Style = Realistic. Stylized assets are only read, never touched (V4).
   M_Car<Cat>_real      instances of those, rougher where faceted Standard
                        meshes would turn a mirror finish into a disco ball
 
-  body    Substrate Simple Clear Coat: smooth glossy coat over a metallic
+  body    Clear Coat shading model: smooth glossy coat over a metallic
           base. No flake texture: at any strength it read as a grainy
           texture on the paint, not smooth paint (Taylor 2026-10-16).
   glass   dark tinted translucent, Fresnel opacity (reflective at grazing),
@@ -322,41 +322,45 @@ return lerp(lerp(Pal, Paint.rgb, saturate(PaintA)), Accent.rgb, m);
 
 
 def body(g):
+    # legacy Clear Coat pins, not a Substrate Simple Clear Coat slab: in this
+    # project's Substrate setup that slab lit with no diffuse at all (base
+    # colour right, lit colour black: only the coat's highlights showed, so
+    # every car read black whatever the paint, Taylor 2026-10-16)
+    g.m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_CLEAR_COAT)
     st = g.car_state()
-    conv = g.node(unreal.MaterialExpressionSubstrateMetalnessToDiffuseAlbedoF0)
     paint = g.vparam("PaintColor")
     paint_col = g.custom(PAINT, F3, P=g.local_pos(), N=g.true_local_normal(), Pal=g.palette(),
                          Paint=paint, PaintA=(paint, "A"), Accent=g.vparam("AccentColor"),
                          Pattern=g.param("PaintPattern", 0.0), WR=st["WR"])
-    g.wire(paint_col, conv, "BaseColor")
-    g.wire(g.param("BaseMetallic", 0.6), conv, "Metallic")
-    g.wire(g.const(0.5), conv, "Specular")
     code = FRAME + CAR + BEAD + GAPS + """
 float k = 1.0 - max(grime, snow);              // bare paint left
 float occ = ao * gap;
 // pearl: the colour slides toward its neighbour hue at grazing angles
 float pe = Pearl * pow(1.0 - saturate(abs(dot(normalize(NW), V))), 2.0);
 float3 Alb2 = lerp(Alb, Alb.brg * 0.8 + Alb * 0.2, pe);
-F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * occ, 0.04, 1.0 - k);
+MetalO = Metal * k;
 Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
 CoatR = lerp(CoatR0 + 0.12 * Dirt, CoatR0 * 0.6, Wet);
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
 return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
 """
-    O = [("F0o", F3), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3)]
+    O = [("MetalO", F1), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3)]
     c = g.custom(code, F3, outputs=O, P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(),
-                 Flake=g.tex(flake), Drops=g.tex(drops_tex),
-                 Alb=(conv, "DiffuseAlbedo"), F0=(conv, "F0"),
+                 Flake=g.tex(flake), Drops=g.tex(drops_tex), Alb=paint_col,
+                 Metal=g.param("BaseMetallic", 0.6),
                  BaseR=g.param("BaseRoughness", 0.38), CoatR0=g.param("CoatRoughness", 0.035),
                  Pearl=g.param("Pearl", 0.0), V=g.node(unreal.MaterialExpressionCameraVectorWS),
                  NW=g.node(unreal.MaterialExpressionVertexNormalWS), **st)
-    slab = g.node(unreal.MaterialExpressionSubstrateSimpleClearCoatBSDF, x=-150)
-    g.wire(c, slab, "Diffuse Albedo")
-    for out, pin in (("F0o", "F0"), ("Rough", "Roughness"), ("Cov", "Clear Coat Coverage"),
-                     ("CoatR", "Clear Coat Roughness"), ("TopN", "Normal")):
-        g.wire((c, out), slab, pin)
-    g.pin(slab, MP.MP_FRONT_MATERIAL)
+    # the clear coat pins (CustomData0/1) are hidden from Python: go through Make Material Attributes
+    g.m.set_editor_property("use_material_attributes", True)
+    ma = g.node(unreal.MaterialExpressionMakeMaterialAttributes, x=-150)
+    g.wire(c, ma, "BaseColor")
+    g.wire(g.const(0.5), ma, "Specular")
+    for out, pin in (("MetalO", "Metallic"), ("Rough", "Roughness"), ("Cov", "ClearCoat"),
+                     ("CoatR", "ClearCoatRoughness"), ("TopN", "Normal")):
+        g.wire((c, out), ma, pin)
+    g.pin(ma, MP.MP_MATERIAL_ATTRIBUTES)
 
 
 def trim(rough, metal, spec, grille=False, tint=1.0):
