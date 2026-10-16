@@ -7,7 +7,6 @@
 class UStaticMeshComponent;
 class UDynamicMeshComponent;
 class UPointLightComponent;
-class URectLightComponent;
 class UBoxReflectionCaptureComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
@@ -73,9 +72,11 @@ public:
 	/** Inner edge of each hex's lit outline as a fraction of HexRadiusCm: the
 	 *  ceiling glows along the hex edges (Taylor, 2026-10-16) and the tile
 	 *  centres stay dark. Two neighbours' bands meet on their shared edge, so
-	 *  a line is 2 * (1 - this) * HexRadiusCm wide. */
+	 *  a line is 2 * (1 - this) * HexRadiusCm wide. The lines' brightness
+	 *  scales with 1 / their area, so the room gets the light the old filled
+	 *  tiles gave it whatever this is (BuildHexCeiling). */
 	UPROPERTY(EditAnywhere, Category = "Garage")
-	float HexFillRatio = 0.95f;
+	float HexFillRatio = 0.9f;
 
 	/** Move the room to sit around this world point - see class comment for
 	 *  why Center should be the current showroom pivot
@@ -123,8 +124,6 @@ private:
 	TObjectPtr<UPointLightComponent> FillLightA;
 	UPROPERTY()
 	TObjectPtr<UPointLightComponent> FillLightB;
-	UPROPERTY()
-	TObjectPtr<URectLightComponent> CeilingLight;
 	UPROPERTY()
 	TObjectPtr<UBoxReflectionCaptureComponent> ReflectionCapture;
 
