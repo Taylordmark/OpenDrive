@@ -168,4 +168,19 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Brakes")
 	float HandbrakeNm = 6000.0f;
+
+	// ---- camera mounts (car-local cm, pivot = wheelbase centre at axle
+	// height). Zero = derive from the mesh bounds at runtime; per-car values
+	// come from pipeline/car_camera_mounts.py via unreal/apply_vehicle_cameras.py ----
+	UPROPERTY(EditAnywhere, Category = "Camera")
+	FVector CockpitEyeCm = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, Category = "Camera")
+	FVector SteeringWheelCm = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, Category = "Camera")
+	FVector HoodCamCm = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, Category = "Camera")
+	FVector BumperCamCm = FVector::ZeroVector;
 };
