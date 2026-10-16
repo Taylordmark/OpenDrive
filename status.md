@@ -438,7 +438,8 @@ become new roads via `fetch_osm_network.py` (rebuild the area first).
     Matte/Pearl, Two-Tone/Racing Stripes/Side Stripe with an accent swatch,
     8 rim finishes. Saved per car (`OpenDrive.Paint`, def asset name), applied
     as MIDs on the "body"/"rim" slots; `build_car_materials_real.py` params,
-    grime on top. Realistic only.
+    grime on top. Realistic only. Mouse colour picker beside the panel
+    (S/V square + hue strip, `AODRaceHUD::DrawColorPicker`), saved on release.
 - **4.4** (§7.31): settings (11 rows, Off/TSR upscaler) and generated credits
   (30/30). Saved under `OpenDrive.Graphics` and `OpenDrive.Audio`.
 - **UI loose ends** (2026-10-14, compiled, not driven). Pause/settings

@@ -200,4 +200,11 @@ private:
 	mutable float LoadingBarFrac = 0.0f;
 	mutable int32 LoadingLastPhase = 0;
 	bool bGlobeDrag = false;   // World screen: a mouse drag is spinning the globe
+
+	/** Paint screen (4.3): saturation/brightness square + hue strip beside the
+	 *  panel; click or drag sets the player car's colour, saved on release. */
+	void DrawColorPicker(float X, float Y) const;
+	void HandlePickerMouse();
+	mutable FBox2D PickerSV = FBox2D(ForceInit), PickerHue = FBox2D(ForceInit);   // this frame's, invalid = not drawn
+	uint8 PickerDrag = 0;   // 1 square, 2 hue strip
 };

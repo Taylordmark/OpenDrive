@@ -869,7 +869,122 @@ void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 		return;
 	}
 	bGlobeDrag = false;
+	if (Menu && Menu->GetScreen() == EODMenuScreen::Paint && !Menu->IsSettingsOpen())
+	{
+		HandlePickerMouse();
+	}
+	else
+	{
+		PickerDrag = 0;
+	}
 	DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame);
+}
+
+void AODRaceHUD::HandlePickerMouse()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	AODVehiclePawn* Pawn = PC ? Cast<AODVehiclePawn>(PC->GetPawn()) : nullptr;
+	float Mx = 0.0f, My = 0.0f;
+	if (!Pawn || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
+	{
+		PickerDrag = 0;
+		return;
+	}
+	const FVector2D M(Mx, My);
+	if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+	{
+		PickerDrag = PickerSV.bIsValid && PickerSV.IsInside(M) ? 1 : PickerHue.bIsValid && PickerHue.IsInside(M) ? 2 : 0;
+	}
+	if (PickerDrag == 0 || !PickerSV.bIsValid)
+	{
+		return;
+	}
+	const bool bDown = PC->IsInputKeyDown(EKeys::LeftMouseButton);
+	FODCarPaint Paint = Pawn->GetPaint();
+	const FBox2D& Box = PickerDrag == 1 ? PickerSV : PickerHue;
+	const FVector2D T = ((M - Box.Min) / Box.GetSize()).ClampAxes(0.0, 1.0);
+	if (PickerDrag == 1)
+	{
+		Paint.S = T.X;
+		Paint.V = 1.0f - T.Y;
+	}
+	else
+	{
+		Paint.H = FMath::Min(T.Y, 0.9999) * 360.0f;
+	}
+	Paint.bFactory = false;
+	Pawn->SetPaint(Paint, !bDown);   // live while dragging, saved once on release
+	if (!bDown)
+	{
+		PickerDrag = 0;
+	}
+}
+
+void AODRaceHUD::DrawColorPicker(float X, float Y) const
+{
+	const AODVehiclePawn* Pawn = Cast<AODVehiclePawn>(GetOwningPawn());
+	if (!Pawn)
+	{
+		return;
+	}
+	const FODCarPaint& Paint = Pawn->GetPaint();
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S, Sz = 280.0f * S, HW = 28.0f * S, HX = X + Sz + 14.0f * S;
+	// sRGB HSV -> the canvas's linear colour (same conversion as FODCarPaint::BodySrgb)
+	auto Col = [](float H, float Sa, float V) { return FLinearColor(FLinearColor(H, Sa, V).HSVToLinearRGB().ToFColor(false)); };
+
+	P.Rect(X - 10.0f * S, Y - 10.0f * S, HX + HW - X + 20.0f * S, Sz + 20.0f * S, FLinearColor(0, 0, 0, 0.45f));
+	TArray<FCanvasUVTri> Tris;
+	auto Quad = [&](float X0, float Y0, float X1, float Y1, FLinearColor C00, FLinearColor C10, FLinearColor C01, FLinearColor C11)
+	{
+		FCanvasUVTri& A = Tris.AddDefaulted_GetRef();
+		A.V0_Pos = FVector2D(X0, Y0); A.V0_Color = C00;
+		A.V1_Pos = FVector2D(X1, Y0); A.V1_Color = C10;
+		A.V2_Pos = FVector2D(X1, Y1); A.V2_Color = C11;
+		FCanvasUVTri& B = Tris.AddDefaulted_GetRef();
+		B.V0_Pos = FVector2D(X0, Y0); B.V0_Color = C00;
+		B.V1_Pos = FVector2D(X1, Y1); B.V1_Color = C11;
+		B.V2_Pos = FVector2D(X0, Y1); B.V2_Color = C01;
+	};
+	// the square as a 16x16 grid: per-vertex colours interpolate linearly, so
+	// one quad would grey out its middle; 16 cells keep it close to true HSV
+	constexpr int32 N = 16;
+	for (int32 j = 0; j < N; ++j)
+	{
+		for (int32 i = 0; i < N; ++i)
+		{
+			const float S0 = float(i) / N, S1 = float(i + 1) / N, V0 = 1.0f - float(j) / N, V1 = 1.0f - float(j + 1) / N;
+			Quad(X + S0 * Sz, Y + (1.0f - V0) * Sz, X + S1 * Sz, Y + (1.0f - V1) * Sz,
+				Col(Paint.H, S0, V0), Col(Paint.H, S1, V0), Col(Paint.H, S0, V1), Col(Paint.H, S1, V1));
+		}
+	}
+	constexpr int32 HN = 24;
+	for (int32 j = 0; j < HN; ++j)
+	{
+		const FLinearColor C0 = Col(360.0f * j / HN, 1.0f, 1.0f), C1 = Col(360.0f * (j + 1) / HN, 1.0f, 1.0f);
+		Quad(HX, Y + Sz * j / HN, HX + HW, Y + Sz * (j + 1) / HN, C0, C0, C1, C1);
+	}
+	FCanvasTriangleItem T(Tris, GWhiteTexture);
+	Canvas->DrawItem(T);
+
+	// markers: ringed square on the square, a bar across the strip (dimmed while Factory)
+	const float A = Paint.bFactory ? 0.4f : 1.0f;
+	auto Ring = [&](float CX, float CY, float W, float H)
+	{
+		for (const auto& [Pad, RingCol] : {TPair<float, FLinearColor>(3.0f * S, FLinearColor(0, 0, 0, A)), TPair<float, FLinearColor>(1.5f * S, FLinearColor(1, 1, 1, A))})
+		{
+			const float L = CX - W * 0.5f - Pad, R = CX + W * 0.5f + Pad, U = CY - H * 0.5f - Pad, D = CY + H * 0.5f + Pad;
+			const float B = 1.5f * S;
+			P.Rect(L, U, R - L, B, RingCol); P.Rect(L, D - B, R - L, B, RingCol);
+			P.Rect(L, U, B, D - U, RingCol); P.Rect(R - B, U, B, D - U, RingCol);
+		}
+	};
+	Ring(X + Paint.S * Sz, Y + (1.0f - Paint.V) * Sz, 8.0f * S, 8.0f * S);
+	Ring(HX + HW * 0.5f, Y + Paint.H / 360.0f * Sz, HW, 2.0f * S);
+	P.Text(TEXT("Click or drag to pick a colour"), X, Y + Sz + 26.0f * S, 16.0f, EMenuWeight::Medium, DimCol);
+
+	PickerSV = FBox2D(FVector2D(X, Y), FVector2D(X + Sz, Y + Sz));
+	PickerHue = FBox2D(FVector2D(HX, Y), FVector2D(HX + HW, Y + Sz));
 }
 
 void AODRaceHUD::HandleMenuMouse(AODPauseMenu* Menu)
@@ -1425,6 +1540,11 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista,
 			bAreaMap ? Menu->GetAreaBlurb() : FString());
 		const float HX = MenuX(bVista, ColW * S);
+		if (Screen == EODMenuScreen::Paint)
+		{
+			// beside the panel, on the side away from the screen edge (picker is 322 wide)
+			DrawColorPicker(bVista ? HX - 362.0f * S : HX + (ColW + 40.0f) * S, 215.0f * S);
+		}
 		if (Screen == EODMenuScreen::Main)
 		{
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}});
@@ -2011,6 +2131,7 @@ void AODRaceHUD::DrawHUD()
 		return;
 	}
 	MenuHits.Reset();   // refilled by whichever menu draws this frame
+	PickerSV = PickerHue = FBox2D(ForceInit);
 
 	// loading-screen fade-out (2026-10-14): once AODMainMenu releases to
 	// Playing, a fading copy of the loading screen draws over everything else

@@ -214,9 +214,9 @@ public:
 	void SetTyreSetup(const FString& SetupName);
 
 	/** Garage paint (4.3, ODCarPaint.h): the current car's, loaded on every car
-	 *  swap; SetPaint applies it live and saves it for this car. */
+	 *  swap; SetPaint applies it live and (bSave) saves it for this car. */
 	const FODCarPaint& GetPaint() const { return Paint; }
-	void SetPaint(const FODCarPaint& InPaint);
+	void SetPaint(const FODCarPaint& InPaint, bool bSave = true);
 
 	/** Turntable preview for the car-select menu: freezes physics, levels the
 	 *  car, and detaches the spring-arm yaw so rotating the pawn spins the car

@@ -229,10 +229,13 @@ void AODVehiclePawn::ApplyWheelMeshes()
 	}
 }
 
-void AODVehiclePawn::SetPaint(const FODCarPaint& InPaint)
+void AODVehiclePawn::SetPaint(const FODCarPaint& InPaint, bool bSave)
 {
 	Paint = InPaint;
-	Paint.Save(PaintKey);
+	if (bSave)
+	{
+		Paint.Save(PaintKey);
+	}
 	ApplyPaint();
 }
 
