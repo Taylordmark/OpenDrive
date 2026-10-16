@@ -103,6 +103,35 @@ void Advance(float& S, float& V, float A, float Dt, float CarGap, float LeaderV)
 	V = Adv > Room ? FMath::Min(NewV, FMath::Max(LeaderV, 0.0f)) : NewV;
 }
 
+/** Where a car's centre waits before a junction crossed by a road of Lanes (per direction):
+ *  its nose 1.5 m short of that road's edge. */
+float JunctionStopCm(int32 Lanes, bool bOneway)
+{
+	return FMath::Min(Lanes * LaneWidthCm * (bOneway ? 0.5f : 1.0f) + 150.0f + CarLenCm * 0.5f, 1500.0f);
+}
+
+/** Two car footprints (bounds half extents, centred on the pose) overlap in plan: separating axis test. */
+bool Overlaps(const FVector& PA, const FQuat& RA, const FVector& EA, const FVector& PB, const FQuat& RB, const FVector& EB)
+{
+	if (FMath::Abs(PA.Z - PB.Z) > 300.0)
+	{
+		return false;   // bridge over road
+	}
+	const FVector2D D(PB - PA);
+	const FVector2D Ax[4] = {FVector2D(RA.GetForwardVector()).GetSafeNormal(), FVector2D(RA.GetRightVector()).GetSafeNormal(),
+		FVector2D(RB.GetForwardVector()).GetSafeNormal(), FVector2D(RB.GetRightVector()).GetSafeNormal()};
+	for (const FVector2D& N : Ax)
+	{
+		const double RadA = EA.X * FMath::Abs(Ax[0] | N) + EA.Y * FMath::Abs(Ax[1] | N);
+		const double RadB = EB.X * FMath::Abs(Ax[2] | N) + EB.Y * FMath::Abs(Ax[3] | N);
+		if (FMath::Abs(D | N) > RadA + RadB)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 /** A physics wreck of a traffic car, wheels attached (no collision, so never welded or
  *  simulated on their own) so they ride the body wherever it tumbles. */
 UStaticMeshComponent* SpawnWreck(AActor* Owner, UStaticMesh* Chassis, UStaticMesh* Wheel, float FrontX, float RearX,
@@ -184,6 +213,7 @@ struct FODTrafficGraph
 	TArray<FLink> Links;
 	TArray<int32> Out;
 	TArray<TArray<int32>> ClusterIn;     // entry links per junction cluster
+	TArray<float> ClusterStop;           // cm from the end node a car's centre waits at
 	TArray<FVector2f> ClusterCenter;
 	TArray<float> ClusterOffset;         // signal cycle phase, s
 	TMap<FIntPoint, TArray<int32>> Grid; // GridCm cells -> links
@@ -562,6 +592,17 @@ TSharedPtr<FODTrafficGraph, ESPMode::ThreadSafe> LoadGraph(const FString& GraphP
 		}
 		const float Diff = FMath::Abs(FMath::Fmod(Yaw - Axis + 720.0f, 180.0f));
 		L.SignalGroup = (Diff > 45.0f && Diff < 135.0f) ? 1 : 0;
+	}
+	// wait clear of the widest road crossing the junction: a 1.5 m stop line left the
+	// waiting car's nose past the junction centre, in the crossing traffic's lane
+	G.ClusterStop.Init(StopLineCm, G.ClusterIn.Num());
+	for (int32 c = 0; c < G.ClusterIn.Num(); ++c)
+	{
+		for (int32 In : G.ClusterIn[c])
+		{
+			const FODTrafficGraph::FLink& L = G.Links[In];
+			G.ClusterStop[c] = FMath::Max(G.ClusterStop[c], JunctionStopCm(L.Lanes, L.bOneway));
+		}
 	}
 
 	for (int32 l = 0; l < G.Links.Num(); ++l)
@@ -1364,24 +1405,26 @@ void AODTrafficManager::Step(float Dt)
 
 		// the player, wrecks and any-link neighbours as leaders: in this lane's corridor, ahead
 		const FVector F = Ag.CurRot.GetForwardVector();
-		auto Lead = [&](double Along, const FVector& Vel)
+		uint8 Why = 0;   // what binds: 0 lane leader / free, 1 any-link car, 2 player / wreck / bump, 3 stop line
+		auto Lead = [&](double Along, const FVector& Vel, uint8 W)
 		{
 			if (Along - CarLenCm < Gap)
 			{
 				Gap = Along - CarLenCm;
 				LV = FMath::Max(0.0, FVector::DotProduct(Vel, F));
+				Why = W;
 			}
 		};
 		double Along;
 		if (InCorridor(Ag.CurPos, Ag.CurRot, PlayerPos, 15000.0, 220.0, Along))
 		{
-			Lead(Along, PlayerVel);
+			Lead(Along, PlayerVel, 2);
 		}
 		for (const FVector& P : WreckPos)
 		{
 			if (InCorridor(Ag.CurPos, Ag.CurRot, P, 15000.0, 220.0, Along))
 			{
-				Lead(Along, FVector::ZeroVector);
+				Lead(Along, FVector::ZeroVector, 2);
 			}
 		}
 		const FIntPoint C0 = CellOf(Ag.CurPos);
@@ -1394,9 +1437,11 @@ void AODTrafficManager::Step(float Dt)
 					for (int32 j : *Cell)
 					{
 						const FAgent& B = Agents[j];
-						if (j != i && Blocks(Ag.CurPos, Ag.CurRot, Ag.Id, B.CurPos, B.CurRot, B.Id, Along))
+						// same link: FindLeader and the lane rules own it (and an adjacent
+						// lane on a bend would read as in the way)
+						if (B.Link != Ag.Link && Blocks(Ag.CurPos, Ag.CurRot, Ag.Id, B.CurPos, B.CurRot, B.Id, Along))
 						{
-							Lead(Along, B.CurRot.GetForwardVector() * B.V);
+							Lead(Along, B.CurRot.GetForwardVector() * B.V, 1);
 						}
 					}
 				}
@@ -1404,7 +1449,7 @@ void AODTrafficManager::Step(float Dt)
 		}
 		if (SimTime < Ag.HoldUntil)
 		{
-			Lead(CarLenCm, FVector::ZeroVector);   // bumped: stand
+			Lead(CarLenCm, FVector::ZeroVector, 2);   // bumped: stand
 		}
 		const float CarGap = Gap, CarV = LV;   // stop lines below are targets, not contacts
 
@@ -1415,6 +1460,7 @@ void AODTrafficManager::Step(float Dt)
 			{
 				Gap = Dist;
 				LV = 0.0f;
+				Why = 3;
 			}
 		};
 		const FODTrafficGraph::FLink* NL = Ag.Next >= 0 ? &G.Links[Ag.Next] : nullptr;
@@ -1459,12 +1505,13 @@ void AODTrafficManager::Step(float Dt)
 		// junction control at the link end (D5: strict)
 		if (L.IsEntry() && !Ag.bCleared && NL)
 		{
+			const float StopCm = G.ClusterStop[L.EndCluster];
 			const bool bStopSign = L.EndControl == 2 && L.bYield;
 			const bool bGiveWay = (L.EndControl == 3 || L.EndControl == 4) && L.bYield;
 			if (L.EndControl == 1)
 			{
 				const int32 St = SignalState(Ag.Link);
-				const float StopDist = DistEnd - StopLineCm;
+				const float StopDist = DistEnd - StopCm;
 				// yellow: stop only if it can at a comfortable 3 m/s^2
 				const bool bStop = St == 2 || (St == 1 && Ag.V * Ag.V / 600.0f < StopDist);
 				if (bStop && StopDist > -50.0f)
@@ -1478,7 +1525,7 @@ void AODTrafficManager::Step(float Dt)
 			}
 			else if (bStopSign)
 			{
-				if (DistEnd < StopLineCm + 400.0f && Ag.V < 50.0f)
+				if (DistEnd < StopCm + 400.0f && Ag.V < 50.0f)
 				{
 					Ag.StopTime += Dt;
 				}
@@ -1489,7 +1536,7 @@ void AODTrafficManager::Step(float Dt)
 				}
 				else
 				{
-					StopAt(DistEnd - StopLineCm);
+					StopAt(DistEnd - StopCm);
 				}
 			}
 			else if (bGiveWay)
@@ -1501,7 +1548,7 @@ void AODTrafficManager::Step(float Dt)
 				}
 				else
 				{
-					StopAt(DistEnd - StopLineCm);
+					StopAt(DistEnd - StopCm);
 				}
 			}
 			else
@@ -1512,6 +1559,7 @@ void AODTrafficManager::Step(float Dt)
 
 		Ag.A = Idm(Ag.V, V0, Gap, LV);
 		Advance(Ag.S, Ag.V, Ag.A, Dt, CarGap, CarV);
+		SlowWhy[Why] += Ag.V < 300.0f ? 1 : 0;
 
 		while (Ag.S >= G.Links[Ag.Link].Length)
 		{
@@ -1570,6 +1618,33 @@ void AODTrafficManager::Step(float Dt)
 		if (FVector2D::DistSquared(FVector2D(Ag.CurPos), FVector2D(PlayerPos)) > Despawn2)
 		{
 			Remove.AddUnique(i);
+		}
+	}
+	// AI-AI contact census (diag line): footprints that overlap after this step
+	++DiagSteps;
+	for (int32 i = 0; i < Agents.Num(); ++i)
+	{
+		const FAgent& A = Agents[i];
+		const FIntPoint C0 = CellOf(A.CurPos);
+		for (int32 dy = -1; dy <= 1; ++dy)
+		{
+			for (int32 dx = -1; dx <= 1; ++dx)
+			{
+				const auto* Cell = Cells.Find(C0 + FIntPoint(dx, dy));
+				for (int32 j : Cell ? TArrayView<const int32>(*Cell) : TArrayView<const int32>())
+				{
+					const FAgent& B = Agents[j];
+					if (A.Id < B.Id && Overlaps(A.CurPos, A.CurRot, Models[A.Model].HalfExtent, B.CurPos, B.CurRot, Models[B.Model].HalfExtent))
+					{
+						++OverlapSteps;
+						bool bSeen = false;
+						OverlapPairs.Add(((uint64)A.Id << 32) | B.Id, &bSeen);
+						const FODTrafficGraph::FLink& LA = G.Links[A.Link];
+						const bool bJunction = A.Link != B.Link || (LA.EndCluster >= 0 && LA.Length - A.S < 3000.0f);
+						OverlapJunction += !bSeen && bJunction ? 1 : 0;
+					}
+				}
+			}
 		}
 	}
 	Remove.Sort([](int32 A, int32 B) { return A > B; });
@@ -1954,6 +2029,12 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 			*Graph->Name, Agents.Num(), Slow, RangeLinks.Num(), Hour, Dow, PeakMs, Wrecks.Num(),
 			WheelIsms.Num() ? WheelIsms[0]->GetInstanceCount() : -1,
 			WheelIsms.Num() && WheelIsms[0]->GetInstanceCount() ? *FString::Printf(TEXT("%s visible %d"), *WheelIsms[0]->GetStaticMesh()->GetName(), WheelIsms[0]->IsVisible()) : TEXT("-"));
+		const float N = FMath::Max(DiagSteps, 1);
+		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: AI-AI contacts %d pair(s) (%d at junctions), %.1f overlapping on average; slow cars held by lane leader %.0f, other-link car %.0f, player/wreck/bump %.0f, stop line %.0f"),
+			OverlapPairs.Num(), OverlapJunction, OverlapSteps / N, SlowWhy[0] / N, SlowWhy[1] / N, SlowWhy[2] / N, SlowWhy[3] / N);
+		OverlapPairs.Reset();
+		OverlapJunction = OverlapSteps = DiagSteps = 0;
+		FMemory::Memzero(SlowWhy);
 		PeakMs = 0.0f;
 	}
 }
@@ -2005,6 +2086,20 @@ bool FODTrafficCollisionCheck::RunTest(const FString& Parameters)
 	const bool bAB = Blocks(FVector::ZeroVector, East, 7, PB, In, 9, Along);
 	const bool bBA = Blocks(PB, In, 9, FVector::ZeroVector, East, 7, Along);
 	TestTrue(TEXT("merge: exactly one car yields"), bAB != bBA);
+
+	// a car waiting at a junction must not stand in the crossing lane: north-bound car 10 m
+	// short of the node, east-bound car waiting at the stop line of a 1+1 lane crossing road
+	const FVector Crosser(-0.5f * LaneWidthCm, -1000.0f, 0.0f);
+	const FVector Waiting(-JunctionStopCm(1, false), 0.5f * LaneWidthCm, 0.0f);
+	TestFalse(TEXT("waiting car clear of the crossing lane"), Blocks(Crosser, North, 1, Waiting, East, 2, Along));
+	TestTrue(TEXT("(the old 1.5 m stop line was in it)"), Blocks(Crosser, North, 1, FVector(-StopLineCm, 0.5f * LaneWidthCm, 0.0f), East, 2, Along));
+
+	// ---- contact census ----
+	const FVector E(230, 95, 70);
+	TestFalse(TEXT("adjacent lanes don't overlap"), Overlaps(FVector::ZeroVector, East, E, FVector(0, LaneWidthCm, 0), East, E));
+	TestFalse(TEXT("2 m bumper gap doesn't overlap"), Overlaps(FVector::ZeroVector, East, E, FVector(660, 0, 0), East, E));
+	TestTrue(TEXT("nose into a door overlaps"), Overlaps(FVector::ZeroVector, East, E, FVector(300, 0, 0), North, E));
+	TestFalse(TEXT("bridge over road"), Overlaps(FVector::ZeroVector, East, E, FVector(0, 0, 600), North, E));
 
 	// ---- wheels ride a wreck ----
 	// (a test world's physics scene doesn't step headless, so the body is moved the way the
