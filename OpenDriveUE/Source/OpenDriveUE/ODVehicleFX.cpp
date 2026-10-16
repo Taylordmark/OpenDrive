@@ -193,7 +193,12 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 		bAnyLive = true;
 	}
 
-	const float Wet = WeatherCtl.IsValid() ? WeatherCtl->Wetness : 0.0f;
+	// Spray needs water ON the road (2026-10-16): a drying, merely damp
+	// surface throws little; falling rain or standing puddles throw the full
+	// rooster tail, and loose road snow kicks up a white plume the same way.
+	const AODWeatherController* Wx = WeatherCtl.Get();
+	const float Wet = Wx ? FMath::Max3(Wx->Wetness * (0.4f + 0.6f * FMath::Min(Wx->RainRate * 2.0f, 1.0f)),
+		Wx->Puddles, FMath::Min(Wx->RoadSnowCm / 3.0f, 1.0f)) : 0.0f;
 
 	const UODVehicleMovement* Move = Owner->FindComponentByClass<UODVehicleMovement>();
 	const UPrimitiveComponent* Body = Cast<UPrimitiveComponent>(Owner->GetRootComponent());

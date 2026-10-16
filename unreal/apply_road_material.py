@@ -143,12 +143,19 @@ elif SURFACE == "dirt":
     WetDarken, WetRoughness = 0.5, 0.25   # mud: dark, satin sheen
 # Puddles (PLAN-REALISM Phase 6, 2026-10-09): UV3.x = how far the pavement
 # sits below its +-20 m neighbours, cm (ODRoadManager's RoadSagCm; 0 off the
-# ribbon and on non-V3 chunks). Past Wetness 0.6, 2D value noise thresholded
-# by sag x wetness pools water into the sags. "PuddleAmount" (default 1)
-# turns them off where UV3 isn't the sag (the Dragon's OBJ meshes read UV0).
+# ribbon and on non-V3 chunks). 2D value noise thresholded by sag x standing
+# water pools it into the sags. "PuddleAmount" (default 1) turns them off
+# where UV3 isn't the sag (the Dragon's OBJ meshes read UV0).
 # Mirrored by pipeline/check_puddle_sag.py.
-PuddleWetStart = 0.6
-PuddleWetFull = 0.9
+# 2026-10-16: the fill is the "Puddles" param (AODWeatherController::Puddles:
+# fills over minutes of rain, drains slower than the surface dries), not a
+# Wetness threshold - so puddles outlast the shine and a shower doesn't flood.
+# "Rain" (rain rate) drives ripple rings in puddles and wheel ruts: a Custom
+# node of two jittered 0.25 m cells, faded out past RippleFadeCm, off at
+# Low quality (QualitySwitch). Rain 0 = flat water = the old graph.
+RippleCellCm = 25.0
+RippleFadeCm = 3000.0
+RippleStrength = 0.35
 PuddleSagFullCm = 8.0           # sag that reaches PuddleMaxCover
 PuddleMaxCover = 0.7            # noise fraction pooled at full sag + wetness
 PuddleCellM = 2.5               # noise cell, m
@@ -160,11 +167,22 @@ PuddleRoughness = 0.03          # standing water = mirror
 # roadside cm). Both 0 = the exact pre-snow graph output, incl. the WPO.
 SnowSlushFullCm = 2.0           # wet -> grey slush over the first 2 cm
 SnowCoverFullCm = 10.0          # ... -> fully white by 10 cm
-SlushColor = (0.42, 0.43, 0.45)
+SlushColor = (0.38, 0.37, 0.35)  # 2026-10-16: grey-brown with road grime, not clean grey
 SlushOpacity = 0.7
 SnowColor = (0.90, 0.92, 0.95)
-SlushRoughness = 0.25
+SlushRoughness = 0.15           # slush is saturated - glossy
 SnowRoughness = 0.8
+# 2026-10-16: wheel tracks pack the snow - greyer, smoother, polished - and
+# snow on walls/berm faces (not facing up) takes the blue of light that
+# scattered through it (a cheap stand-in for subsurface). Sparkle: 1.5 cm
+# world cells, ~12% get a random facet normal tilted up to ~30 deg and near-
+# mirror roughness, so the sun glints off individual crystals as the view
+# moves. Within SparkleFadeCm only; off at Low quality.
+PackedColor = (0.66, 0.67, 0.69)
+PackedRoughness = 0.45
+SnowShadeBlue = (0.78, 0.86, 0.97)
+SparkleCellCm = 1.5
+SparkleFadeCm = 1500.0
 TrackOffsetM = 0.8              # tire tracks +-0.8 m from each lane's center
 TrackHalfWidthM = 0.3
 TrackCover = 0.45               # white cover kept inside a track (packed/slushy ruts)
@@ -403,6 +421,25 @@ class G:
     def scalar_param(self, name, default):
         n = self.node(unreal.MaterialExpressionScalarParameter, parameter_name=name)
         n.set_editor_property("default_value", default)
+        return n
+
+    def custom(self, code, out_type, **ins):
+        n = self.node(unreal.MaterialExpressionCustom, code=code, output_type=out_type)
+        pins = []
+        for name in ins:
+            i = unreal.CustomInput()
+            i.set_editor_property("input_name", name)
+            pins.append(i)
+        n.set_editor_property("inputs", pins)
+        for name, src in ins.items():
+            self._req(MEL.connect_material_expressions(src, "", n, name), f"Custom.{name}")
+        return n
+
+    def quality(self, default, low):
+        """QualitySwitch: `low` on Low material quality, `default` otherwise."""
+        n = self.node(unreal.MaterialExpressionQualitySwitch)
+        self._req(MEL.connect_material_expressions(default, "", n, "Default"), "QualitySwitch.Default")
+        self._req(MEL.connect_material_expressions(low, "", n, "Low"), "QualitySwitch.Low")
         return n
 
     def vertex_color(self):
@@ -773,21 +810,45 @@ wet_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
 
 # ---------------------------------------------------------------- puddles (Phase 6)
 sag = g.mask(g.tex_coord(3), r=True)
-puddle_fill = g.mul(g.mul(g.clamp01(g.mul(g.sub(wetness, g.const(PuddleWetStart)), g.const(1.0 / (PuddleWetFull - PuddleWetStart)))),
-                          g.clamp01(g.mul(sag, g.const(1.0 / PuddleSagFullCm)))),
+standing = g.scalar_param("Puddles", 0.0)
+puddle_fill = g.mul(g.mul(standing, g.clamp01(g.mul(sag, g.const(1.0 / PuddleSagFullCm)))),
                     g.mul(g.scalar_param("PuddleAmount", 1.0), g.const(PuddleMaxCover)))
 puddle_noise = value_noise2(g.mul(meter_pos, g.const(1.0 / PuddleCellM)),
                             g.add(g.mul(v0, g.const(1.0 / PuddleCellM)), g.mul(wear_seed, g.const(131.0))))
 puddle = g.clamp01(g.mul(g.sub(puddle_noise, g.sub(g.const(1.0), puddle_fill)), g.const(PuddleEdge)))
 wet_albedo = g.mul(wet_albedo, g.lerp(g.const(1.0), g.const(PuddleDarken), puddle))
 wet_rough = g.lerp(wet_rough, g.const(PuddleRoughness), puddle)
-base_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), puddle)
-if REAL:   # ruts hold a water film; a wet film smooths the micro-normal
-    rut = g.mul(g.mul(wheel, g.clamp01(g.mul(g.sub(wetness, g.const(RealRutWetStart)), g.const(1.0 / (1.0 - RealRutWetStart))))),
+# rain ripples: expanding rings in jittered cells, tangent-space normal;
+# (0,0,1) when Rain = 0, so the water is flat exactly as before
+ripple_xy = g.mul(g.mask(g.node(unreal.MaterialExpressionWorldPosition), r=True, gg=True), g.const(1.0 / RippleCellCm))
+ripple = g.custom(
+    "float2 n = 0;\n"
+    "for (int k = 0; k < 2; k++) {\n"
+    "  float2 q = P + k * float2(0.37, 0.61);\n"
+    "  float2 c = floor(q);\n"
+    "  float h = frac(sin(dot(c, float2(127.1, 311.7)) + k * 13.0) * 43758.5453);\n"
+    "  if (frac(h * 7.13) > Rain * 1.4) continue;\n"
+    "  float2 d = frac(q) - 0.5 - (frac(h * float2(17.3, 29.1)) - 0.5) * 0.5;\n"
+    "  float t = frac(T * 1.3 + h);\n"
+    "  float r = length(d);\n"
+    "  float env = saturate(1 - abs(r - t * 0.45) * 14) * (1 - t) * (1 - t);\n"
+    "  n += d / max(r, 1e-3) * sin((r - t * 0.45) * 60) * env;\n"
+    "}\n"
+    "n *= S * F;\n"
+    "return normalize(float3(n, 1));",
+    unreal.CustomMaterialOutputType.CMOT_FLOAT3,
+    P=ripple_xy, T=g.node(unreal.MaterialExpressionTime), Rain=g.scalar_param("Rain", 0.0),
+    S=g.const(RippleStrength),
+    F=g.clamp01(g.sub(g.const(1.0), g.mul(g.node(unreal.MaterialExpressionPixelDepth), g.const(1.0 / RippleFadeCm)))))
+ripple = g.quality(ripple, g.const3(0.0, 0.0, 1.0))
+base_normal = g.lerp(base_normal, ripple, puddle)
+if REAL:   # ruts hold a water film (and stay wet while puddles last); a wet film smooths the micro-normal
+    rut = g.mul(g.mul(wheel, g.maxv(g.clamp01(g.mul(g.sub(wetness, g.const(RealRutWetStart)), g.const(1.0 / (1.0 - RealRutWetStart)))),
+                                    standing)),
                 g.scalar_param("PuddleAmount", 1.0))
     wet_rough = g.lerp(wet_rough, g.const(RealRutRough), g.mul(rut, g.const(0.8)))
     wet_albedo = g.mul(wet_albedo, g.lerp(g.const(1.0), g.const(RealRutDarken), rut))
-    base_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0),
+    base_normal = g.lerp(base_normal, ripple,
                          g.maxv(g.mul(rut, g.const(0.8)), g.mul(wetness, g.const(RealWetFlatten))))
 
 
@@ -815,9 +876,29 @@ berm_w = g.mul(g.clamp01(g.mul(g.dotp(uv2, uv2), g.const(64.0))),
 snow_white = g.maxv(snow_cover, berm_w)
 
 slushy_albedo = g.lerp(wet_albedo, g.const3(*SlushColor), g.mul(slush_t, g.const(SlushOpacity)))
-final_albedo = g.lerp(slushy_albedo, g.const3(*SnowColor), snow_white)
-final_rough = g.lerp(g.lerp(wet_rough, g.const(SlushRoughness), slush_t), g.const(SnowRoughness), snow_white)
-final_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), snow_white)
+# packed in the tracks, blue on faces that don't look at the sky
+packed = g.mul(track, cover_raw)
+up = g.clamp01(g.mask(g.node(unreal.MaterialExpressionVertexNormalWS), b=True))
+snow_col = g.lerp(g.lerp(g.const3(*SnowColor), g.const3(*PackedColor), packed),
+                  g.const3(*SnowShadeBlue), g.mul(g.sub(g.const(1.0), up), g.const(0.7)))
+# sparkle: x = glint mask, yzw = facet normal (tangent space)
+sparkle = g.custom(
+    "float3 c = floor(W / Cell);\n"
+    "float h = frac(sin(dot(c, float3(12.9898, 78.233, 37.719))) * 43758.5453);\n"
+    "float3 r = frac(h * float3(31.7, 57.3, 91.1)) * 2 - 1;\n"
+    "float g = (h < 0.12) * F;\n"
+    "return float4(g, normalize(float3(r.xy * 0.6, 1)));",
+    unreal.CustomMaterialOutputType.CMOT_FLOAT4,
+    W=g.node(unreal.MaterialExpressionWorldPosition), Cell=g.const(SparkleCellCm),
+    F=g.clamp01(g.sub(g.const(1.0), g.mul(g.node(unreal.MaterialExpressionPixelDepth), g.const(1.0 / SparkleFadeCm)))))
+sparkle = g.quality(sparkle, g.node(unreal.MaterialExpressionConstant4Vector, constant=unreal.LinearColor(0.0, 0.0, 0.0, 1.0)))
+glint = g.mul(g.mask(sparkle, r=True), g.mul(snow_white, g.sub(g.const(1.0), packed)))
+final_albedo = g.lerp(slushy_albedo, snow_col, snow_white)
+final_rough = g.lerp(g.lerp(g.lerp(wet_rough, g.const(SlushRoughness), slush_t),
+                            g.lerp(g.const(SnowRoughness), g.const(PackedRoughness), packed), snow_white),
+                     g.const(0.06), glint)
+final_normal = g.lerp(g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), snow_white),
+                      g.mask(sparkle, gg=True, b=True, alpha=True), glint)
 
 # berm WPO: lip out by depth*BermOutPerCm, up from -BermLipDropCm to +depth
 # (eased in over the first 10 cm so a dusting doesn't yank the lip up)

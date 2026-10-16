@@ -512,13 +512,15 @@ AODRoadManager::AODRoadManager()
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
 
-void AODRoadManager::SetWetness(float Wetness)
+void AODRoadManager::SetWetness(float Wetness, float Rain, float Puddles)
 {
 	for (UMaterialInterface* Mat : { RoadMat.Get(), RoadMatGravel.Get(), RoadMatDirt.Get() })
 	{
 		if (UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mat))
 		{
 			Mid->SetScalarParameterValue(TEXT("Wetness"), Wetness);
+			Mid->SetScalarParameterValue(TEXT("Rain"), Rain);
+			Mid->SetScalarParameterValue(TEXT("Puddles"), Puddles);
 		}
 	}
 	if (Decals)

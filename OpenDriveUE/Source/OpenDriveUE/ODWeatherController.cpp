@@ -136,6 +136,8 @@ namespace
 	constexpr float LENS_FADE_OUT = 0.25f;       // fades over the last fraction of its life
 	constexpr float LENS_TELEPORT_MS = 150.0f;   // a faster camera "speed" is a teleport/respawn, not driving
 
+	constexpr float PUDDLE_PER_RAIN = 1.4f;      // standing-water level per unit rain rate (Rain 0.45 -> 0.63, HeavyRain full)
+
 	/** Raised-cosine bump, 1 at D = 0, 0 beyond +-H. */
 	float Bump(float D, float H)
 	{
@@ -234,10 +236,10 @@ namespace
 			}
 			if (Args.Num() == 0)
 			{
-				UE_LOG(LogTemp, Display, TEXT("od.Weather: %s precip=%.2f type=%.2f wind=%.1f m/s vis=%.0f m wet=%.2f ")
+				UE_LOG(LogTemp, Display, TEXT("od.Weather: %s precip=%.2f type=%.2f wind=%.1f m/s vis=%.0f m wet=%.2f puddles=%.2f ")
 					TEXT("air=%.1f C chill=%.2f snow road=%.1f cm side=%.1f cm"),
 					*StateName(Weather->State), Weather->PrecipIntensity, Weather->PrecipType,
-					Weather->WindSpeedMs, Weather->VisibilityM, Weather->Wetness,
+					Weather->WindSpeedMs, Weather->VisibilityM, Weather->Wetness, Weather->Puddles,
 					Weather->AirTempC, Weather->RoadChill, Weather->RoadSnowCm, Weather->SideSnowCm);
 				return;
 			}
@@ -467,8 +469,24 @@ void AODWeatherController::Tick(float DeltaSeconds)
 	// Snow/sleet wet the road too (slush) - W3 decides grip per PrecipType.
 	Wetness = PrecipIntensity > 0.05f
 		? FMath::Min(Wetness + DeltaSeconds * PrecipIntensity / WetUpSeconds, 1.0f)
-		: FMath::Max(Wetness - DeltaSeconds / DrySeconds, 0.0f);
+		: FMath::Max(Wetness - DeltaSeconds * Evaporation() / DrySeconds, 0.0f);
+	// Standing water (2026-10-16): eases toward the rain rate's level (light
+	// rain = a few rut puddles, a downpour floods the sags), then drains far
+	// slower than the film dries. Exponential fill, linear drain: both
+	// frame-rate independent (pipeline/checks/check_wet_dryout.py mirrors this).
+	RainRate = PrecipIntensity * (1.0f - PrecipType);
+	const float PuddleTarget = FMath::Clamp(RainRate * PUDDLE_PER_RAIN, 0.0f, 1.0f);
+	Puddles = Puddles < PuddleTarget
+		? FMath::Lerp(Puddles, PuddleTarget, 1.0f - FMath::Exp(-DeltaSeconds / FMath::Max(PuddleFillSeconds, 1.0f)))
+		: FMath::Max(Puddles - DeltaSeconds * Evaporation() / PuddleDrainSeconds, PuddleTarget);
 	TickSnow(DeltaSeconds);
+}
+
+float AODWeatherController::Evaporation() const
+{
+	// 1 at 15 C in calm air; 0.3 near freezing, 2x at a hot 35 C; wind
+	// doubles it by 15 m/s (pipeline/checks/check_wet_dryout.py).
+	return FMath::Clamp((AirTempC + 5.0f) / 20.0f, 0.3f, 2.0f) * (1.0f + WindSpeedMs / 15.0f);
 }
 
 namespace
@@ -954,6 +972,7 @@ bool AODWeatherController::ForceState(const FString& Name, bool bInstant)
 			From = To;
 			RampT = 1.0f;
 			Wetness = To.Precip > 0.05f ? 1.0f : 0.0f;
+			Puddles = FMath::Clamp(To.Precip * (1.0f - To.PrecipType) * PUDDLE_PER_RAIN, 0.0f, 1.0f);
 			// 2026-10-09 (Taylor: Summit set to Summer was "still snowing in the
 			// view"): an instant switch to weather that isn't snowing also drops
 			// the lying snow instead of melting it at sim speed

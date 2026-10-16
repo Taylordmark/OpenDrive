@@ -14,6 +14,7 @@
 #include "Math/RandomStream.h"
 #include "Misc/CommandLine.h"
 #include "UObject/UObjectIterator.h"
+#include "ODBuildingManager.h"
 #include "ODForestManager.h"
 #include "ODRoadManager.h"
 #include "ODTerrainManager.h"
@@ -420,6 +421,10 @@ void AODSeasonController::PushParamsToMIDs()
 	// darkens/glosses the ground and the forest MIDs ("Wetness" in
 	// apply_ground_material.py / build_flora_materials.py, 0 = dry).
 	const float Wet = Wx ? Wx->Wetness : 0.0f;
+	// 2026-10-16: rain rate (ripples) and standing water (puddles fill over
+	// minutes, drain slower than the surface dries) - AODWeatherController.
+	const float Rain = Wx ? Wx->RainRate : 0.0f;
+	const float Puddles = Wx ? Wx->Puddles : 0.0f;
 	for (TActorIterator<AODTerrainManager> It(World); It; ++It)
 	{
 		AODTerrainManager* Terrain = *It;
@@ -452,6 +457,7 @@ void AODSeasonController::PushParamsToMIDs()
 			GroundMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), High);
 			GroundMID->SetScalarParameterValue(TEXT("SpringGreen"), SpringGreen);
 			GroundMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
+			GroundMID->SetScalarParameterValue(TEXT("Puddles"), Puddles);
 		}
 	}
 	for (TActorIterator<AODWaterManager> It(World); It; ++It)
@@ -460,6 +466,7 @@ void AODSeasonController::PushParamsToMIDs()
 		if (UMaterialInstanceDynamic* WaterMID = Water->GetWaterMID())
 		{
 			WaterMID->SetScalarParameterValue(TEXT("FreezeBlend"), FreezeBlend);
+			WaterMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);   // snow lying on the ice
 			// Weather W5 (sec 7.42): wind-driven chop, 10 m/s calm .. 35 m/s
 			// (Hurricane) full (apply_water_material.py's "WaveRoughness").
 			const AODWeatherController* Weather = WeatherCtl.Get();
@@ -509,7 +516,7 @@ void AODSeasonController::PushParamsToMIDs()
 	bool bAnyRoadMgr = false;
 	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{
-		It->SetWetness(Wet);
+		It->SetWetness(Wet, Rain, Puddles);
 		bAnyRoadMgr = true;
 	}
 	if (!bAnyRoadMgr)
@@ -518,7 +525,14 @@ void AODSeasonController::PushParamsToMIDs()
 		if (StaticRoadMID)
 		{
 			StaticRoadMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
+			StaticRoadMID->SetScalarParameterValue(TEXT("Rain"), Rain);
 		}
+	}
+	// 2026-10-16: wet masonry darkens, snow settles on roofs by pitch
+	// (apply_building_material*.py "Wetness"/"SnowCover", 0 = dry/bare).
+	for (TActorIterator<AODBuildingManager> It(World); It; ++It)
+	{
+		It->SetWeather(Wet, Cover);
 	}
 }
 
@@ -600,33 +614,42 @@ void AODSeasonController::EnsureSnowfallComponent()
 	// clearly in a still frame without turning into a blizzard.
 	// Weather W2: pool doubled to 520 - the visible count is Num *
 	// PrecipIntensity, so the Snow state (0.5) still shows the tuned 260.
+	// 2026-10-16: + a far layer of 300 bigger, fainter instances (custom data
+	// 1 = fade) in a 3x wider box, drawn only outside the near box, so heavy
+	// precipitation thickens toward the horizon instead of stopping at 9 m.
 	constexpr int32 NumFlakes = 520;
+	constexpr int32 NumFar = 300;
 	constexpr float HalfExtentXYCm = 900.0f;
 	constexpr float HalfHeightCm = 700.0f;
 	FRandomStream Rng(12345);
-	SnowFxLocalOffsets.Reserve(NumFlakes);
-	PrecipFxSnowRoll.Reserve(NumFlakes);
+	SnowFxNumNear = NumFlakes;
+	SnowFxLocalOffsets.Reserve(NumFlakes + NumFar);
+	PrecipFxSnowRoll.Reserve(NumFlakes + NumFar);
+	PrecipFxRoll.Reserve(NumFlakes + NumFar);
 	TArray<FTransform> Transforms;
-	Transforms.Reserve(NumFlakes);
-	for (int32 i = 0; i < NumFlakes; ++i)
+	Transforms.Reserve(NumFlakes + NumFar);
+	for (int32 i = 0; i < NumFlakes + NumFar; ++i)
 	{
+		const float Ext = i < NumFlakes ? 1.0f : 3.0f;
 		const FVector Offset(
-			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm),
-			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm),
-			Rng.FRandRange(-HalfHeightCm, HalfHeightCm));
+			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm) * Ext,
+			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm) * Ext,
+			Rng.FRandRange(-HalfHeightCm, HalfHeightCm) * (i < NumFlakes ? 1.0f : 1.5f));
 		SnowFxLocalOffsets.Add(Offset);
 		PrecipFxSnowRoll.Add(Rng.FRand());
+		PrecipFxRoll.Add(FVector3f(Rng.FRandRange(0.6f, 1.4f), Rng.FRandRange(0.8f, 1.2f), Rng.FRandRange(0.0f, 2.0f * PI)));
 		FTransform T;
 		T.SetLocation(Offset);
 		T.SetScale3D(FVector(0.11f));   // ~11 cm sphere - reads as a soft flake at driving distance
 		Transforms.Add(T);
 	}
-	SnowFxHism->SetNumCustomDataFloats(1);
+	SnowFxHism->SetNumCustomDataFloats(2);
 	SnowFxHism->AddInstances(Transforms, false);
-	PrecipFxIsSnow.Init(1, NumFlakes);
-	for (int32 i = 0; i < NumFlakes; ++i)
+	PrecipFxIsSnow.Init(1, NumFlakes + NumFar);
+	for (int32 i = 0; i < NumFlakes + NumFar; ++i)
 	{
 		SnowFxHism->SetCustomDataValue(i, 0, 1.0f, false);
+		SnowFxHism->SetCustomDataValue(i, 1, i < NumFlakes ? 1.0f : 0.35f, false);
 	}
 }
 
@@ -657,18 +680,26 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		return;
 	}
 
-	// Weather W2: snow keeps its 260 cm/s fall and drifts at 0.1x wind; rain
-	// falls ~900 cm/s and is pushed at 0.5x wind, drawn as a thin sphere
-	// stretched along its velocity relative to the car (2026-10-06: so at
-	// speed the streaks lengthen and rake toward the lens - next steps.md
-	// "rain streaks ignore car speed").
-	constexpr float SnowFallCmS = 260.0f;
+	// Weather W2 + 2026-10-16 realism pass. Snow falls ~1.7 m/s (real
+	// aggregates: 1-2 m/s) and rides the wind almost fully (0.8x), so a
+	// blizzard goes sideways; rain falls ~9 m/s at 0.9x wind. Each flake has a
+	// fixed size/fall roll and flutters on an absolute-time sine (a drawn
+	// offset, not integrated - frame-rate independent). Base flake size
+	// shrinks with wind (big soft calm-air flakes, fine blizzard grit). Sleet
+	// (PrecipType ~0.5) turns the snow-kind instances into small fast ice
+	// pellets. Rain - and snow at speed - is a sphere stretched along its
+	// velocity relative to the car, so streaks lengthen and rake toward the
+	// lens as you drive.
+	constexpr float SnowFallCmS = 170.0f;
+	constexpr float PelletFallCmS = 550.0f;
 	constexpr float RainFallCmS = 900.0f;
 	constexpr double HalfHeightCm = 700.0;
 	constexpr double HalfExtentXYCm = 900.0;
 	constexpr float AheadCm = 600.0f;           // box center ahead of the camera (little falls behind it)
 	constexpr float StreakSeconds = 0.055f;     // streak length = relative speed x this (50 cm at a parked 9 m/s fall)
 	constexpr float StreakMaxCm = 250.0f;
+	constexpr float FlutterCm = 18.0f;
+	constexpr float FarScale = 2.2f;            // far layer: bigger so it reads at 10-27 m
 
 	const FVector CamLoc = CamMgr->GetCameraLocation();
 	const FVector Center = CamLoc + CamMgr->GetCameraRotation().Vector().GetSafeNormal2D() * AheadCm;
@@ -686,53 +717,80 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	bSnowFxCentered = true;
 	SnowFxHism->SetWorldLocation(Center);
 
-	const float WindCmS = (Weather ? Weather->WindSpeedMs : 0.0f) * 100.0f;
+	const float WindMs = Weather ? Weather->WindSpeedMs : 0.0f;
 	const float WindYaw = FMath::DegreesToRadians(Weather ? Weather->WindDirDeg : 0.0f);
 	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
-	const FVector SnowVel = WindDir * (0.1f * WindCmS) - FVector(0, 0, SnowFallCmS);
-	const FVector RainVel = WindDir * (0.5f * WindCmS) - FVector(0, 0, RainFallCmS);
-	// Streaks rake along rain velocity relative to the CAR (PLAN-REALISM
-	// Phase 6, 2026-10-14): the body's velocity comes from the fixed 120 Hz
-	// physics step, so the slant no longer jitters with the frame-to-frame
-	// camera delta (chase-cam lag, uneven frame times). No car (menus): the
-	// camera delta, as before.
-	const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0);
-	const FVector RainRel = RainVel - (Car ? Car->GetVelocity() : CamVel);
-	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainRel).ToQuat();
-	const float StreakCm = FMath::Clamp(RainRel.Size() * StreakSeconds, 50.0f, StreakMaxCm);
 	const float SnowType = Weather ? Weather->PrecipType : 1.0f;
+	const float Pellet = 1.0f - FMath::SmoothStep(0.55f, 0.85f, SnowType);   // sleet: snow-kind = ice pellets
+	const float SnowFall = FMath::Lerp(SnowFallCmS, PelletFallCmS, Pellet);
+	const float FlakeScale = FMath::Lerp(FMath::Lerp(0.11f, 0.06f, FMath::Clamp(WindMs / 20.0f, 0.0f, 1.0f)), 0.035f, Pellet);
+	const FVector SnowVel = WindDir * (0.8f * WindMs * 100.0f) - FVector(0, 0, SnowFall);
+	const FVector RainVel = WindDir * (0.9f * WindMs * 100.0f) - FVector(0, 0, RainFallCmS);
+	// Streaks rake along velocity relative to the CAR (PLAN-REALISM Phase 6,
+	// 2026-10-14): the body's velocity comes from the fixed 120 Hz physics
+	// step, so the slant no longer jitters with the frame-to-frame camera
+	// delta (chase-cam lag, uneven frame times). No car (menus): the camera
+	// delta, as before.
+	const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0);
+	const FVector Frame = Car ? Car->GetVelocity() : CamVel;
+	const FVector RainRel = RainVel - Frame;
+	const FVector SnowRel = SnowVel - Frame;
+	const FQuat RainRot = FRotationMatrix::MakeFromZ(RainRel).ToQuat();
+	const FQuat SnowRot = FRotationMatrix::MakeFromZ(SnowRel).ToQuat();
+	const float StreakCm = FMath::Clamp(RainRel.Size() * StreakSeconds, 50.0f, StreakMaxCm);
+	// motion blur on a flake: the distance it sweeps in ~1/3 of the streak time
+	const float SnowSmearCm = FMath::Min(SnowRel.Size() * StreakSeconds * 0.35f, 120.0f);
+	const float Time = GetWorld()->GetTimeSeconds();
 
 	const int32 Num = SnowFxLocalOffsets.Num();
-	const int32 NumActive = FMath::RoundToInt(Num * FMath::Clamp(Precip, 0.0f, 1.0f));
+	const int32 NumNear = SnowFxNumNear;
+	const float Active = FMath::Clamp(Precip, 0.0f, 1.0f);
+	const int32 NumActiveNear = FMath::RoundToInt(NumNear * Active);
+	// far layer only once it is properly coming down (none in drizzle)
+	const int32 NumActiveFar = FMath::RoundToInt((Num - NumNear) * FMath::Clamp((Active - 0.25f) / 0.5f, 0.0f, 1.0f));
 	for (int32 i = 0; i < Num; ++i)
 	{
+		const bool bFar = i >= NumNear;
+		const double Ext = bFar ? 3.0 : 1.0;
+		const double HalfH = HalfHeightCm * (bFar ? 1.5 : 1.0);
 		const bool bSnow = PrecipFxSnowRoll[i] < SnowType;
 		if (PrecipFxIsSnow[i] != (uint8)bSnow)
 		{
 			PrecipFxIsSnow[i] = bSnow;
 			SnowFxHism->SetCustomDataValue(i, 0, bSnow ? 1.0f : 0.0f, false);
 		}
+		const FVector3f& Roll = PrecipFxRoll[i];
 		FVector& Offset = SnowFxLocalOffsets[i];
-		Offset += (bSnow ? SnowVel : RainVel) * DeltaSeconds - Shift;
-		Offset.X = FMath::Wrap(Offset.X, -HalfExtentXYCm, HalfExtentXYCm);
-		Offset.Y = FMath::Wrap(Offset.Y, -HalfExtentXYCm, HalfExtentXYCm);
-		Offset.Z = FMath::Wrap(Offset.Z, -HalfHeightCm, HalfHeightCm);
+		Offset += (bSnow ? SnowVel : RainVel) * (DeltaSeconds * Roll.Y) - Shift;
+		Offset.X = FMath::Wrap(Offset.X, -HalfExtentXYCm * Ext, HalfExtentXYCm * Ext);
+		Offset.Y = FMath::Wrap(Offset.Y, -HalfExtentXYCm * Ext, HalfExtentXYCm * Ext);
+		Offset.Z = FMath::Wrap(Offset.Z, -HalfH, HalfH);
 
 		FTransform T;
-		T.SetLocation(Offset);
-		if (i >= NumActive)
+		FVector Drawn = Offset;
+		const bool bSlotOff = bFar
+			? (i - NumNear >= NumActiveFar
+				|| (FMath::Abs(Offset.X) < HalfExtentXYCm && FMath::Abs(Offset.Y) < HalfExtentXYCm))   // the near box covers it
+			: i >= NumActiveNear;
+		const float Scale = bFar ? FarScale : 1.0f;
+		if (bSlotOff)
 		{
 			T.SetScale3D(FVector::ZeroVector);   // pool slot unused at this intensity
 		}
 		else if (bSnow)
 		{
-			T.SetScale3D(FVector(0.11f));
+			const float Size = FlakeScale * Roll.X * Scale;
+			const float Flutter = FlutterCm * (1.0f - Pellet);
+			Drawn += FVector(FMath::Sin(Time * 1.7f + Roll.Z), FMath::Cos(Time * 1.3f + 2.0f * Roll.Z), 0.0f) * Flutter;
+			T.SetRotation(SnowRot);
+			T.SetScale3D(FVector(Size, Size, FMath::Max(Size, SnowSmearCm / 100.0f * Scale)));
 		}
 		else
 		{
 			T.SetRotation(RainRot);
-			T.SetScale3D(FVector(0.015f, 0.015f, StreakCm / 100.0f));   // ~1.5 cm wide streak (Sphere is 100 cm)
+			T.SetScale3D(FVector(0.015f * Scale, 0.015f * Scale, StreakCm / 100.0f * Roll.Y * Scale));   // ~1.5 cm wide streak (Sphere is 100 cm)
 		}
+		T.SetLocation(Drawn);
 		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
 	}
 }

@@ -170,6 +170,33 @@ NORMAL_BLEND_ALPHA = 0.5   # even mix - both layers contribute (large rolling sh
 # strength faded toward flat (a frozen surface doesn't show wind chop).
 ICE_COLOR = (0.62, 0.68, 0.72)
 ICE_ROUGHNESS = 0.75
+# Frozen-lake look (2026-10-16): a real frozen lake is not one pale sheet -
+# wind-scoured patches of dark clear ("black") ice show the water under
+# them and stay glossy, and snow ("SnowCover", AODSeasonController's cover,
+# 0 = none) lies in drifts on the rest. Both are 12 m / 5 m world-space
+# value noise in one Custom node, only where FreezeBlend is past ~0.7.
+CLEAR_ICE_COLOR = (0.06, 0.09, 0.11)
+CLEAR_ICE_ROUGHNESS = 0.12
+LAKE_SNOW_COLOR = (0.86, 0.89, 0.93)
+LAKE_SNOW_ROUGHNESS = 0.85
+LAKE_ICE_HLSL = """
+float2 m = 0;
+for (int k = 0; k < 2; k++) {
+  float2 p = W.xy / (k == 0 ? 1200.0 : 500.0) + k * 17.3;
+  float2 i = floor(p), f = frac(p);
+  f = f * f * (3 - 2 * f);
+  float a = frac(sin(dot(i, float2(127.1, 311.7))) * 43758.5453);
+  float b = frac(sin(dot(i + float2(1, 0), float2(127.1, 311.7))) * 43758.5453);
+  float c = frac(sin(dot(i + float2(0, 1), float2(127.1, 311.7))) * 43758.5453);
+  float d = frac(sin(dot(i + float2(1, 1), float2(127.1, 311.7))) * 43758.5453);
+  m[k] = lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+float frozen = saturate((Freeze - 0.7) * 3.33);
+float n = lerp(m.x, m.y, 0.35);
+float snow = saturate((Cover * 1.4 - 0.4 + (n - 0.5) * 0.9) * 4) * frozen;
+float clear = saturate((0.32 - n) * 6) * frozen * (1 - snow);
+return float2(snow, clear);
+"""
 
 # ---- Weather W5: storm chop (2026-09-25, next steps.md sec 7.42) ---------
 # AODSeasonController pushes WaveRoughness 0..1 from AODWeatherController's
@@ -394,6 +421,24 @@ base_color = g.lerp(deep_color, sky_color, base_fresnel)
 
 specular = g.lerp(g.const(SPECULAR_BASE), g.const(SPECULAR_GRAZING), fresnel)
 roughness = g.lerp(g.const(ROUGHNESS), g.const(ICE_ROUGHNESS), freeze_blend)
+
+lake_ice = g.node(unreal.MaterialExpressionCustom, code=LAKE_ICE_HLSL,
+                  output_type=unreal.CustomMaterialOutputType.CMOT_FLOAT2)
+_pins = []
+for _name in ("W", "Freeze", "Cover"):
+    _i = unreal.CustomInput()
+    _i.set_editor_property("input_name", _name)
+    _pins.append(_i)
+lake_ice.set_editor_property("inputs", _pins)
+for _name, _src in (("W", g.node(unreal.MaterialExpressionWorldPosition)), ("Freeze", freeze_blend),
+                    ("Cover", g.scalar_param("SnowCover", 0.0))):
+    g._req(MEL.connect_material_expressions(_src, "", lake_ice, _name), f"Custom.{_name}")
+lake_snow = g.node(unreal.MaterialExpressionComponentMask, r=True, g=False, b=False, a=False)
+lake_clear = g.node(unreal.MaterialExpressionComponentMask, r=False, g=True, b=False, a=False)
+for _m in (lake_snow, lake_clear):
+    g._req(MEL.connect_material_expressions(lake_ice, "", _m, ""), "ComponentMask(lake_ice)")
+base_color = g.lerp(g.lerp(base_color, g.const3(*CLEAR_ICE_COLOR), lake_clear), g.const3(*LAKE_SNOW_COLOR), lake_snow)
+roughness = g.lerp(g.lerp(roughness, g.const(CLEAR_ICE_ROUGHNESS), lake_clear), g.const(LAKE_SNOW_ROUGHNESS), lake_snow)
 
 MEL.connect_material_property(base_color, "", unreal.MaterialProperty.MP_BASE_COLOR)
 MEL.connect_material_property(roughness, "", unreal.MaterialProperty.MP_ROUGHNESS)

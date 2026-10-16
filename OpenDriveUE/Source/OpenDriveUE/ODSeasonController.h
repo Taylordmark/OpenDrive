@@ -196,6 +196,8 @@ private:
 	TArray<FVector> SnowFxLocalOffsets;   // world-axis offsets from SnowFxCenter
 	TArray<float> PrecipFxSnowRoll;   // fixed [0,1) per instance: snow if < PrecipType
 	TArray<uint8> PrecipFxIsSnow;     // last custom-data value pushed per instance
+	TArray<FVector3f> PrecipFxRoll;   // fixed per instance: size x, fall-speed x, flutter phase (rad)
+	int32 SnowFxNumNear = 0;          // instances [0, N) are the near box, the rest the far layer
 	FVector SnowFxCenter = FVector::ZeroVector;   // box center last tick
 	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (box re-center + teleport test)
 	bool bSnowFxCentered = false;                 // false = next tick re-centers without shifting flakes

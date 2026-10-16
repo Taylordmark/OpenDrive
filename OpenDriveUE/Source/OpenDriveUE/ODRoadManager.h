@@ -140,8 +140,9 @@ public:
 	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet. */
 	FODVistaRegion Vista;
 
-	/** Weather W2: push "Wetness" to the shared road MIDs (paved, gravel, dirt). */
-	void SetWetness(float Wetness);
+	/** Weather W2: push "Wetness" to the shared road MIDs (paved, gravel, dirt);
+	 *  2026-10-16 also "Rain" (ripple rate) and "Puddles" (standing water). */
+	void SetWetness(float Wetness, float Rain = 0.0f, float Puddles = 0.0f);
 
 	/** Road snow depth (cm) on Comp if it's one of this class's chunks
 	 *  (Custom Primitive Data 0, see TickSnow), else Fallback. */

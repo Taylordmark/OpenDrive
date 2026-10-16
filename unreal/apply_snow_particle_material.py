@@ -110,12 +110,24 @@ kind_node.set_editor_property("const_default_value", 1.0)
 lerps = []
 
 
-def rain_snow(rain_node, snow_node, prop, y):
+# Layer fade (2026-10-16): AODSeasonController's far layer draws at < 1
+# (per instance, index 1; default 1 = the near layer / the old look).
+fade_node = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -800, 450)
+fade_node.set_editor_property("data_index", 1)
+fade_node.set_editor_property("const_default_value", 1.0)
+
+
+def rain_snow(rain_node, snow_node, prop, y, fade=False):
     lerp = MEL.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -200, y)
     req(MEL.connect_material_expressions(rain_node, "", lerp, "A"), f"{prop} Lerp.A")
     req(MEL.connect_material_expressions(snow_node, "", lerp, "B"), f"{prop} Lerp.B")
     req(MEL.connect_material_expressions(kind_node, "", lerp, "Alpha"), f"{prop} Lerp.Alpha")
-    req(MEL.connect_material_property(lerp, "", prop), f"Lerp -> {prop}")
+    out = lerp
+    if fade:
+        out = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -100, y)
+        req(MEL.connect_material_expressions(lerp, "", out, "A"), f"{prop} Fade.A")
+        req(MEL.connect_material_expressions(fade_node, "", out, "B"), f"{prop} Fade.B")
+    req(MEL.connect_material_property(out, "", prop), f"Lerp -> {prop}")
     lerps.append((prop, lerp))
 
 
@@ -133,7 +145,7 @@ def scalar(v, y):
 
 rain_snow(vec3(rain_emissive, 0), vec3(final_emissive, 50), unreal.MaterialProperty.MP_EMISSIVE_COLOR, 0)
 rain_snow(vec3(RAIN_COLOR, -150), vec3(SNOW_COLOR, -100), unreal.MaterialProperty.MP_BASE_COLOR, -150)
-rain_snow(scalar(RAIN_OPACITY, 300), scalar(OPACITY, 350), unreal.MaterialProperty.MP_OPACITY, 300)
+rain_snow(scalar(RAIN_OPACITY, 300), scalar(OPACITY, 350), unreal.MaterialProperty.MP_OPACITY, 300, fade=True)
 
 MEL.recompile_material(mat)
 unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
@@ -148,6 +160,11 @@ if node2 is None:
 for prop, _ in lerps:
     n = MEL.get_material_property_input_node(reloaded, prop)
     ins = MEL.get_inputs_for_material_expression(reloaded, n) if n else []
+    if prop == unreal.MaterialProperty.MP_OPACITY and n is not None:   # Lerp x Fade
+        if len([i for i in ins if i is not None]) != 2:
+            raise RuntimeError(f"M_SnowFlake: opacity fade not wired ({ins})")
+        n = next(i for i in ins if isinstance(i, unreal.MaterialExpressionLinearInterpolate))
+        ins = MEL.get_inputs_for_material_expression(reloaded, n)
     if n is None or len([i for i in ins if i is not None]) != 3:
         raise RuntimeError(f"M_SnowFlake: {prop} Lerp not fully wired ({ins})")
     log(f"  {prop}: Lerp inputs={[i.get_class().get_name() for i in ins]}")
