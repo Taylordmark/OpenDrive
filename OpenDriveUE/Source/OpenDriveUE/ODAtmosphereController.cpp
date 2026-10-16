@@ -469,6 +469,11 @@ void AODAtmosphereController::SpawnGradeVolume()
 		S.VignetteIntensity = 0.3f;
 		S.bOverride_FilmGrainIntensity = true;
 		S.FilmGrainIntensity = 0.0f;
+		// Car glass is translucent, so without this it only gets the blurry
+		// radiance-cache reflection - windscreens read as flat grey. Front layer
+		// = one extra GBuffer-ish pass for the nearest translucent surface only.
+		S.bOverride_LumenFrontLayerTranslucencyReflections = true;
+		S.LumenFrontLayerTranslucencyReflections = 1;
 	}
 
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: spawned Grade post-process volume "

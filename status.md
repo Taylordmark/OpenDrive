@@ -1045,3 +1045,20 @@ run since before §7.49, so 1,276 junctions had no pad.
 - Shared `ODBinSidecarUtil.h` read helpers.
 - Forest HISMs are kept out of Lumen dynamic indirect lighting.
 - GC smoothing cvars are set in `DefaultEngine.ini`.
+
+### Perf + lighting pass (2026-10-16, branch claude/lighting-perf-deb7df)
+
+- **Before (from Saved/Logs frame counters):**
+  - breckenridge: ~89 fps with 0 cars, ~40 fps with 60 cars;
+  - summit_county: ~30 fps with 4 cars, ~10 fps with 450 cars;
+  - so each car cost ~0.15–0.23 ms.
+- **Cause:** `_real` cars are 16–21k tris, non-Nanite, have one LOD and cast shadows. Every car drew out to the 950 m despawn radius (~8M tris at 450 cars).
+- **Fixes:**
+  - **Traffic near/far tiers.** Past `NearTierCm` (150 m) a car draws as its stylized ~1.5k-tri mesh, with no shadow and no RT. No car feeds DF lighting.
+  - **Lakes.** One merged, shadowless DynamicMeshComponent per tile, instead of 1841 components on summit.
+  - **Sun/moon.** Rotate in 0.25° steps (~2.5 s apart) instead of every frame, so VSM and Lumen caches are no longer invalidated every frame.
+  - **VSM.** `r.Shadow.Virtual.NonNanite.IncludeInCoarsePages=0`.
+- **Lighting:** Lumen front-layer translucency reflections for car glass (Realistic grade volume).
+- **Measuring:** `ODPerf:` log line every 5 s: frame avg/p95/max, game/draw/RHI/GPU ms, draws, tris, resolution, scalability. `ProfileGPU` dump to the log at 60 s and every 150 s after.
+  - Turn them off with `-odperf=0` / `-odprofilegpu=0`.
+- **Open:** summit's ~33 ms base cost vs breckenridge's ~11 ms is unexplained. The next drive's ProfileGPU dump decides it (suspects: volumetric clouds/fog, Lumen at Epic, 238 wall components, far forest).
