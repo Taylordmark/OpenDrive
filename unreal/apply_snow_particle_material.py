@@ -52,11 +52,17 @@ MAT_DIR = "/Game/OpenDrive/Materials"
 MAT_NAME = "M_SnowFlake"
 
 SNOW_COLOR = (0.95, 0.96, 0.98)
-OPACITY = 0.92
+OPACITY = 0.8
 # Modest push on top of the lit BaseColor (see MSM_DEFAULT_LIT note above) -
 # keeps flakes readable in shadow/backlit conditions without blowing out to
 # a glowing orb in direct sun.
-EMISSIVE_STRENGTH = 1.2
+# 2026-10-16 (2): flakes are now ~2 cm, not 11 cm, and were reading as
+# glowing balls. Edges go soft (a Fresnel falloff on the sphere - no texture)
+# and the glow drops; per-pixel translucency lighting lets headlights and
+# street lights light the flakes, so night snow sparkles in the beams
+# instead of glowing everywhere.
+EMISSIVE_STRENGTH = 0.35
+EDGE_SOFTNESS = 1.5   # Fresnel exponent: lower = softer, fuzzier edge
 
 # Rain streaks (Weather W2): thin, faint, slightly blue-grey - a drop is mostly
 # see-through, it reads by its streak, not its body.
@@ -89,6 +95,7 @@ mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
 mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
 mat.set_editor_property("two_sided", True)
 mat.set_editor_property("used_with_instanced_static_meshes", True)
+mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE_PER_PIXEL_LIGHTING)
 
 # Pre-multiplying in Python and wiring a single Constant3Vector straight to
 # each property (rather than a Constant3Vector*Constant Multiply node)
@@ -115,6 +122,15 @@ lerps = []
 fade_node = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -800, 450)
 fade_node.set_editor_property("data_index", 1)
 fade_node.set_editor_property("const_default_value", 1.0)
+_fres = MEL.create_material_expression(mat, unreal.MaterialExpressionFresnel, -800, 550)
+_fres.set_editor_property("exponent", EDGE_SOFTNESS)
+_fres.set_editor_property("base_reflect_fraction", 0.0)
+_edge = MEL.create_material_expression(mat, unreal.MaterialExpressionOneMinus, -650, 550)
+req(MEL.connect_material_expressions(_fres, "", _edge, ""), "OneMinus(Fresnel)")
+_fade = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -500, 500)
+req(MEL.connect_material_expressions(fade_node, "", _fade, "A"), "fade x edge A")
+req(MEL.connect_material_expressions(_edge, "", _fade, "B"), "fade x edge B")
+fade_node = _fade   # layer fade x soft edge
 
 
 def rain_snow(rain_node, snow_node, prop, y, fade=False):
