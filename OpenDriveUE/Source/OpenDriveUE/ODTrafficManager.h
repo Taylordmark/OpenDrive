@@ -127,8 +127,8 @@ private:
 
 	struct FWreck
 	{
-		UStaticMeshComponent* Comp = nullptr;
-		TArray<UStaticMeshComponent*, TInlineAllocator<4>> Wheels;   // attached to Comp
+		UBoxComponent* Comp = nullptr;   // the physics body, chassis + wheel colliders in one box
+		TArray<UStaticMeshComponent*, TInlineAllocator<5>> Parts;   // chassis, 4 wheels; attached to Comp
 		double Born = 0.0;
 	};
 

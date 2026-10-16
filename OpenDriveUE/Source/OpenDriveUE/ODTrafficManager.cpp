@@ -132,37 +132,49 @@ bool Overlaps(const FVector& PA, const FQuat& RA, const FVector& EA, const FVect
 	return true;
 }
 
-/** A physics wreck of a traffic car, wheels attached (no collision, so never welded or
- *  simulated on their own) so they ride the body wherever it tumbles. */
-UStaticMeshComponent* SpawnWreck(AActor* Owner, UStaticMesh* Chassis, UStaticMesh* Wheel, float FrontX, float RearX,
+/** A physics wreck of a traffic car. The physics body is a box that reaches down to the
+ *  tyres: the chassis mesh's own collision is its body bbox, which stops 8-24 cm under the
+ *  axle while the tyres reach a wheel radius under it, so a wreck resting on that box sank
+ *  its wheels into the road and the arches hid the rest (Taylor 2026-10-16: "wheels
+ *  disappear"). Chassis and wheels ride the box with no collision (never welded or
+ *  simulated on their own). OutParts[0] = chassis, then the four wheels. */
+UBoxComponent* SpawnWreck(AActor* Owner, UStaticMesh* Chassis, UStaticMesh* Wheel, float FrontX, float RearX,
 	float HalfTrack, float WheelR, const FVector& Pos, const FQuat& Rot, const FVector& Vel,
-	TArray<UStaticMeshComponent*, TInlineAllocator<4>>& OutWheels)
+	TArray<UStaticMeshComponent*, TInlineAllocator<5>>& OutParts)
 {
-	UStaticMeshComponent* W = NewObject<UStaticMeshComponent>(Owner);
-	W->SetupAttachment(Owner->GetRootComponent());
-	W->SetMobility(EComponentMobility::Movable);
-	W->SetStaticMesh(Chassis);
-	W->SetWorldLocationAndRotation(Pos, Rot);
-	W->SetCollisionProfileName(TEXT("PhysicsActor"));
-	W->RegisterComponent();
-	ODVisualStyle::PickSlots(W);
-	for (int32 w = 0; Wheel && w < 4; ++w)
+	const FBox B = Chassis->GetBounds().GetBox();
+	const FVector Lo(FMath::Min(B.Min.X, RearX - WheelR), B.Min.Y, FMath::Min(B.Min.Z, -WheelR));
+	const FVector Hi(FMath::Max(B.Max.X, FrontX + WheelR), B.Max.Y, B.Max.Z);
+	const FVector Center = (Lo + Hi) * 0.5;
+	UBoxComponent* Box = NewObject<UBoxComponent>(Owner);
+	Box->SetupAttachment(Owner->GetRootComponent());
+	Box->SetMobility(EComponentMobility::Movable);
+	Box->SetBoxExtent((Hi - Lo) * 0.5, false);
+	Box->SetWorldLocationAndRotation(Pos + Rot.RotateVector(Center), Rot);
+	Box->SetCollisionProfileName(TEXT("PhysicsActor"));
+	Box->RegisterComponent();
+	auto Part = [&](UStaticMesh* Mesh, const FVector& Local, float Scale)
 	{
 		UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(Owner);
-		C->SetupAttachment(W);
+		C->SetupAttachment(Box);
 		C->SetMobility(EComponentMobility::Movable);
-		C->SetStaticMesh(Wheel);
+		C->SetStaticMesh(Mesh);
 		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		C->SetRelativeLocation(FVector(w < 2 ? FrontX : RearX, (w % 2 == 0 ? -1.0f : 1.0f) * HalfTrack, 0.0f));
-		C->SetRelativeScale3D(FVector(WheelR / TrafficWheelMeshRadiusCm));
+		C->SetRelativeLocation(Local - Center);
+		C->SetRelativeScale3D(FVector(Scale));
 		C->RegisterComponent();
 		ODVisualStyle::PickSlots(C);
-		OutWheels.Add(C);
+		OutParts.Add(C);
+	};
+	Part(Chassis, FVector::ZeroVector, 1.0f);
+	for (int32 w = 0; Wheel && w < 4; ++w)
+	{
+		Part(Wheel, FVector(w < 2 ? FrontX : RearX, (w % 2 == 0 ? -1.0f : 1.0f) * HalfTrack, 0.0f), WheelR / TrafficWheelMeshRadiusCm);
 	}
-	W->SetMassOverrideInKg(NAME_None, 1400.0f, true);
-	W->SetSimulatePhysics(true);
-	W->SetPhysicsLinearVelocity(Vel);
-	return W;
+	Box->SetMassOverrideInKg(NAME_None, 1400.0f, true);
+	Box->SetSimulatePhysics(true);
+	Box->SetPhysicsLinearVelocity(Vel);
+	return Box;
 }
 
 // D3: the five traffic bodies (AODVehiclePawn's own defs; road cars, no prototypes)
@@ -1819,7 +1831,7 @@ void AODTrafficManager::ProcessHits()
 		FWreck& Wr = Wrecks.AddDefaulted_GetRef();
 		Wr.Born = SimTime;
 		Wr.Comp = SpawnWreck(this, M.Chassis, M.Wheel[0] >= 0 ? WheelIsms[M.Wheel[0]]->GetStaticMesh() : nullptr,
-			M.FrontX, M.RearX, M.HalfTrack, M.WheelR, Ag.CurPos, Ag.CurRot, Ag.CurRot.GetForwardVector() * Ag.V, Wr.Wheels);
+			M.FrontX, M.RearX, M.HalfTrack, M.WheelR, Ag.CurPos, Ag.CurRot, Ag.CurRot.GetForwardVector() * Ag.V, Wr.Parts);
 		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: player hit car %u at %.0f km/h closing (car %.0f km/h) - now a physics wreck"),
 			Id, H.Value * 0.036f, Ag.V * 0.036f);
 		Agents.RemoveAtSwap(i);
@@ -1828,19 +1840,19 @@ void AODTrafficManager::ProcessHits()
 	// wrecks go once settled (Phase 0 handled the player side)
 	for (int32 w = Wrecks.Num() - 1; w >= 0; --w)
 	{
-		UStaticMeshComponent* C = Wrecks[w].Comp;
+		UBoxComponent* C = Wrecks[w].Comp;
 		const double Age = SimTime - Wrecks[w].Born;
 		if (!C || Age > 20.0 || (Age > 4.0 && C->GetPhysicsLinearVelocity().SizeSquared() < 30.0 * 30.0))
 		{
 			int32 Attached = 0;
-			for (UStaticMeshComponent* Wh : Wrecks[w].Wheels)
+			for (UStaticMeshComponent* Part : Wrecks[w].Parts)
 			{
-				Attached += C && Wh->GetAttachParent() == C ? 1 : 0;
-				Wh->DestroyComponent();
+				Attached += C && Part->GetAttachParent() == C ? 1 : 0;
+				Part->DestroyComponent();
 			}
 			if (C)
 			{
-				UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: wreck cleared after %.1f s, wheels attached %d/%d"), Age, Attached, Wrecks[w].Wheels.Num());
+				UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: wreck cleared after %.1f s, chassis + wheels attached %d/%d"), Age, Attached, Wrecks[w].Parts.Num());
 				C->DestroyComponent();
 			}
 			Wrecks.RemoveAtSwap(w);
@@ -2115,22 +2127,55 @@ bool FODTrafficCollisionCheck::RunTest(const FString& Parameters)
 	Root->RegisterComponent();
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UStaticMesh* Cyl = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	TArray<UStaticMeshComponent*, TInlineAllocator<4>> Wheels;
-	UStaticMeshComponent* Body = SpawnWreck(Owner, Cube, Cyl, 132.0f, -128.0f, 84.0f, 34.0f, FVector(0, 0, 100),
-		FRotator(0, 30, 0).Quaternion(), FVector(1500, 0, 0), Wheels);
+	// a 60 cm wheel under a 100 cm cube: the tyres reach 10 cm below the chassis bbox, as the
+	// real cars' do (floor 8-24 cm under the axle, tyre a wheel radius under it)
+	const float WheelR = 60.0f, FrontX = 132.0f, RearX = -128.0f, HalfTrack = 84.0f;
+	const FVector Pos(0, 0, 100);
+	const FQuat Rot = FRotator(0, 30, 0).Quaternion();
+	TArray<UStaticMeshComponent*, TInlineAllocator<5>> Parts;
+	UBoxComponent* Body = SpawnWreck(Owner, Cube, Cyl, FrontX, RearX, HalfTrack, WheelR, Pos, Rot, FVector(1500, 0, 0), Parts);
 	TestTrue(TEXT("wreck body simulates"), Body->IsSimulatingPhysics());
 	TestTrue(TEXT("wreck body detached from the manager (free body)"), Body->GetAttachParent() == nullptr);
+	TestEqual(TEXT("chassis + four wheels"), Parts.Num(), 5);
+	if (Parts.Num() != 5)
+	{
+		return false;
+	}
+	TestTrue(TEXT("chassis where the car was"), Parts[0]->GetComponentLocation().Equals(Pos, 1.0));
+	for (int32 w = 1; w < 5; ++w)
+	{
+		// the collision box must hold the tyres up, or the wreck rests on its floor with the
+		// wheels sunk into the road
+		const double TyreBottom = Parts[w]->GetRelativeLocation().Z - WheelR;
+		TestTrue(*FString::Printf(TEXT("collision reaches the tyre bottom (%.1f vs %.1f)"), TyreBottom, -Body->GetUnscaledBoxExtent().Z),
+			TyreBottom >= -Body->GetUnscaledBoxExtent().Z - 0.5);
+		// same hub as the live ISM wheel: car transform x (axle x, +-half track, 0)
+		const FVector Hub(w < 3 ? FrontX : RearX, (w % 2 == 1 ? -1.0f : 1.0f) * HalfTrack, 0.0f);
+		TestTrue(TEXT("wheel on the live car's hub"), Parts[w]->GetComponentLocation().Equals(Pos + Rot.RotateVector(Hub), 1.0));
+	}
 	// tumble it: upside down, 40 m away
 	Body->SetWorldLocationAndRotation(FVector(4000, -500, 300), FRotator(170, 75, -60).Quaternion(), false, nullptr, ETeleportType::TeleportPhysics);
 	const FTransform BodyXf = Body->GetComponentTransform();
-	TestEqual(TEXT("four wheels"), Wheels.Num(), 4);
-	for (UStaticMeshComponent* Wh : Wheels)
+	for (UStaticMeshComponent* P : Parts)
 	{
-		const double Drift = FVector::Dist(Wh->GetComponentLocation(), BodyXf.TransformPosition(Wh->GetRelativeLocation()));
-		TestTrue(TEXT("wheel attached to the body"), Wh->GetAttachParent() == Body);
-		TestFalse(TEXT("wheel not simulating"), Wh->IsSimulatingPhysics());
-		TestEqual(TEXT("wheel has no collision"), Wh->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
-		TestTrue(*FString::Printf(TEXT("wheel stays on its hub (drift %.2f cm)"), Drift), Drift < 1.0);
+		const double Drift = FVector::Dist(P->GetComponentLocation(), BodyXf.TransformPosition(P->GetRelativeLocation()));
+		TestTrue(TEXT("part attached to the body"), P->GetAttachParent() == Body);
+		TestFalse(TEXT("part not simulating"), P->IsSimulatingPhysics());
+		TestEqual(TEXT("part has no collision"), P->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+		TestTrue(*FString::Printf(TEXT("part stays on the body (drift %.2f cm)"), Drift), Drift < 1.0);
+		TestTrue(TEXT("part next to the body"), FVector::Dist(P->GetComponentLocation(), BodyXf.GetLocation()) < 400.0);
+		// drawable: registered, visible, a mesh and materials, real scale, no cull distance
+		TestTrue(TEXT("part registered"), P->IsRegistered());
+		TestTrue(TEXT("part visible"), P->IsVisible() && !P->bHiddenInGame);
+		TestTrue(TEXT("part has a mesh"), P->GetStaticMesh() != nullptr);
+		bool bMats = P->GetNumMaterials() > 0;
+		for (int32 i = 0; i < P->GetNumMaterials(); ++i)
+		{
+			bMats &= P->GetMaterial(i) != nullptr;
+		}
+		TestTrue(TEXT("part has materials"), bMats);
+		TestTrue(TEXT("part scale > 0"), P->GetComponentScale().GetMin() > 0.1);
+		TestTrue(TEXT("part never distance-culled"), P->LDMaxDrawDistance == 0.0f && P->CachedMaxDrawDistance == 0.0f);
 	}
 	GEngine->DestroyWorldContext(World);
 	World->DestroyWorld(false);
