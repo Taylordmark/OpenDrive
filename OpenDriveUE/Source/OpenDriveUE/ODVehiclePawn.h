@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
+#include "ODCarPaint.h"
 #include "InputCoreTypes.h"
 #include "ODVehiclePawn.generated.h"
 
@@ -211,6 +212,11 @@ public:
 	 *  SM_CarWheel_real_<Kind> (TyreKind in the .cpp); Stylized keeps the one
 	 *  wheel. Kept across car swaps. */
 	void SetTyreSetup(const FString& SetupName);
+
+	/** Garage paint (4.3, ODCarPaint.h): the current car's, loaded on every car
+	 *  swap; SetPaint applies it live and saves it for this car. */
+	const FODCarPaint& GetPaint() const { return Paint; }
+	void SetPaint(const FODCarPaint& InPaint);
 
 	/** Turntable preview for the car-select menu: freezes physics, levels the
 	 *  car, and detaches the spring-arm yaw so rotating the pawn spins the car
@@ -429,6 +435,10 @@ private:
 	TObjectPtr<UStaticMesh> WheelBaseMesh;
 	FString TyreSetup;
 	void ApplyWheelMeshes();
+
+	FODCarPaint Paint;
+	FString PaintKey = TEXT("Default");   // the current def's asset name: Paint's ini key
+	void ApplyPaint();          // after any mesh swap: PickSlots dropped the MIDs
 
 	/** Holds the Body kinematic (no physics) from spawn until a downward
 	 *  trace confirms where the actual streamed terrain/road is, then

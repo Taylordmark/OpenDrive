@@ -342,7 +342,7 @@ open-world levels, the menu spawns the car at the track start, a loop runs
 laps back to back, and best times save per track. `"road": true` lines
 become new roads via `fetch_osm_network.py` (rebuild the area first).
 
-## Arc 4 — UX (4.1, 4.2, 4.4 done; 4.3 partial)
+## Arc 4 — UX (4.1, 4.2, 4.3 v1, 4.4 done)
 
 - **4.0b** (2026-07-25) `AODMainMenu`: canvas front end with a live showroom
   pawn, map select by town node, and the pause menu.
@@ -432,7 +432,13 @@ become new roads via `fetch_osm_network.py` (rebuild the area first).
 - **4.3:** live car/engine/drivetrain/tuning picker in the garage. Picks
   persist (2f0a03f): `OpenDrive.Car` (VehicleIdx, read by the pawn; EngineIdx,
   DriveIdx, TunePreset) and `OpenDrive.Area`, saved on change, out-of-range
-  values fall back to stock. Cosmetics are still open.
+  values fall back to stock.
+  - Cosmetics v1 (2026-10-16, compiled, not driven): Garage > Paint & Wheels
+    (`ODCarPaint.h`): 14 swatches + hue/saturation/brightness, Gloss/Metallic/
+    Matte/Pearl, Two-Tone/Racing Stripes/Side Stripe with an accent swatch,
+    8 rim finishes. Saved per car (`OpenDrive.Paint`, def asset name), applied
+    as MIDs on the "body"/"rim" slots; `build_car_materials_real.py` params,
+    grime on top. Realistic only.
 - **4.4** (§7.31): settings (11 rows, Off/TSR upscaler) and generated credits
   (30/30). Saved under `OpenDrive.Graphics` and `OpenDrive.Audio`.
 - **UI loose ends** (2026-10-14, compiled, not driven). Pause/settings

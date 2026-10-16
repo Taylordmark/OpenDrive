@@ -1006,6 +1006,14 @@ void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab
 			P.Rect(IX0 + (TX1 - IX0) * Pct - 2.0f * S, CY - 8.0f * S, 4.0f * S, 16.0f * S, bSel ? FLinearColor::White : TextCol);
 			P.Text(Value, IX1 - 26.0f * S, CY, 20.0f, EMenuWeight::SemiBold, ValCol, true);
 		}
+		else if (Value.Len() > 8 && Value[0] == TEXT('#') && Value[7] == TEXT(' '))
+		{
+			// "#RRGGBB Name" (garage Paint screen): a colour chip, then the name
+			const FLinearColor Chip = FLinearColor(FColor::FromHex(Value.Mid(1, 6)));
+			P.Rect(IX0, CY - 9.0f * S, 18.0f * S, 18.0f * S, bSel ? FLinearColor::White : TextCol);
+			P.Rect(IX0 + 2.0f * S, CY - 7.0f * S, 14.0f * S, 14.0f * S, Chip);
+			P.Text(Value.Mid(8), (IX0 + 18.0f * S + IX1) * 0.5f, CY, 22.0f, EMenuWeight::SemiBold, ValCol, true);
+		}
 		else
 		{
 			P.Text(Value, (IX0 + IX1) * 0.5f, CY, 22.0f, EMenuWeight::SemiBold, ValCol, true);

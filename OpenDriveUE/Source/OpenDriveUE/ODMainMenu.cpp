@@ -221,16 +221,18 @@ constexpr double DriveFadeSec = 0.5;           // Drive elsewhere: fade to black
 // Row ids: one global GetRow()/Adjust() switch; each screen's tabs show a slice.
 enum ERow : int32
 {
-	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound,   // Garage
+	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound, RowPaint,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
+	RowColor, RowHue, RowSat, RowVal, RowFinish, RowPattern, RowAccent, RowRims,   // Paint (from Garage)
 	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
 	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
 	RowPick,                                                             // AreaMap: RowPick + i = Picks[i]
 };
 const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // footer Quit
-const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 6}};            // footer Back
+const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 7}};            // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
+const FODMenuTab PaintTabs[] = {{TEXT("PAINT"), RowColor, 8}};            // footer Back
 const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
 // and the AreaMap screen gets a tab per area (green_valley / oahu / ...)
@@ -835,6 +837,7 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 	{
 	case EODMenuScreen::Garage: return GarageTabs;
 	case EODMenuScreen::Sound: return SoundTabs;
+	case EODMenuScreen::Paint: return PaintTabs;
 	case EODMenuScreen::AreaMap: return AreaTabs;
 	case EODMenuScreen::Start: return ConditionsTabs;
 	default: return MainTabs;   // World draws no panel
@@ -852,6 +855,7 @@ FString AODMainMenu::GetScreenTitle() const
 	{
 	case EODMenuScreen::Garage: return TEXT("Garage");
 	case EODMenuScreen::Sound: return TEXT("Exhaust Sound");
+	case EODMenuScreen::Paint: return TEXT("Paint & Wheels");
 	case EODMenuScreen::World:
 	case EODMenuScreen::AreaMap: return bTrackMode ? TEXT("Track Select") : TEXT("Open Drive");
 	case EODMenuScreen::Start: return AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : TEXT("Conditions");
@@ -963,6 +967,7 @@ void AODMainMenu::Activate()
 			break;
 		case RowGarage: SetScreen(EODMenuScreen::Garage, RowCar); break;
 		case RowSound: SetScreen(EODMenuScreen::Sound, RowLoudness); break;
+		case RowPaint: SetScreen(EODMenuScreen::Paint, RowColor); break;
 		case RowSettings:
 			EnsureSettingsMenu();
 			bSettingsOpen = true;
@@ -1021,9 +1026,10 @@ void AODMainMenu::Back()
 	{
 		return;
 	}
-	else if (Screen == EODMenuScreen::Sound)
+	else if (Screen == EODMenuScreen::Sound || Screen == EODMenuScreen::Paint)
 	{
-		SetScreen(EODMenuScreen::Garage, RowSound);   // before the garage-mode resume below
+		// before the garage-mode resume below
+		SetScreen(EODMenuScreen::Garage, Screen == EODMenuScreen::Sound ? RowSound : RowPaint);
 	}
 	else if (bGarageMode)
 	{
@@ -1517,6 +1523,82 @@ void AODMainMenu::OnClick()
 	}
 }
 
+// ---- Paint screen (4.3 cosmetics v1) ---------------------------------------
+
+namespace
+{
+// "#RRGGBB Name": ODRaceHUD draws the colour as a chip before the name
+FString Swatch(const FColor& C, const TCHAR* Name)
+{
+	return FString::Printf(TEXT("#%02X%02X%02X %s"), C.R, C.G, C.B, Name);
+}
+
+template <typename T, int32 N>
+int32 Cycle(int32 Idx, int32 Dir, const T (&)[N]) { return (Idx + Dir + N) % N; }
+
+void PaintRow(const FODCarPaint& P, int32 Row, FString& OutLabel, FString& OutValue)
+{
+	switch (Row)
+	{
+	case RowColor:
+	{
+		OutLabel = TEXT("Color");
+		const int32 W = P.SwatchIdx();
+		OutValue = P.bFactory ? TEXT("Factory") : Swatch(P.BodySrgb(), W == INDEX_NONE ? TEXT("Custom") : ODCarPaint::Swatches[W].Name);
+		break;
+	}
+	case RowHue: OutLabel = TEXT("Hue"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.H / 3.6f)); break;
+	case RowSat: OutLabel = TEXT("Saturation"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.S * 100.0f)); break;
+	case RowVal: OutLabel = TEXT("Brightness"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.V * 100.0f)); break;
+	case RowFinish: OutLabel = TEXT("Finish"); OutValue = ODCarPaint::FinishNames[P.Finish]; break;
+	case RowPattern: OutLabel = TEXT("Pattern"); OutValue = ODCarPaint::PatternNames[P.Pattern]; break;
+	case RowAccent:
+		OutLabel = P.Pattern == 0 ? TEXT("Accent (pick a pattern)") : TEXT("Accent Color");
+		OutValue = Swatch(ODCarPaint::Swatches[P.Accent].Srgb, ODCarPaint::Swatches[P.Accent].Name);
+		break;
+	case RowRims:
+	{
+		OutLabel = TEXT("Rims");
+		const ODCarPaint::FRim& R = ODCarPaint::Rims[P.Rim];
+		OutValue = R.Kind > 0.0f && P.Rim != ODCarPaint::RimBodyColor ? Swatch(R.Srgb, R.Name) : FString(R.Name);
+		break;
+	}
+	default: break;
+	}
+}
+
+void AdjustPaint(FODCarPaint& P, int32 Row, int32 Dir)
+{
+	switch (Row)
+	{
+	case RowColor:
+	{
+		// Factory, then the swatches; a custom colour steps from Factory
+		const int32 W = P.bFactory ? -1 : P.SwatchIdx();
+		const int32 N = UE_ARRAY_COUNT(ODCarPaint::Swatches) + 1;
+		const int32 Next = ((W + 1) + Dir + N) % N - 1;
+		if (Next < 0)
+		{
+			P.bFactory = true;
+		}
+		else
+		{
+			P.SetSrgb(ODCarPaint::Swatches[Next].Srgb);
+		}
+		break;
+	}
+	case RowHue: P.H = FMath::Fmod(P.H + Dir * 10.0f + 360.0f, 360.0f); P.bFactory = false; break;
+	case RowSat: P.S = FMath::Clamp(P.S + Dir * 0.05f, 0.0f, 1.0f); P.bFactory = false; break;
+	case RowVal: P.V = FMath::Clamp(P.V + Dir * 0.05f, 0.0f, 1.0f); P.bFactory = false; break;
+	case RowFinish: P.Finish = Cycle(P.Finish, Dir, ODCarPaint::FinishNames); break;
+	case RowPattern: P.Pattern = Cycle(P.Pattern, Dir, ODCarPaint::PatternNames); break;
+	case RowAccent: P.Accent = Cycle(P.Accent, Dir, ODCarPaint::Swatches); break;
+	case RowRims: P.Rim = Cycle(P.Rim, Dir, ODCarPaint::Rims); break;
+	default: break;
+	}
+}
+}
+
 void AODMainMenu::Adjust(int32 Dir)
 {
 	if (bSettingsOpen)
@@ -1559,6 +1641,15 @@ void AODMainMenu::Adjust(int32 Dir)
 		ExhaustPop = ExhaustPresets[ExhaustPresetIdx].PopProbability;
 		ApplyExhaust();
 		SaveExhaustConfig();
+		break;
+	case RowColor: case RowHue: case RowSat: case RowVal:
+	case RowFinish: case RowPattern: case RowAccent: case RowRims:
+		if (AODVehiclePawn* Pawn = FindPawn())
+		{
+			FODCarPaint P = Pawn->GetPaint();
+			AdjustPaint(P, Selected, Dir);
+			Pawn->SetPaint(P);   // applied live, saved for this car
+		}
 		break;
 	case RowLoudness:
 		// Exhaust Loudness slider - individually adjustable beyond the preset
@@ -2493,6 +2584,17 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 	case RowSound:
 		OutLabel = TEXT("Customize Sound");
 		OutValue.Empty();
+		break;
+	case RowPaint:
+		OutLabel = TEXT("Paint & Wheels");
+		OutValue.Empty();
+		break;
+	case RowColor: case RowHue: case RowSat: case RowVal:
+	case RowFinish: case RowPattern: case RowAccent: case RowRims:
+		if (const AODVehiclePawn* Pawn = FindPawn())
+		{
+			PaintRow(Pawn->GetPaint(), Row, OutLabel, OutValue);
+		}
 		break;
 	case RowLoudness:
 		OutLabel = TEXT("Loudness");

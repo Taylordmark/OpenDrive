@@ -64,6 +64,7 @@ enum class EODMenuScreen : uint8
 	Main,         // Open Drive, Track Select, Garage, Settings, Quit - garage-room backdrop
 	Garage,       // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
 	Sound,        // exhaust sliders, opened from the Garage's "Customize Sound" row - garage room
+	Paint,        // paint, finish, pattern, rims (ODCarPaint.h), from the Garage's "Paint & Wheels" row - garage room
 	World,        // the in-engine globe (AODMenuGlobe) is the view target, pins drawn by the HUD
 	AreaMap,      // top-down on the globe, the area's relief draped; rows = starts or tracks, one tab per nearby area
 	Start,        // the picked start's live vista: Time of Day, Season, Weather, Drive
@@ -72,7 +73,7 @@ enum class EODMenuScreen : uint8
 /**
  * Front-end menu, drawn on canvas by AODRaceHUD (no UMG). Sequential screens:
  * Main -> Open Drive / Track Select -> World -> AreaMap -> Start -> Drive,
- * Main -> Garage (-> Sound) / Settings / Quit; Esc or Back steps back one.
+ * Main -> Garage (-> Sound / Paint) / Settings / Quit; Esc or Back steps back one.
  * Open Drive's globe lists every area, Track Select's only areas with tracks;
  * the AreaMap screen lists its towns (or tracks, best time and line on the map).
  * The backdrop follows the SCREEN, never the row: Main and Garage show the car

@@ -103,6 +103,7 @@ void AODVehiclePawn::EnsureMeshes()
 		{
 			Body->SetStaticMesh(Chassis);
 			ODVisualStyle::PickSlots(Body);
+			Paint.ApplyBody(Body);
 			Body->BodyInstance.bOverrideMass = true;
 			Body->BodyInstance.SetMassOverride(MassKg);
 			Movement->MarkBodyDirty();   // mass/COM re-derived on next tick
@@ -224,6 +225,23 @@ void AODVehiclePawn::ApplyWheelMeshes()
 			WheelVisuals[i]->SetStaticMesh(Wheel);
 			ODVisualStyle::PickSlots(WheelVisuals[i]);
 		}
+		Paint.ApplyRim(WheelVisuals[i]);
+	}
+}
+
+void AODVehiclePawn::SetPaint(const FODCarPaint& InPaint)
+{
+	Paint = InPaint;
+	Paint.Save(PaintKey);
+	ApplyPaint();
+}
+
+void AODVehiclePawn::ApplyPaint()
+{
+	Paint.ApplyBody(Body);
+	for (UStaticMeshComponent* WV : WheelVisuals)
+	{
+		Paint.ApplyRim(WV);
 	}
 }
 
@@ -254,6 +272,10 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 			TEXT("ODVehiclePawn: vehicle '%s' chassis mesh missing - keeping current"),
 			*Def->DisplayName);
 	}
+
+	PaintKey = Def->GetName();
+	Paint = FODCarPaint::Load(PaintKey);
+	ApplyPaint();   // the wheels again below if they swap
 
 	MassKg = Def->MassKg;
 	Movement->ResetDirt();   // a different car starts clean

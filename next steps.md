@@ -249,8 +249,6 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 3. Gameplay and UX
 
-- **4.3 cosmetics v1:** paint color and wraps. Acceptance: 4–6 cars, color
-  choice and preset choice, all persisted.
 - **Stage 3 vehicle work:**
   - retune the five presets on the new physics;
   - make drift a progressive rear breakaway;

@@ -35,6 +35,15 @@ road grime low on the body and behind each wheel, darkened wheel arches and
 underbody, panel-gap lines, rain beads (T_CarRainDrops) on paint and glass,
 mud when wet, and snow on the up-facing panels.
 
+Garage paint (4.3 cosmetics v1, ODCarPaint.h sets these on the player car's
+MIDs; the defaults leave the palette look untouched, so traffic is unchanged):
+  body  PaintColor (rgb, a = 1 replaces the palette colour), AccentColor +
+        PaintPattern (0 none, 1 two-tone above the beltline, 2 twin stripes
+        nose to tail, 3 side stripe), Pearl (view-angle hue shift); the finish
+        is the existing BaseMetallic / BaseRoughness / CoatRoughness / Flake*.
+        Grime, snow and rain beads sit on top as before.
+  rim   RimColor (rgb; a = 0 factory alloy, 1 tinted metal, 2 painted).
+
 Every twin samples T_CarPalette2 through UV0 exactly as its stylized twin
 does (colours stay the palette's) and keeps its parameters; the interface
 check at the end fails the run if one is missing, or the blend mode or
@@ -161,6 +170,10 @@ class G:
         for n, src in inputs.items():
             self.wire(src, c, n)
         return c
+
+    def vparam(self, name, v=(0.0, 0.0, 0.0, 0.0)):
+        return self.node(unreal.MaterialExpressionVectorParameter, parameter_name=name,
+                         default_value=unreal.LinearColor(*v))
 
     def cpd(self, name, index):
         """Per-car state from UODVehicleFX (custom primitive data, 0 when unset)."""
@@ -299,23 +312,47 @@ float gap = 1.0 - side * (0.85 * core + 0.25 * halo);
 """
 
 
+# garage paint over the palette colour (car-local P/N as in CAR); band()
+# edges are 0.5 cm soft so the stripes don't alias
+PAINT = """
+float r = WR > 1.0 ? WR : 34.0;
+float h = P.z + r;
+float ay = abs(P.y);
+float m = 0.0;
+if (Pattern > 0.5 && Pattern < 1.5)                // two-tone: roof and pillars above the beltline
+    m = saturate((h - (2.0 * r + 32.0)) * 2.0);
+else if (Pattern > 1.5 && Pattern < 2.5)           // twin stripes over bonnet, roof and boot
+    m = saturate((ay - 7.0) * 2.0) * saturate((19.0 - ay) * 2.0) * saturate((h - 25.0) * 0.5);
+else if (Pattern > 2.5)                            // side stripe along the flanks
+    m = saturate((h - r - 14.0) * 2.0) * saturate((r + 24.0 - h) * 2.0) * saturate(abs(N.y) * 3.0 - 1.5);
+return lerp(lerp(Pal, Paint.rgb, saturate(PaintA)), Accent.rgb, m);
+"""
+
+
 def body(g):
     st = g.car_state()
     conv = g.node(unreal.MaterialExpressionSubstrateMetalnessToDiffuseAlbedoF0)
-    g.wire(g.palette(), conv, "BaseColor")
+    paint = g.vparam("PaintColor")
+    paint_col = g.custom(PAINT, F3, P=g.local_pos(), N=g.true_local_normal(), Pal=g.palette(),
+                         Paint=paint, PaintA=(paint, "A"), Accent=g.vparam("AccentColor"),
+                         Pattern=g.param("PaintPattern", 0.0), WR=st["WR"])
+    g.wire(paint_col, conv, "BaseColor")
     g.wire(g.param("BaseMetallic", 0.6), conv, "Metallic")
     g.wire(g.const(0.5), conv, "Specular")
     code = FRAME + CAR + BEAD + FLAKE + GAPS + """
 float k = 1.0 - max(grime, snow);              // bare paint left
 float occ = ao * gap;
-F0o = lerp(F0 * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 - k);
+// pearl: the colour slides toward its neighbour hue at grazing angles
+float pe = Pearl * pow(1.0 - saturate(abs(dot(normalize(NW), V))), 2.0);
+float3 Alb2 = lerp(Alb, Alb.brg * 0.8 + Alb * 0.2, pe);
+F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 - k);
 Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
 CoatR = lerp(CoatR0 * lerp(0.7, 1.6, fm) + 0.12 * Dirt, CoatR0 * 0.6, Wet);
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
 // tangent-space tilt under the coat; any tangent basis will do for random flakes
 BotN = normalize(float3(fd.xy * Strength, 1.0));
-return lerp(lerp(Alb * occ, dirtCol * ao, grime), 0.85, snow);
+return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), 0.85, snow);
 """
     O = [("F0o", F3), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3), ("BotN", F3)]
     c = g.custom(code, F3, outputs=O, P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(),
@@ -323,7 +360,9 @@ return lerp(lerp(Alb * occ, dirtCol * ao, grime), 0.85, snow);
                  Alb=(conv, "DiffuseAlbedo"), F0=(conv, "F0"),
                  Scale=g.param("FlakeScale", 0.25), Macro=g.param("MacroScale", 0.004),
                  Sparkle=g.param("FlakeSparkle", 0.3), BaseR=g.param("BaseRoughness", 0.38),
-                 CoatR0=g.param("CoatRoughness", 0.035), Strength=g.param("FlakeStrength", 0.35), **st)
+                 CoatR0=g.param("CoatRoughness", 0.035), Strength=g.param("FlakeStrength", 0.35),
+                 Pearl=g.param("Pearl", 0.0), V=g.node(unreal.MaterialExpressionCameraVectorWS),
+                 NW=g.node(unreal.MaterialExpressionVertexNormalWS), **st)
     slab = g.node(unreal.MaterialExpressionSubstrateSimpleClearCoatBSDF, x=-150)
     g.wire(c, slab, "Diffuse Albedo")
     for out, pin in (("F0o", "F0"), ("Rough", "Roughness"), ("Cov", "Clear Coat Coverage"),
@@ -468,22 +507,26 @@ float r = length(P.xz);
 float lip = step(LipR, r);
 float hub = 1.0 - step(HubR, r);
 float ring = frac(sin(floor(r * 6.0) * 12.9898) * 43758.5453) * saturate(1.0 - Dist / 800.0);
-float3 alb = saturate(Pal * 1.5) * (0.92 + 0.08 * ring);
-float rgh = lerp(R + 0.08 * ring, 0.08, lip);
-alb = lerp(alb, Pal * 0.35, hub);
+float painted = saturate(RimA - 1.0);             // garage rim colour: 1 tinted metal, 2 painted
+float3 base = lerp(saturate(Pal * 1.5), Rim.rgb, saturate(RimA));
+float3 alb = base * (0.92 + 0.08 * ring * (1.0 - painted));
+float rgh = lerp(lerp(R + 0.08 * ring, 0.3, painted), 0.08, lip);
+alb = lerp(alb, lerp(Pal, base, saturate(RimA)) * 0.35, hub);
 rgh = lerp(rgh, 0.45, hub);
 float bd = Dirt * (0.45 + 0.55 * saturate(1.0 - (r - 8.0) / 14.0));
 alb = lerp(alb, float3(0.09, 0.075, 0.06), 0.8 * bd);
 Rough = lerp(rgh, 0.7, 0.8 * bd);
-MetalO = (1.0 - 0.7 * bd) * (1.0 - 0.5 * hub);
+MetalO = (1.0 - 0.7 * bd) * (1.0 - 0.5 * hub) * lerp(1.0, 1.0 - 0.9 * painted, 1.0 - lip);
 return alb;
 """
 
 
 def rim(g):
     st = g.car_state(wheel=True)
+    rim_col = g.vparam("RimColor")
     c = g.custom(RIM, F3, outputs=[("Rough", F1), ("MetalO", F1)], P=g.local_pos(), Dist=g.cam_dist(),
                  Pal=g.palette(), R=g.param("Roughness", 0.2), Dirt=st["Dirt"],
+                 Rim=rim_col, RimA=(rim_col, "A"),
                  LipR=g.param("RimLipRadius", WHEEL_SHAPE["RimLipRadius"]),
                  HubR=g.param("HubRadius", WHEEL_SHAPE["HubRadius"]))
     g.pin(c, MP.MP_BASE_COLOR)
