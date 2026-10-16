@@ -24,6 +24,9 @@ struct FParsedBuilding
 	// pitched roofs (building_roofs.py): vertices from here on are the gable
 	// end walls, which get vertex alpha 0 (no windows)
 	int32 NumSolidVerts = MAX_int32;
+	// landmarks (pipeline/build_landmarks.py): the material seed byte (vertex
+	// G, picks the paint) chosen by the pipeline; -1 = hashed from the centroid
+	int16 SeedByte = -1;
 };
 
 /** One parsed tile file's worth of buildings - the off-thread output of

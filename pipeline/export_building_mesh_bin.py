@@ -45,20 +45,23 @@ SRC = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "building_mesh.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
 
+def pack_tile(buildings, gen_id_bytes):
+    """One ODU4 tile's bytes (build_landmarks.py embeds these too)."""
+    out = [b"ODU4", gen_id_bytes, struct.pack("<I", len(buildings))]
+    for b in buildings:
+        verts, uvs, tris = b["vertices"], b["uvs"], b["triangles"]
+        vcount, tcount = len(verts) // 3, len(tris) // 3
+        assert len(uvs) // 2 == vcount, f"{b['name']}: uv/vertex count mismatch"
+        out.append(struct.pack("<IIBBBBBBBI", vcount, tcount, b["wall_set"], b["flat_roof"], b["roof_set"],
+                               *b["roof_rgb"], b["facade"], b["n_solid"]))
+        out.append(struct.pack(f"<{len(verts)}f", *verts))
+        out.append(struct.pack(f"<{len(uvs)}f", *uvs))
+        out.append(struct.pack(f"<{len(tris)}I", *tris))
+    return b"".join(out)
+
+
 def write_tile(path, buildings, gen_id_bytes):
-    with open(path, "wb") as f:
-        f.write(b"ODU4")
-        f.write(gen_id_bytes)
-        f.write(struct.pack("<I", len(buildings)))
-        for b in buildings:
-            verts, uvs, tris = b["vertices"], b["uvs"], b["triangles"]
-            vcount, tcount = len(verts) // 3, len(tris) // 3
-            assert len(uvs) // 2 == vcount, f"{b['name']}: uv/vertex count mismatch"
-            f.write(struct.pack("<IIBBBBBBBI", vcount, tcount, b["wall_set"], b["flat_roof"], b["roof_set"],
-                                *b["roof_rgb"], b["facade"], b["n_solid"]))
-            f.write(struct.pack(f"<{len(verts)}f", *verts))
-            f.write(struct.pack(f"<{len(uvs)}f", *uvs))
-            f.write(struct.pack(f"<{len(tris)}I", *tris))
+    Path(path).write_bytes(pack_tile(buildings, gen_id_bytes))
 
 
 def main():
