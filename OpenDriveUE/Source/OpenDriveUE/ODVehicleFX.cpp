@@ -266,7 +266,8 @@ void UODVehicleFX::PushCarState()
 	// and foliage: season cover, or fresh roadside snow at full by 15 cm
 	const float Snow = FMath::Max(SeasonCtl.IsValid() ? SeasonCtl->SnowCover : 0.0f,
 		Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f);
-	const float State[6] = { Move->GetDirt(), Wx ? Wx->Wetness : 0.0f, Snow,
+	const bool bOut = !(Wx && Wx->IsIndoors());   // the garage shows the car clean and dry
+	const float State[6] = { bOut ? Move->GetDirt() : 0.0f, Wx && bOut ? Wx->Wetness : 0.0f, bOut ? Snow : 0.0f,
 		Move->GetWheelAttachXY(0).X, Move->GetWheelAttachXY(2).X, Move->GetWheelRadius(0) };
 
 	TInlineComponentArray<UStaticMeshComponent*> Meshes(Owner);

@@ -646,7 +646,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	const AODWeatherController* Weather = WeatherCtl.Get();
 	const float Precip = Weather ? Weather->PrecipIntensity : 0.0f;
-	const bool bVisible = Precip > 0.02f && CamMgr != nullptr;
+	const bool bVisible = Precip > 0.02f && CamMgr != nullptr && !(Weather && Weather->IsIndoors());
 	if (SnowFxHism->IsVisible() != bVisible)
 	{
 		SnowFxHism->SetVisibility(bVisible);
@@ -735,4 +735,13 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		}
 		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
 	}
+}
+
+void AODSeasonController::HidePrecipFx()
+{
+	if (SnowFxHism)
+	{
+		SnowFxHism->SetVisibility(false);
+	}
+	bSnowFxCentered = false;
 }

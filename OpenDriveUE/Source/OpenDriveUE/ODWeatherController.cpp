@@ -16,6 +16,7 @@
 #include "ODForestManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
+#include "ODVehicleFX.h"
 #include "ODVehiclePawn.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -457,7 +458,10 @@ void AODWeatherController::Tick(float DeltaSeconds)
 			FMath::Lerp(HURR_VIS_M[0], HURR_VIS_M[1], E) * FMath::Lerp(1.0f, HURR_GUST_VIS, Gust), A);
 	}
 	TickTornado(DeltaSeconds);
-	TickLens(DeltaSeconds);
+	if (!bIndoors)
+	{
+		TickLens(DeltaSeconds);
+	}
 
 	// Snow/sleet wet the road too (slush) - W3 decides grip per PrecipType.
 	Wetness = PrecipIntensity > 0.05f
@@ -714,6 +718,31 @@ void AODWeatherController::TickTornado(float DeltaSeconds)
 		const FVector Off(FMath::Cos(A) * OrbitM, FMath::Sin(A) * OrbitM, FMath::Lerp(2.0f, 80.0f, U2 * U2));
 		DebrisISM->UpdateInstanceTransform(j, FTransform(FRotator(FunnelSpin * 97.0f * U1, FunnelSpin * 131.0f * U2, 0.0f),
 			Off * 100.0f, FVector(FMath::Lerp(0.6f, 2.5f, U3))), false, j == DEBRIS_COUNT - 1, true);
+	}
+}
+
+void AODWeatherController::SetIndoors(bool bOn)
+{
+	bIndoors = bOn;
+	if (bOn)
+	{
+		LensDrops.Reset();
+		if (LensISM)
+		{
+			LensISM->SetVisibility(false);
+		}
+	}
+	// the garage may pause the world (pause menu > Garage): apply now, not on the next tick
+	for (TActorIterator<AODSeasonController> It(GetWorld()); It && bOn; ++It)
+	{
+		It->HidePrecipFx();
+	}
+	if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+	{
+		if (UODVehicleFX* Fx = Player->FindComponentByClass<UODVehicleFX>())
+		{
+			Fx->PushCarState();
+		}
 	}
 }
 

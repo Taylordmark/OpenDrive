@@ -69,11 +69,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Garage")
 	float HexRadiusCm = 70.0f;
 
-	/** Fraction of HexRadiusCm actually drawn (< 1 leaves a visible gap
-	 *  between neighboring tiles so they read as separate panels instead of
-	 *  one solid glowing ceiling). */
+	/** Inner edge of each hex's lit outline as a fraction of HexRadiusCm: the
+	 *  ceiling glows along the hex edges (Taylor, 2026-10-16) and the tile
+	 *  centres stay dark. Two neighbours' bands meet on their shared edge, so
+	 *  a line is 2 * (1 - this) * HexRadiusCm wide. */
 	UPROPERTY(EditAnywhere, Category = "Garage")
-	float HexFillRatio = 0.88f;
+	float HexFillRatio = 0.95f;
 
 	/** Move the room to sit around this world point - see class comment for
 	 *  why Center should be the current showroom pivot

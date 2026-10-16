@@ -650,7 +650,7 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 	{
 		FlashAge += DeltaSeconds;
 	}
-	if (Weather.State == EODWeatherState::Thunderstorm && Weather.PrecipIntensity > 0.5f)
+	if (Weather.State == EODWeatherState::Thunderstorm && Weather.PrecipIntensity > 0.5f && !Weather.IsIndoors())
 	{
 		StrikeCountdown -= DeltaSeconds;
 		if (StrikeCountdown <= 0.0f)

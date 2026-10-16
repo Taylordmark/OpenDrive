@@ -215,6 +215,12 @@ public:
 	 *  negative releases the hold. -odsnowdepth=cm, "od.Weather Depth <cm|Auto>". */
 	void SetSnowDepth(float Cm);
 
+	/** The garage room is up (AODGarageEnvironment::SetActive): no falling
+	 *  precipitation, lens drops, rain sound, lightning or car grime/wet/snow.
+	 *  The weather itself keeps running underneath. */
+	void SetIndoors(bool bOn);
+	bool IsIndoors() const { return bIndoors; }
+
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float CloudCover = 0.1f;
 
@@ -329,4 +335,5 @@ private:
 	float RampT = 1.0f;
 	float HoldLeft = 0.0f;
 	bool bForced = false;
+	bool bIndoors = false;
 };

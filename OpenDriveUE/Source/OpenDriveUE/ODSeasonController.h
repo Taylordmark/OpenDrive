@@ -59,6 +59,9 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
+	/** Hide the falling precipitation now (garage, even with the world paused). */
+	void HidePrecipFx();
+
 	/** Real seconds each season holds stable before transitioning. */
 	UPROPERTY(EditAnywhere, Category = "Season")
 	float HoldSeconds = 2700.0f;

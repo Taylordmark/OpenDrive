@@ -66,6 +66,9 @@ public:
 	 *  ground, m/s. Wetness: AODWeatherController::Wetness, 0..1. */
 	static FODFxRates Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness);
 
+	/** Grime/wet/snow + axles into the car meshes' custom primitive data. */
+	void PushCarState();
+
 private:
 	struct FPuff
 	{
@@ -81,7 +84,6 @@ private:
 		const FVector& Fwd, float Tau);
 	void Integrate(FPuff& P, float Dt) const;
 	void Draw(bool bAnyLive);
-	void PushCarState();
 
 	UPROPERTY()
 	TObjectPtr<UInstancedStaticMeshComponent> Pool;
