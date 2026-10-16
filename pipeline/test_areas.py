@@ -107,6 +107,20 @@ AREAS = {
         max_building_levels=6,
     ),
 
+    # Breckenridge, CO (2026-10-15) - Taylor's "just breckenridge in a 5 mile
+    # radius" small-batch test: a summit_county slice (8 km square around
+    # town) for profiling and checking pipeline speed-ups before a full
+    # summit/Oahu rebake. Origin 3000 m is a round datum near the summit
+    # stations within 8 km (2810..3534 m), not a z12 read; elev range as
+    # summit_county. Bake with OD_AREA=breckenridge.
+    "breckenridge": dict(
+        bbox_snwe=(39.410, -106.065, 39.554, -105.878),
+        background_bbox_snwe=(39.31, -106.165, 39.654, -105.778),
+        origin_height_m=3000.0,
+        elev_plausible_m=(1800.0, 4600.0),
+        max_building_levels=6,
+    ),
+
     # Russian Hill, San Francisco (2026-10-02) - Taylor's junction-pad test:
     # steep parallel streets that flatten at the cross streets. 2x2 blocks
     # (Union/Filbert/Greenwich x Hyde/Leavenworth/Jones) plus ~50 m of

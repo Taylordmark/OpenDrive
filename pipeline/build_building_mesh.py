@@ -163,7 +163,8 @@ REGION_PALETTE = {
                     apartments=[2, 3, 5, 4, 2], civic=[5, 4, 0, 2], church=[5, 0, 2], mid=[2, 3, 5, 4],
                     low=[2, 2, 6, 6, 5, 3]),
 }
-AREA_REGION = {"oahu": "tropical", "green_valley": "socal", "sf_russian_hill": "sf", "summit_county": "rockies"}
+AREA_REGION = {"oahu": "tropical", "green_valley": "socal", "sf_russian_hill": "sf", "summit_county": "rockies",
+               "breckenridge": "rockies"}
 HIGH_RISE_LEVELS = 8
 
 
