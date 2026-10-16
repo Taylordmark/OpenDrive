@@ -137,6 +137,8 @@ public:
 	/** True while the outdoor area vista (not the garage room) is on screen -
 	 *  the HUD moves the panel right and drops its dim. Start only. */
 	bool IsVistaShown() const { return ShownVista != INDEX_NONE; }
+	/** HUD mouse drag in the garage room: turn the car on the spot (2026-10-16). */
+	void SpinShowroomCar(float DeltaDeg);
 	/** Start screen still on the globe, waiting for the vista to stream. */
 	bool IsStartLoading() const { return Screen == EODMenuScreen::Start && bGlobeView; }
 	FString GetScreenTitle() const;

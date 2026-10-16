@@ -161,8 +161,8 @@ private:
 	 *  (value between clickable arrows, % values as sliders) and the footer
 	 *  button. bRight mirrors it to the right edge (Scene vista). Sub: a dim
 	 *  line under the title. Rows past the screen height scroll (MenuScrollTop)
-	 *  to keep Selected in view (2026-10-14). */
-	void DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+	 *  to keep Selected in view (2026-10-14). Returns the Y under the footer. */
+	float DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
 		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight,
 		const FString& Sub = FString()) const;
 	/** Settings, or its Key Bindings / Credits sub-screen - drawn INSTEAD of

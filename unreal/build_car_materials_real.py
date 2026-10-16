@@ -8,11 +8,9 @@ Style = Realistic. Stylized assets are only read, never touched (V4).
   M_Car<Cat>_real      instances of those, rougher where faceted Standard
                        meshes would turn a mirror finish into a disco ball
 
-  body    Substrate Simple Clear Coat: glossy coat over a metallic base whose
-          bottom normal is tilted per flake (T_CarFlake, triplanar in local
-          space so the flakes ride with the car; the palette UVs are one
-          point per colour cell and can't tile). Coat roughness varies with
-          the flake texture's low-frequency alpha.
+  body    Substrate Simple Clear Coat: smooth glossy coat over a metallic
+          base. No flake texture: at any strength it read as a grainy
+          texture on the paint, not smooth paint (Taylor 2026-10-16).
   glass   dark tinted translucent, Fresnel opacity (reflective at grazing),
           forward-shaded surface so it gets real specular.
   lights  glossy lens + the exact lamp emissive of apply_car_lights_material.py
@@ -40,7 +38,7 @@ MIDs; the defaults leave the palette look untouched, so traffic is unchanged):
   body  PaintColor (rgb, a = 1 replaces the palette colour), AccentColor +
         PaintPattern (0 none, 1 two-tone above the beltline, 2 twin stripes
         nose to tail, 3 side stripe), Pearl (view-angle hue shift); the finish
-        is the existing BaseMetallic / BaseRoughness / CoatRoughness / Flake*.
+        is the existing BaseMetallic / BaseRoughness / CoatRoughness.
         Grime, snow and rain beads sit on top as before.
   rim   RimColor (rgb; a = 0 factory alloy, 1 tinted metal, 2 painted).
 
@@ -292,17 +290,6 @@ float4 dr = Texture2DSampleLevel(Drops, DropsSampler, P.yz * 0.05, mip) * w.x
 float bead = dr.a * saturate(Wet * 1.5) * saturate(N.z + 0.7);
 """
 
-# local-space triplanar of T_CarFlake: xyz = flake direction (-1..1) at
-# FlakeScale, w = low-frequency noise at MacroScale (both per cm)
-FLAKE = """
-float4 f = Texture2DSample(Flake, FlakeSampler, P.yz * Scale) * w.x
-         + Texture2DSample(Flake, FlakeSampler, P.xz * Scale) * w.y
-         + Texture2DSample(Flake, FlakeSampler, P.xy * Scale) * w.z;
-float fm = Texture2DSampleLevel(Flake, FlakeSampler, P.yz * Macro, 0).a * w.x
-         + Texture2DSampleLevel(Flake, FlakeSampler, P.xz * Macro, 0).a * w.y
-         + Texture2DSampleLevel(Flake, FlakeSampler, P.xy * Macro, 0).a * w.z;
-float3 fd = f.rgb * 2.0 - 1.0;
-"""
 # panel gaps: door shuts and bumper splits on the flanks, placed from the
 # axles (a line ~0.4 cm wide that fades to its coverage when sub-pixel)
 GAPS = """
@@ -343,35 +330,30 @@ def body(g):
     g.wire(paint_col, conv, "BaseColor")
     g.wire(g.param("BaseMetallic", 0.6), conv, "Metallic")
     g.wire(g.const(0.5), conv, "Specular")
-    code = FRAME + CAR + BEAD + FLAKE + GAPS + """
+    code = FRAME + CAR + BEAD + GAPS + """
 float k = 1.0 - max(grime, snow);              // bare paint left
 float occ = ao * gap;
 // pearl: the colour slides toward its neighbour hue at grazing angles
 float pe = Pearl * pow(1.0 - saturate(abs(dot(normalize(NW), V))), 2.0);
 float3 Alb2 = lerp(Alb, Alb.brg * 0.8 + Alb * 0.2, pe);
-F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 - k)
-     + snow * 0.5 * pow(saturate(fd.z), 24.0);   // ice-crystal glints
+F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * occ, 0.04, 1.0 - k);
 Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
-CoatR = lerp(CoatR0 * lerp(0.9, 1.15, fm) + 0.12 * Dirt, CoatR0 * 0.6, Wet);   // faint orange peel, not blotches
+CoatR = lerp(CoatR0 + 0.12 * Dirt, CoatR0 * 0.6, Wet);
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
-// tangent-space tilt under the coat; any tangent basis will do for random flakes
-BotN = normalize(float3(fd.xy * Strength, 1.0));
 return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
 """
-    O = [("F0o", F3), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3), ("BotN", F3)]
+    O = [("F0o", F3), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3)]
     c = g.custom(code, F3, outputs=O, P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(),
                  Flake=g.tex(flake), Drops=g.tex(drops_tex),
                  Alb=(conv, "DiffuseAlbedo"), F0=(conv, "F0"),
-                 Scale=g.param("FlakeScale", 0.25), Macro=g.param("MacroScale", 0.004),
-                 Sparkle=g.param("FlakeSparkle", 0.12), BaseR=g.param("BaseRoughness", 0.38),
-                 CoatR0=g.param("CoatRoughness", 0.035), Strength=g.param("FlakeStrength", 0.12),
+                 BaseR=g.param("BaseRoughness", 0.38), CoatR0=g.param("CoatRoughness", 0.035),
                  Pearl=g.param("Pearl", 0.0), V=g.node(unreal.MaterialExpressionCameraVectorWS),
                  NW=g.node(unreal.MaterialExpressionVertexNormalWS), **st)
     slab = g.node(unreal.MaterialExpressionSubstrateSimpleClearCoatBSDF, x=-150)
     g.wire(c, slab, "Diffuse Albedo")
     for out, pin in (("F0o", "F0"), ("Rough", "Roughness"), ("Cov", "Clear Coat Coverage"),
-                     ("CoatR", "Clear Coat Roughness"), ("TopN", "Normal"), ("BotN", "Bottom Normal")):
+                     ("CoatR", "Clear Coat Roughness"), ("TopN", "Normal")):
         g.wire((c, out), slab, pin)
     g.pin(slab, MP.MP_FRONT_MATERIAL)
 

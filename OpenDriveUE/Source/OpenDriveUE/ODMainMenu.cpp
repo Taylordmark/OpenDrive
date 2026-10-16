@@ -2477,6 +2477,15 @@ void AODMainMenu::UpdateScene()
 	}
 }
 
+void AODMainMenu::SpinShowroomCar(float DeltaDeg)
+{
+	AODVehiclePawn* Pawn = FindPawn();
+	if (Pawn && !IsVistaShown() && Stage == EODMenuStage::Menu)
+	{
+		Pawn->AddActorWorldRotation(FRotator(0.0f, DeltaDeg, 0.0f));
+	}
+}
+
 AODGarageEnvironment* AODMainMenu::EnsureGarageEnvironment()
 {
 	if (GarageEnv.IsValid())

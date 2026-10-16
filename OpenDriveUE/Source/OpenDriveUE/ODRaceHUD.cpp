@@ -868,7 +868,6 @@ void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 		DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame, !bOverMap);
 		return;
 	}
-	bGlobeDrag = false;
 	if (Menu && Menu->GetScreen() == EODMenuScreen::Paint && !Menu->IsSettingsOpen())
 	{
 		HandlePickerMouse();
@@ -876,6 +875,35 @@ void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 	else
 	{
 		PickerDrag = 0;
+	}
+	// garage room (2026-10-16): a drag off the menu (left on empty space, or
+	// right anywhere) turns the car; bGlobeDrag doubles as the drag latch
+	if (Menu && !Menu->IsVistaShown() && Menu->GetScreen() != EODMenuScreen::Start && !Menu->IsSettingsOpen()
+		&& PC && PC->bShowMouseCursor && PC->GetMousePosition(Mx, My))
+	{
+		const bool bOverUi = PickerDrag != 0 || (PickerSV.bIsValid && Menu->GetScreen() == EODMenuScreen::Paint
+			&& (PickerSV.IsInside(FVector2D(Mx, My)) || PickerHue.IsInside(FVector2D(Mx, My))))
+			|| MenuHits.ContainsByPredicate([&](const FODMenuHit& H) { return Mx >= H.X0 && Mx < H.X1 && My >= H.Y0 && My < H.Y1; });
+		if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+		{
+			bGlobeDrag = !bOverUi;
+		}
+		else if (PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = true;
+		}
+		else if (!PC->IsInputKeyDown(EKeys::LeftMouseButton) && !PC->IsInputKeyDown(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = false;
+		}
+		else if (bGlobeDrag && GFrameCounter - LastMenuMouseFrame <= 1)
+		{
+			Menu->SpinShowroomCar((Mx - LastMenuMouse.X) * 0.4f);
+		}
+	}
+	else
+	{
+		bGlobeDrag = false;
 	}
 	DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame);
 }
@@ -1057,7 +1085,7 @@ void AODRaceHUD::DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float
 	AddMenuHit(FODMenuHit::Row, Id, -1, X, Y, W, H);
 }
 
-void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+float AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
 	int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight,
 	const FString& Sub) const
 {
@@ -1138,6 +1166,7 @@ void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab
 	FString FootLabel, FootValue;
 	GetRow(Footer, FootLabel, FootValue);
 	DrawMenuFooter(FootLabel, Footer, Selected == Footer, X, Y + 22.0f * S, W);
+	return Y + (22.0f + FooterH) * S;
 }
 
 void AODRaceHUD::DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const
@@ -1544,14 +1573,14 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		{
 			DrawAreaMap(Menu);
 		}
-		DrawMenuPanel(Title, Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
+		const float PanelBottom = DrawMenuPanel(Title, Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista,
 			bAreaMap ? Menu->GetAreaBlurb() : FString());
 		const float HX = MenuX(bVista, ColW * S);
 		if (Screen == EODMenuScreen::Paint)
 		{
-			// beside the panel, on the side away from the screen edge (picker is 322 wide)
-			DrawColorPicker(bVista ? HX - 362.0f * S : HX + (ColW + 40.0f) * S, 215.0f * S);
+			// under the rows in the menu column, clear of the car (Taylor 2026-10-16)
+			DrawColorPicker(HX + 10.0f * S, PanelBottom + 34.0f * S);
 		}
 		if (Screen == EODMenuScreen::Main)
 		{

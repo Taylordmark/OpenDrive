@@ -164,13 +164,9 @@ struct FODCarPaint
 		const float BaseR = Parent(TEXT("BaseRoughness")), CoatR = Parent(TEXT("CoatRoughness"));
 		//                          Gloss  Metallic                          Matte                      Pearl
 		const float Metal[] =     { 0.0f,  Parent(TEXT("BaseMetallic")),    0.15f,                     0.3f };
-		const float Sparkle[] =   { 0.0f,  Parent(TEXT("FlakeSparkle")),    0.03f,                     0.25f };
-		const float Strength[] =  { 0.0f,  Parent(TEXT("FlakeStrength")),   0.05f,                     0.2f };
 		const float Rough[] =     { BaseR, BaseR,                           FMath::Max(BaseR, 0.55f),  BaseR };
 		const float Coat[] =      { CoatR, CoatR,                           FMath::Max(CoatR, 0.45f),  CoatR };
 		MID->SetScalarParameterValue(TEXT("BaseMetallic"), Metal[Finish]);
-		MID->SetScalarParameterValue(TEXT("FlakeSparkle"), Sparkle[Finish]);
-		MID->SetScalarParameterValue(TEXT("FlakeStrength"), Strength[Finish]);
 		MID->SetScalarParameterValue(TEXT("BaseRoughness"), Rough[Finish]);
 		MID->SetScalarParameterValue(TEXT("CoatRoughness"), Coat[Finish]);
 		MID->SetScalarParameterValue(TEXT("Pearl"), Finish == 3 ? 1.0f : 0.0f);
