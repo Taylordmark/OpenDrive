@@ -95,6 +95,7 @@ private:
 		float Lat = 0.0f;         // lateral offset (cm, + = right), eased
 		float V0Factor = 1.0f;    // 0.9..1.1 of the limit
 		float StopTime = 0.0f;    // seconds stood at a stop line
+		double HoldUntil = 0.0;   // bumped by the player: stands until this sim time
 		uint32 Seed = 0;
 		uint8 Lane = 0;           // 0 = kerb lane
 		uint8 Model = 0;
@@ -127,6 +128,7 @@ private:
 	struct FWreck
 	{
 		UStaticMeshComponent* Comp = nullptr;
+		TArray<UStaticMeshComponent*, TInlineAllocator<4>> Wheels;   // attached to Comp
 		double Born = 0.0;
 	};
 
@@ -206,7 +208,7 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<UBoxComponent>> Boxes;
 	TArray<int32> BoxAgent;        // agent Id per box, -1 = parked
-	TArray<uint32> HitIds;
+	TMap<uint32, float> HitClosing;   // agent Id -> worst closing speed this frame (cm/s)
 	TArray<FWreck> Wrecks;
 	TWeakObjectPtr<UPrimitiveComponent> HookedPlayerBody;
 
