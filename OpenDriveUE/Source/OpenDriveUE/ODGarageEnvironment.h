@@ -7,6 +7,7 @@
 class UStaticMeshComponent;
 class UDynamicMeshComponent;
 class UPointLightComponent;
+class URectLightComponent;
 class UBoxReflectionCaptureComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
@@ -122,6 +123,8 @@ private:
 	TObjectPtr<UPointLightComponent> FillLightA;
 	UPROPERTY()
 	TObjectPtr<UPointLightComponent> FillLightB;
+	UPROPERTY()
+	TObjectPtr<URectLightComponent> CeilingLight;
 	UPROPERTY()
 	TObjectPtr<UBoxReflectionCaptureComponent> ReflectionCapture;
 

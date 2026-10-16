@@ -144,13 +144,17 @@ struct FODCarPaint
 
 	void ApplyBody(UMeshComponent* Body) const
 	{
+		const FLinearColor PaintColor = bFactory ? FLinearColor::Transparent : FLinearColor(BodySrgb()).CopyWithNewOpacity(1.0f);
+		if (UMaterialInstanceDynamic* Trim = SlotMID(Body, TEXT("plastic")))
+		{
+			Trim->SetVectorParameterValue(TEXT("PaintColor"), PaintColor);   // the car-colour lower band
+		}
 		UMaterialInstanceDynamic* MID = SlotMID(Body, TEXT("body"));
 		if (!MID || !MID->Parent)
 		{
 			return;
 		}
-		MID->SetVectorParameterValue(TEXT("PaintColor"),
-			bFactory ? FLinearColor::Transparent : FLinearColor(BodySrgb()).CopyWithNewOpacity(1.0f));
+		MID->SetVectorParameterValue(TEXT("PaintColor"), PaintColor);
 		MID->SetVectorParameterValue(TEXT("AccentColor"), FLinearColor(ODCarPaint::Swatches[Accent].Srgb));
 		MID->SetScalarParameterValue(TEXT("PaintPattern"), Pattern);
 

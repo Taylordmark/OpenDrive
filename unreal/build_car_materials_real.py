@@ -40,6 +40,7 @@ MIDs; the defaults leave the palette look untouched, so traffic is unchanged):
         nose to tail, 3 side stripe), Pearl (view-angle hue shift); the finish
         is the existing BaseMetallic / BaseRoughness / CoatRoughness.
         Grime, snow and rain beads sit on top as before.
+  plastic PaintColor too: the car-colour lower band follows a custom paint.
   rim   RimColor (rgb; a = 0 factory alloy, 1 tinted metal, 2 painted).
 
 Every twin samples T_CarPalette2 through UV0 exactly as its stylized twin
@@ -368,6 +369,12 @@ float3 alb = saturate(Pal * Tint) * ao;
 float rgh = R;
 float met = M0;
 """ + ("""
+// custom garage paint also recolours the car-colour lower band (the body's
+// "dark" palette cells 1/3/5/7/9 sit on this slot at about half the body's
+// value): without it the super's yellow sill stayed under any paint
+float cell = floor(UV.x * 23.0);                  // N_CELL, pipeline/make_car_meshes.py
+float band = (cell == 1.0 || cell == 3.0 || cell == 5.0 || cell == 7.0 || cell == 9.0) ? 1.0 : 0.0;
+alb = lerp(alb, Paint.rgb * 0.5 * ao, band * saturate(PaintA));
 float front = saturate(N.x * 4.0 - 2.8) * step(xf + 0.3 * r, P.x) * step(8.0, h);
 float2 q = P.yz / 2.2, s = float2(1.0, 1.7320508);
 float2 a = (frac(q / s) - 0.5) * s, b = (frac((q - 0.5 * s) / s) - 0.5) * s;
@@ -383,9 +390,14 @@ Rough = lerp(lerp(rgh, 0.85, grime), 0.75, snow);
 MetalO = met * (1.0 - k);
 return lerp(lerp(alb, dirtCol * ao, grime), snowCol, snow);
 """
+        extra = {}
+        if grille:
+            paint = g.vparam("PaintColor")
+            extra = dict(UV=g.node(unreal.MaterialExpressionTextureCoordinate), Paint=paint, PaintA=(paint, "A"))
         c = g.custom(code, F3, outputs=[("Rough", F1), ("MetalO", F1)],
                      P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(), Flake=g.tex(flake),
-                     Pal=g.palette(), Tint=g.const(tint), R=g.param("Roughness", rough), M0=g.const(metal), **st)
+                     Pal=g.palette(), Tint=g.const(tint), R=g.param("Roughness", rough), M0=g.const(metal),
+                     **extra, **st)
         g.pin(c, MP.MP_BASE_COLOR)
         g.pin((c, "Rough"), MP.MP_ROUGHNESS)
         g.pin((c, "MetalO"), MP.MP_METALLIC)

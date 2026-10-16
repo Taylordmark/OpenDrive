@@ -4,6 +4,7 @@
 #include "Components/DirectionalLightComponent.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/RectLightComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -160,6 +161,23 @@ void AODGarageEnvironment::BuildRoom()
 		FVector(RoomHalfExtentCm * 0.35f, RoomHalfExtentCm * 0.35f, RoomHeightCm - 40.0f));
 	FillLightB = MakeFillLight(TEXT("FillLightB"),
 		FVector(-RoomHalfExtentCm * 0.35f, -RoomHalfExtentCm * 0.35f, RoomHeightCm - 40.0f));
+
+	// ---- ceiling light (2026-10-16): the old filled hex tiles (77% of the
+	// ceiling at ~10 nits) lit the car's top through Lumen; the outline-only
+	// ceiling (~10%) left roof and bonnet black. This stands in for the old
+	// panels: same area, luminance and colour, I = L * A = 10 * 0.77 * A cd.
+	CeilingLight = NewObject<URectLightComponent>(this, TEXT("CeilingLight"));
+	CeilingLight->SetupAttachment(Root);
+	CeilingLight->SetMobility(EComponentMobility::Movable);
+	CeilingLight->SetRelativeLocationAndRotation(FVector(0, 0, RoomHeightCm - 10.0f), FRotator(-90.0f, 0.0f, 0.0f));
+	const float Side = 2.0f * (RoomHalfExtentCm - HexRadiusCm);
+	CeilingLight->SetSourceWidth(Side);
+	CeilingLight->SetSourceHeight(Side);
+	CeilingLight->SetIntensityUnits(ELightUnits::Candelas);
+	CeilingLight->SetIntensity(10.0f * 0.77f * FMath::Square(Side / 100.0f));
+	CeilingLight->SetLightColor(FLinearColor(0.75f, 0.85f, 1.0f));
+	CeilingLight->AttenuationRadius = RoomHalfExtentCm * 2.5f;
+	CeilingLight->RegisterComponent();
 
 	// ---- reflection capture: lets the glossy floor actually pick up the
 	// car/hex-ceiling instead of relying on SSR alone (which can't reflect
