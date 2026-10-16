@@ -6,10 +6,13 @@
 #include "Components/BoxComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
@@ -54,6 +57,84 @@ constexpr int32 NumBoxes = 12;
 constexpr int32 NumPassBy = 4;
 constexpr float BoxRangeCm = 6000.0f;
 constexpr float PassByRangeCm = 6000.0f;
+// a player contact wrecks a car only past this closing speed along the contact
+// normal; slower is a bump that stops it (2026-10-16 drive: 0-6 km/h touches wrecked)
+constexpr float WreckClosingCmS = 25.0f / 0.036f;
+constexpr float BumpHoldS = 3.0f;              // a bumped car stands this long
+constexpr float ContactGapCm = 50.0f;          // hard floor on the bumper gap to anything ahead
+constexpr float NeighbourCm = 1500.0f;         // any-link look-ahead (merges, junctions, lane entry)
+constexpr float CarHalfWidthCm = 190.0f;       // centre-to-centre lateral clearance of two cars
+
+/** Closing speed along the contact normal: a sideswipe at speed is a scrape, not a wreck. */
+float ClosingCmS(const FVector& PlayerVel, const FVector& CarVel, const FVector& Normal)
+{
+	const FVector Rel = PlayerVel - CarVel;
+	return Normal.IsNearlyZero() ? Rel.Size() : FMath::Abs(FVector::DotProduct(Rel, Normal.GetSafeNormal()));
+}
+
+/** P sits in the corridor ahead of a car at Pos / Rot; OutAlong = centre-to-centre distance. */
+bool InCorridor(const FVector& Pos, const FQuat& Rot, const FVector& P, double Range, double HalfW, double& OutAlong)
+{
+	const FVector D = P - Pos;
+	OutAlong = FVector::DotProduct(D, Rot.GetForwardVector());
+	return FMath::Abs(D.Z) < 400.0 && OutAlong > 0.0 && OutAlong < Range
+		&& FMath::Abs(FVector::DotProduct(D, Rot.GetRightVector())) < HalfW;
+}
+
+/** B (any link) blocks A: in A's corridor, not oncoming; when each is in the other's corridor
+ *  (a merge, two noses at one point) only the higher id yields, so nobody deadlocks. */
+bool Blocks(const FVector& PA, const FQuat& RA, uint32 IdA, const FVector& PB, const FQuat& RB, uint32 IdB, double& OutAlong)
+{
+	double Back;
+	return InCorridor(PA, RA, PB, NeighbourCm, CarHalfWidthCm, OutAlong)
+		&& FVector::DotProduct(RA.GetForwardVector(), RB.GetForwardVector()) > -0.7
+		&& !(IdA < IdB && InCorridor(PB, RB, PA, NeighbourCm, CarHalfWidthCm, Back));
+}
+
+/** One fixed step of the IDM integration with a hard no-contact floor: IDM's braking is
+ *  capped at MaxDecel, so a cut-in / merge / spawn inside its stopping distance used to
+ *  drive straight into the car ahead. CarGap is the bumper gap at the step start. */
+void Advance(float& S, float& V, float A, float Dt, float CarGap, float LeaderV)
+{
+	const float NewV = FMath::Max(0.0f, V + A * Dt);
+	const float Adv = 0.5f * (V + NewV) * Dt;
+	const float Room = FMath::Max(0.0f, CarGap - ContactGapCm);
+	S += FMath::Min(Adv, Room);
+	V = Adv > Room ? FMath::Min(NewV, FMath::Max(LeaderV, 0.0f)) : NewV;
+}
+
+/** A physics wreck of a traffic car, wheels attached (no collision, so never welded or
+ *  simulated on their own) so they ride the body wherever it tumbles. */
+UStaticMeshComponent* SpawnWreck(AActor* Owner, UStaticMesh* Chassis, UStaticMesh* Wheel, float FrontX, float RearX,
+	float HalfTrack, float WheelR, const FVector& Pos, const FQuat& Rot, const FVector& Vel,
+	TArray<UStaticMeshComponent*, TInlineAllocator<4>>& OutWheels)
+{
+	UStaticMeshComponent* W = NewObject<UStaticMeshComponent>(Owner);
+	W->SetupAttachment(Owner->GetRootComponent());
+	W->SetMobility(EComponentMobility::Movable);
+	W->SetStaticMesh(Chassis);
+	W->SetWorldLocationAndRotation(Pos, Rot);
+	W->SetCollisionProfileName(TEXT("PhysicsActor"));
+	W->RegisterComponent();
+	ODVisualStyle::PickSlots(W);
+	for (int32 w = 0; Wheel && w < 4; ++w)
+	{
+		UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(Owner);
+		C->SetupAttachment(W);
+		C->SetMobility(EComponentMobility::Movable);
+		C->SetStaticMesh(Wheel);
+		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetRelativeLocation(FVector(w < 2 ? FrontX : RearX, (w % 2 == 0 ? -1.0f : 1.0f) * HalfTrack, 0.0f));
+		C->SetRelativeScale3D(FVector(WheelR / TrafficWheelMeshRadiusCm));
+		C->RegisterComponent();
+		ODVisualStyle::PickSlots(C);
+		OutWheels.Add(C);
+	}
+	W->SetMassOverrideInKg(NAME_None, 1400.0f, true);
+	W->SetSimulatePhysics(true);
+	W->SetPhysicsLinearVelocity(Vel);
+	return W;
+}
 
 // D3: the five traffic bodies (AODVehiclePawn's own defs; road cars, no prototypes)
 const TCHAR* const ModelDefs[] = {
@@ -569,6 +650,9 @@ void AODTrafficManager::BeginPlay()
 		Box->SetupAttachment(RootComponent);
 		Box->SetMobility(EComponentMobility::Movable);
 		Box->SetCollisionProfileName(TEXT("BlockAll"));
+		// kinematic boxes teleport along with the cars: blocking wrecks drove them
+		// through the wreck and flung it into the next car and the furniture
+		Box->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
 		Box->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Box->SetCanEverAffectNavigation(false);
 		Box->RegisterComponent();
@@ -1247,6 +1331,22 @@ void AODTrafficManager::Step(float Dt)
 	RebuildOrder();
 	TArray<int32> Remove;
 	const double Despawn2 = (double)DespawnRadiusCm * DespawnRadiusCm;
+	// any-link neighbours: the lane graph only sees this link and the next, so a
+	// merge, a junction crossing or a short link let cars drive into each other
+	TMap<FIntPoint, TArray<int32, TInlineAllocator<8>>> Cells;
+	auto CellOf = [](const FVector& P) { return FIntPoint(FMath::FloorToInt(P.X / NeighbourCm), FMath::FloorToInt(P.Y / NeighbourCm)); };
+	for (int32 i = 0; i < Agents.Num(); ++i)
+	{
+		Cells.FindOrAdd(CellOf(Agents[i].CurPos)).Add(i);
+	}
+	TArray<FVector, TInlineAllocator<16>> WreckPos;
+	for (const FWreck& Wr : Wrecks)
+	{
+		if (Wr.Comp)
+		{
+			WreckPos.Add(Wr.Comp->GetComponentLocation());
+		}
+	}
 	for (int32 i = 0; i < Agents.Num(); ++i)
 	{
 		FAgent& Ag = Agents[i];
@@ -1262,18 +1362,51 @@ void AODTrafficManager::Step(float Dt)
 		float Gap, LV;
 		FindLeader(i, Ag.Lane, Gap, LV);
 
-		// the player as a leader: in this lane's corridor, ahead
-		const FVector D = PlayerPos - Ag.CurPos;
-		if (D.SizeSquared() < 15000.0 * 15000.0 && FMath::Abs(D.Z) < 400.0)
+		// the player, wrecks and any-link neighbours as leaders: in this lane's corridor, ahead
+		const FVector F = Ag.CurRot.GetForwardVector();
+		auto Lead = [&](double Along, const FVector& Vel)
 		{
-			const FVector F = Ag.CurRot.GetForwardVector(), R = Ag.CurRot.GetRightVector();
-			const double Along = FVector::DotProduct(D, F);
-			if (Along > 0.0 && FMath::Abs(FVector::DotProduct(D, R)) < 220.0 && Along - CarLenCm < Gap)
+			if (Along - CarLenCm < Gap)
 			{
 				Gap = Along - CarLenCm;
-				LV = FMath::Max(0.0, FVector::DotProduct(PlayerVel, F));
+				LV = FMath::Max(0.0, FVector::DotProduct(Vel, F));
+			}
+		};
+		double Along;
+		if (InCorridor(Ag.CurPos, Ag.CurRot, PlayerPos, 15000.0, 220.0, Along))
+		{
+			Lead(Along, PlayerVel);
+		}
+		for (const FVector& P : WreckPos)
+		{
+			if (InCorridor(Ag.CurPos, Ag.CurRot, P, 15000.0, 220.0, Along))
+			{
+				Lead(Along, FVector::ZeroVector);
 			}
 		}
+		const FIntPoint C0 = CellOf(Ag.CurPos);
+		for (int32 dy = -1; dy <= 1; ++dy)
+		{
+			for (int32 dx = -1; dx <= 1; ++dx)
+			{
+				if (const auto* Cell = Cells.Find(C0 + FIntPoint(dx, dy)))
+				{
+					for (int32 j : *Cell)
+					{
+						const FAgent& B = Agents[j];
+						if (j != i && Blocks(Ag.CurPos, Ag.CurRot, Ag.Id, B.CurPos, B.CurRot, B.Id, Along))
+						{
+							Lead(Along, B.CurRot.GetForwardVector() * B.V);
+						}
+					}
+				}
+			}
+		}
+		if (SimTime < Ag.HoldUntil)
+		{
+			Lead(CarLenCm, FVector::ZeroVector);   // bumped: stand
+		}
+		const float CarGap = Gap, CarV = LV;   // stop lines below are targets, not contacts
 
 		const float DistEnd = L.Length - Ag.S;
 		auto StopAt = [&](float Dist)
@@ -1378,9 +1511,7 @@ void AODTrafficManager::Step(float Dt)
 		}
 
 		Ag.A = Idm(Ag.V, V0, Gap, LV);
-		const float NewV = FMath::Max(0.0f, Ag.V + Ag.A * Dt);
-		Ag.S += 0.5f * (Ag.V + NewV) * Dt;
-		Ag.V = NewV;
+		Advance(Ag.S, Ag.V, Ag.A, Dt, CarGap, CarV);
 
 		while (Ag.S >= G.Links[Ag.Link].Length)
 		{
@@ -1578,39 +1709,47 @@ void AODTrafficManager::OnPlayerHit(UPrimitiveComponent* HitComp, AActor* OtherA
 		return;
 	}
 	const int32 b = Boxes.IndexOfByKey(Cast<UBoxComponent>(OtherComp));
-	if (b != INDEX_NONE && BoxAgent[b] >= 0)
+	if (b == INDEX_NONE || BoxAgent[b] < 0)
 	{
-		HitIds.AddUnique((uint32)BoxAgent[b]);
+		return;
 	}
+	const uint32 Id = (uint32)BoxAgent[b];
+	const FAgent* Ag = Agents.FindByPredicate([Id](const FAgent& A) { return A.Id == Id; });
+	if (!Ag)
+	{
+		return;
+	}
+	// PlayerVel was read in this (pre-physics) tick, so it is the speed going into the contact
+	float& Worst = HitClosing.FindOrAdd(Id, 0.0f);
+	Worst = FMath::Max(Worst, ClosingCmS(PlayerVel, Ag->CurRot.GetForwardVector() * Ag->V, Hit.ImpactNormal));
 }
 
 void AODTrafficManager::ProcessHits()
 {
-	for (uint32 Id : HitIds)
+	for (const TPair<uint32, float>& H : HitClosing)
 	{
+		const uint32 Id = H.Key;
 		const int32 i = Agents.IndexOfByPredicate([Id](const FAgent& A) { return A.Id == Id; });
 		if (i == INDEX_NONE)
 		{
 			continue;
 		}
-		const FAgent& Ag = Agents[i];
+		FAgent& Ag = Agents[i];
+		if (H.Value < WreckClosingCmS)
+		{
+			Ag.HoldUntil = SimTime + BumpHoldS;   // a bump: the car stops, the player bounces off
+			continue;
+		}
 		const FModel& M = Models[Ag.Model];
-		UStaticMeshComponent* W = NewObject<UStaticMeshComponent>(this);
-		W->SetupAttachment(RootComponent);
-		W->SetMobility(EComponentMobility::Movable);
-		W->SetStaticMesh(M.Chassis);
-		W->SetWorldLocationAndRotation(Ag.CurPos, Ag.CurRot);
-		W->SetCollisionProfileName(TEXT("PhysicsActor"));
-		W->RegisterComponent();
-		ODVisualStyle::PickSlots(W);
-		W->SetMassOverrideInKg(NAME_None, 1400.0f, true);
-		W->SetSimulatePhysics(true);
-		W->SetPhysicsLinearVelocity(Ag.CurRot.GetForwardVector() * Ag.V);
-		Wrecks.Add({W, SimTime});
-		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: player hit car %u at %.0f km/h - now a physics wreck"), Id, Ag.V * 0.036f);
+		FWreck& Wr = Wrecks.AddDefaulted_GetRef();
+		Wr.Born = SimTime;
+		Wr.Comp = SpawnWreck(this, M.Chassis, M.Wheel[0] >= 0 ? WheelIsms[M.Wheel[0]]->GetStaticMesh() : nullptr,
+			M.FrontX, M.RearX, M.HalfTrack, M.WheelR, Ag.CurPos, Ag.CurRot, Ag.CurRot.GetForwardVector() * Ag.V, Wr.Wheels);
+		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: player hit car %u at %.0f km/h closing (car %.0f km/h) - now a physics wreck"),
+			Id, H.Value * 0.036f, Ag.V * 0.036f);
 		Agents.RemoveAtSwap(i);
 	}
-	HitIds.Reset();
+	HitClosing.Reset();
 	// wrecks go once settled (Phase 0 handled the player side)
 	for (int32 w = Wrecks.Num() - 1; w >= 0; --w)
 	{
@@ -1618,8 +1757,15 @@ void AODTrafficManager::ProcessHits()
 		const double Age = SimTime - Wrecks[w].Born;
 		if (!C || Age > 20.0 || (Age > 4.0 && C->GetPhysicsLinearVelocity().SizeSquared() < 30.0 * 30.0))
 		{
+			int32 Attached = 0;
+			for (UStaticMeshComponent* Wh : Wrecks[w].Wheels)
+			{
+				Attached += C && Wh->GetAttachParent() == C ? 1 : 0;
+				Wh->DestroyComponent();
+			}
 			if (C)
 			{
+				UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: wreck cleared after %.1f s, wheels attached %d/%d"), Age, Attached, Wrecks[w].Wheels.Num());
 				C->DestroyComponent();
 			}
 			Wrecks.RemoveAtSwap(w);
@@ -1810,4 +1956,88 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 			WheelIsms.Num() && WheelIsms[0]->GetInstanceCount() ? *FString::Printf(TEXT("%s visible %d"), *WheelIsms[0]->GetStaticMesh()->GetName(), WheelIsms[0]->IsVisible()) : TEXT("-"));
 		PeakMs = 0.0f;
 	}
+}
+
+// ---- headless self-check ---------------------------------------------------
+// UnrealEditor-Cmd OpenDriveUE.uproject -ExecCmds="Automation RunTests
+// OpenDrive.Traffic;Quit" -unattended -nullrhi -testexit="Automation Test Queue Empty"
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FODTrafficCollisionCheck, "OpenDrive.Traffic.Collisions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FODTrafficCollisionCheck::RunTest(const FString& Parameters)
+{
+	// ---- wreck threshold: closing speed along the contact normal ----
+	const FVector X(1, 0, 0), Y(0, 1, 0);
+	auto Kmh = [](float K) { return K / 0.036f; };
+	TestFalse(TEXT("0 km/h touch"), ClosingCmS(FVector::ZeroVector, FVector::ZeroVector, X) >= WreckClosingCmS);
+	TestFalse(TEXT("6 km/h nudge into a parked car"), ClosingCmS(X * Kmh(6), FVector::ZeroVector, -X) >= WreckClosingCmS);
+	TestFalse(TEXT("rear-end 15 km/h faster"), ClosingCmS(X * Kmh(65), X * Kmh(50), -X) >= WreckClosingCmS);
+	TestFalse(TEXT("80 km/h sideswipe of a 40 km/h car"), ClosingCmS(X * Kmh(80), X * Kmh(40), Y) >= WreckClosingCmS);
+	TestTrue(TEXT("30 km/h into a parked car"), ClosingCmS(X * Kmh(30), FVector::ZeroVector, -X) >= WreckClosingCmS);
+	TestTrue(TEXT("head-on 30 + 30"), ClosingCmS(X * Kmh(30), -X * Kmh(30), -X) >= WreckClosingCmS);
+	TestTrue(TEXT("no normal: full relative speed"), ClosingCmS(X * Kmh(56), FVector::ZeroVector, FVector::ZeroVector) >= WreckClosingCmS);
+
+	// ---- spacing: 90 km/h, a stopped car cuts in 3 m ahead, IDM braking saturated ----
+	float S = 0.0f, V = Kmh(90), MinGap = 1.0e9f;
+	const float LeaderS = CarLenCm + 300.0f;
+	for (int32 k = 0; k < 100; ++k)
+	{
+		Advance(S, V, -MaxDecel * 100.0f, StepS, LeaderS - S - CarLenCm, 0.0f);
+		MinGap = FMath::Min(MinGap, LeaderS - S - CarLenCm);
+	}
+	AddInfo(FString::Printf(TEXT("cut-in at 90 km/h: min bumper gap %.0f cm, end speed %.1f cm/s"), MinGap, V));
+	TestTrue(TEXT("cut-in never closes past the contact floor"), MinGap >= ContactGapCm - 0.01f);
+	TestEqual(TEXT("cut-in ends stopped"), V, 0.0f);
+	float S2 = 0.0f, V2 = 1000.0f;
+	Advance(S2, V2, 100.0f, StepS, 1.0e9f, 0.0f);
+	TestEqual(TEXT("free road: plain trapezoid step"), S2, 0.5f * (1000.0f + 1005.0f) * StepS, 1e-3f);
+
+	// ---- any-link neighbours ----
+	const FQuat East = FQuat::Identity, North = FRotator(0, 90, 0).Quaternion(), West = FRotator(0, 180, 0).Quaternion();
+	double Along;
+	TestTrue(TEXT("car stopped 8 m ahead on another link"), Blocks(FVector::ZeroVector, East, 1, FVector(800, 0, 0), East, 2, Along));
+	TestFalse(TEXT("adjacent lane (3.5 m) is not in the way"), Blocks(FVector::ZeroVector, East, 1, FVector(600, 350, 0), East, 2, Along));
+	TestFalse(TEXT("oncoming lane is not in the way"), Blocks(FVector::ZeroVector, East, 1, FVector(800, 100, 0), West, 2, Along));
+	TestTrue(TEXT("car crossing 6 m ahead"), Blocks(FVector::ZeroVector, East, 1, FVector(600, 50, 0), North, 2, Along));
+	// a 60 degree merge, noses level: each is in the other's corridor, exactly one yields
+	const FQuat In = FRotator(0, 60, 0).Quaternion();
+	const FVector PB(100, -150, 0);
+	const bool bAB = Blocks(FVector::ZeroVector, East, 7, PB, In, 9, Along);
+	const bool bBA = Blocks(PB, In, 9, FVector::ZeroVector, East, 7, Along);
+	TestTrue(TEXT("merge: exactly one car yields"), bAB != bBA);
+
+	// ---- wheels ride a wreck ----
+	// (a test world's physics scene doesn't step headless, so the body is moved the way the
+	// physics sync moves a simulating component: a teleporting transform update)
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
+	FWorldContext& Ctx = GEngine->CreateNewWorldContext(EWorldType::Game);
+	Ctx.SetCurrentWorld(World);
+	World->InitializeActorsForPlay(FURL());
+	World->BeginPlay();
+	AActor* Owner = World->SpawnActor<AActor>();
+	USceneComponent* Root = NewObject<USceneComponent>(Owner);
+	Owner->SetRootComponent(Root);
+	Root->RegisterComponent();
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UStaticMesh* Cyl = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	TArray<UStaticMeshComponent*, TInlineAllocator<4>> Wheels;
+	UStaticMeshComponent* Body = SpawnWreck(Owner, Cube, Cyl, 132.0f, -128.0f, 84.0f, 34.0f, FVector(0, 0, 100),
+		FRotator(0, 30, 0).Quaternion(), FVector(1500, 0, 0), Wheels);
+	TestTrue(TEXT("wreck body simulates"), Body->IsSimulatingPhysics());
+	TestTrue(TEXT("wreck body detached from the manager (free body)"), Body->GetAttachParent() == nullptr);
+	// tumble it: upside down, 40 m away
+	Body->SetWorldLocationAndRotation(FVector(4000, -500, 300), FRotator(170, 75, -60).Quaternion(), false, nullptr, ETeleportType::TeleportPhysics);
+	const FTransform BodyXf = Body->GetComponentTransform();
+	TestEqual(TEXT("four wheels"), Wheels.Num(), 4);
+	for (UStaticMeshComponent* Wh : Wheels)
+	{
+		const double Drift = FVector::Dist(Wh->GetComponentLocation(), BodyXf.TransformPosition(Wh->GetRelativeLocation()));
+		TestTrue(TEXT("wheel attached to the body"), Wh->GetAttachParent() == Body);
+		TestFalse(TEXT("wheel not simulating"), Wh->IsSimulatingPhysics());
+		TestEqual(TEXT("wheel has no collision"), Wh->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+		TestTrue(*FString::Printf(TEXT("wheel stays on its hub (drift %.2f cm)"), Drift), Drift < 1.0);
+	}
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
+	return true;
 }
