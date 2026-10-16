@@ -551,6 +551,46 @@ void UODVehicleMovement::AsyncPhysicsTickComponent(float DeltaTime, float SimTim
 	}
 }
 
+// Ground under one wheel. CenterLen = strut top -> wheel centre along -Up.
+// Tyre-sized sphere first (2026-10-16, Taylor: roads "very difficult to get
+// back on to"): a ray only sees a step once the hub is over it, so the tyre
+// sank into the road edge and the body wedged; the sphere's front face meets
+// the edge first and the spring lifts the wheel onto it. Normal (not
+// ImpactNormal) so an edge hit counts by its contact direction rather than
+// the vertical face it touched. A wall, a start-penetrating sphere or a miss
+// falls back to the ray. Only ground counts (2026-10-06, PLAN-REALISM.md
+// Phase 0): a car on its side, or nosed up a building, would otherwise
+// push/climb off the wall - nothing drivable is steeper than ~60 deg. Abs()
+// so a flipped-winding ground mesh still reads as ground.
+static bool ProbeWheelGround(const UWorld* World, const FVector& Start, const FVector& Up,
+	float RestLen, float Radius, const FCollisionQueryParams& Query, FHitResult& Hit, float& CenterLen)
+{
+	FHitResult Line;
+	const bool bLine = World->LineTraceSingleByChannel(Line, Start,
+		Start - Up * (RestLen + Radius), ECC_Visibility, Query)
+		&& FMath::Abs(Line.ImpactNormal.Z) > 0.5f;
+	FHitResult Sweep;
+	if (World->SweepSingleByChannel(Sweep, Start, Start - Up * RestLen, FQuat::Identity,
+			ECC_Visibility, FCollisionShape::MakeSphere(Radius), Query)
+		&& !Sweep.bStartPenetrating && FMath::Abs(Sweep.Normal.Z) > 0.5f)
+	{
+		if (!Sweep.PhysMaterial.IsValid() && bLine)
+		{
+			Sweep.PhysMaterial = Line.PhysMaterial;   // trimesh sweeps may not resolve it
+		}
+		Hit = Sweep;
+		CenterLen = Sweep.Distance;
+		return true;
+	}
+	if (bLine)
+	{
+		Hit = Line;
+		CenterLen = Line.Distance - Radius;
+		return true;
+	}
+	return false;
+}
+
 void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 {
 	const FTransform Xf = Body->GetComponentTransform();
@@ -580,19 +620,10 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 
 		const FVector Start = Xf.TransformPosition(W.Attach);
 		FHitResult Hit;
-		// only ground counts (2026-10-06, PLAN-REALISM.md Phase 0): a car on
-		// its side, or nosed up a building, casts these rays INTO the wall,
-		// and the springs plus driven tires then pushed/climbed off it - the
-		// tumble half of "hit a building, launched". Nothing drivable is
-		// steeper than ~60 deg. Abs() so a flipped-winding ground mesh still
-		// reads as ground.
-		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start,
-			Start - Up * (RestLen + W.Radius), ECC_Visibility, Query)
-			&& FMath::Abs(Hit.ImpactNormal.Z) > 0.5f;
-		if (bHit)
+		float CenterLen = 0.0f;
+		if (ProbeWheelGround(GetWorld(), Start, Up, RestLen, W.Radius, Query, Hit, CenterLen))
 		{
-			const float NewLen =
-				FMath::Clamp(Hit.Distance - W.Radius, 0.0f, RestLen);
+			const float NewLen = FMath::Clamp(CenterLen, 0.0f, RestLen);
 			const float ComprRate = (W.SpringLen - NewLen) / Dt;   // cm/s
 			W.SpringLen = NewLen;
 			// bump stop: the tyre top past BumpTravelCm over the authored
@@ -646,13 +677,12 @@ void UODVehicleMovement::PrimeSuspension()
 		W.Radius = W.BaseRadius * TireDiameterScale;
 		const FVector Start = Xf.TransformPosition(W.Attach);
 		FHitResult Hit;
-		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start,
-			Start - Up * (RestLen + W.Radius), ECC_Visibility, Query);
-		if (bHit)
+		float CenterLen = 0.0f;
+		if (ProbeWheelGround(GetWorld(), Start, Up, RestLen, W.Radius, Query, Hit, CenterLen))
 		{
 			// set the length directly - no ComprRate derived from this, so
 			// there's nothing here for a stale prior value to corrupt
-			W.SpringLen = FMath::Clamp(Hit.Distance - W.Radius, 0.0f, RestLen);
+			W.SpringLen = FMath::Clamp(CenterLen, 0.0f, RestLen);
 			W.bInContact = true;
 			W.ContactPoint = Hit.ImpactPoint;
 			W.Surface = Hit.PhysMaterial;
