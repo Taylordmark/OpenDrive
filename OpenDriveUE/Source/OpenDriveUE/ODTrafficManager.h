@@ -84,6 +84,7 @@ private:
 		uint32 Id = 0;
 		int32 Link = -1;
 		int32 Next = -1;          // chosen successor link, -1 = none
+		int32 Prev = -1;          // link it came from (pose looks back across the junction)
 		float S = 0.0f;           // cm from the link start
 		float V = 0.0f;           // cm/s
 		float A = 0.0f;           // cm/s^2, last step
@@ -96,6 +97,9 @@ private:
 		bool bCleared = false;    // may enter the junction at the link end
 		FVector PrevPos = FVector::ZeroVector, CurPos = FVector::ZeroVector;
 		FQuat PrevRot = FQuat::Identity, CurRot = FQuat::Identity;
+		FVector2f Approach = FVector2f::ZeroVector;   // heading into the current junction cluster
+		FTransform Shown;         // last rendered transform (ISM motion vectors)
+		bool bShown = false;
 	};
 
 	// components below are owned (outer = this, registered), so plain pointers are GC-safe
@@ -140,7 +144,7 @@ private:
 	bool SpawnAgent(int32 Link, float S, uint8 Lane, float V, uint32 Seed);
 	int32 PickNext(FAgent& Ag);
 	float TargetPerCm(int32 Link, float* OutSpeedCmS = nullptr) const;
-	FVector PosAt(int32 Link, float S, int32 Next) const;
+	FVector PosAt(int32 Link, float S, int32 Next, int32 Prev = -1) const;
 	void Pose(const FAgent& Ag, FVector& OutPos, FQuat& OutRot) const;
 	float LaneLat(int32 Link, uint8 Lane) const;
 	float Idm(float V, float V0, float Gap, float LeaderV) const;
@@ -187,6 +191,7 @@ private:
 	TArray<TObjectPtr<UInstancedStaticMeshComponent>> WheelIsms;
 	TArray<FModel> Models;
 	TArray<TArray<FTransform>> BodyXf, BrakeXf, WheelXf;
+	TArray<TArray<FTransform>> BodyPrevXf, BrakePrevXf, WheelPrevXf;
 	bool bNightLights = false;
 	bool bLightsSet = false;
 

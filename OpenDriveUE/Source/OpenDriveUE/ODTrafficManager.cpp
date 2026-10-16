@@ -49,7 +49,7 @@ constexpr float ClusterCm = 2000.0f;           // export_road_centerline_bin.JUN
 constexpr float ClusterDzCm = 500.0f;
 constexpr float CarLenCm = CarLength * 100.0f;
 constexpr float StopLineCm = 150.0f;           // stop this far before the junction node
-constexpr float ReferenceWheelMeshRadiusCm = 34.0f;   // ODVehiclePawn.cpp
+constexpr float TrafficWheelMeshRadiusCm = 34.0f;   // ODVehiclePawn.cpp
 constexpr int32 NumBoxes = 12;
 constexpr int32 NumPassBy = 4;
 constexpr float BoxRangeCm = 6000.0f;
@@ -499,7 +499,7 @@ TSharedPtr<FODTrafficGraph, ESPMode::ThreadSafe> LoadGraph(const FString& GraphP
 	return GP;
 }
 
-void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf)
+void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf, const TArray<FTransform>& PrevXf)
 {
 	if (!Ism)
 	{
@@ -517,7 +517,11 @@ void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf)
 	}
 	if (Have > 0 && Xf.Num() > 0)
 	{
-		Ism->BatchUpdateInstancesTransforms(0, TArrayView<const FTransform>(Xf.GetData(), FMath::Min(Have, Xf.Num())), true, true, true);
+		// each car's own last-frame transform: instance slots reshuffle as cars
+		// come and go or swap to the brake-lamp ISM, and teleporting every frame
+		// left moving traffic with no velocity, so TSR smeared it (flicker)
+		const int32 N = FMath::Min(Have, Xf.Num());
+		Ism->BatchUpdateInstancesTransforms(0, TArray<FTransform>(Xf.GetData(), N), TArray<FTransform>(PrevXf.GetData(), N), true, true, false);
 	}
 	if (Have < Xf.Num())
 	{
@@ -644,6 +648,7 @@ void AODTrafficManager::BuildModels()
 			Ism->SetCanEverAffectNavigation(false);
 			Ism->SetCastShadow(bShadow);
 			Ism->SetCullDistances(0, (int32)CullCm);
+			Ism->SetHasPerInstancePrevTransforms(true);
 			Ism->RegisterComponent();
 			ODVisualStyle::PickSlots(Ism);
 			return Ism;
@@ -800,13 +805,18 @@ float AODTrafficManager::TargetPerCm(int32 Link, float* OutSpeedCmS) const
 	return TargetK[Link];
 }
 
-FVector AODTrafficManager::PosAt(int32 Link, float S, int32 Next) const
+FVector AODTrafficManager::PosAt(int32 Link, float S, int32 Next, int32 Prev) const
 {
 	const FODTrafficGraph& G = *Graph;
 	if (S > G.Links[Link].Length && Next >= 0)
 	{
 		S -= G.Links[Link].Length;
 		Link = Next;
+	}
+	else if (S < 0.0f && Prev >= 0)
+	{
+		S += G.Links[Prev].Length;
+		Link = Prev;
 	}
 	const FODTrafficGraph::FLink& L = G.Links[Link];
 	S = FMath::Clamp(S, 0.0f, L.Length);
@@ -820,7 +830,9 @@ FVector AODTrafficManager::PosAt(int32 Link, float S, int32 Next) const
 void AODTrafficManager::Pose(const FAgent& Ag, FVector& OutPos, FQuat& OutRot) const
 {
 	const FVector P = PosAt(Ag.Link, Ag.S, Ag.Next);
-	FVector F = PosAt(Ag.Link, Ag.S + 300.0f, Ag.Next) - PosAt(Ag.Link, Ag.S - 300.0f, Ag.Next);
+	// heading over +-3 m spanning the junction both ways, so a turn eases in
+	// instead of snapping the car (and its lane offset) round at the node
+	FVector F = PosAt(Ag.Link, Ag.S + 300.0f, Ag.Next) - PosAt(Ag.Link, Ag.S - 300.0f, Ag.Next, Ag.Prev);
 	if (F.SizeSquared() < 1.0)
 	{
 		F = FVector(1, 0, 0);
@@ -936,6 +948,13 @@ bool AODTrafficManager::JunctionClear(int32 Cluster, int32 SelfLink) const
 int32 AODTrafficManager::PickNext(FAgent& Ag)
 {
 	const FODTrafficGraph::FLink& L = Graph->Links[Ag.Link];
+	// heading into the junction, held across its internal links (both ends in
+	// one cluster) so a median crossover + turn still reads as a U-turn
+	const bool bInternal = L.EndCluster >= 0 && L.StartCluster == L.EndCluster;
+	if (!bInternal || Ag.Approach.IsNearlyZero())
+	{
+		Ag.Approach = FVector2f(FVector2D(PosAt(Ag.Link, L.Length) - PosAt(Ag.Link, L.Length - 1500.0f))).GetSafeNormal();
+	}
 	if (L.OutNum == 0)
 	{
 		return -1;
@@ -944,7 +963,10 @@ int32 AODTrafficManager::PickNext(FAgent& Ag)
 	{
 		return Graph->Out[L.OutStart];
 	}
-	// split by demand: each branch weighted by its target flow
+	// split by demand: each branch weighted by its target flow; U-turns and
+	// another lap of a loop (cul-de-sac turning circles) only when nothing else
+	// leaves (2026-10-16, Taylor: cars "switching roads and spinning in circles
+	// at junctions")
 	float Total = 0.0f;
 	float W[16];
 	const int32 N = FMath::Min(L.OutNum, 16);
@@ -954,14 +976,23 @@ int32 AODTrafficManager::PickNext(FAgent& Ag)
 		float V;
 		const float K = TargetPerCm(C, &V);
 		W[i] = K * V + 0.002f * Graph->Links[C].Lanes;
+		const FVector2f Dir = FVector2f(FVector2D(PosAt(C, FMath::Min(1500.0f, Graph->Links[C].Length)) - PosAt(C, 0.0f))).GetSafeNormal();
+		if (C == Ag.Link || (Dir | Ag.Approach) < -0.5f)
+		{
+			W[i] = 0.0f;
+		}
 		Total += W[i];
+	}
+	if (Total <= 0.0f)
+	{
+		return Graph->Out[L.OutStart + Ag.Seed % N];
 	}
 	Ag.Seed = Hash(Ag.Seed + 0x9e3779b9U);
 	float R = Unit(Ag.Seed) * Total;
 	for (int32 i = 0; i < N; ++i)
 	{
 		R -= W[i];
-		if (R <= 0.0f)
+		if (R <= 0.0f && W[i] > 0.0f)
 		{
 			return Graph->Out[L.OutStart + i];
 		}
@@ -1344,6 +1375,7 @@ void AODTrafficManager::Step(float Dt)
 			const FODTrafficGraph::FLink& Old = G.Links[Ag.Link];
 			const bool bJunction = Old.EndCluster >= 0;
 			Ag.S -= Old.Length;
+			Ag.Prev = Ag.Link;
 			Ag.Link = Ag.Next;
 			const FODTrafficGraph::FLink& New = G.Links[Ag.Link];
 			if (bJunction || New.Lanes != Old.Lanes)
@@ -1403,32 +1435,44 @@ void AODTrafficManager::Render(float Alpha)
 	for (TArray<FTransform>& X : BodyXf) { X.Reset(); }
 	for (TArray<FTransform>& X : BrakeXf) { X.Reset(); }
 	for (TArray<FTransform>& X : WheelXf) { X.Reset(); }
+	for (TArray<FTransform>& X : BodyPrevXf) { X.Reset(); }
+	for (TArray<FTransform>& X : BrakePrevXf) { X.Reset(); }
+	for (TArray<FTransform>& X : WheelPrevXf) { X.Reset(); }
 	BodyXf.SetNum(Models.Num());
 	BrakeXf.SetNum(Models.Num());
-	for (const FAgent& Ag : Agents)
+	BodyPrevXf.SetNum(Models.Num());
+	BrakePrevXf.SetNum(Models.Num());
+	WheelPrevXf.SetNum(WheelIsms.Num());
+	for (FAgent& Ag : Agents)
 	{
 		const FModel& M = Models[Ag.Model];
 		const FTransform Xf(FQuat::Slerp(Ag.PrevRot, Ag.CurRot, Alpha), FMath::Lerp(Ag.PrevPos, Ag.CurPos, (double)Alpha));
+		const FTransform Was = Ag.bShown ? Ag.Shown : Xf;
+		Ag.Shown = Xf;
+		Ag.bShown = true;
 		// brake lamps on under braking and while stood in a queue
-		(Ag.A < -150.0f || Ag.V < 50.0f ? BrakeXf : BodyXf)[Ag.Model].Add(Xf);
+		const bool bBrake = Ag.A < -150.0f || Ag.V < 50.0f;
+		(bBrake ? BrakeXf : BodyXf)[Ag.Model].Add(Xf);
+		(bBrake ? BrakePrevXf : BodyPrevXf)[Ag.Model].Add(Was);
 		if (M.Wheel >= 0)
 		{
-			const FVector Sc(M.WheelR / ReferenceWheelMeshRadiusCm);
+			const FVector Sc(M.WheelR / TrafficWheelMeshRadiusCm);
 			for (int32 w = 0; w < 4; ++w)
 			{
 				const FVector Local(w < 2 ? M.FrontX : M.RearX, (w % 2 == 0 ? -1.0f : 1.0f) * M.HalfTrack, 0.0f);
 				WheelXf[M.Wheel].Add(FTransform(Xf.GetRotation(), Xf.TransformPosition(Local), Sc));
+				WheelPrevXf[M.Wheel].Add(FTransform(Was.GetRotation(), Was.TransformPosition(Local), Sc));
 			}
 		}
 	}
 	for (int32 m = 0; m < Models.Num(); ++m)
 	{
-		SyncIsm(Models[m].Body, BodyXf[m]);
-		SyncIsm(Models[m].Braking, BrakeXf[m]);
+		SyncIsm(Models[m].Body, BodyXf[m], BodyPrevXf[m]);
+		SyncIsm(Models[m].Braking, BrakeXf[m], BrakePrevXf[m]);
 	}
 	for (int32 w = 0; w < WheelIsms.Num(); ++w)
 	{
-		SyncIsm(WheelIsms[w], WheelXf[w]);
+		SyncIsm(WheelIsms[w], WheelXf[w], WheelPrevXf[w]);
 	}
 }
 
@@ -1731,8 +1775,10 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 		{
 			Slow += Ag.V < 300.0f ? 1 : 0;
 		}
-		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: '%s' %d car(s) (%d under 11 km/h) on %d link(s) in range, hour %d day %d, peak %.2f ms/frame, wrecks %d"),
-			*Graph->Name, Agents.Num(), Slow, RangeLinks.Num(), Hour, Dow, PeakMs, Wrecks.Num());
+		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: '%s' %d car(s) (%d under 11 km/h) on %d link(s) in range, hour %d day %d, peak %.2f ms/frame, wrecks %d, wheel instances %d (%s)"),
+			*Graph->Name, Agents.Num(), Slow, RangeLinks.Num(), Hour, Dow, PeakMs, Wrecks.Num(),
+			WheelIsms.Num() ? WheelIsms[0]->GetInstanceCount() : -1,
+			WheelIsms.Num() && WheelIsms[0]->GetInstanceCount() ? *FString::Printf(TEXT("%s visible %d"), *WheelIsms[0]->GetStaticMesh()->GetName(), WheelIsms[0]->IsVisible()) : TEXT("-"));
 		PeakMs = 0.0f;
 	}
 }
