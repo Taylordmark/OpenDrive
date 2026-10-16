@@ -133,11 +133,13 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	const float Elevation = FMath::Sin(DayPhase) * MaxElevation;
 	const float Azimuth = TimeOfDay * 15.0f + 90.0f;
 
-	// Turn the lights in 0.25 deg steps (~every 2.5 s at the 1 h day), not every
-	// frame: any sun rotation throws away the whole Virtual Shadow Map cache
-	// (and Lumen's cached sun lighting), so a per-frame drift re-rendered
-	// every shadow page every frame (2026-10-16 perf pass). A 0.25 deg step
-	// moves a 10 m tree's shadow ~4 cm. Menu time jumps are far past the step.
+	// The sun turns every frame. The 2026-10-16 perf pass turned it in 0.25 deg
+	// steps to keep the Virtual Shadow Map cache, but that cache is keyed on
+	// the exact light direction: each step (~2.3 s) rendered one uncached
+	// frame and then rebuilt the whole static cache - the 120-175 ms skip.
+	// A light that moves every frame stays on VSM's cheaper uncached path
+	// (FVirtualShadowMapPerLightCacheEntry::Update): steady cost, no spikes.
+	// The moon casts no shadow, so it keeps the step.
 	auto Turn = [](AActor* Light, const FRotator& To)
 	{
 		if (Light && Light->GetActorQuat().AngularDistance(To.Quaternion()) > FMath::DegreesToRadians(0.25f))
@@ -147,7 +149,7 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	};
 	if (Sun.IsValid())
 	{
-		Turn(Sun.Get(), FRotator(-Elevation, Azimuth, 0.0f));
+		Sun->SetActorRotation(FRotator(-Elevation, Azimuth, 0.0f));
 	}
 	if (Moon.IsValid())
 	{
