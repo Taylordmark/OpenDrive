@@ -521,7 +521,10 @@ void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf, c
 		// come and go or swap to the brake-lamp ISM, and teleporting every frame
 		// left moving traffic with no velocity, so TSR smeared it (flicker)
 		const int32 N = FMath::Min(Have, Xf.Num());
-		Ism->BatchUpdateInstancesTransforms(0, TArray<FTransform>(Xf.GetData(), N), TArray<FTransform>(PrevXf.GetData(), N), true, true, false);
+		// no MarkRenderStateDirty: the instance data manager pushes just the
+		// changed transforms; a dirty flag rebuilt every traffic proxy each
+		// frame (400+ cars in town ran ~15 fps, 2026-10-16)
+		Ism->BatchUpdateInstancesTransforms(0, TArray<FTransform>(Xf.GetData(), N), TArray<FTransform>(PrevXf.GetData(), N), true, false, false);
 	}
 	if (Have < Xf.Num())
 	{
@@ -653,8 +656,9 @@ void AODTrafficManager::BuildModels()
 			ODVisualStyle::PickSlots(Ism);
 			return Ism;
 		};
-		M.Body = MakeIsm(Chassis, DespawnRadiusCm, true);
-		M.Braking = MakeIsm(Chassis, DespawnRadiusCm, true);
+		// drawn to 400 m (simulated out to DespawnRadiusCm): beyond that a car is a few pixels
+		M.Body = MakeIsm(Chassis, 40000.0f, true);
+		M.Braking = MakeIsm(Chassis, 40000.0f, true);
 		for (UInstancedStaticMeshComponent* Ism : {M.Body, M.Braking})
 		{
 			const int32 Slot = Ism->GetMaterialIndex(TEXT("lights"));
@@ -668,7 +672,7 @@ void AODTrafficManager::BuildModels()
 			}
 			else
 			{
-				M.Wheel = WheelIsms.Add(MakeIsm(Wheel, 25000.0f, false));
+				M.Wheel = WheelIsms.Add(MakeIsm(Wheel, 15000.0f, false));
 				WheelIdx.Add(Wheel, M.Wheel);
 			}
 		}

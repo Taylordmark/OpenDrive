@@ -450,3 +450,7 @@ make_def("DA_Vehicle_LMP", {
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
 log("DONE - saved 8 meshes, 7 category materials, and 7 vehicle defs")
+
+# per-car camera mounts live in their own script so they can be re-applied
+# alone; the defs above were just recreated without them
+exec((Path(__file__).resolve().parent / "apply_vehicle_cameras.py").read_text())

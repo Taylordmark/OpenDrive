@@ -27,6 +27,7 @@ const FActionMeta ActionTable[] = {
 	{EODInputAction::ZoomMapOut,  TEXT("ZoomMapOut"),   EKeys::LeftBracket,  FKey()},
 	{EODInputAction::WorldMap,    TEXT("WorldMap"),     EKeys::Tab,       EKeys::Gamepad_Special_Left},
 	{EODInputAction::ClearRoute,  TEXT("ClearRoute"),   EKeys::BackSpace, FKey()},
+	{EODInputAction::CameraView,  TEXT("CameraView"),   EKeys::C,         EKeys::Gamepad_FaceButton_Top},
 	{EODInputAction::ShiftUp,     TEXT("ShiftUp"),      EKeys::E,         FKey()},
 	{EODInputAction::ShiftDown,   TEXT("ShiftDown"),    EKeys::Q,         FKey()},
 };
