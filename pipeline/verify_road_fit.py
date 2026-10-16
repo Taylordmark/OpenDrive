@@ -54,6 +54,7 @@ other road's deck and would hide a poke).
 import json
 import sys
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -61,7 +62,7 @@ import numpy as np
 import build_terrain_mesh_tiles as btmt
 import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
-from road_mesh_common import ROAD_LIFT, sample_mesh_heights
+from road_mesh_common import ROAD_LIFT, bake_map, bake_workers, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns, to_local
 
@@ -143,7 +144,35 @@ def _load_road_tile(tx, ty):
     return _ROAD_CACHE[key]
 
 
+# Sampling is per point, so _sample_with_neighbors splits big batches into
+# tile-sorted chunks over a bake_map pool (2026-10-15); each task loads only
+# its own chunk's tiles, then drops them.
+PARALLEL_MIN_POINTS = 20_000
+CHUNKS_PER_WORKER = 4
+SAMPLE_WORKER_GB = 1.5
+
+
+def _sample_chunk(job):
+    _TERRAIN_CACHE.clear()
+    _ROAD_CACHE.clear()
+    return _sample_serial(*job)
+
+
 def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1):
+    """_sample_serial, spread over the bake pool when the batch is big.
+    `loader` must pickle (a module-level function or a partial of one)."""
+    n_workers = bake_workers(SAMPLE_WORKER_GB)
+    if n_workers == 1 or len(x_cm) < PARALLEL_MIN_POINTS:
+        return _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring)
+    parts = np.array_split(np.lexsort((ty0, tx0)), n_workers * CHUNKS_PER_WORKER)
+    out = np.empty(len(x_cm))
+    jobs = [(loader, tx0[c], ty0[c], x_cm[c], y_cm[c], ring) for c in parts]
+    for c, h in zip(parts, bake_map(_sample_chunk, jobs, SAMPLE_WORKER_GB)):
+        out[c] = h
+    return out
+
+
+def _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring=1):
     """Per point: tries its own tile (tx0,ty0) first, then its neighbors out
     to `ring` tiles, keeping the first hit (NaN = none) - see this module's
     docstring for why a station's own tile isn't guaranteed to hold the
@@ -341,7 +370,7 @@ def check_poke_through():
               for label, pe, pn in probes]
     ok = True
     for label, prefix, pe, pn in probes:
-        loader = lambda tx, ty: _load_terrain_tile(tx, ty, prefix)
+        loader = partial(_load_terrain_tile, prefix=prefix)
         poke = np.full(len(east), np.nan)
         idx = idx_all[owns(pe[idx_all] * 100.0, -pn[idx_all] * 100.0)]   # owned probes (step 3)
         x_cm, y_cm = pe[idx] * 100.0, -pn[idx] * 100.0
