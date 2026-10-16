@@ -953,7 +953,7 @@ int32 AODTrafficManager::PickNext(FAgent& Ag)
 	const bool bInternal = L.EndCluster >= 0 && L.StartCluster == L.EndCluster;
 	if (!bInternal || Ag.Approach.IsNearlyZero())
 	{
-		Ag.Approach = FVector2f(FVector2D(PosAt(Ag.Link, L.Length) - PosAt(Ag.Link, L.Length - 1500.0f))).GetSafeNormal();
+		Ag.Approach = FVector2f(FVector2D(PosAt(Ag.Link, L.Length, -1) - PosAt(Ag.Link, L.Length - 1500.0f, -1))).GetSafeNormal();
 	}
 	if (L.OutNum == 0)
 	{
@@ -976,7 +976,7 @@ int32 AODTrafficManager::PickNext(FAgent& Ag)
 		float V;
 		const float K = TargetPerCm(C, &V);
 		W[i] = K * V + 0.002f * Graph->Links[C].Lanes;
-		const FVector2f Dir = FVector2f(FVector2D(PosAt(C, FMath::Min(1500.0f, Graph->Links[C].Length)) - PosAt(C, 0.0f))).GetSafeNormal();
+		const FVector2f Dir = FVector2f(FVector2D(PosAt(C, FMath::Min(1500.0f, Graph->Links[C].Length), -1) - PosAt(C, 0.0f, -1))).GetSafeNormal();
 		if (C == Ag.Link || (Dir | Ag.Approach) < -0.5f)
 		{
 			W[i] = 0.0f;
