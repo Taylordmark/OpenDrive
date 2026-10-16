@@ -1049,11 +1049,8 @@ run since before §7.49, so 1,276 junctions had no pad.
 
 ### Perf + lighting pass (2026-10-16, branch claude/lighting-perf-deb7df)
 
-- **Before (from Saved/Logs frame counters):**
-  - breckenridge: ~89 fps with 0 cars, ~40 fps with 60 cars;
-  - summit_county: ~30 fps with 4 cars, ~10 fps with 450 cars;
-  - so each car cost ~0.15–0.23 ms.
-- **Cause:** `_real` cars are 16–21k tris, non-Nanite, have one LOD and cast shadows. Every car drew out to the 950 m despawn radius (~8M tris at 450 cars).
+- **Before:** breckenridge drive on main 8615911 runs ~38–41 fps at steady state, with ~3 s slower after load. There were 459 cars, 1,985 lakes and 1.33M far-forest tris. An earlier "~10 fps" reading was wrong: UE's log frame column wraps at 1000.
+- **Cause:** `_real` cars are 16–21k tris, non-Nanite, have one LOD and cast shadows. Every car drew out to the 950 m despawn radius (~8M tris at 459 cars). This is from tri counts, not a measured per-car cost.
 - **Fixes:**
   - **Traffic near/far tiers.** Past `NearTierCm` (150 m) a car draws as its stylized ~1.5k-tri mesh, with no shadow and no RT. No car feeds DF lighting.
   - **Lakes.** One merged, shadowless DynamicMeshComponent per tile, instead of 1841 components on summit.
@@ -1062,4 +1059,4 @@ run since before §7.49, so 1,276 junctions had no pad.
 - **Lighting:** Lumen front-layer translucency reflections for car glass (Realistic grade volume).
 - **Measuring:** `ODPerf:` log line every 5 s: frame avg/p95/max, game/draw/RHI/GPU ms, draws, tris, resolution, scalability. `ProfileGPU` dump to the log at 60 s and every 150 s after.
   - Turn them off with `-odperf=0` / `-odprofilegpu=0`.
-- **Open:** summit's ~33 ms base cost vs breckenridge's ~11 ms is unexplained. The next drive's ProfileGPU dump decides it (suspects: volumetric clouds/fog, Lumen at Epic, 238 wall components, far forest).
+- **Open:** the remaining ~25 ms frame is unattributed. The next drive's ODPerf lines and ProfileGPU dump split it into CPU vs GPU and per pass.
