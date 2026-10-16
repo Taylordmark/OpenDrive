@@ -26,6 +26,9 @@ enum class EODInputDevice : uint8
 	Wheel,
 };
 
+/** Player camera views, in C-cycle order (see AODVehiclePawn::CameraView). */
+enum class EODCameraView : uint8 { Chase, ChaseFar, ChaseNear, Cockpit, Hood, Bumper, Count };
+
 /**
  * The OD car (Chaos rip-out, 2026-07-18): a simulating static-mesh Body, our
  * own UODVehicleMovement for ALL vehicle physics, manual wheel visuals, and
@@ -456,6 +459,27 @@ private:
 	float LookPitchDeg = 0.0f;
 	double LastLookInputTime = 0.0;
 	void UpdateFreeLook(float DeltaSeconds);
+
+	// --- camera views (2026-10-16): C / pad Y cycles, persisted in
+	// GameUserSettings [OpenDrive.Camera] View. Chase* ride the spring arm
+	// with exact-exponential lag; the first-person ones pin the arm (length
+	// 0, no lag) at a per-car mount from the def (zero = derived from the
+	// mesh bounds in ResolveCameraMounts) and add head motion on Camera.
+	EODCameraView CameraView = EODCameraView::Chase;
+	FVector CockpitEyeCm, SteeringWheelCm, HoodCamCm, BumperCamCm;
+	FVector HeadAccelG = FVector::ZeroVector;   // smoothed car-local accel, g
+	FVector HeadPrevVel = FVector::ZeroVector;
+	float HeadApexYawDeg = 0.0f;
+	void CycleCameraView();
+	void ApplyCameraView();
+	void ResolveCameraMounts(const UODVehicleDef* Def);
+	void UpdateCameraMotion(float DeltaSeconds);
+
+	// procedural steering wheel (rim/spokes/hub of engine cylinders), shown
+	// only in Cockpit, laid over the Realistic mesh's baked static wheel
+	UPROPERTY()
+	TObjectPtr<USceneComponent> CockpitWheel;
+	void BuildCockpitWheel();
 
 	bool bGroundSnapped = false;
 	bool bInShowroom = false;   // see IsInShowroom() above

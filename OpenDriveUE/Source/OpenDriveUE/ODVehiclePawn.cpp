@@ -11,6 +11,7 @@
 #include "Engine/StaticMesh.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/PlayerController.h"
 #include "Misc/CommandLine.h"
 #include "Misc/ConfigCacheIni.h"
@@ -82,6 +83,10 @@ AODVehiclePawn::AODVehiclePawn()
 	SpringArm->CameraRotationLagSpeed = 9.0f;
 	SpringArm->bInheritPitch = false;
 	SpringArm->bInheritRoll = false;
+	// UpdateCameraMotion sets the lag speeds per tick so each step is an
+	// exact exponential decay - engine substepping only kicks in above
+	// 1/60 s and its clamp(Dt*Speed) alpha drifts with frame rate
+	SpringArm->bUseCameraLagSubstepping = false;
 	// Lets the normal chase-cam keep settling/lagging into place even while
 	// paused - matters for AODMainMenu's OpenGarage() (mid-drive reopen),
 	// which still pauses. The fresh-boot showroom no longer goes through
@@ -305,6 +310,9 @@ void AODVehiclePawn::ApplyVehicleDef(UODVehicleDef* Def)
 		}
 	}
 
+	ResolveCameraMounts(Def);
+	ApplyCameraView();
+
 	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: applied vehicle '%s' (%.0f kg)"),
 		*Def->DisplayName, MassKg);
 }
@@ -385,6 +393,7 @@ void AODVehiclePawn::SetShowroom(bool bOn)
 		// path makes this a harmless no-op flicker for that case.
 		Body->SetSimulatePhysics(true);
 	}
+	ApplyCameraView();   // cockpit wheel visibility follows the showroom
 }
 
 void AODVehiclePawn::TeleportToSpawn(const FVector& RoadPoint, float YawDeg)
@@ -498,6 +507,11 @@ void AODVehiclePawn::BeginPlay()
 	DeviceMode = LoadInputDeviceMode();
 	ActiveDevice = EODInputDevice::Keyboard;
 
+	int32 View = 0;
+	GConfig->GetInt(TEXT("OpenDrive.Camera"), TEXT("View"), View, GGameUserSettingsIni);
+	CameraView = static_cast<EODCameraView>(FMath::Clamp(View, 0, static_cast<int32>(EODCameraView::Count) - 1));
+	BuildCockpitWheel();
+
 	// selectable cars: discover defs, spawn as index 0 (the base coupe). Falls
 	// back to the hardcoded coupe meshes if no def assets exist yet.
 	LoadVehicleDefs();
@@ -509,6 +523,8 @@ void AODVehiclePawn::BeginPlay()
 	else
 	{
 		EnsureMeshes();
+		ResolveCameraMounts(nullptr);
+		ApplyCameraView();
 	}
 
 	for (int32 i = 0; i < WheelVisuals.Num(); ++i)
@@ -998,6 +1014,7 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::SteerRight, &AODVehiclePawn::RightPressed, &AODVehiclePawn::RightReleased},
 		{EODInputAction::Handbrake, &AODVehiclePawn::HandbrakePressed, &AODVehiclePawn::HandbrakeReleased},
 		{EODInputAction::ResetVehicle, &AODVehiclePawn::ResetVehicle, nullptr},
+		{EODInputAction::CameraView, &AODVehiclePawn::CycleCameraView, nullptr},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1020,6 +1037,12 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		Input->BindKey(GamepadHandbrakeKey, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
 		Input->BindKey(GamepadHandbrakeKey, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
 		LastODManagedKeys.AddUnique(GamepadHandbrakeKey);
+	}
+	const FKey GamepadViewKey = FODInputConfig::GetGamepadKey(EODInputAction::CameraView);
+	if (GamepadViewKey.IsValid())
+	{
+		Input->BindKey(GamepadViewKey, IE_Pressed, this, &AODVehiclePawn::CycleCameraView);
+		LastODManagedKeys.AddUnique(GamepadViewKey);
 	}
 }
 
@@ -1311,8 +1334,9 @@ void AODVehiclePawn::UpdateFreeLook(float DeltaSeconds)
 		{
 			return;
 		}
-		LookYawDeg = FMath::FInterpTo(LookYawDeg, 0.0f, DeltaSeconds, LookRecenterSpeed);
-		LookPitchDeg = FMath::FInterpTo(LookPitchDeg, 0.0f, DeltaSeconds, LookRecenterSpeed);
+		const float Keep = FMath::Exp(-LookRecenterSpeed * DeltaSeconds);   // exact, any fps
+		LookYawDeg *= Keep;
+		LookPitchDeg *= Keep;
 		if (FMath::Abs(LookYawDeg) < 0.05f && FMath::Abs(LookPitchDeg) < 0.05f)
 		{
 			LookYawDeg = 0.0f;
@@ -1324,6 +1348,188 @@ void AODVehiclePawn::UpdateFreeLook(float DeltaSeconds)
 		return;
 	}
 	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg + LookPitchDeg, LookYawDeg, 0.0f));
+}
+
+// ===========================================================================
+// Camera views (2026-10-16) - see the CameraView block in ODVehiclePawn.h.
+// ===========================================================================
+
+void AODVehiclePawn::ResolveCameraMounts(const UODVehicleDef* Def)
+{
+	// def values come from pipeline/car_camera_mounts.py (the Realistic
+	// interior's own numbers); zero = derive from the chassis bounds + axles,
+	// roughly where that script lands for a coupe
+	const float Fx = Def ? Def->FrontAxleXCm : 132.0f;
+	const float Rx = Def ? Def->RearAxleXCm : -128.0f;
+	const float Ht = Def ? Def->HalfTrackYCm : 84.0f;
+	const FBox B = Body->GetStaticMesh() ? Body->GetStaticMesh()->GetBoundingBox()
+		: FBox(FVector(-220.0f, -90.0f, -30.0f), FVector(230.0f, 90.0f, 100.0f));
+	const float Mid = 0.5f * (Fx + Rx);
+	auto Pick = [](const FVector& FromDef, const FVector& Auto)
+	{
+		return FromDef.IsNearlyZero() ? Auto : FromDef;
+	};
+	// ponytail: bounds-based fallback is a coupe guess; unreal/apply_vehicle_cameras.py writes exact mounts
+	CockpitEyeCm = Pick(Def ? Def->CockpitEyeCm : FVector::ZeroVector,
+		FVector(Mid - 10.0f, -0.45f * Ht, B.Max.Z - 24.0f));
+	SteeringWheelCm = Pick(Def ? Def->SteeringWheelCm : FVector::ZeroVector,
+		CockpitEyeCm + FVector(45.0f, 0.0f, -28.0f));
+	HoodCamCm = Pick(Def ? Def->HoodCamCm : FVector::ZeroVector,
+		FVector(FMath::Lerp(Mid, Fx, 0.45f), 0.0f, 0.62f * B.Max.Z + 12.0f));
+	BumperCamCm = Pick(Def ? Def->BumperCamCm : FVector::ZeroVector,
+		FVector(B.Max.X + 8.0f, 0.0f, 0.0f));
+	if (CockpitWheel)
+	{
+		CockpitWheel->SetRelativeLocation(SteeringWheelCm);
+	}
+}
+
+void AODVehiclePawn::CycleCameraView()
+{
+	CameraView = static_cast<EODCameraView>(
+		(static_cast<int32>(CameraView) + 1) % static_cast<int32>(EODCameraView::Count));
+	GConfig->SetInt(TEXT("OpenDrive.Camera"), TEXT("View"), static_cast<int32>(CameraView), GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+	ApplyCameraView();
+}
+
+void AODVehiclePawn::ApplyCameraView()
+{
+	if (!SpringArm)
+	{
+		return;
+	}
+	const bool bFirstPerson = CameraView >= EODCameraView::Cockpit;
+	if (!bFirstPerson)
+	{
+		struct FChase { float Arm, Height, Pitch; };
+		static const FChase Chase[] = {{640.0f, 150.0f, -12.0f}, {900.0f, 190.0f, -12.0f}, {470.0f, 115.0f, -10.0f}};
+		const FChase& C = Chase[static_cast<int32>(CameraView)];
+		SpringArm->SetRelativeLocation(FVector::ZeroVector);
+		SpringArm->TargetArmLength = C.Arm;
+		SpringArm->SocketOffset = FVector(0.0f, 0.0f, C.Height);
+		BaseCameraPitchDeg = C.Pitch;
+	}
+	else
+	{
+		SpringArm->SetRelativeLocation(CameraView == EODCameraView::Cockpit ? CockpitEyeCm
+			: CameraView == EODCameraView::Hood ? HoodCamCm : BumperCamCm);
+		SpringArm->TargetArmLength = 0.0f;
+		SpringArm->SocketOffset = FVector::ZeroVector;
+		BaseCameraPitchDeg = CameraView == EODCameraView::Cockpit ? -3.0f
+			: CameraView == EODCameraView::Hood ? -2.0f : 0.0f;
+	}
+	// first person rides the body rigidly (pitch/roll too); chase keeps the
+	// level, lagged follow it always had
+	SpringArm->bEnableCameraLag = !bFirstPerson;
+	SpringArm->bEnableCameraRotationLag = !bFirstPerson;
+	SpringArm->bInheritPitch = bFirstPerson;
+	SpringArm->bInheritRoll = bFirstPerson;
+	SpringArm->bDoCollisionTest = !bFirstPerson;
+	SpringArm->SetRelativeRotation(FRotator(BaseCameraPitchDeg + LookPitchDeg, LookYawDeg, 0.0f));
+	if (CockpitWheel)
+	{
+		CockpitWheel->SetVisibility(CameraView == EODCameraView::Cockpit && !bInShowroom, true);
+	}
+}
+
+void AODVehiclePawn::UpdateCameraMotion(float DeltaSeconds)
+{
+	if (bInShowroom || DeltaSeconds <= 0.0f)
+	{
+		return;   // the showroom camera is detached and placed by SetShowroom
+	}
+	const float Dt = DeltaSeconds;
+	auto Alpha = [Dt](float Rate) { return 1.0f - FMath::Exp(-Rate * Dt); };   // exact exponential step
+
+	// chase lag: VInterpTo/QInterpTo step by alpha = Dt*Speed, so this speed
+	// makes each frame's step exactly 1-exp(-9*Dt) - the old 9/s feel at
+	// 60 fps, the same settle at any fps
+	constexpr float ChaseLagRate = 9.0f;
+	SpringArm->CameraLagSpeed = SpringArm->CameraRotationLagSpeed = Alpha(ChaseLagRate) / Dt;
+
+	// head motion (first person): G-force sway from the body's finite-
+	// difference acceleration, and a look into the turn from the yaw rate
+	const bool bSim = Body->IsSimulatingPhysics();
+	const FVector Vel = bSim ? Body->GetPhysicsLinearVelocity() : FVector::ZeroVector;
+	const FVector AccG = GetActorTransform().InverseTransformVectorNoScale((Vel - HeadPrevVel) / Dt) / 981.0f;
+	HeadPrevVel = Vel;
+	HeadAccelG += (AccG.BoundToCube(2.0f) - HeadAccelG) * Alpha(6.0f);
+	const float YawRate = bSim ? Body->GetPhysicsAngularVelocityInDegrees().Z : 0.0f;
+	HeadApexYawDeg += (FMath::Clamp(YawRate * 0.13f, -8.0f, 8.0f) - HeadApexYawDeg) * Alpha(4.0f);
+	const float Gain = CameraView == EODCameraView::Cockpit ? 1.0f
+		: CameraView == EODCameraView::Hood ? 0.4f : 0.0f;
+
+	// crash shake (OnBodyHit): smooth noise, ~0.25 s at full strength
+	FRotator Shake = FRotator::ZeroRotator;
+	if (CrashShake > 0.0f)
+	{
+		CrashShake = FMath::Max(CrashShake - Dt * 4.0f, 0.0f);
+		const float A = CrashShakeDeg * CrashShake;
+		const float T = GetWorld()->GetTimeSeconds() * 30.0f;
+		Shake = FRotator(FMath::PerlinNoise1D(T) * A,
+			FMath::PerlinNoise1D(T + 17.0f) * A, FMath::PerlinNoise1D(T + 41.0f) * A * 0.5f);
+	}
+	// accelerating pushes the head back and tips it up; cornering pushes it
+	// to the outside and rolls it out. Camera sits on the arm's end, so the
+	// freelook (arm rotation) stays independent of this.
+	Camera->SetRelativeLocation(Gain * FVector(-3.0f * HeadAccelG.X, -3.0f * HeadAccelG.Y, 0.0f));
+	Camera->SetRelativeRotation(Shake + Gain * FRotator(2.0f * HeadAccelG.X, HeadApexYawDeg, -1.5f * HeadAccelG.Y));
+
+	if (CockpitWheel && CameraView == EODCameraView::Cockpit)
+	{
+		// ponytail: fixed 12:1 road-wheel-to-rim ratio for every car; per-car def field if one feels wrong
+		const float SteerDeg = 0.5f * (Movement->GetWheelSteerDeg(0) + Movement->GetWheelSteerDeg(1));
+		CockpitWheel->SetRelativeRotation(FRotator(-28.0f, 0.0f, FMath::Clamp(12.0f * SteerDeg, -450.0f, 450.0f)));
+	}
+}
+
+void AODVehiclePawn::BuildCockpitWheel()
+{
+	// engine basic shapes only (no imported asset): a 17 cm rim of 20
+	// cylinder segments, three spokes and a hub, dark, no collision/shadow.
+	// Column axis = local +X, tilted 28 deg nose-down like the baked wheel.
+	UStaticMesh* Cyl = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	if (!Cyl || !Base)
+	{
+		return;
+	}
+	UMaterialInstanceDynamic* Mat = UMaterialInstanceDynamic::Create(Base, this);
+	Mat->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.02f, 0.02f, 0.02f));
+	CockpitWheel = NewObject<USceneComponent>(this, TEXT("CockpitWheel"));
+	CockpitWheel->SetupAttachment(Body);
+	CockpitWheel->RegisterComponent();
+	auto Piece = [&](const FVector& Loc, const FVector& AxisDir, const FVector& SizeCm)
+	{
+		UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(this);
+		C->SetStaticMesh(Cyl);
+		C->SetMaterial(0, Mat);
+		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetCastShadow(false);
+		C->SetupAttachment(CockpitWheel);
+		C->SetRelativeLocation(Loc);
+		C->SetRelativeRotation(FRotationMatrix::MakeFromZ(AxisDir).Rotator());   // the cylinder runs along its Z
+		C->SetRelativeScale3D(SizeCm / 100.0f);
+		C->RegisterComponent();
+	};
+	constexpr float R = 17.0f, Tube = 4.0f;
+	constexpr int32 Segs = 20;
+	for (int32 i = 0; i < Segs; ++i)
+	{
+		const float A = 2.0f * PI * i / Segs;
+		Piece(FVector(0.0f, R * FMath::Cos(A), R * FMath::Sin(A)), FVector(0.0f, -FMath::Sin(A), FMath::Cos(A)),
+			FVector(Tube, Tube, 2.0f * PI * R / Segs + 1.0f));
+	}
+	for (const float Deg : {0.0f, 180.0f, 270.0f})   // 3, 9 and 6 o'clock
+	{
+		const FVector Dir(0.0f, FMath::Cos(FMath::DegreesToRadians(Deg)), FMath::Sin(FMath::DegreesToRadians(Deg)));
+		Piece(Dir * R * 0.5f, Dir, FVector(2.5f, 2.5f, R));
+	}
+	Piece(FVector::ZeroVector, FVector::ForwardVector, FVector(9.0f, 9.0f, 4.0f));
+	CockpitWheel->SetRelativeLocation(SteeringWheelCm);
+	CockpitWheel->SetRelativeRotation(FRotator(-28.0f, 0.0f, 0.0f));
+	CockpitWheel->SetVisibility(false, true);
 }
 
 namespace
@@ -1395,17 +1601,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// that mouse nudges barely dented.
 	UpdateFreeLook(DeltaSeconds);
 
-	// crash shake (OnBodyHit): smooth noise on the camera's own relative
-	// rotation - the spring arm above it is the freelook's - ~0.25 s at full
-	// strength; the last tick writes it back to zero
-	if (CrashShake > 0.0f && !bInShowroom)
-	{
-		CrashShake = FMath::Max(CrashShake - DeltaSeconds * 4.0f, 0.0f);
-		const float A = CrashShakeDeg * CrashShake;
-		const float T = GetWorld()->GetTimeSeconds() * 30.0f;
-		Camera->SetRelativeRotation(FRotator(FMath::PerlinNoise1D(T) * A,
-			FMath::PerlinNoise1D(T + 17.0f) * A, FMath::PerlinNoise1D(T + 41.0f) * A * 0.5f));
-	}
+	UpdateCameraMotion(DeltaSeconds);   // chase lag, head motion, crash shake
 
 	// controller/wheel device selection (2026-08-27) - resolves ActiveDevice
 	// (Auto = last-device-wins) from this frame's latched axis/key state.

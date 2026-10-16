@@ -55,6 +55,7 @@ enum class EODInputAction : uint8
 	ZoomMapOut,
 	WorldMap,     // SS7.37 full-screen world map + navigation
 	ClearRoute,
+	CameraView,   // cycle chase / far / near / cockpit / hood / bumper
 	Count  // sentinel, not a real action
 };
 
