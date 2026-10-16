@@ -42,6 +42,7 @@ namespace
 	int32 GPrimary = INDEX_NONE;
 	bool GStarted = false;
 	double GNextEnum = 0.0;
+	int32 GLastHid = -2;   // CountHidControllers at the last Enumerate; -2 = never
 	double GLastForceCall = -1.0;
 	double GLastActivity = 0.0;
 	bool GForceZeroed = true;
@@ -188,18 +189,18 @@ namespace
 		return DIENUM_CONTINUE;
 	}
 
-	void Enumerate()
+	bool Enumerate()
 	{
 		const HWND Hwnd = GameHwnd();
 		if (!Hwnd)
 		{
-			return;
+			return false;
 		}
 		if (!GDI && FAILED(DirectInput8Create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8W,
 			reinterpret_cast<void**>(&GDI), nullptr)))
 		{
 			GDI = nullptr;
-			return;
+			return false;
 		}
 		ReleaseAll();
 		GDI->EnumDevices(DI8DEVCLASS_GAMECTRL, EnumCb, Hwnd, DIEDFL_ATTACHEDONLY);
@@ -211,6 +212,7 @@ namespace
 		{
 			GPrimary = GDevs[i].bDriving ? i : INDEX_NONE;
 		}
+		return true;
 	}
 
 	void PushForce(float Command)
@@ -242,6 +244,38 @@ namespace
 		E.cbTypeSpecificParams = sizeof(C);
 		E.lpvTypeSpecificParams = &C;
 		Eff->SetParameters(&E, DIEP_TYPESPECIFICPARAMS);
+	}
+
+	// HID joysticks / gamepads / multi-axis controllers attached now, from the
+	// raw input device list (~0.015 ms); -1 if the list can't be read.
+	int32 CountHidControllers()
+	{
+		UINT N = 0;
+		if (GetRawInputDeviceList(nullptr, &N, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1)
+		{
+			return -1;
+		}
+		TArray<RAWINPUTDEVICELIST> List;
+		List.SetNumUninitialized(N);
+		N = GetRawInputDeviceList(List.GetData(), &N, sizeof(RAWINPUTDEVICELIST));
+		if (N == (UINT)-1)
+		{
+			return -1;
+		}
+		int32 Count = 0;
+		for (UINT i = 0; i < N; ++i)
+		{
+			RID_DEVICE_INFO Info = {};
+			Info.cbSize = sizeof(Info);
+			UINT Size = sizeof(Info);
+			if (List[i].dwType == RIM_TYPEHID
+				&& GetRawInputDeviceInfoW(List[i].hDevice, RIDI_DEVICEINFO, &Info, &Size) != (UINT)-1
+				&& Info.hid.usUsagePage == 1 && (Info.hid.usUsage == 4 || Info.hid.usUsage == 5 || Info.hid.usUsage == 8))
+			{
+				++Count;
+			}
+		}
+		return Count;
 	}
 
 	bool Tick(float)
@@ -283,7 +317,14 @@ namespace
 		if ((GDevs.Num() == 0 || bAnyLost) && Now >= GNextEnum)
 		{
 			GNextEnum = Now + 2.0;   // ponytail: no hot-add while a wheel is open; replug = relaunch
-			Enumerate();
+			// EnumDevices stalls the game thread 85-98 ms even with nothing
+			// attached (measured 2026-10-16) - with no wheel that was a skip
+			// every 2 s. Only re-enumerate when the HID controller count changes.
+			const int32 Hid = CountHidControllers();
+			if (bAnyLost || Hid < 0 || Hid != GLastHid)
+			{
+				GLastHid = Enumerate() ? Hid : GLastHid;
+			}
 		}
 		// watchdog: nobody driving the force -> zero it, drop the soft lock
 		if (!GForceZeroed && Now - GLastForceCall > 0.1)
