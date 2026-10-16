@@ -1176,10 +1176,14 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 	float Y = DrawMenuHeader(TEXT("Key Bindings"), {}, 0, X);
 
 	const float H = 42.0f * S;
-	const float KX0 = X + W * 0.40f;
-	const float CellW = (X + W - KX0) * 0.5f;
-	P.Text(TEXT("KEYBOARD"), KX0 + CellW * 0.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
-	P.Text(TEXT("GAMEPAD"), KX0 + CellW * 1.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
+	const int32 NumCols = AODRebindMenu::NumCols;
+	const float KX0 = X + W * 0.32f;
+	const float CellW = (X + W - KX0) / NumCols;
+	for (int32 Col = 0; Col < NumCols; ++Col)
+	{
+		P.Text(AODRebindMenu::ColumnHeader(Col), KX0 + CellW * (Col + 0.5f), Y + 10.0f * S, 15.0f,
+			EMenuWeight::SemiBold, DimCol, true, 120);
+	}
 	Y += 34.0f * S;
 
 	// scrolling (2026-10-14): the binding rows + Reset scroll as one list
@@ -1212,8 +1216,12 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 		}
 		P.Text(Menu->GetLabel(Row), X + 22.0f * S, CY, 21.0f, bRowSel ? EMenuWeight::SemiBold : EMenuWeight::Medium,
 			bRowSel ? FLinearColor::White : TextCol);
-		for (int32 Col = 0; Col < 2; ++Col)
+		for (int32 Col = 0; Col < NumCols; ++Col)
 		{
+			if (!Menu->HasCell(Row, Col))
+			{
+				continue;
+			}
 			const float CX = KX0 + CellW * Col;
 			const bool bCap = Menu->IsCapturingCell(Row, Col);
 			const bool bCellSel = bRowSel && Col == Menu->GetColumn();
@@ -1222,7 +1230,7 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 				: bCellSel ? FLinearColor(Accent.R, Accent.G, Accent.B, 0.25f) : FLinearColor(1, 1, 1, 0.05f));
 			FString Bind = Menu->GetBinding(Row, Col);
 			Bind.RemoveFromStart(TEXT("Gamepad "));
-			P.Text(Bind, CX + CellW * 0.5f, CY, 19.0f, EMenuWeight::SemiBold,
+			P.Text(Bind, CX + CellW * 0.5f, CY, 17.0f, EMenuWeight::SemiBold,
 				bCap || bCellSel ? FLinearColor::White : TextCol, true);
 			AddMenuHit(FODMenuHit::Cell, Row, Col, CX, Y, CellW, H);
 		}
@@ -1246,7 +1254,7 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 
 	if (Menu->IsCapturing())
 	{
-		DrawHints(P, X, {{TEXT("Any key"), TEXT("Assign")}, {TEXT("Esc"), TEXT("Cancel")}});
+		DrawHints(P, X, {{TEXT("Any key / wheel"), TEXT("Assign")}, {TEXT("Esc"), TEXT("Cancel")}});
 	}
 	else
 	{

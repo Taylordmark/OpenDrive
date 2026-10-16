@@ -7,6 +7,7 @@
 #include "ODPauseMenu.h"
 #include "ODRaceHUD.h"
 #include "ODVehiclePawn.h"
+#include "ODWheelDevice.h"
 
 namespace
 {
@@ -82,8 +83,79 @@ const FKey GamepadCandidates[] = {
 
 AODRebindMenu::AODRebindMenu()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// ticks only while capturing a wheel cell (polls the device)
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
+	SetTickableWhenPaused(true);
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+}
+
+const TCHAR* AODRebindMenu::ColumnHeader(int32 Col)
+{
+	return Col == 0 ? TEXT("KEYBOARD") : Col == 1 ? TEXT("GAMEPAD") : TEXT("WHEEL");
+}
+
+FODWheelBind* AODRebindMenu::WheelBind(int32 Row, bool& bAxis) const
+{
+	FODWheelProfile& P = FODRacingWheel::Profile();
+	bAxis = false;
+	const int32 W = Row - FODInputConfig::NumActions;
+	if (W >= 0 && W < NumWheelRows)
+	{
+		bAxis = W < static_cast<int32>(EODWheelAxis::Count);
+		return bAxis ? &P.Axes[W]
+			: &P.Buttons[static_cast<int32>(EODWheelButton::Gear1) + W - static_cast<int32>(EODWheelAxis::Count)];
+	}
+	switch (static_cast<EODInputAction>(Row))
+	{
+	case EODInputAction::Handbrake: return &P.Buttons[static_cast<int32>(EODWheelButton::Handbrake)];
+	case EODInputAction::ResetVehicle: return &P.Buttons[static_cast<int32>(EODWheelButton::Reset)];
+	case EODInputAction::ShiftUp: return &P.Buttons[static_cast<int32>(EODWheelButton::ShiftUp)];
+	case EODInputAction::ShiftDown: return &P.Buttons[static_cast<int32>(EODWheelButton::ShiftDown)];
+	default: return nullptr;
+	}
+}
+
+bool AODRebindMenu::HasCell(int32 Row, int32 Col) const
+{
+	bool bAxis = false;
+	return Col == 2 ? IsBindingRow(Row) && WheelBind(Row, bAxis) != nullptr
+		: Col >= 0 && Col < 2 && Row >= 0 && Row < FODInputConfig::NumActions;
+}
+
+int32 AODRebindMenu::CellCol(int32 Row, int32 Col) const
+{
+	for (int32 d = 0; d < NumCols; ++d)
+	{
+		if (HasCell(Row, Col - d))
+		{
+			return Col - d;
+		}
+		if (HasCell(Row, Col + d))
+		{
+			return Col + d;
+		}
+	}
+	return Col;
+}
+
+void AODRebindMenu::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	bool bAxis = false;
+	FODWheelBind* Target = bCapturing ? WheelBind(CapturingRow / NumCols, bAxis) : nullptr;
+	if (!Target || CapturingRow % NumCols != 2)
+	{
+		SetActorTickEnabled(false);
+		return;
+	}
+	FODWheelBind Got;
+	if (bAxis ? FODWheelDevice::PollCaptureAxis(Got) : FODWheelDevice::PollCaptureButton(Got))
+	{
+		*Target = Got;
+		FODRacingWheel::Save();
+		EndCapture();
+	}
 }
 
 void AODRebindMenu::MoveSelection(int32 Dir)
@@ -99,7 +171,15 @@ void AODRebindMenu::AdjustSelected(int32 Dir)
 {
 	if (!bCapturing && IsBindingRow(Selected))
 	{
-		Column = FMath::Clamp(Column + Dir, 0, 1);
+		// step over columns this row has no cell in
+		for (int32 C = GetColumn() + Dir; C >= 0 && C < NumCols; C += Dir)
+		{
+			if (HasCell(Selected, C))
+			{
+				Column = C;
+				break;
+			}
+		}
 	}
 }
 
@@ -112,7 +192,7 @@ void AODRebindMenu::SelectCell(int32 Row, int32 Col)
 	Selected = Row;
 	if (Col >= 0)
 	{
-		Column = FMath::Clamp(Col, 0, 1);
+		Column = FMath::Clamp(Col, 0, NumCols - 1);
 	}
 }
 
@@ -124,12 +204,13 @@ bool AODRebindMenu::ActivateSelected()
 	}
 	if (IsBindingRow(Selected))
 	{
-		BeginCapture(Selected * 2 + Column);
+		BeginCapture(Selected * NumCols + GetColumn());
 		return false;
 	}
 	if (Selected == ResetRow())
 	{
 		FODInputConfig::ResetToDefaults();
+		FODRacingWheel::ResetProfile();
 		RefreshAllLiveInputBindings(GetWorld());
 		return false;
 	}
@@ -169,7 +250,15 @@ void AODRebindMenu::BeginCapture(int32 Slot)
 	EscB.bConsumeInput = true;
 	EscB.bExecuteWhenPaused = true;
 
-	const bool bGamepadSlot = (Slot % 2) == 1;
+	if (Slot % NumCols == 2)
+	{
+		// wheel: polled in Tick from the device, keys only for Escape
+		FODWheelDevice::Start();
+		FODWheelDevice::BeginCapture();
+		SetActorTickEnabled(true);
+		return;
+	}
+	const bool bGamepadSlot = (Slot % NumCols) == 1;
 	if (bGamepadSlot)
 	{
 		for (const FKey& K : GamepadCandidates)
@@ -213,8 +302,12 @@ void AODRebindMenu::OnCaptureKey(FKey Key)
 		EndCapture();   // cancel, no assignment - see class comment
 		return;
 	}
-	const int32 ActionIdx = CapturingRow / 2;
-	const bool bGamepadSlot = (CapturingRow % 2) == 1;
+	if (CapturingRow % NumCols == 2)
+	{
+		return;   // wheel capture takes no keys but Escape
+	}
+	const int32 ActionIdx = CapturingRow / NumCols;
+	const bool bGamepadSlot = (CapturingRow % NumCols) == 1;
 	const EODInputAction Action = static_cast<EODInputAction>(ActionIdx);
 
 	// device-class guard: a gamepad-slot capture only accepts a gamepad key
@@ -241,22 +334,35 @@ void AODRebindMenu::OnCaptureKey(FKey Key)
 
 FString AODRebindMenu::GetLabel(int32 Row) const
 {
-	if (IsBindingRow(Row))
+	if (Row >= 0 && Row < FODInputConfig::NumActions)
 	{
 		return FODInputConfig::ActionName(static_cast<EODInputAction>(Row));
+	}
+	const int32 W = Row - FODInputConfig::NumActions;
+	if (W >= 0 && W < NumWheelRows)
+	{
+		return W < static_cast<int32>(EODWheelAxis::Count)
+			? FString(FODRacingWheel::AxisLabel(static_cast<EODWheelAxis>(W))) + TEXT(" axis")
+			: FString(FODRacingWheel::ButtonName(static_cast<EODWheelButton>(
+				static_cast<int32>(EODWheelButton::Gear1) + W - static_cast<int32>(EODWheelAxis::Count))));
 	}
 	return Row == ResetRow() ? TEXT("Reset to Defaults") : Row == BackRow() ? TEXT("Back") : TEXT("");
 }
 
 FString AODRebindMenu::GetBinding(int32 Row, int32 Col) const
 {
-	if (!IsBindingRow(Row))
+	if (!HasCell(Row, Col))
 	{
 		return FString();
 	}
 	if (IsCapturingCell(Row, Col))
 	{
-		return TEXT("Press a key...");
+		return Col == 2 ? TEXT("Move / press...") : TEXT("Press a key...");
+	}
+	if (Col == 2)
+	{
+		bool bAxis = false;
+		return FODRacingWheel::BindName(*WheelBind(Row, bAxis), bAxis);
 	}
 	const EODInputAction Action = static_cast<EODInputAction>(Row);
 	const FKey Key = Col == 1 ? FODInputConfig::GetGamepadKey(Action) : FODInputConfig::GetKeyboardKey(Action);

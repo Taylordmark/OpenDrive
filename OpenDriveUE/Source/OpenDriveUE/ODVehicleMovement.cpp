@@ -610,7 +610,7 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 
 	// steering angle: raw input times a mild high-speed taper (the tires are
 	// the real limit; this only keeps 120 mph lane-keeping humane)
-	const float Taper = SteerTaper(FwdSpeedCmS);
+	const float Taper = bSteerTaper ? SteerTaper(FwdSpeedCmS) : 1.0f;
 
 	for (FODWheel& W : Wheels)
 	{
@@ -625,6 +625,7 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 		{
 			const float NewLen = FMath::Clamp(CenterLen, 0.0f, RestLen);
 			const float ComprRate = (W.SpringLen - NewLen) / Dt;   // cm/s
+			W.ComprRate = ComprRate;
 			W.SpringLen = NewLen;
 			// bump stop: the tyre top past BumpTravelCm over the authored
 			// tyre top (body-fixed, so a taller tyre or lower ride eats travel)
@@ -649,6 +650,7 @@ void UODVehicleMovement::TickSuspension(FODStepBody* Body, float Dt)
 		{
 			W.bInContact = false;
 			W.Surface = nullptr;
+			W.ComprRate = 0.0f;
 			W.SpringLen =
 				FMath::FInterpConstantTo(W.SpringLen, RestLen, Dt, 80.0f);
 			W.FzSm += (0.0f - W.FzSm) * FMath::Min(Dt * 25.0f, 1.0f);
@@ -768,11 +770,15 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 	bRelaxedShift = CruiseTimer > 1.0f;
 
 	// ---- shift controller (stage 1, drive-test passed 2026-07-17)
+	if (!bManualGearbox && Gear == 0)
+	{
+		Gear = 1;   // back from manual in neutral: the auto box has no N
+	}
 	if (ShiftTimer > 0.0f)
 	{
 		ShiftTimer -= Dt;
 	}
-	else if (Gear > 0)
+	else if (Gear > 0 && !bManualGearbox)
 	{
 		const float UpshiftRpm = FMath::Lerp(
 			UpshiftRpmAtCruise, UpshiftRpmAtWot, ThrottleIn);
@@ -850,7 +856,11 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 	// speed, not literally standstill (2026-08-25, Taylor: under 4mph,
 	// holding forward or back should shift) - 4mph = 178.8 cm/s
 	const bool bStopped = FMath::Abs(FwdSpeedCmS) < 178.8f;
-	if (Gear > 0 && bStopped && BrakeIn > 0.3f && ThrottleIn < 0.05f)
+	if (bManualGearbox)
+	{
+		ReverseIntent = 0.0f;   // the driver selects R
+	}
+	else if (Gear > 0 && bStopped && BrakeIn > 0.3f && ThrottleIn < 0.05f)
 	{
 		ReverseIntent += Dt;
 		if (ReverseIntent > 0.35f)
@@ -868,7 +878,8 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 		ReverseIntent = 0.0f;
 	}
 	// while reversing the pedals swap: brake input drives, throttle brakes
-	float Demand = Gear < 0 ? (IsReverseRollingForward() ? 0.0f : BrakeIn) : ThrottleIn;
+	float Demand = Gear < 0 && !bManualGearbox
+		? (IsReverseRollingForward() ? 0.0f : BrakeIn) : ThrottleIn;
 	// setup top-speed cap (offroad gearing): fade throttle over the last 8 km/h
 	if (TopSpeedCapKph > 0.0f && Gear > 0)
 	{
@@ -922,14 +933,20 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 		LaunchTimer = LaunchClutchTime;
 	}
 	LaunchTimer = FMath::Max(LaunchTimer - Dt, 0.0f);
+	// a real clutch pedal replaces the automatic launch bite
+	const float Engage = 1.0f - ClutchIn;
+	if (ClutchIn > 0.05f)
+	{
+		LaunchTimer = 0.0f;
+	}
 
-	if (ShiftTimer > 0.0f || Gear == 0)
+	if (ShiftTimer > 0.0f || Gear == 0 || Engage < 0.05f)
 	{
 		// decoupled (shifting or neutral): free engine on its own inertia
 		const float RadPerS2 = (DriveTq - BrakeTq) / EngineInertia;
 		EngineRpm += RadPerS2 * 60.0f / (2.0f * PI) * Dt;
 	}
-	else if (LaunchTimer > 0.0f)
+	else if (LaunchTimer > 0.0f || Engage < 0.95f)
 	{
 		// slipping clutch: blend a free-revving estimate (the flare) with
 		// the normal coupled target (still low - the car isn't moving yet),
@@ -940,7 +957,8 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 			EngineRpm + FreeRadPerS2 * 60.0f / (2.0f * PI) * Dt;
 		const float CoupledTarget = FMath::FInterpTo(EngineRpm,
 			FMath::Max(CoupledRpm, IdleRpm), Dt, 12.0f);
-		const float Bite = 1.0f - LaunchTimer / LaunchClutchTime;   // 0->1
+		const float Bite = FMath::Min(LaunchTimer > 0.0f
+			? 1.0f - LaunchTimer / LaunchClutchTime : 1.0f, Engage);   // 0->1
 		EngineRpm = FMath::Lerp(FreeRpm, CoupledTarget, Bite * Bite);
 	}
 	else
@@ -963,7 +981,8 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 		// only engine-brake through wheels that are actually coupled
 		// (near-idle at standstill = slipping clutch, no drag)
 		const float NetTq = DriveTq - (CoupledRpm > IdleRpm ? BrakeTq : 0.0f);
-		WheelTq = NetTq * Ratio * FinalRatio * Efficiency / DrivenCount;
+		WheelTq = NetTq * Ratio * FinalRatio * Efficiency / DrivenCount
+			* FMath::Clamp(Engage, 0.0f, 1.0f);
 	}
 
 	// ---- TC High: closed-loop drive-torque authority. Cut fast when the
@@ -1057,7 +1076,19 @@ void UODVehicleMovement::TickDrivetrain(FODStepBody* Body, float Dt)
 	}
 
 	CurTotalRatio = Ratio * FinalRatio;
-	bDrivelineCoupled = Gear != 0 && ShiftTimer <= 0.0f;
+	bDrivelineCoupled = Gear != 0 && ShiftTimer <= 0.0f && Engage > 0.5f;
+}
+
+void UODVehicleMovement::RequestGear(int32 NewGear)
+{
+	NewGear = FMath::Clamp(NewGear, -1, GearRatios.Num());
+	if (NewGear == Gear)
+	{
+		return;
+	}
+	Gear = NewGear;
+	ShiftTimer = NewGear != 0 ? ShiftTime : 0.0f;
+	LaunchTimer = 0.0f;
 }
 
 float UODVehicleMovement::SurfaceGrip(const UPhysicalMaterial* Mat) const
@@ -1115,6 +1146,8 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 		DrivenCount += W.bDriven ? 1 : 0;
 		ContactCount += W.bInContact ? 1 : 0;
 	}
+
+	float FfbNm = 0.0f;   // this step's rim torque (Nm, + = toward right steer)
 
 	// filled per wheel below, consumed after the loop by the ABS / brake pass
 	float RoadMs[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1194,24 +1227,13 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			const float Sy = SlipAngle / PeakSlipAngleRad;
 			const float Sc = FMath::Sqrt(Sx * Sx + Sy * Sy);
 
-			// grip curve: smooth rise to peak at Sc=1, fade to sliding grip
-			const float Shape = Sc <= 1.0f
-				? 1.5f * Sc - 0.5f * Sc * Sc * Sc
-				: FMath::Lerp(1.0f, SlideKeep,
-					FMath::Min((Sc - 1.0f) / 1.5f, 1.0f));
-
 			WheelSlipAngle = SlipAngle;
 
+			// load sensitivity - see TireLoadSensitivity
+			const float LoadSens = FMath::Max(1.0f - TireLoadSensitivity
+				* (Fz / FzStatic - 1.0f), 0.4f);
 			float Fx = 0.0f, Fy = 0.0f;
-			if (Sc > KINDA_SMALL_NUMBER)
-			{
-				// load sensitivity - see TireLoadSensitivity
-				const float LoadSens = FMath::Max(1.0f - TireLoadSensitivity
-					* (Fz / FzStatic - 1.0f), 0.4f);
-				const float F = Mu * Fz * LoadSens * Shape;   // friction circle
-				Fx = F * Sx / Sc;
-				Fy = F * Sy / Sc;
-			}
+			TyreForce(Sx, Sy, Mu * Fz * LoadSens, SlideKeep, Fx, Fy);
 
 			// stability clamps: never push the contact patch past zero in
 			// one frame (kills parking jitter without touching real slides).
@@ -1284,6 +1306,11 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 			{
 				TraceAlphaF = FMath::RadiansToDegrees(SlipAngle);
 				TraceFyF += Fy;
+				// FFB: aligning torque, plus the scrub-radius pull of an
+				// uneven brake/drive force (left wheel pulls the rim left)
+				FfbNm += AligningRimNm(Fy, Sc)
+					+ (W.Attach.Y < 0.0f ? 1.0f : -1.0f) * Fx / 100.0f
+						* ScrubRadiusCm / 100.0f / FMath::Max(SteeringRatio, 1.0f);
 			}
 			else
 			{
@@ -1326,6 +1353,45 @@ void UODVehicleMovement::TickTires(FODStepBody* Body, float Dt)
 
 		SlipAngles[i] = WheelSlipAngle;
 		EffInertias[i] = EffInertia;
+	}
+
+	// ---- force feedback extras (fixed step, so frame-rate independent):
+	// road texture/kerbs from the front struts, rumble on rough surfaces,
+	// collision kicks from lateral body acceleration no tyre can make
+	{
+		float CrL = 0.0f, CrR = 0.0f, Rough = 0.0f;
+		for (const FODWheel& W : Wheels)
+		{
+			if (W.Attach.X > 0.0f)
+			{
+				(W.Attach.Y < 0.0f ? CrL : CrR) = W.ComprRate / 100.0f;   // m/s
+				if (W.bInContact)
+				{
+					const FString Name = W.Surface.IsValid() ? W.Surface->GetName() : FString();
+					Rough = FMath::Max(Rough, Name.Contains(TEXT("Asphalt")) ? 0.0f
+						: Name.Contains(TEXT("Gravel")) ? 1.0f : Name.Contains(TEXT("DirtRoad")) ? 0.7f : 0.8f);
+				}
+			}
+		}
+		// a bump under the left wheel pushes it back - the rim kicks left
+		FfbNm += FMath::Clamp(-FfbRoadNmPerMs * (CrL - CrR), -6.0f, 6.0f);
+		const float SpeedMs = FMath::Abs(FwdSpeedCmS) / 100.0f;
+		FfbRumbleDist += SpeedMs * Dt;
+		FfbNm += FfbRumbleNm * Rough * FMath::Min(SpeedMs / 10.0f, 1.0f)
+			* FMath::PerlinNoise1D(FfbRumbleDist * 3.0f);
+		const FVector VNow = StepV[(StepIdx + StepHistory - 1) % StepHistory];
+		const FVector VPrev = StepV[(StepIdx + StepHistory - 2) % StepHistory];
+		const float LatAcc = FVector::DotProduct(VNow - VPrev, Body->GetRightVector()) / 100.0f / Dt;   // m/s^2
+		const float Excess = FMath::Max(FMath::Abs(LatAcc) - 25.0f, 0.0f);
+		if (Excess > 0.0f)
+		{
+			FfbJoltState = FMath::Clamp(FfbJoltState + FMath::Sign(LatAcc) * FfbJoltNm * Excess / 10.0f,
+				-3.0f * FfbJoltNm, 3.0f * FfbJoltNm);
+		}
+		FfbNm += FfbJoltState;
+		FfbJoltState *= FMath::Exp(-Dt / 0.06f);
+		FfbSumNm += FfbNm;
+		++FfbSteps;
 	}
 
 	// ---- ABS (2026-10-09, Taylor: "abs should be helping braking not hurting
@@ -1450,6 +1516,42 @@ void UODVehicleMovement::TickAero(FODStepBody* Body)
 			Body->GetComponentTransform().TransformPosition(
 				FVector(RearX + Bal * (FrontX - RearX), 0.0f, ComZEff)));
 	}
+}
+
+void UODVehicleMovement::TyreForce(float Sx, float Sy, float FMax, float SlideKeep,
+	float& OutFx, float& OutFy)
+{
+	OutFx = OutFy = 0.0f;
+	const float Sc = FMath::Sqrt(Sx * Sx + Sy * Sy);
+	if (Sc <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	// grip curve: smooth rise to peak at Sc=1, fade to sliding grip
+	const float Shape = Sc <= 1.0f
+		? 1.5f * Sc - 0.5f * Sc * Sc * Sc
+		: FMath::Lerp(1.0f, SlideKeep, FMath::Min((Sc - 1.0f) / 1.5f, 1.0f));
+	const float F = FMax * Shape;   // friction circle
+	OutFx = F * Sx / Sc;
+	OutFy = F * Sy / Sc;
+}
+
+float UODVehicleMovement::AligningRimNm(float Fy, float Sc) const
+{
+	// Fy acts behind the steering axis by the pneumatic trail (gone at the
+	// grip peak) plus the caster trail; it turns the wheel back toward the
+	// direction of travel, i.e. against the steer that made it. Rack torque
+	// reaches the rim divided by the steering ratio.
+	const float TrailM = (PneumaticTrailCm * FMath::Max(1.0f - Sc, 0.0f) + CasterTrailCm) / 100.0f;
+	return -(Fy / 100.0f) * TrailM / FMath::Max(SteeringRatio, 1.0f);
+}
+
+float UODVehicleMovement::ConsumeFfbRimNm()
+{
+	const float Mean = FfbSteps > 0 ? FfbSumNm / FfbSteps : 0.0f;
+	FfbSumNm = 0.0f;
+	FfbSteps = 0;
+	return Mean;
 }
 
 float UODVehicleMovement::SteerTaper(float FwdSpeedCmS)

@@ -58,6 +58,7 @@ struct FODWheel
 	float SteerDeg = 0.0f;
 	float DriveNm = 0.0f;
 	float BrakeNm = 0.0f;
+	float ComprRate = 0.0f;       // strut compression speed this step, cm/s (FFB road feel)
 };
 
 /**
@@ -109,9 +110,29 @@ public:
 	bool IsReverseRollingForward() const { return Gear < 0 && FwdSpeedCmS > 30.0f; }
 	float GetPedalBrake() const
 	{
-		return Gear >= 0 ? BrakeIn : IsReverseRollingForward() ? FMath::Max(ThrottleIn, BrakeIn) : ThrottleIn;
+		return Gear >= 0 || bManualGearbox ? BrakeIn
+			: IsReverseRollingForward() ? FMath::Max(ThrottleIn, BrakeIn) : ThrottleIn;
 	}
 	float GetSteeringInput() const { return SteerIn; }
+	/** Clutch pedal, 1 = fully down (disengaged). Only a wheel's clutch
+	 *  axis writes it; 0 leaves the automatic launch clutch in charge. */
+	void SetClutchInput(float V) { ClutchIn = FMath::Clamp(V, 0.0f, 1.0f); }
+	float GetClutchInput() const { return ClutchIn; }
+
+	// --- manual gearbox (Arc 6): the pawn sets bManualGearbox from the
+	// Gearbox setting. Manual = no auto shifts, no brake-to-reverse pedal
+	// swap; gears come from paddles/sequential keys or an H-shifter.
+	// ponytail: no stall or gear grind - the engine floors at idle and any
+	// gear engages; add a stall model if a clutch-only start should matter.
+	bool bManualGearbox = false;
+	/** Sequential: R <-> N <-> 1 <-> ... <-> top. */
+	void ShiftUp() { RequestGear(Gear + 1); }
+	void ShiftDown() { RequestGear(Gear - 1); }
+	/** -1 = R, 0 = N, 1..N. Takes the normal shift torque cut. */
+	void RequestGear(int32 NewGear);
+	/** false while a wheel steers: the rim is 1:1 with the road wheels, so
+	 *  the high-speed SteerTaper (a keyboard/gamepad aid) stays off. */
+	bool bSteerTaper = true;
 
 	// --- spawn parking hold (2026-09-02) ---
 	// Full-brake hold engaged by the pawn when the ground-snap releases
@@ -322,6 +343,37 @@ public:
 	// --- steering ---
 	UPROPERTY(EditAnywhere, Category = "Steering")
 	float MaxSteerAngleDeg = 38.0f;
+
+	/** Steering-wheel degrees per road-wheel degree. Sets a wheel's soft
+	 *  lock: lock-to-lock = 2 x MaxSteerAngleDeg x SteerLockScale x this
+	 *  (38 deg x 12 = 912 deg, a G29's 900 is close to 1:1). */
+	UPROPERTY(EditAnywhere, Category = "Steering")
+	float SteeringRatio = 12.0f;
+
+	// --- force feedback (Arc 6). Torque is computed per fixed step in
+	// TickTires/TickSuspension, so it is the same at any frame rate; the
+	// pawn averages the steps since its last frame (ConsumeFfbRimNm). ---
+	/** Pneumatic trail at zero slip; it shrinks to 0 at the grip peak, so
+	 *  the rim goes light as the front tyres saturate (understeer) or lock. */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float PneumaticTrailCm = 4.0f;
+	/** Caster (mechanical) trail - keeps some weight past the peak. */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float CasterTrailCm = 1.5f;
+	/** Left/right front Fx difference x this = brake/drive pull at the rim. */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float ScrubRadiusCm = 1.0f;
+	/** Road texture/kerbs: rim Nm per m/s of left-right front strut
+	 *  compression-speed difference. */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float FfbRoadNmPerMs = 8.0f;
+	/** Unpaved/off-road rumble amplitude at speed, rim Nm. */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float FfbRumbleNm = 1.2f;
+	/** Collision kick, rim Nm per 10 m/s^2 of lateral body acceleration
+	 *  beyond what tyres can make (2.5 g). */
+	UPROPERTY(EditAnywhere, Category = "Steering|FFB")
+	float FfbJoltNm = 4.0f;
 
 	// --- tires ---
 	/** Peak grip coefficient on dry asphalt (road tire ~1.0). */
@@ -619,6 +671,23 @@ public:
 	 *  every steer input; the pawn's keyboard cap reads it too. */
 	static float SteerTaper(float FwdSpeedCmS);
 
+	/** Lock-to-lock at the steering wheel, deg (see SteeringRatio). */
+	float GetSteeringLockToLockDeg() const
+	{
+		return 2.0f * MaxSteerAngleDeg * SteerLockScale * SteeringRatio;
+	}
+	/** Mean steering-rim torque (Nm, + = toward right steer) over the fixed
+	 *  steps since the last call; 0 if none ran. */
+	float ConsumeFfbRimNm();
+
+	/** The tyre's friction-circle force for normalized slips (1 = peak)
+	 *  and available grip FMax (Mu x Fz x load sensitivity). TickTires and
+	 *  the wheel self-check share it. */
+	static void TyreForce(float Sx, float Sy, float FMax, float SlideKeep, float& OutFx, float& OutFy);
+	/** One front tyre's aligning torque at the rim, Nm, + = toward right
+	 *  steer. Fy in UE force units (kg cm/s^2), Sc = combined normalized slip. */
+	float AligningRimNm(float Fy, float Sc) const;
+
 private:
 	// (re)build the 4-wheel array for a wheelbase/track/radius + drive layout;
 	// called from the constructor (the placeholder-coupe defaults) and from
@@ -644,7 +713,15 @@ private:
 	TArray<FODWheel> Wheels;
 
 	// inputs
-	float ThrottleIn = 0.0f, BrakeIn = 0.0f, SteerIn = 0.0f;
+	float ThrottleIn = 0.0f, BrakeIn = 0.0f, SteerIn = 0.0f, ClutchIn = 0.0f;
+
+	// force feedback accumulators (see ConsumeFfbRimNm). ponytail: unsynced
+	// game/physics-thread hand-off like the inputs above; a torn read costs
+	// one frame of FFB - make it a lock or atomic pair if that ever shows
+	float FfbSumNm = 0.0f;
+	int32 FfbSteps = 0;
+	float FfbJoltState = 0.0f;   // decaying collision kick, rim Nm
+	float FfbRumbleDist = 0.0f;  // m rolled, drives the rumble noise
 	bool bHandbrakeIn = false;
 	bool bParkHold = false;   // see EngageParkHold()
 	FVector ParkHoldPos;      // where it holds, anchored on the first held tick
