@@ -79,7 +79,7 @@ from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, owns
-from road_mesh_common import ROAD_LIFT
+from road_mesh_common import ROAD_LIFT, bake_map
 from road_mesh_common import (CONFLICT_SAME_CHAIN_GAP_STATIONS, STATION_SPACING,
                               WALL_EMBED_MARGIN_M, classify_wall_stations, sample_mesh_heights)
 
@@ -256,17 +256,38 @@ def _judge_devs(label, rows):
     return len(above) == 0 and uncovered == 0
 
 
+SHIPPED_WORKER_GB = 1.0
+
+
+def _shipped_tile_heights(job):
+    """(tile path, mesh height cm per point - NaN off-mesh, None if the tile
+    is missing/unreadable) for one shipped near tile."""
+    (tx, ty), xs_cm, ys_cm = job
+    path = MASKS_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+    parsed = parse_terrain_tile_bin(path)
+    if parsed is None:
+        return path, None
+    positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
+    triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
+    return path, sample_mesh_heights(positions, triangles, xs_cm, ys_cm)
+
+
 def check_shipped_terrain_fit():
     """SHIPPED ARTIFACT CHECK - reads the actual ODT1 .bin tiles in
     Content/OpenDrive/Masks/ and samples the real parsed mesh, per this
     module's docstring section 1."""
     st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data(shipped=True)
 
+    near_d = {k: btmt.tile_min_dist_m(st_x_cm, st_y_cm, k[0], k[1], tile_cm) for k in tiles}
+    # tiles are independent: parse + sample each in the bake pool (2026-10-15)
+    heights = bake_map(_shipped_tile_heights,
+                       [(k, st_x_cm[idxs], st_y_cm[idxs]) for k, idxs in tiles.items()
+                        if near_d[k] <= btmt.NEAR_MARGIN_M], SHIPPED_WORKER_GB)
     dzs, rows = [], []
     misses = 0
     missing_tiles = 0
     for (tx, ty), idxs in tiles.items():
-        d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
+        d = near_d[(tx, ty)]
         is_near = d <= btmt.NEAR_MARGIN_M
         if not is_near:
             print(f"WARNING: station tile ({tx},{ty}) did not classify as "
@@ -274,18 +295,14 @@ def check_shipped_terrain_fit():
             misses += len(idxs)
             continue
 
-        path = MASKS_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        parsed = parse_terrain_tile_bin(path)
-        if parsed is None:
+        path, hs = next(heights)
+        if hs is None:
             print(f"MISSING/UNREADABLE: {path.name} - {len(idxs)} station(s) "
                   f"in this tile can't be checked against the shipped bake")
             missing_tiles += 1
             misses += len(idxs)
             continue
 
-        positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
-        triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
-        hs = sample_mesh_heights(positions, triangles, st_x_cm[idxs], st_y_cm[idxs])
         for i, h_cm in zip(idxs, hs):
             if np.isnan(h_cm):
                 misses += 1

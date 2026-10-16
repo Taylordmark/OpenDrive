@@ -13,7 +13,9 @@ meter frame around a shared origin before calling into this module.
 """
 
 import math
+import os
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -1545,53 +1547,133 @@ def detect_elevation_conflict_pairs(east_m, north_m, elev_m, seg_idx, station_id
     (deciding what to carve vs. wall) call this SAME function with the SAME
     parameters, so their answers can't independently drift the way the two
     prior separate implementations did."""
+    pairs_i, pairs_j, _d, _dz = _conflict_candidates(
+        east_m, north_m, elev_m, seg_idx, station_idx, radius_m, (max_grade,), min_gap_m,
+        same_chain_gap_stations)
+    return pairs_i, pairs_j
+
+
+# candidate (i, j) pairs expanded per array chunk - bounds the temporaries
+# (~100 B per candidate) on a dense downtown where a 150 m cell holds thousands
+CONFLICT_CHUNK_CANDIDATES = 20_000_000
+_CELL_OFFSETS = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+
+
+def _conflict_candidates(east_m, north_m, elev_m, seg_idx, station_idx, radius_m, max_grades,
+                         min_gap_m, same_chain_gap_stations):
+    """(i, j, d_m, dz) of every pair detect_elevation_conflict_pairs finds at
+    the LOWEST of max_grades, in its order: i ascending, then the 3x3 cell
+    offsets dx-major, then j ascending - the order the old per-station bucket
+    loop produced, which wall_pairs' order still depends on. Array math over
+    radius_m cells (2026-10-15, was a Python loop: ~45 s on summit_county).
+    np.hypot can differ from math.hypot by an ulp, so pairs within 1e-9 of any
+    threshold (any of max_grades) get math.hypot's distance - same answer."""
     n = len(east_m)
-    east_m = np.asarray(east_m, dtype=np.float64)
-    north_m = np.asarray(north_m, dtype=np.float64)
+    x_cm = np.asarray(east_m, dtype=np.float64) * 100.0
+    y_cm = -np.asarray(north_m, dtype=np.float64) * 100.0
     elev_m = np.asarray(elev_m, dtype=np.float64)
     seg_idx = np.asarray(seg_idx)
-    station_idx = np.asarray(station_idx)
-    x_cm = east_m * 100.0
-    y_cm = -north_m * 100.0
+    station_idx = np.asarray(station_idx).astype(np.int64)
+    empty = np.zeros(0, dtype=np.int64)
+    if n == 0:
+        return empty, empty, np.zeros(0), np.zeros(0)
     radius_cm = radius_m * 100.0
-
     cx = np.floor(x_cm / radius_cm).astype(np.int64)
     cy = np.floor(y_cm / radius_cm).astype(np.int64)
-    buckets = defaultdict(list)
-    for i in range(n):
-        buckets[(int(cx[i]), int(cy[i]))].append(i)
+    cx -= cx.min() - 1
+    cy -= cy.min() - 1
+    w = int(cy.max()) + 2
+    key = cx * w + cy
+    order = np.argsort(key, kind="stable")   # stable: j ascending within a cell
+    cells, start, count = np.unique(key[order], return_index=True, return_counts=True)
 
-    pairs_i, pairs_j = [], []
-    for i in range(n):
-        bx, by = int(cx[i]), int(cy[i])
-        neighbor_idxs = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                neighbor_idxs.extend(buckets.get((bx + dx, by + dy), ()))
-        for j in neighbor_idxs:
-            if j <= i:
-                continue
-            if (seg_idx[i] == seg_idx[j]
-                    and abs(int(station_idx[i]) - int(station_idx[j])) <= same_chain_gap_stations):
-                continue
-            d_m = math.hypot(x_cm[j] - x_cm[i], y_cm[j] - y_cm[i]) / 100.0
-            if d_m <= 0.01 or d_m > radius_m:
-                continue
-            dz = abs(elev_m[j] - elev_m[i])
-            if dz > max_grade * d_m + min_gap_m:
-                pairs_i.append(i)
-                pairs_j.append(j)
-    return np.array(pairs_i, dtype=np.int64), np.array(pairs_j, dtype=np.int64)
+    # per offset, each station's neighbour cell (start, count); 0 if empty
+    nb = []
+    for dx, dy in _CELL_OFFSETS:
+        nk = key + dx * w + dy
+        c = np.minimum(np.searchsorted(cells, nk), len(cells) - 1)
+        hit = cells[c] == nk
+        nb.append((np.where(hit, start[c], 0), np.where(hit, count[c], 0)))
+    per_i = np.cumsum(sum(ct for _, ct in nb))
+    bounds = np.searchsorted(per_i, np.arange(0, per_i[-1], CONFLICT_CHUNK_CANDIDATES), "right")
+    bounds = np.unique(np.r_[0, bounds, n])
+
+    lo_grade = min(max_grades)
+    out = []
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        parts = []
+        for st, ct in nb:
+            ct = ct[lo:hi]
+            ii = np.repeat(np.arange(lo, hi), ct)
+            first = np.repeat(np.cumsum(ct) - ct, ct)
+            jj = order[np.repeat(st[lo:hi], ct) + np.arange(len(ii)) - first]
+            keep = jj > ii
+            ii, jj = ii[keep], jj[keep]
+            keep = ~((seg_idx[ii] == seg_idx[jj])
+                     & (np.abs(station_idx[ii] - station_idx[jj]) <= same_chain_gap_stations))
+            ii, jj = ii[keep], jj[keep]
+            d_m = np.hypot(x_cm[jj] - x_cm[ii], y_cm[jj] - y_cm[ii]) / 100.0
+            dz = np.abs(elev_m[jj] - elev_m[ii])
+            near = (np.abs(d_m - 0.01) < 1e-9) | (np.abs(d_m - radius_m) < 1e-9)
+            for g in max_grades:
+                near |= np.abs(dz - (g * d_m + min_gap_m)) < 1e-9
+            for k in np.flatnonzero(near):
+                i, j = ii[k], jj[k]
+                d_m[k] = math.hypot(x_cm[j] - x_cm[i], y_cm[j] - y_cm[i]) / 100.0
+            keep = (d_m > 0.01) & (d_m <= radius_m) & (dz > lo_grade * d_m + min_gap_m)
+            parts.append((ii[keep], jj[keep], d_m[keep], dz[keep]))
+        # parts are offset-major; a stable sort on i gives (i, offset, j)
+        s = np.argsort(np.concatenate([p[0] for p in parts]), kind="stable")
+        out.append([np.concatenate([p[k] for p in parts])[s] for k in range(4)])
+    return tuple(np.concatenate([o[k] for o in out]) for k in range(4))
 
 
-def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
-                            radius_m=CONFLICT_RADIUS_M,
-                            max_grade=CONFLICT_MAX_GRADE,
-                            min_gap_m=CONFLICT_MIN_GAP_M,
-                            same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
-                            wall_min_grade=WALL_MIN_GRADE,
-                            cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE,
-                            half_width_m=None):
+# classify_wall_stations results on disk (2026-10-15): the wall, terrain and
+# verify stages each classify the same road_stations.json - up to ~8 calls a
+# bake. Keyed by a hash of every input, so a changed station set just misses.
+WALL_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache" / "wall_classify"
+WALL_CACHE_MIN_STATIONS = 10_000   # small (test) inputs aren't worth a file
+WALL_CACHE_KEEP = 16               # newest files kept; ~19 MB each on summit
+
+
+def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name, *args,
+                           **kwargs):
+    """Disk-cached _classify_wall_stations - see its docstring."""
+    import hashlib
+    # only the default thresholds are cached, so the key is the station data
+    if len(east_m) < WALL_CACHE_MIN_STATIONS or args or set(kwargs) - {"half_width_m"}:
+        return _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
+                                       *args, **kwargs)
+    h = hashlib.sha1()
+    for a in (east_m, north_m, elev_m, kwargs.get("half_width_m")):
+        h.update(b"-" if a is None else np.ascontiguousarray(a, dtype=np.float64).tobytes())
+    for a in (seg_idx, station_idx):
+        h.update(np.ascontiguousarray(a, dtype=np.int64).tobytes())
+    h.update(repr(list(road_name)).encode())
+    path = WALL_CACHE_DIR / f"{h.hexdigest()}.npz"
+    if path.exists():
+        with np.load(path) as z:
+            return z["exclude"], list(zip(z["wi"].tolist(), z["wj"].tolist()))
+    exclude, wall_pairs = _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx,
+                                                  road_name, *args, **kwargs)
+    w = np.array(wall_pairs, dtype=np.int32).reshape(-1, 2)
+    WALL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp.npz")   # atomic: parallel stages
+    np.savez(tmp, exclude=exclude, wi=w[:, 0], wj=w[:, 1])
+    os.replace(tmp, path)
+    for old in sorted(WALL_CACHE_DIR.glob("*.npz"), key=lambda f: f.stat().st_mtime)[:-WALL_CACHE_KEEP]:
+        old.unlink(missing_ok=True)
+    return exclude, wall_pairs
+
+
+def _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
+                             radius_m=CONFLICT_RADIUS_M,
+                             max_grade=CONFLICT_MAX_GRADE,
+                             min_gap_m=CONFLICT_MIN_GAP_M,
+                             same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
+                             wall_min_grade=WALL_MIN_GRADE,
+                             cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE,
+                             half_width_m=None):
     """Classifies every conflicting pair (detect_elevation_conflict_pairs)
     into one of three outcomes:
 
@@ -1640,92 +1722,72 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
     east_m = np.asarray(east_m, dtype=np.float64)
     north_m = np.asarray(north_m, dtype=np.float64)
     elev_m = np.asarray(elev_m, dtype=np.float64)
-    pairs_i, pairs_j = detect_elevation_conflict_pairs(
-        east_m, north_m, elev_m, seg_idx, station_idx,
-        radius_m, max_grade, min_gap_m, same_chain_gap_stations)
+    seg_idx = np.asarray(seg_idx)
+    # One candidate pass serves both grade passes below (2026-10-15): the
+    # cross-road pass's pairs are a superset of the main pass's whenever
+    # cross_road_max_grade <= max_grade, so each main pair is a cross pair
+    # whose dz also clears max_grade.
+    pi, pj, d_m, dz = _conflict_candidates(
+        east_m, north_m, elev_m, seg_idx, station_idx, radius_m,
+        (max_grade, cross_road_max_grade), min_gap_m, same_chain_gap_stations)
+    main = dz > max_grade * d_m + min_gap_m
+    cross = dz > cross_road_max_grade * d_m + min_gap_m
+    names = {}
+    name_id = np.array([names.setdefault(s, len(names)) if s else -1 for s in road_name] or [0],
+                       dtype=np.int64)
+    in_scope = (seg_idx[pi] == seg_idx[pj]) | ((name_id[pi] >= 0) & (name_id[pi] == name_id[pj]))
 
-    exclude = np.zeros(n, dtype=bool)
-    wall_pairs = []
-    wall_pair_set = set()
-
-    def add_wall_pair(i, j):
-        key = (i, j) if i < j else (j, i)
-        if key not in wall_pair_set:
-            wall_pair_set.add(key)
-            wall_pairs.append(key)
-        exclude[i] = True
-        exclude[j] = True
-
-    for i, j in zip(pairs_i.tolist(), pairs_j.tolist()):
-        in_scope = (seg_idx[i] == seg_idx[j]) or (
-            bool(road_name[i]) and road_name[i] == road_name[j])
-        if not in_scope:
-            add_wall_pair(i, j)
-            continue
-        dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
+    # in-scope main pairs wall only at grade >= wall_min_grade; math.hypot
+    # re-checks the ones within 1e-9 of it, as in _conflict_candidates
+    dist = np.hypot(east_m[pj] - east_m[pi], north_m[pj] - north_m[pi])
+    if half_width_m is not None:
+        hw = np.asarray(half_width_m, dtype=np.float64)
+        dist = np.maximum(dist - hw[pi] - hw[pj], 0.5)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        grade = np.where(dist > 1e-6, dz / dist, np.inf)
+    for k in np.flatnonzero(main & in_scope & (np.abs(grade - wall_min_grade) < 1e-9)):
+        i, j = pi[k], pj[k]
+        dk = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
         if half_width_m is not None:
-            dist_m = max(dist_m - half_width_m[i] - half_width_m[j], 0.5)
-        grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
-        if grade >= wall_min_grade:
-            add_wall_pair(i, j)
-        # else: in-scope, below threshold - leave exclude as-is (un-excluded
-        # unless some OTHER pair already required this station excluded)
+            dk = max(dk - half_width_m[i] - half_width_m[j], 0.5)
+        grade[k] = abs(elev_m[j] - elev_m[i]) / dk if dk > 1e-6 else float("inf")
 
-    # Second, tighter pass: catches cross-road disagreements too small for
-    # the main (same-road-switchback-calibrated) threshold above to see, but
-    # still real enough that two DIFFERENT roads shouldn't blend into each
-    # other's carve - see CROSS_ROAD_CONFLICT_MAX_GRADE's docstring. Same
-    # "out of scope always walls" rule as the main pass above.
-    cross_i, cross_j = detect_elevation_conflict_pairs(
-        east_m, north_m, elev_m, seg_idx, station_idx,
-        radius_m, cross_road_max_grade, min_gap_m, same_chain_gap_stations)
-    for i, j in zip(cross_i.tolist(), cross_j.tolist()):
-        in_scope = (seg_idx[i] == seg_idx[j]) or (
-            bool(road_name[i]) and road_name[i] == road_name[j])
-        if not in_scope:
-            add_wall_pair(i, j)
+    # main-pass walls in pair order, then the cross-road pass's out-of-scope
+    # pairs the main pass didn't already take (pairs are unique, i < j)
+    wall_main = main & (~in_scope | (grade >= wall_min_grade))
+    wall_cross = cross & ~main & ~in_scope
+    wi = np.concatenate([pi[wall_main], pi[wall_cross]])
+    wj = np.concatenate([pj[wall_main], pj[wall_cross]])
+    exclude = np.zeros(n, dtype=bool)
+    exclude[wi] = True
+    exclude[wj] = True
 
     # Coherence filter (see WALL_RUN_MAX_ASPECT's comment): drop any wall
     # pair whose transitively-connected run isn't path-like, un-excluding
     # its stations so they fall back to ordinary carve blending instead of
     # feeding build_retaining_walls.py geometry it can't build sanely.
-    if wall_pairs:
-        parent = {}
-
-        def find(x):
-            parent.setdefault(x, x)
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a, b):
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-
-        for i, j in wall_pairs:
-            union(i, j)
-
-        components = defaultdict(list)
-        for i, j in wall_pairs:
-            components[find(i)].append(i)
-            components[find(i)].append(j)
-        bad_roots = set()
-        for root, members in components.items():
-            stations = sorted(set(members))
-            if len(stations) < 3:
-                continue   # a lone pair is always path-like (2 points)
-            pts = np.stack([east_m[stations], north_m[stations]], axis=1)
-            centered = pts - pts.mean(axis=0)
-            cov = centered.T @ centered
-            evals = np.linalg.eigvalsh(cov)
-            primary_std = math.sqrt(max(evals[-1], 0.0))
-            secondary_std = math.sqrt(max(evals[0], 0.0))
-            if primary_std > 1e-6 and secondary_std / primary_std > WALL_RUN_MAX_ASPECT:
-                bad_roots.add(root)
-
-        if bad_roots:
+    if len(wi):
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        _, label = connected_components(
+            coo_matrix((np.ones(len(wi)), (wi, wj)), shape=(n, n)), directed=False)
+        # each component's PCA over its distinct stations (2x2 covariance,
+        # eigenvalues in closed form)
+        st = np.flatnonzero(exclude)
+        lab = label[st]
+        cnt = np.bincount(lab)
+        cnt_nz = np.maximum(cnt, 1)
+        ex = east_m[st] - (np.bincount(lab, east_m[st]) / cnt_nz)[lab]
+        ny = north_m[st] - (np.bincount(lab, north_m[st]) / cnt_nz)[lab]
+        sxx, syy, sxy = (np.bincount(lab, v) for v in (ex * ex, ny * ny, ex * ny))
+        half_tr = (sxx + syy) / 2.0
+        disc = np.sqrt(((sxx - syy) / 2.0) ** 2 + sxy ** 2)
+        primary_std = np.sqrt(np.maximum(half_tr + disc, 0.0))
+        secondary_std = np.sqrt(np.maximum(half_tr - disc, 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bad = ((cnt >= 3) & (primary_std > 1e-6)
+                   & (secondary_std / primary_std > WALL_RUN_MAX_ASPECT))
+        if bad.any():
             # An incoherent (blob-shaped) component can't get a clean ruled-surface
             # wall mesh from build_wall_run_mesh()'s single-PCA-axis approach - but
             # its stations are still real, close-in-XY/far-in-Z conflicts (that's
@@ -1739,9 +1801,10 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
             # but leave `exclude` untouched - they keep falling back to raw,
             # un-carved DEM terrain at that spot, same as before this session's
             # wall-extension work, rather than being carved wrong.
-            wall_pairs = [(i, j) for i, j in wall_pairs if find(i) not in bad_roots]
+            keep = ~bad[label[wi]]
+            wi, wj = wi[keep], wj[keep]
 
-    return exclude, wall_pairs
+    return exclude, list(zip(wi.tolist(), wj.tolist()))
 
 
 def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
@@ -2313,6 +2376,37 @@ def sample_mesh_heights(positions, triangles, xs_cm, ys_cm, eps=1e-4, chunk=50_0
         np.maximum.at(out, lo + pt, z)
     out[np.isinf(out)] = np.nan
     return out
+
+
+# Process pools for the single-core bake/verify stages (2026-10-15): about
+# 3/4 of the cores, capped so the whole pool's peak stays inside BAKE_RAM_GB -
+# other bakes may be running beside this one. OD_BAKE_WORKERS=N overrides
+# (1 = in-process, no pool: the serial reference).
+BAKE_RAM_GB = 20.0
+
+
+def bake_workers(per_worker_gb):
+    import multiprocessing
+    import os
+    if multiprocessing.parent_process() is not None:
+        return 1   # already a pool worker: no nested pools
+    if os.environ.get("OD_BAKE_WORKERS"):
+        return max(1, int(os.environ["OD_BAKE_WORKERS"]))
+    return max(1, min(os.cpu_count() * 3 // 4, int(BAKE_RAM_GB / per_worker_gb)))
+
+
+def bake_map(fn, items, per_worker_gb, initializer=None, initargs=()):
+    """map(fn, items) in order, over a bake_workers(per_worker_gb) process
+    pool (fn and items must pickle). In-process when that is 1 worker."""
+    from concurrent.futures import ProcessPoolExecutor
+    n = bake_workers(per_worker_gb)
+    if n == 1:
+        if initializer is not None:
+            initializer(*initargs)
+        yield from map(fn, items)
+        return
+    with ProcessPoolExecutor(n, initializer=initializer, initargs=initargs) as pool:
+        yield from pool.map(fn, items)
 
 
 _TERRAIN_GRIDS = {}

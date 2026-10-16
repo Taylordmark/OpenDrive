@@ -42,7 +42,7 @@ Outputs data/road_tiles/<AREA_NAME>_test/building_mesh.json
 import json
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -50,7 +50,7 @@ from scipy.spatial import cKDTree
 
 from building_roofs import clean_ring, make_roof, triangulate
 from classify_settlements import MIN_BUILDINGS_PER_TILE
-from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, half_width_for_stations, road_ue_z_m
+from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, bake_map, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
 # Clearance a footprint corner must keep beyond the nearest station's OWN
@@ -163,7 +163,8 @@ REGION_PALETTE = {
                     apartments=[2, 3, 5, 4, 2], civic=[5, 4, 0, 2], church=[5, 0, 2], mid=[2, 3, 5, 4],
                     low=[2, 2, 6, 6, 5, 3]),
 }
-AREA_REGION = {"oahu": "tropical", "green_valley": "socal", "sf_russian_hill": "sf", "summit_county": "rockies"}
+AREA_REGION = {"oahu": "tropical", "green_valley": "socal", "sf_russian_hill": "sf", "summit_county": "rockies",
+               "breckenridge": "rockies"}
 HIGH_RISE_LEVELS = 8
 
 
@@ -378,70 +379,51 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
     return verts, uvs, tris
 
 
-def main():
-    st_east, st_north, st_elev, st_half_w = load_stations()
-    st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
-    st_half_w_cm = st_half_w * 100.0
+# Per-process state for build_chunk (main() in-process, or each bake_map
+# worker): stations, their tile buckets, settlement + known-storey lookups.
+_SHARED = None
+CHUNK_BUILDINGS = 2000
+# a worker holds the station arrays/buckets and one chunk's footprints + meshes
+WORKER_GB = 1.0
 
-    # Tile-bucket every station once (same TERRAIN_TILE_SIZE_CM grid the
-    # settlement classification already uses) so the per-building nearest-
-    # station lookup below only ever scans a 3x3 tile neighborhood instead
-    # of every station in the whole network - at whole-island scale (a real
-    # city has orders of magnitude more stations AND buildings than the
-    # Mount-Vernon-only proof this replaces) a brute-force O(buildings x
-    # stations) scan is actually too slow, not just inelegant.
-    station_tiles = defaultdict(list)
-    for i in range(len(st_x_cm)):
-        key = (int(st_x_cm[i] // TERRAIN_TILE_SIZE_CM), int(st_y_cm[i] // TERRAIN_TILE_SIZE_CM))
-        station_tiles[key].append(i)
 
-    def nearby_station_indices(x_cm, y_cm):
-        """Indices of stations in the 3x3 tile neighborhood around (x,y),
-        widening the search ring if that neighborhood happens to be empty
-        (sparse/edge-of-network area) - returns None if nothing found even
-        after a generous widen, which the caller treats as "no road nearby"."""
-        cx, cy = int(x_cm // TERRAIN_TILE_SIZE_CM), int(y_cm // TERRAIN_TILE_SIZE_CM)
-        for ring in (1, 3, 8):
-            idx = [i for dx in range(-ring, ring + 1) for dy in range(-ring, ring + 1)
-                   for i in station_tiles.get((cx + dx, cy + dy), [])]
-            if idx:
-                return np.array(idx)
-        return None
+def _init_shared(shared):
+    global _SHARED
+    _SHARED = shared
 
-    settlement = json.loads(SETTLEMENT_PATH.read_text())["tiles"]
-    buildings_raw = json.loads(BUILDINGS_PATH.read_text())
 
-    rings = []
-    for b in buildings_raw:
-        ring_ll = b["nodes"]
-        east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
-                                   np.array([lat for lat, _ in ring_ll]))
-        rings.append([(e * 100.0, -n * 100.0) for e, n in zip(east_m.tolist(), north_m.tolist())])
-    centroids_cm = np.array([[sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)] for r in rings])
-    known = [known_levels(b) for b in buildings_raw]
-    known_idx = np.array([i for i, lv in enumerate(known) if lv], dtype=np.int64)
-    known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
-    level_sources = defaultdict(int)
-    tile_counts = defaultdict(int)
-    for cx, cy in centroids_cm:
-        tile_counts[f"{int(cx // TERRAIN_TILE_SIZE_CM)},{int(cy // TERRAIN_TILE_SIZE_CM)}"] += 1
+def nearby_station_indices(x_cm, y_cm):
+    """Indices of stations in the 3x3 tile neighborhood around (x,y),
+    widening the search ring if that neighborhood happens to be empty
+    (sparse/edge-of-network area) - returns None if nothing found even
+    after a generous widen, which the caller treats as "no road nearby"."""
+    station_tiles = _SHARED["station_tiles"]
+    cx, cy = int(x_cm // TERRAIN_TILE_SIZE_CM), int(y_cm // TERRAIN_TILE_SIZE_CM)
+    for ring in (1, 3, 8):
+        idx = [i for dx in range(-ring, ring + 1) for dy in range(-ring, ring + 1)
+               for i in station_tiles.get((cx + dx, cy + dy), [])]
+        if idx:
+            return np.array(idx)
+    return None
 
-    out = []
-    n_excluded_road = n_not_populated = n_ms = 0
-    facade_counts = defaultdict(int)
-    roof_counts = defaultdict(int)
-    archetype_counts = defaultdict(int)
-    for bi, b in enumerate(buildings_raw):
-        ring_xy_cm = rings[bi]
-        cx_cm, cy_cm = centroids_cm[bi]
+
+def build_chunk(chunk):
+    """chunk: [(osm building, ring_xy_cm, (cx_cm, cy_cm), known levels)] ->
+    (building dicts in order, Counter of the stats main() prints). Each
+    building depends only on itself and _SHARED, so chunks are independent."""
+    S = _SHARED
+    st_x_cm, st_y_cm, st_half_w_cm, st_elev = S["st_x_cm"], S["st_y_cm"], S["st_half_w_cm"], S["st_elev"]
+    known_tree, known_vals = S["known_tree"], S["known_vals"]
+    out, stats = [], Counter()
+    for b, ring_xy_cm, (cx_cm, cy_cm), levels in chunk:
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
         tile_key = f"{tx},{ty}"
-        archetype_tile = settlement.get(tile_key)
-        if archetype_tile is None and tile_counts[tile_key] >= MIN_BUILDINGS_PER_TILE:
+        archetype_tile = S["settlement"].get(tile_key)
+        if archetype_tile is None and S["tile_counts"][tile_key] >= MIN_BUILDINGS_PER_TILE:
             archetype_tile = "AmericanTown"   # B6: settlement tiles count OSM only; MS fill populates too
         if archetype_tile is None:
-            n_not_populated += 1
+            stats["not_populated"] += 1
             continue
 
         # road-corridor exclusion gate: nearest station to ANY footprint
@@ -451,14 +433,14 @@ def main():
         if cand is None:
             # no road station anywhere near this building even after
             # widening the search - can't place it without a ground height
-            n_not_populated += 1
+            stats["not_populated"] += 1
             continue
         clearance_cm = min(
             float(np.min(np.hypot(st_x_cm[cand] - x, st_y_cm[cand] - y) - st_half_w_cm[cand]))
             for x, y in ring_xy_cm)
         min_clear_m = CITY_ROAD_CLEARANCE_M if archetype_tile == "City" else ROAD_CLEARANCE_M
         if clearance_cm / 100.0 < min_clear_m:
-            n_excluded_road += 1
+            stats["excluded_road"] += 1
             continue
 
         # Placeholder base Z only: AODBuildingManager::ComputeBuildingZOffset
@@ -471,25 +453,24 @@ def main():
         rng = random.Random(b["way_id"])
         area_m2 = abs(sum(ring_xy_cm[i][0] * ring_xy_cm[i - 1][1] - ring_xy_cm[i - 1][0] * ring_xy_cm[i][1]
                           for i in range(len(ring_xy_cm)))) / 2e4
-        levels = known[bi]
-        level_sources[level_source(b) or "estimated"] += 1
+        stats["levels", level_source(b) or "estimated"] += 1
         if levels is None:
             neighbours = []
             if known_tree is not None:
-                d, j = known_tree.query((cx_cm, cy_cm), k=min(NEIGHBOUR_K, len(known_idx)),
+                d, j = known_tree.query((cx_cm, cy_cm), k=min(NEIGHBOUR_K, len(known_vals)),
                                         distance_upper_bound=NEIGHBOUR_RADIUS_M * 100.0)
-                neighbours = [known[known_idx[i]] for i in np.atleast_1d(j)[np.isfinite(np.atleast_1d(d))]]
+                neighbours = [known_vals[i] for i in np.atleast_1d(j)[np.isfinite(np.atleast_1d(d))]]
             levels = estimate_levels(b.get("building_tag"), area_m2, neighbours, rng)
         levels = min(max(1, levels), MAX_BUILDING_LEVELS)   # sanity backstop, see MAX_BUILDING_LEVELS
         # drawn AFTER the levels roll so existing heights don't shift
         wall_set, flat_roof = pick_facade(b.get("building_tag"), levels, rng, REGION)
-        facade_counts[(wall_set, flat_roof)] += 1
+        stats["facade", (wall_set, flat_roof)] += 1
         shape = roof_shape(b, flat_roof, area_m2, levels, rng, REGION)
         # own stream, so the facade / roof rolls above stay as they were
         city_street = archetype_tile == "City" and clearance_cm / 100.0 < STOREFRONT_SETBACK_M
         archetype = pick_archetype(b.get("building_tag"), levels, shape, city_street,
                                    random.Random(b["way_id"] ^ 0x5F3759DF), REGION)
-        archetype_counts[archetype] += 1
+        stats["archetype", archetype] += 1
         height_cm = facade_height_m(archetype, levels) * 100.0
 
         verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
@@ -501,7 +482,7 @@ def main():
             else:
                 shape = "flat"
         roof_set, roof_rgb = roof_look(b, shape, rng, REGION)
-        roof_counts[(shape, roof_set)] += 1
+        stats["roof", (shape, roof_set)] += 1
         out.append({
             "name": f"bldg_{b['way_id']}",
             "tile": tile_key,
@@ -517,19 +498,71 @@ def main():
             "levels": levels,
             "roof": shape,
         })
-        n_ms += b.get("source") == "ms"
+        stats["ms"] += b.get("source") == "ms"
+    return out, stats
+
+
+def main():
+    st_east, st_north, st_elev, st_half_w = load_stations()
+    st_x_cm, st_y_cm = st_east * 100.0, -st_north * 100.0
+
+    # Tile-bucket every station once (same TERRAIN_TILE_SIZE_CM grid the
+    # settlement classification already uses) so the per-building nearest-
+    # station lookup in build_chunk only ever scans a 3x3 tile neighborhood
+    # instead of every station in the whole network - at whole-island scale
+    # (a real city has orders of magnitude more stations AND buildings than
+    # the Mount-Vernon-only proof this replaces) a brute-force O(buildings x
+    # stations) scan is actually too slow, not just inelegant.
+    station_tiles = defaultdict(list)
+    for i in range(len(st_x_cm)):
+        key = (int(st_x_cm[i] // TERRAIN_TILE_SIZE_CM), int(st_y_cm[i] // TERRAIN_TILE_SIZE_CM))
+        station_tiles[key].append(i)
+
+    settlement = json.loads(SETTLEMENT_PATH.read_text())["tiles"]
+    buildings_raw = json.loads(BUILDINGS_PATH.read_text())
+
+    rings = []
+    for b in buildings_raw:
+        ring_ll = b["nodes"]
+        east_m, north_m = to_local(np.array([lon for _, lon in ring_ll]),
+                                   np.array([lat for lat, _ in ring_ll]))
+        rings.append([(e * 100.0, -n * 100.0) for e, n in zip(east_m.tolist(), north_m.tolist())])
+    centroids_cm = np.array([[sum(p[0] for p in r) / len(r), sum(p[1] for p in r) / len(r)] for r in rings])
+    known = [known_levels(b) for b in buildings_raw]
+    known_idx = np.array([i for i, lv in enumerate(known) if lv], dtype=np.int64)
+    known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
+    tile_counts = defaultdict(int)
+    for cx, cy in centroids_cm:
+        tile_counts[f"{int(cx // TERRAIN_TILE_SIZE_CM)},{int(cy // TERRAIN_TILE_SIZE_CM)}"] += 1
+
+    # buildings are independent: CHUNK_BUILDINGS at a time over bake_map
+    # (2026-10-15), merged back in input order
+    shared = {"st_x_cm": st_x_cm, "st_y_cm": st_y_cm, "st_half_w_cm": st_half_w * 100.0,
+              "st_elev": st_elev, "station_tiles": dict(station_tiles), "settlement": settlement,
+              "tile_counts": tile_counts, "known_tree": known_tree,
+              "known_vals": [known[i] for i in known_idx]}
+    items = list(zip(buildings_raw, rings, centroids_cm.tolist(), known))
+    chunks = [items[i:i + CHUNK_BUILDINGS] for i in range(0, len(items), CHUNK_BUILDINGS)]
+    out, stats = [], Counter()
+    for part, part_stats in bake_map(build_chunk, chunks, WORKER_GB, _init_shared, (shared,)):
+        out += part
+        stats.update(part_stats)
+    level_sources = {k[1]: v for k, v in stats.items() if k[0] == "levels"}
+    facade_counts = {k[1]: v for k, v in stats.items() if k[0] == "facade"}
+    roof_counts = {k[1]: v for k, v in stats.items() if k[0] == "roof"}
+    archetype_counts = {k[1]: v for k, v in stats.items() if k[0] == "archetype"}
 
     OUT_PATH.write_text(json.dumps({"buildings": out}))
     print(f"{len(buildings_raw)} footprint(s) -> {len(out)} building(s) built "
-          f"({n_not_populated} outside populated tiles, {n_excluded_road} "
+          f"({stats['not_populated']} outside populated tiles, {stats['excluded_road']} "
           f"excluded - too close to the road) -> {OUT_PATH}")
-    print(f"  {n_ms} of them Microsoft gap-fill footprints")
+    print(f"  {stats['ms']} of them Microsoft gap-fill footprints")
     print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
     n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
     print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "
           + ", ".join(f"{k}={roof_counts[k]}" for k in sorted(roof_counts)))
     print("facade archetypes (punched, house, storefront, curtain, balcony): "
-          + ", ".join(str(archetype_counts[i]) for i in range(len(FACADE_FLOORS))))
+          + ", ".join(str(archetype_counts.get(i, 0)) for i in range(len(FACADE_FLOORS))))
     print("facade (wall_set, flat_roof) counts: "
           + ", ".join(f"{k}={facade_counts[k]}" for k in sorted(facade_counts)))
 

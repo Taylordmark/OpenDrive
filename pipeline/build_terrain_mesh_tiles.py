@@ -1160,9 +1160,27 @@ def tile_min_dist_m(station_x_cm, station_y_cm, tx, ty, tile_cm):
     return float(d_cm.min()) / 100.0
 
 
-CARVE_STATION_CHUNK = 1000   # see carve_grid_m's docstring - bounds the
-                             # (grid_points x stations) distance matrix; ~1.5 GB
-                             # peak per BAKE_WORKERS process on a near tile
+CARVE_STATION_CHUNK = 1000   # bounds the (points x stations) distance matrix
+                             # in road_protect_w's nearest loop
+
+CARVE_NEAREST_K = 8   # KD candidates re-measured exactly, see _nearest_station
+
+
+def _nearest_station(gx, gy, st_east, st_north):
+    """(index, distance) of each grid point's nearest station. The tree's K
+    nearest are re-measured with np.hypot and exact ties go to the lowest
+    station index - the old brute-force argmin's rule, so coincident stations
+    at different heights (chain joins) resolve the same way. A tie group
+    larger than CARVE_NEAREST_K could resolve differently."""
+    from scipy.spatial import cKDTree
+    k = min(CARVE_NEAREST_K, len(st_east))
+    _, cand = cKDTree(np.c_[st_east, st_north]).query(np.c_[gx, gy], k=k)
+    cand = cand.reshape(len(gx), k)
+    cd = np.hypot(gx[:, None] - st_east[cand], gy[:, None] - st_north[cand])
+    pick = np.argmin(np.where(cd == cd.min(axis=1, keepdims=True), cand, len(st_east)), axis=1)
+    rows = np.arange(len(gx))
+    return cand[rows, pick], cd[rows, pick]
+
 
 def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
@@ -1185,19 +1203,11 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     Fill pixels (raw terrain below road) are unaffected - they keep the
     original wide taper.
 
-    Chunked over stations (2026-07-28) - the naive one-shot version built a
-    dense (grid_points x stations) distance matrix (up to 257x257=66,049
-    grid points), which is fine for a handful of nearby stations but not
-    bounded: a dense mountain switchback area can hand build_tile() several
-    thousand "keep" stations for one tile (prefiltered by distance, not
-    count), and 66,049 x thousands x 8 bytes is multiple GB for a SINGLE
-    tile - found live during the full-Oahu rebake (2026-07-28): process RSS
-    swung 5.6->20 GB tile to tile, not a steady climb, which is the
-    signature of one-off huge transient allocations on specific dense
-    tiles rather than an actual leak. Processing stations in fixed-size
-    chunks and keeping a running nearest-distance/elevation bounds peak
-    memory to grid_points x CARVE_STATION_CHUNK regardless of how many
-    stations a tile has nearby.
+    Nearest station by cKDTree (2026-10-15, was a chunked brute-force
+    (grid_points x stations) hypot: ~4 s on a 13k-station summit tile, now
+    ~0.06 s, same answer - see _nearest_station). Memory is grid_points x
+    CARVE_NEAREST_K, however many stations a tile has nearby (the 2026-07-28
+    full-Oahu RSS swings came from that dense matrix).
 
     `st_bank` (station_bank rows, UE frame) tilts the nearest station's
     target height across the road onto its banked pavement plane, held at
@@ -1209,30 +1219,17 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     gx = east_grid.reshape(-1)
     gy = north_grid.reshape(-1)
     P = gx.shape[0]
-    best_d = np.full(P, np.inf, dtype=np.float64)
-    best_elev = np.zeros(P, dtype=np.float64)
+    nearest, best_d = _nearest_station(gx, gy, st_east, st_north)
+    best_elev = st_elev[nearest]
     # per-station hard-clamp footprint radius (variable road width,
     # 2026-09-06) - carried alongside best_elev from the same nearest
     # station; the old constant everywhere when the caller has no widths.
-    best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
+    best_clamp = (np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64) if st_clamp_r is None
+                  else st_clamp_r[nearest])
     best_bank = np.zeros((P, 5))   # nearest station's east, north, slope, right-normal east/north
-    for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
-        sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
-        sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
-        se = st_elev[c0:c0 + CARVE_STATION_CHUNK]
-        d = np.hypot(gx.reshape(-1, 1) - sx, gy.reshape(-1, 1) - sy)   # (P, chunk)
-        nearest = np.argmin(d, axis=1)
-        nearest_d = d[np.arange(P), nearest]
-        better = nearest_d < best_d
-        best_d = np.where(better, nearest_d, best_d)
-        best_elev = np.where(better, se[nearest], best_elev)
-        if st_clamp_r is not None:
-            sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
-            best_clamp = np.where(better, sc[nearest], best_clamp)
-        if st_bank is not None:
-            sb = st_bank[c0:c0 + CARVE_STATION_CHUNK][nearest]
-            best_bank = np.where(better[:, None], np.column_stack(
-                [sx[0, nearest], sy[0, nearest], sb[:, 0], sb[:, 1], -sb[:, 2]]), best_bank)
+    if st_bank is not None:
+        sb = st_bank[nearest]
+        best_bank = np.column_stack([st_east[nearest], st_north[nearest], sb[:, 0], sb[:, 1], -sb[:, 2]])
     hw = best_clamp - SKIRT_EXTRA
     o = (gx - best_bank[:, 0]) * best_bank[:, 3] + (gy - best_bank[:, 1]) * best_bank[:, 4]
     best_elev = best_elev + best_bank[:, 2] * np.clip(o, -hw, hw)
