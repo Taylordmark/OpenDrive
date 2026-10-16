@@ -215,6 +215,18 @@ def match_edges(mid, brg, cls, s_xy, s_brg, s_rows):
     return out
 
 
+def edge_values(m, s_rows, fb, bcount):
+    """-> (aadt, dir_pct, truck_pct, urban) per edge: the matched HPMS row, else the fallback."""
+    hit = m >= 0
+    if not len(s_rows):
+        # HPMS down (HTTP 500 every year, 2026-10-15 Breckenridge) or no sections: all fallback.
+        print("  WARNING: no HPMS samples - every edge uses the fallback AADT")
+        s_rows = np.zeros((1, 6))
+    r = s_rows[np.maximum(m, 0)]
+    return (np.where(hit, r[:, 0], fb), np.where(hit, r[:, 1], 55.0),
+            np.where(hit, r[:, 5], FALLBACK_TRUCK_PCT), np.where(hit, r[:, 2] > 0, bcount >= URBAN_BUILDINGS))
+
+
 def main():
     nodes, edges, _dirs, lane = load_graph(MASKS / f"routegraph_{AREA_NAME}_test.bin")
     assert lane is not None, "routegraph has no lane block - re-run export_road_centerline_bin.py"
@@ -249,10 +261,7 @@ def main():
     fb = np.array(FALLBACK_AADT, dtype=np.float64)[np.minimum(cls & 7, 6)]
     fb *= 1.0 + (FALLBACK_TOWN_GAIN - 1.0) * np.clip(bcount / FALLBACK_DENSE_BUILDINGS, 0.0, 1.0)
     fb *= np.where(cls & CLS_RAMP, FALLBACK_RAMP_SHARE, 1.0)
-    aadt = np.where(hit, s_rows[np.maximum(m, 0), 0], fb)
-    dir_pct = np.where(hit, s_rows[np.maximum(m, 0), 1], 55.0)
-    truck_pct = np.where(hit, s_rows[np.maximum(m, 0), 5], FALLBACK_TRUCK_PCT)
-    urban = np.where(hit, s_rows[np.maximum(m, 0), 2] > 0, bcount >= URBAN_BUILDINGS)
+    aadt, dir_pct, truck_pct, urban = edge_values(m, s_rows, fb, bcount)
 
     if counts:
         (tx, ty), _ = max(counts.items(), key=lambda kv: kv[1])
