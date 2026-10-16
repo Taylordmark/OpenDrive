@@ -221,6 +221,14 @@ public:
 	void SetIndoors(bool bOn);
 	bool IsIndoors() const { return bIndoors; }
 
+	/** Something solid straight above the camera (tunnel bore, overpass road
+	 *  ribbon) - polled in Tick. Stops falling precipitation, new lens drops,
+	 *  rain/wind sound and new car snow, but unlike the garage the car keeps
+	 *  its grime/wet/snow. Kept apart from bIndoors so leaving a tunnel never
+	 *  re-enables weather in the garage. */
+	bool IsCovered() const { return bCovered; }
+	bool IsSheltered() const { return bIndoors || bCovered; }
+
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float CloudCover = 0.1f;
 
@@ -336,4 +344,9 @@ private:
 	float HoldLeft = 0.0f;
 	bool bForced = false;
 	bool bIndoors = false;
+
+	void TickCover(float DeltaSeconds);
+	bool bCovered = false;
+	float CoverPollT = 0.0f;
+	int32 CoverVotes = 0;   // consecutive polls disagreeing with bCovered
 };
