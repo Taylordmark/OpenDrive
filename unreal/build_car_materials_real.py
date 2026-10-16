@@ -523,6 +523,9 @@ def build_material(cat):
         raise RuntimeError(f"could not create or load {path}")
     BUILD[cat](G(mat))
     mat.set_editor_property("two_sided", True)    # mirrored OBJ winding (import_car_meshes.py)
+    # traffic draws its cars as ISMs (ODTrafficManager); without this flag they
+    # render grey with the default material until one is hit (2026-10-16)
+    mat.set_editor_property("used_with_instanced_static_meshes", True)
     if cat != "glass":
         mat.set_editor_property("used_with_nanite", True)
     MEL.recompile_material(mat)
