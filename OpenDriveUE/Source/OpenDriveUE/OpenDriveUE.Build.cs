@@ -31,6 +31,8 @@ public class OpenDriveUE : ModuleRules
 			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
 			"SlateCore",
 			"RenderCore",
+			// GNumDrawCallsRHI / RHIGetGPUFrameCycles (OpenDriveUE.cpp perf log).
+			"RHI",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
 			"Json",
 			// ODTileSource: -ODTileServer live tile fetch.

@@ -133,15 +133,27 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	const float Elevation = FMath::Sin(DayPhase) * MaxElevation;
 	const float Azimuth = TimeOfDay * 15.0f + 90.0f;
 
+	// Turn the lights in 0.25 deg steps (~every 2.5 s at the 1 h day), not every
+	// frame: any sun rotation throws away the whole Virtual Shadow Map cache
+	// (and Lumen's cached sun lighting), so a per-frame drift re-rendered
+	// every shadow page every frame (2026-10-16 perf pass). A 0.25 deg step
+	// moves a 10 m tree's shadow ~4 cm. Menu time jumps are far past the step.
+	auto Turn = [](AActor* Light, const FRotator& To)
+	{
+		if (Light && Light->GetActorQuat().AngularDistance(To.Quaternion()) > FMath::DegreesToRadians(0.25f))
+		{
+			Light->SetActorRotation(To);
+		}
+	};
 	if (Sun.IsValid())
 	{
-		Sun->SetActorRotation(FRotator(-Elevation, Azimuth, 0.0f));
+		Turn(Sun.Get(), FRotator(-Elevation, Azimuth, 0.0f));
 	}
 	if (Moon.IsValid())
 	{
 		// Opposite the sun in azimuth, mirrored elevation - rises as the sun
 		// sets, peaks at solar midnight, sets as the sun rises.
-		Moon->SetActorRotation(FRotator(Elevation, Azimuth + 180.0f, 0.0f));
+		Turn(Moon.Get(), FRotator(Elevation, Azimuth + 180.0f, 0.0f));
 		if (UDirectionalLightComponent* MoonComp = Cast<UDirectionalLightComponent>(Moon->GetLightComponent()))
 		{
 			MoonComp->SetIntensity(Elevation < 0.0f ? MoonIntensity : 0.0f);

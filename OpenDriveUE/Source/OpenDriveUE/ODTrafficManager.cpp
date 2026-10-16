@@ -619,11 +619,12 @@ void AODTrafficManager::EndPlay(const EEndPlayReason::Type Reason)
 
 void AODTrafficManager::BuildModels()
 {
-	TMap<UStaticMesh*, int32> WheelIdx;
+	TMap<TPair<UStaticMesh*, int32>, int32> WheelIdx;   // (mesh, tier) -> WheelIsms
 	for (const TCHAR* Path : ModelDefs)
 	{
 		const UODVehicleDef* Def = LoadObject<UODVehicleDef>(nullptr, Path, nullptr, LOAD_NoWarn | LOAD_Quiet);
-		UStaticMesh* Chassis = Def ? ODVisualStyle::Pick(Def->ChassisMesh.LoadSynchronous()) : nullptr;
+		UStaticMesh* FarChassis = Def ? Def->ChassisMesh.LoadSynchronous() : nullptr;
+		UStaticMesh* Chassis = ODVisualStyle::Pick(FarChassis);
 		if (!Chassis)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("ODTrafficManager: no car def/mesh at %s - skipped"), Path);
@@ -638,7 +639,7 @@ void AODTrafficManager::BuildModels()
 		const FBoxSphereBounds Bounds = Chassis->GetBounds();
 		M.BoundsOrigin = Bounds.Origin;
 		M.HalfExtent = Bounds.BoxExtent;
-		auto MakeIsm = [&](UStaticMesh* Mesh, float CullCm, bool bShadow)
+		auto MakeIsm = [&](UStaticMesh* Mesh, float CullCm, bool bShadow, bool bFar)
 		{
 			UInstancedStaticMeshComponent* Ism = NewObject<UInstancedStaticMeshComponent>(this);
 			Ism->SetupAttachment(RootComponent);
@@ -646,30 +647,41 @@ void AODTrafficManager::BuildModels()
 			Ism->SetStaticMesh(Mesh);
 			Ism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Ism->SetCanEverAffectNavigation(false);
-			Ism->SetCastShadow(bShadow);
+			Ism->SetCastShadow(bShadow && !bFar);
 			Ism->SetCullDistances(0, (int32)CullCm);
 			Ism->SetHasPerInstancePrevTransforms(true);
+			// moving instances re-voxelise into the global distance field every frame
+			Ism->bAffectDistanceFieldLighting = false;
+			Ism->bVisibleInRayTracing = !bFar;
 			Ism->RegisterComponent();
-			ODVisualStyle::PickSlots(Ism);
+			if (!bFar)
+			{
+				ODVisualStyle::PickSlots(Ism);
+			}
 			return Ism;
 		};
-		M.Body = MakeIsm(Chassis, DespawnRadiusCm, true);
-		M.Braking = MakeIsm(Chassis, DespawnRadiusCm, true);
-		for (UInstancedStaticMeshComponent* Ism : {M.Body, M.Braking})
+		for (int32 t = 0; t < 2; ++t)
 		{
-			const int32 Slot = Ism->GetMaterialIndex(TEXT("lights"));
-			(Ism == M.Body ? M.LampMID : M.BrakeMID) = Slot != INDEX_NONE ? Ism->CreateDynamicMaterialInstance(Slot) : nullptr;
-		}
-		if (UStaticMesh* Wheel = ODVisualStyle::Pick(Def->WheelMesh.LoadSynchronous()))
-		{
-			if (const int32* W = WheelIdx.Find(Wheel))
+			UStaticMesh* Mesh = t == 0 ? Chassis : FarChassis;
+			M.Body[t] = MakeIsm(Mesh, DespawnRadiusCm, true, t == 1);
+			M.Braking[t] = MakeIsm(Mesh, DespawnRadiusCm, true, t == 1);
+			for (UInstancedStaticMeshComponent* Ism : {M.Body[t], M.Braking[t]})
 			{
-				M.Wheel = *W;
+				const int32 Slot = Ism->GetMaterialIndex(TEXT("lights"));
+				(Ism == M.Body[t] ? M.LampMID[t] : M.BrakeMID[t]) = Slot != INDEX_NONE ? Ism->CreateDynamicMaterialInstance(Slot) : nullptr;
 			}
-			else
+			UStaticMesh* FarWheel = Def->WheelMesh.LoadSynchronous();
+			if (UStaticMesh* Wheel = t == 0 ? ODVisualStyle::Pick(FarWheel) : FarWheel)
 			{
-				M.Wheel = WheelIsms.Add(MakeIsm(Wheel, 25000.0f, false));
-				WheelIdx.Add(Wheel, M.Wheel);
+				if (const int32* W = WheelIdx.Find({Wheel, t}))
+				{
+					M.Wheel[t] = *W;
+				}
+				else
+				{
+					M.Wheel[t] = WheelIsms.Add(MakeIsm(Wheel, t == 0 ? 25000.0f : 40000.0f, false, t == 1));
+					WheelIdx.Add({Wheel, t}, M.Wheel[t]);
+				}
 			}
 		}
 		Models.Add(M);
@@ -736,8 +748,11 @@ void AODTrafficManager::ClearAgents()
 	RangeCenter = FVector(1.0e12);
 	for (const FModel& M : Models)
 	{
-		M.Body->ClearInstances();
-		M.Braking->ClearInstances();
+		for (int32 t = 0; t < 2; ++t)
+		{
+			M.Body[t]->ClearInstances();
+			M.Braking[t]->ClearInstances();
+		}
 	}
 	for (UInstancedStaticMeshComponent* W : WheelIsms)
 	{
@@ -1432,17 +1447,20 @@ void AODTrafficManager::Step(float Dt)
 
 void AODTrafficManager::Render(float Alpha)
 {
+	// body / brake transforms per (model, tier): slot Model * 2 + tier
+	const int32 NumSlots = Models.Num() * 2;
 	for (TArray<FTransform>& X : BodyXf) { X.Reset(); }
 	for (TArray<FTransform>& X : BrakeXf) { X.Reset(); }
 	for (TArray<FTransform>& X : WheelXf) { X.Reset(); }
 	for (TArray<FTransform>& X : BodyPrevXf) { X.Reset(); }
 	for (TArray<FTransform>& X : BrakePrevXf) { X.Reset(); }
 	for (TArray<FTransform>& X : WheelPrevXf) { X.Reset(); }
-	BodyXf.SetNum(Models.Num());
-	BrakeXf.SetNum(Models.Num());
-	BodyPrevXf.SetNum(Models.Num());
-	BrakePrevXf.SetNum(Models.Num());
+	BodyXf.SetNum(NumSlots);
+	BrakeXf.SetNum(NumSlots);
+	BodyPrevXf.SetNum(NumSlots);
+	BrakePrevXf.SetNum(NumSlots);
 	WheelPrevXf.SetNum(WheelIsms.Num());
+	const double NearSq = FMath::Square((double)NearTierCm);
 	for (FAgent& Ag : Agents)
 	{
 		const FModel& M = Models[Ag.Model];
@@ -1450,25 +1468,30 @@ void AODTrafficManager::Render(float Alpha)
 		const FTransform Was = Ag.bShown ? Ag.Shown : Xf;
 		Ag.Shown = Xf;
 		Ag.bShown = true;
+		const int32 Tier = FVector::DistSquared(Xf.GetLocation(), PlayerPos) > NearSq ? 1 : 0;
+		const int32 Slot = Ag.Model * 2 + Tier;
 		// brake lamps on under braking and while stood in a queue
 		const bool bBrake = Ag.A < -150.0f || Ag.V < 50.0f;
-		(bBrake ? BrakeXf : BodyXf)[Ag.Model].Add(Xf);
-		(bBrake ? BrakePrevXf : BodyPrevXf)[Ag.Model].Add(Was);
-		if (M.Wheel >= 0)
+		(bBrake ? BrakeXf : BodyXf)[Slot].Add(Xf);
+		(bBrake ? BrakePrevXf : BodyPrevXf)[Slot].Add(Was);
+		if (const int32 W = M.Wheel[Tier]; W >= 0)
 		{
 			const FVector Sc(M.WheelR / TrafficWheelMeshRadiusCm);
 			for (int32 w = 0; w < 4; ++w)
 			{
 				const FVector Local(w < 2 ? M.FrontX : M.RearX, (w % 2 == 0 ? -1.0f : 1.0f) * M.HalfTrack, 0.0f);
-				WheelXf[M.Wheel].Add(FTransform(Xf.GetRotation(), Xf.TransformPosition(Local), Sc));
-				WheelPrevXf[M.Wheel].Add(FTransform(Was.GetRotation(), Was.TransformPosition(Local), Sc));
+				WheelXf[W].Add(FTransform(Xf.GetRotation(), Xf.TransformPosition(Local), Sc));
+				WheelPrevXf[W].Add(FTransform(Was.GetRotation(), Was.TransformPosition(Local), Sc));
 			}
 		}
 	}
 	for (int32 m = 0; m < Models.Num(); ++m)
 	{
-		SyncIsm(Models[m].Body, BodyXf[m], BodyPrevXf[m]);
-		SyncIsm(Models[m].Braking, BrakeXf[m], BrakePrevXf[m]);
+		for (int32 t = 0; t < 2; ++t)
+		{
+			SyncIsm(Models[m].Body[t], BodyXf[m * 2 + t], BodyPrevXf[m * 2 + t]);
+			SyncIsm(Models[m].Braking[t], BrakeXf[m * 2 + t], BrakePrevXf[m * 2 + t]);
+		}
 	}
 	for (int32 w = 0; w < WheelIsms.Num(); ++w)
 	{
@@ -1491,13 +1514,16 @@ void AODTrafficManager::UpdateLights()
 	const float BrakeGlow = bNight ? TailGlow * 5.0f : (DN ? DN->BrakelampGlow : 400.0f);   // AODDayNightController's rule
 	for (const FModel& M : Models)
 	{
-		for (UMaterialInstanceDynamic* MID : {M.LampMID, M.BrakeMID})
+		for (int32 t = 0; t < 2; ++t)
 		{
-			if (MID)
+			for (UMaterialInstanceDynamic* MID : {M.LampMID[t], M.BrakeMID[t]})
 			{
-				MID->SetScalarParameterValue(TEXT("HeadGlow"), bNight ? HeadGlow : 0.0f);
-				MID->SetScalarParameterValue(TEXT("TailGlow"), MID == M.BrakeMID ? BrakeGlow : (bNight ? TailGlow : 0.0f));
-				MID->SetScalarParameterValue(TEXT("ReverseGlow"), 0.0f);
+				if (MID)
+				{
+					MID->SetScalarParameterValue(TEXT("HeadGlow"), bNight ? HeadGlow : 0.0f);
+					MID->SetScalarParameterValue(TEXT("TailGlow"), MID == M.BrakeMID[t] ? BrakeGlow : (bNight ? TailGlow : 0.0f));
+					MID->SetScalarParameterValue(TEXT("ReverseGlow"), 0.0f);
+				}
 			}
 		}
 	}
