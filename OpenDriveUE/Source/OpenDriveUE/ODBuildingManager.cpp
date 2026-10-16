@@ -94,7 +94,8 @@ namespace
 		constexpr uint8 NumFacades = 5;
 		const float Bch = bRealistic ? (FMath::Min<uint8>(B.Facade, NumFacades - 1) + 0.5f) / NumFacades
 			: (B.FlatRoof ? 1.0f : 0.0f);
-		return FVector4f(R, HashToUnitFloat(H2), Bch, 1.0f);
+		const float G = B.SeedByte >= 0 ? B.SeedByte / 255.0f : HashToUnitFloat(H2);
+		return FVector4f(R, G, Bch, 1.0f);
 	}
 
 	/** Realistic roof triangles (their own section, M_BuildingRoof_real):
@@ -184,100 +185,194 @@ void AODBuildingManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+namespace
+{
+	/** ODU2-4 tile bytes -> buildings (a building tile file, or the ODU4 blob
+	 *  embedded in a landmark tile). */
+	bool ParseBuildingTileBytes(const uint8* Data, int64 Num, FParsedBuildingTile& Out)
+	{
+		if (Num < 4 + GenerationIdBytes + 4
+			|| Data[0] != 'O' || Data[1] != 'D' || Data[2] != 'U' || Data[3] < '2' || Data[3] > '4')
+		{
+			return false;
+		}
+		// ODU3 (realism B3) adds the baked roof's look and end-wall split, ODU4
+		// (B2) the facade archetype; an old tile still loads, with defaults
+		const bool bOdu3 = Data[3] >= '3';
+		const bool bOdu4 = Data[3] == '4';
+		const int64 HeaderBytes = bOdu4 ? 19 : bOdu3 ? 18 : 10;
+
+		const uint8* Cur = Data + 4;
+		const uint8* End = Data + Num;
+		auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
+
+		if (Remaining() < GenerationIdBytes)
+		{
+			return false;
+		}
+		Out.GenerationId = ReadGenerationId(Cur);
+		Cur += GenerationIdBytes;
+
+		if (Remaining() < 4)
+		{
+			return false;
+		}
+		const uint32 BuildingCount = ReadU32LE(Cur);
+		Cur += 4;
+
+		Out.Buildings.Reserve(BuildingCount);
+		for (uint32 b = 0; b < BuildingCount; ++b)
+		{
+			if (Remaining() < HeaderBytes)
+			{
+				return false;
+			}
+			const uint32 VCount = ReadU32LE(Cur); Cur += 4;
+			const uint32 TCount = ReadU32LE(Cur); Cur += 4;
+			const uint8 WallSet = *Cur++;
+			const uint8 FlatRoof = *Cur++;
+			uint8 RoofSet = FlatRoof ? 3 : 1;
+			uint8 RoofRgb[3] = {87, 87, 85};   // ~0.34 linear concrete
+			uint32 NumSolid = MAX_uint32;
+			uint8 Facade = 0;
+			if (bOdu3)
+			{
+				RoofSet = *Cur++;
+				RoofRgb[0] = *Cur++; RoofRgb[1] = *Cur++; RoofRgb[2] = *Cur++;
+				Facade = bOdu4 ? *Cur++ : 0;
+				NumSolid = ReadU32LE(Cur); Cur += 4;
+			}
+			const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)TCount * 12;
+			if (Remaining() < NeedBytes)
+			{
+				return false;
+			}
+
+			const uint8* VertsBase = Cur;
+			const uint8* UvBase = Cur + (int64)VCount * 12;
+			const uint8* TrisBase = Cur + (int64)VCount * 12 + (int64)VCount * 8;
+			Cur += NeedBytes;
+
+			FParsedBuilding& Building = Out.Buildings.AddDefaulted_GetRef();
+			Building.WallSet = WallSet;
+			Building.FlatRoof = FlatRoof;
+			Building.RoofSet = RoofSet;
+			Building.Facade = Facade;
+			FMemory::Memcpy(Building.RoofRgb, RoofRgb, 3);
+			Building.NumSolidVerts = (int32)FMath::Min<uint32>(NumSolid, MAX_int32);
+			Building.Verts.SetNumUninitialized(VCount * 3);
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				Building.Verts[v * 3 + 0] = ReadF32LE(VertsBase + v * 12 + 0);
+				Building.Verts[v * 3 + 1] = ReadF32LE(VertsBase + v * 12 + 4);
+				Building.Verts[v * 3 + 2] = ReadF32LE(VertsBase + v * 12 + 8);
+			}
+			Building.Uvs.SetNumUninitialized(VCount * 2);
+			for (uint32 v = 0; v < VCount; ++v)
+			{
+				Building.Uvs[v * 2 + 0] = ReadF32LE(UvBase + v * 8 + 0);
+				Building.Uvs[v * 2 + 1] = ReadF32LE(UvBase + v * 8 + 4);
+			}
+			Building.Tris.SetNumUninitialized(TCount * 3);
+			for (uint32 t = 0; t < TCount; ++t)
+			{
+				Building.Tris[t * 3 + 0] = ReadU32LE(TrisBase + t * 12 + 0);
+				Building.Tris[t * 3 + 1] = ReadU32LE(TrisBase + t * 12 + 4);
+				Building.Tris[t * 3 + 2] = ReadU32LE(TrisBase + t * 12 + 8);
+			}
+		}
+		return true;
+	}
+
+	bool PointInRing(const TArray<FVector2f>& Ring, float X, float Y)
+	{
+		bool bIn = false;
+		for (int32 i = 0, j = Ring.Num() - 1; i < Ring.Num(); j = i++)
+		{
+			if ((Ring[i].Y > Y) != (Ring[j].Y > Y)
+				&& X < Ring[j].X + (Y - Ring[j].Y) * (Ring[i].X - Ring[j].X) / (Ring[i].Y - Ring[j].Y))
+			{
+				bIn = !bIn;
+			}
+		}
+		return bIn;
+	}
+
+	/** ODL1 landmark tile (pipeline/build_landmarks.py): drops the procedural
+	 *  buildings in Tile whose vertex-mean centroid is inside a landmark
+	 *  footprint and appends the landmark meshes, which then go through the
+	 *  same placement/collision path. False if the file is absent or bad. */
+	bool MergeLandmarkTile(const FString& Path, FParsedBuildingTile& Tile)
+	{
+		TArray<uint8> Bin;
+		if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 8
+			|| FMemory::Memcmp(Bin.GetData(), "ODL1", 4) != 0)
+		{
+			return false;
+		}
+		const uint8* Cur = Bin.GetData() + 4 + GenerationIdBytes;
+		const uint8* End = Bin.GetData() + Bin.Num();
+		TArray<TArray<FVector2f>> Rings;
+		TArray<FBox2f> Boxes;
+		const uint32 NumRings = ReadU32LE(Cur); Cur += 4;
+		for (uint32 r = 0; r < NumRings; ++r)
+		{
+			if (End - Cur < 4) return false;
+			const uint32 N = ReadU32LE(Cur); Cur += 4;
+			if (End - Cur < (int64)N * 8) return false;
+			TArray<FVector2f>& Ring = Rings.AddDefaulted_GetRef();
+			for (uint32 i = 0; i < N; ++i, Cur += 8)
+			{
+				Ring.Emplace(ReadF32LE(Cur), ReadF32LE(Cur + 4));
+			}
+			Boxes.Emplace(Ring);
+		}
+		if (End - Cur < 4) return false;
+		const uint32 NumSeeds = ReadU32LE(Cur); Cur += 4;
+		if (End - Cur < (int64)NumSeeds) return false;
+		const uint8* Seeds = Cur;
+		Cur += NumSeeds;
+		FParsedBuildingTile Landmarks;
+		if (!ParseBuildingTileBytes(Cur, End - Cur, Landmarks) || (uint32)Landmarks.Buildings.Num() != NumSeeds)
+		{
+			return false;
+		}
+
+		Tile.Buildings.RemoveAll([&](const FParsedBuilding& B)
+		{
+			const int32 VCount = B.Verts.Num() / 3;
+			if (VCount == 0) return false;
+			double X = 0.0, Y = 0.0;
+			for (int32 v = 0; v < VCount; ++v)
+			{
+				X += B.Verts[v * 3 + 0];
+				Y += B.Verts[v * 3 + 1];
+			}
+			const FVector2f C((float)(X / VCount), (float)(Y / VCount));
+			for (int32 r = 0; r < Rings.Num(); ++r)
+			{
+				if (Boxes[r].IsInside(C) && PointInRing(Rings[r], C.X, C.Y)) return true;
+			}
+			return false;
+		});
+		for (int32 b = 0; b < Landmarks.Buildings.Num(); ++b)
+		{
+			FParsedBuilding& L = Landmarks.Buildings[b];
+			L.SeedByte = Seeds[b] == 255 ? (int16)-1 : (int16)Seeds[b];
+			Tile.Buildings.Add(MoveTemp(L));
+		}
+		if (Tile.GenerationId.IsEmpty())
+		{
+			Tile.GenerationId = Landmarks.GenerationId;
+		}
+		return true;
+	}
+}
+
 bool AODBuildingManager::ParseBuildingTileFile(const FString& Path, FParsedBuildingTile& Out)
 {
 	TArray<uint8> Bin;
-	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'U' || Bin[3] < '2' || Bin[3] > '4')
-	{
-		return false;
-	}
-	// ODU3 (realism B3) adds the baked roof's look and end-wall split, ODU4
-	// (B2) the facade archetype; an old tile still loads, with defaults
-	const bool bOdu3 = Bin[3] >= '3';
-	const bool bOdu4 = Bin[3] == '4';
-	const int64 HeaderBytes = bOdu4 ? 19 : bOdu3 ? 18 : 10;
-
-	const uint8* Cur = Bin.GetData() + 4;
-	const uint8* End = Bin.GetData() + Bin.Num();
-	auto Remaining = [&]() -> int64 { return (int64)(End - Cur); };
-
-	if (Remaining() < GenerationIdBytes)
-	{
-		return false;
-	}
-	Out.GenerationId = ReadGenerationId(Cur);
-	Cur += GenerationIdBytes;
-
-	if (Remaining() < 4)
-	{
-		return false;
-	}
-	const uint32 BuildingCount = ReadU32LE(Cur);
-	Cur += 4;
-
-	Out.Buildings.Reserve(BuildingCount);
-	for (uint32 b = 0; b < BuildingCount; ++b)
-	{
-		if (Remaining() < HeaderBytes)
-		{
-			return false;
-		}
-		const uint32 VCount = ReadU32LE(Cur); Cur += 4;
-		const uint32 TCount = ReadU32LE(Cur); Cur += 4;
-		const uint8 WallSet = *Cur++;
-		const uint8 FlatRoof = *Cur++;
-		uint8 RoofSet = FlatRoof ? 3 : 1;
-		uint8 RoofRgb[3] = {87, 87, 85};   // ~0.34 linear concrete
-		uint32 NumSolid = MAX_uint32;
-		uint8 Facade = 0;
-		if (bOdu3)
-		{
-			RoofSet = *Cur++;
-			RoofRgb[0] = *Cur++; RoofRgb[1] = *Cur++; RoofRgb[2] = *Cur++;
-			Facade = bOdu4 ? *Cur++ : 0;
-			NumSolid = ReadU32LE(Cur); Cur += 4;
-		}
-		const int64 NeedBytes = (int64)VCount * 12 + (int64)VCount * 8 + (int64)TCount * 12;
-		if (Remaining() < NeedBytes)
-		{
-			return false;
-		}
-
-		const uint8* VertsBase = Cur;
-		const uint8* UvBase = Cur + (int64)VCount * 12;
-		const uint8* TrisBase = Cur + (int64)VCount * 12 + (int64)VCount * 8;
-		Cur += NeedBytes;
-
-		FParsedBuilding& Building = Out.Buildings.AddDefaulted_GetRef();
-		Building.WallSet = WallSet;
-		Building.FlatRoof = FlatRoof;
-		Building.RoofSet = RoofSet;
-		Building.Facade = Facade;
-		FMemory::Memcpy(Building.RoofRgb, RoofRgb, 3);
-		Building.NumSolidVerts = (int32)FMath::Min<uint32>(NumSolid, MAX_int32);
-		Building.Verts.SetNumUninitialized(VCount * 3);
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			Building.Verts[v * 3 + 0] = ReadF32LE(VertsBase + v * 12 + 0);
-			Building.Verts[v * 3 + 1] = ReadF32LE(VertsBase + v * 12 + 4);
-			Building.Verts[v * 3 + 2] = ReadF32LE(VertsBase + v * 12 + 8);
-		}
-		Building.Uvs.SetNumUninitialized(VCount * 2);
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			Building.Uvs[v * 2 + 0] = ReadF32LE(UvBase + v * 8 + 0);
-			Building.Uvs[v * 2 + 1] = ReadF32LE(UvBase + v * 8 + 4);
-		}
-		Building.Tris.SetNumUninitialized(TCount * 3);
-		for (uint32 t = 0; t < TCount; ++t)
-		{
-			Building.Tris[t * 3 + 0] = ReadU32LE(TrisBase + t * 12 + 0);
-			Building.Tris[t * 3 + 1] = ReadU32LE(TrisBase + t * 12 + 4);
-			Building.Tris[t * 3 + 2] = ReadU32LE(TrisBase + t * 12 + 8);
-		}
-	}
-	return true;
+	return FFileHelper::LoadFileToArray(Bin, *Path) && ParseBuildingTileBytes(Bin.GetData(), Bin.Num(), Out);
 }
 
 void AODBuildingManager::RequestTileLoad(const FIntPoint& Key)
@@ -286,14 +381,26 @@ void AODBuildingManager::RequestTileLoad(const FIntPoint& Key)
 	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
 		/ FString::Printf(TEXT("%s_tile_%d_%d.bin"), *BuildingTilePrefix, Key.X, Key.Y);
 
+	// landmark tiles (build_landmarks.py) sit beside the building tiles
+	const FString LandmarkPath = BuildingTilePrefix.StartsWith(TEXT("buildings_"))
+		? FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks") / FString::Printf(TEXT("landmarks_%s_tile_%d_%d.bin"),
+			*BuildingTilePrefix.RightChop(10), Key.X, Key.Y)
+		: FString();
+
 	TWeakObjectPtr<AODBuildingManager> WeakThis(this);
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path, LandmarkPath]()
 	{
 		FParsedBuildingTile Parsed;
-		FString ReadPath;
+		FString ReadPath, LandmarkReadPath;
 		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
-		const bool bOk = Src == EODTileSource::Ready && ParseBuildingTileFile(ReadPath, Parsed);
-		const bool bPending = Src == EODTileSource::Pending;
+		const EODTileSource LandmarkSrc = LandmarkPath.IsEmpty() ? EODTileSource::Missing
+			: ODTileSource::Resolve(LandmarkPath, LandmarkReadPath);
+		bool bOk = Src == EODTileSource::Ready && ParseBuildingTileFile(ReadPath, Parsed);
+		if (LandmarkSrc == EODTileSource::Ready && MergeLandmarkTile(LandmarkReadPath, Parsed))
+		{
+			bOk = true;
+		}
+		const bool bPending = Src == EODTileSource::Pending || LandmarkSrc == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{

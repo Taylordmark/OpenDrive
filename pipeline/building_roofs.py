@@ -528,9 +528,10 @@ def make_roof(verts, uvs, tris, hip):
 
 def read_tile(path):
     """Building tile -> [dict(verts, uvs, tris, wall_set, flat_roof, roof_set,
-    roof_rgb, facade, n_solid)] (ODU4; see export_building_mesh_bin.py)."""
+    roof_rgb, facade, n_solid)] (ODU4; see export_building_mesh_bin.py).
+    path may be the tile's bytes (the blob inside a landmark tile)."""
     import struct
-    data = open(path, "rb").read()
+    data = path if isinstance(path, bytes) else open(path, "rb").read()
     assert data[:4] == b"ODU4", f"{path}: magic {data[:4]!r}"
     off = 4 + 16
     (count,) = struct.unpack_from("<I", data, off)

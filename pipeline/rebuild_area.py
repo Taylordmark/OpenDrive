@@ -54,6 +54,8 @@ filenames:
  15. export_building_mesh_bin.py -> buildings_*.bin (needs building_mesh.json)
  16. export_building_centroids_bin.py -> building_centroids_*.bin (needs
      building_mesh.json)
+ 16b. build_landmarks.py     -> landmarks_*.bin, landmarks.json (needs
+     road_stations.json; fetches its own OSM footprints)
  17. build_place_labels.py    -> road_labels.json (needs road_stations.json,
      osm_places.json)
  18. export_place_labels_bin.py -> labels_*.bin (needs road_labels.json)
@@ -183,6 +185,7 @@ STAGES = [
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),
+    ("build_landmarks.py", "build landmarks_*.bin"),
     ("build_place_labels.py", "build road_labels.json"),
     ("export_place_labels_bin.py", "export labels_*.bin"),
     ("classify_biomes.py", "classify road-corridor biomes -> road_biomes.json"),
