@@ -458,6 +458,7 @@ void AODWeatherController::Tick(float DeltaSeconds)
 			FMath::Lerp(HURR_VIS_M[0], HURR_VIS_M[1], E) * FMath::Lerp(1.0f, HURR_GUST_VIS, Gust), A);
 	}
 	TickTornado(DeltaSeconds);
+	TickCover(DeltaSeconds);
 	if (!bIndoors)
 	{
 		TickLens(DeltaSeconds);
@@ -721,6 +722,42 @@ void AODWeatherController::TickTornado(float DeltaSeconds)
 	}
 }
 
+void AODWeatherController::TickCover(float DeltaSeconds)
+{
+	// Straight up from the camera hits a tunnel bore (AODWallManager
+	// "tunnel_*", BlockAll) or the road ribbon of an overpass (bridge decks
+	// themselves don't collide, the ribbon on them does). 5 Hz, and 3 polls
+	// in a row (~0.6 s) must disagree before it flips, so a sign gantry or a
+	// tunnel mouth doesn't flicker the rain.
+	constexpr float POLL_S = 0.2f;
+	constexpr int32 VOTES = 3;
+	CoverPollT += DeltaSeconds;
+	if (CoverPollT < POLL_S)
+	{
+		return;
+	}
+	CoverPollT = FMath::Fmod(CoverPollT, POLL_S);
+	bool bHit = false;
+	if (const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0))
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(ODWeatherCover), true, UGameplayStatics::GetPlayerPawn(this, 0));
+		const FVector Eye = Cam->GetCameraLocation();
+		bHit = GetWorld()->LineTraceTestByChannel(Eye, Eye + FVector(0.0, 0.0, 3000.0), ECC_Visibility, Params);
+	}
+	CoverVotes = bHit == bCovered ? 0 : CoverVotes + 1;
+	if (CoverVotes < VOTES)
+	{
+		return;
+	}
+	CoverVotes = 0;
+	bCovered = bHit;
+	UE_LOG(LogTemp, Display, TEXT("ODWeatherController: camera %s cover"), bCovered ? TEXT("under") : TEXT("out from"));
+	for (TActorIterator<AODSeasonController> It(GetWorld()); It && bCovered; ++It)
+	{
+		It->HidePrecipFx();
+	}
+}
+
 void AODWeatherController::SetIndoors(bool bOn)
 {
 	bIndoors = bOn;
@@ -808,7 +845,7 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 	// Landings: none in the garage showroom (indoors / menus).
 	const AODVehiclePawn* Car = Cast<AODVehiclePawn>(Player);
 	const int32 Pool = LensISM->GetInstanceCount();
-	if (PrecipIntensity > 0.02f && !(Car && Car->IsInShowroom()))
+	if (PrecipIntensity > 0.02f && !bCovered && !(Car && Car->IsInShowroom()))   // covered: the drops already on run off
 	{
 		LensSpawnDebt += DeltaSeconds * LensDropsPerSecond * PrecipIntensity * (1.0f + LensSpeedMs / LENS_RATE_REF_MS);
 		for (; LensSpawnDebt >= 1.0f; LensSpawnDebt -= 1.0f)

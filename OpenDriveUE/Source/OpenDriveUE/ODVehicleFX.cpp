@@ -266,7 +266,7 @@ void UODVehicleFX::PushCarState(float Dt)
 	// over ~10 min above freezing. Exponential steps, so frame-rate independent.
 	if (Dt > 0.0f && Wx)
 	{
-		const float Fall = Wx->PrecipIntensity * Wx->PrecipType;
+		const float Fall = Wx->IsSheltered() ? 0.0f : Wx->PrecipIntensity * Wx->PrecipType;   // covered: keeps its load, no new snow
 		const float SpeedMs = Owner->GetVelocity().Size() / 100.0f;
 		const float Off = FMath::Max(SpeedMs - 8.0f, 0.0f) / 900.0f + (Wx->AirTempC > 0.5f ? 1.0f / 600.0f : 0.0f);
 		const float On = Fall / 240.0f;

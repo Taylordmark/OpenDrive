@@ -246,8 +246,8 @@ void AODAmbientSoundManager::SampleAndRetarget()
 		for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It) { WeatherCtl = *It; break; }
 	}
 	const AODWeatherController* Weather = WeatherCtl.Get();
-	LayerRain.TargetVolume = Weather && !Weather->IsIndoors() ? Weather->PrecipIntensity * (1.0f - Weather->PrecipType) : 0.0f;
-	LayerWind.TargetVolume = Weather && !Weather->IsIndoors()
+	LayerRain.TargetVolume = Weather && !Weather->IsSheltered() ? Weather->PrecipIntensity * (1.0f - Weather->PrecipType) : 0.0f;
+	LayerWind.TargetVolume = Weather && !Weather->IsSheltered()
 		? FMath::Max(FMath::Clamp((Weather->WindSpeedMs - 5.0f) / 15.0f, 0.0f, 1.0f), Weather->DustAmount) : 0.0f;
 
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
