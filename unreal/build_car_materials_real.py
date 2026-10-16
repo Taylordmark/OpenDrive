@@ -261,14 +261,16 @@ float h = P.z + r;                                 // cm above the ground at res
 float mac = Texture2DSampleLevel(Flake, FlakeSampler, P.yz * 0.004, 0).a * w.x
           + Texture2DSampleLevel(Flake, FlakeSampler, P.xz * 0.004, 0).a * w.y
           + Texture2DSampleLevel(Flake, FlakeSampler, P.xy * 0.004, 0).a * w.z;
-// occlusion: low panels, underbody, wheel-arch liners facing the axle
+// occlusion: low panels, underbody, wheel-arch liners facing the axle. Kept
+// light: Lumen already shades the lower body, and stacking a strong fake AO
+// on it left the bottom of the car far too dark (Taylor 2026-10-16)
 float under = saturate(-N.z * 1.5 - 0.2);
-float ao = lerp(0.45, 1.0, saturate(h / 40.0)) * (1.0 - 0.7 * under);
+float ao = lerp(0.85, 1.0, saturate(h / 25.0)) * (1.0 - 0.5 * under);
 float2 dF = float2(P.x - xf, P.z), dR = float2(P.x - xr, P.z);
 float2 d = dot(dF, dF) < dot(dR, dR) ? dF : dR;
 float dl = length(d) + 1e-3;
 float arch = saturate(dot(-d / dl, N.xz) * 2.0) * (1.0 - smoothstep(r + 6.0, r + 22.0, dl));
-ao *= 1.0 - 0.85 * arch;
+ao *= 1.0 - 0.6 * arch;
 // grime: low on the body, the spray fan behind each wheel, the tail's dust vortex
 float low = 1.0 - smoothstep(10.0, 60.0, h);
 float tF = (xf - P.x) / r, tR = (xr - P.x) / r;    // > 0 behind that axle
@@ -351,7 +353,7 @@ F0o = lerp(lerp(F0, F0.brg, 0.5 * pe) * (1.0 + Sparkle * fd.z) * occ, 0.04, 1.0 
      + snow * 0.5 * pow(saturate(fd.z), 24.0);   // ice-crystal glints
 Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
-CoatR = lerp(CoatR0 * lerp(0.7, 1.6, fm) + 0.12 * Dirt, CoatR0 * 0.6, Wet);
+CoatR = lerp(CoatR0 * lerp(0.9, 1.15, fm) + 0.12 * Dirt, CoatR0 * 0.6, Wet);   // faint orange peel, not blotches
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
 // tangent-space tilt under the coat; any tangent basis will do for random flakes
 BotN = normalize(float3(fd.xy * Strength, 1.0));
@@ -362,8 +364,8 @@ return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
                  Flake=g.tex(flake), Drops=g.tex(drops_tex),
                  Alb=(conv, "DiffuseAlbedo"), F0=(conv, "F0"),
                  Scale=g.param("FlakeScale", 0.25), Macro=g.param("MacroScale", 0.004),
-                 Sparkle=g.param("FlakeSparkle", 0.3), BaseR=g.param("BaseRoughness", 0.38),
-                 CoatR0=g.param("CoatRoughness", 0.035), Strength=g.param("FlakeStrength", 0.35),
+                 Sparkle=g.param("FlakeSparkle", 0.12), BaseR=g.param("BaseRoughness", 0.38),
+                 CoatR0=g.param("CoatRoughness", 0.035), Strength=g.param("FlakeStrength", 0.12),
                  Pearl=g.param("Pearl", 0.0), V=g.node(unreal.MaterialExpressionCameraVectorWS),
                  NW=g.node(unreal.MaterialExpressionVertexNormalWS), **st)
     slab = g.node(unreal.MaterialExpressionSubstrateSimpleClearCoatBSDF, x=-150)

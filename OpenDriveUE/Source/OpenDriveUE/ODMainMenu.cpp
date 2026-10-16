@@ -223,7 +223,7 @@ enum ERow : int32
 {
 	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound, RowPaint,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
-	RowColor, RowHue, RowSat, RowVal, RowFinish, RowPattern, RowAccent, RowRims,   // Paint (from Garage)
+	RowColor, RowFinish, RowPattern, RowAccent, RowRims,   // Paint (from Garage)
 	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
 	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
@@ -232,7 +232,7 @@ enum ERow : int32
 const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // footer Quit
 const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 7}};            // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
-const FODMenuTab PaintTabs[] = {{TEXT("PAINT"), RowColor, 8}};            // footer Back
+const FODMenuTab PaintTabs[] = {{TEXT("PAINT"), RowColor, 5}};            // footer Back
 const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
 // and the AreaMap screen gets a tab per area (green_valley / oahu / ...)
@@ -1547,9 +1547,6 @@ void PaintRow(const FODCarPaint& P, int32 Row, FString& OutLabel, FString& OutVa
 		OutValue = P.bFactory ? TEXT("Factory") : Swatch(P.BodySrgb(), W == INDEX_NONE ? TEXT("Custom") : ODCarPaint::Swatches[W].Name);
 		break;
 	}
-	case RowHue: OutLabel = TEXT("Hue"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.H / 3.6f)); break;
-	case RowSat: OutLabel = TEXT("Saturation"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.S * 100.0f)); break;
-	case RowVal: OutLabel = TEXT("Brightness"); OutValue = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(P.V * 100.0f)); break;
 	case RowFinish: OutLabel = TEXT("Finish"); OutValue = ODCarPaint::FinishNames[P.Finish]; break;
 	case RowPattern: OutLabel = TEXT("Pattern"); OutValue = ODCarPaint::PatternNames[P.Pattern]; break;
 	case RowAccent:
@@ -1587,9 +1584,6 @@ void AdjustPaint(FODCarPaint& P, int32 Row, int32 Dir)
 		}
 		break;
 	}
-	case RowHue: P.H = FMath::Fmod(P.H + Dir * 10.0f + 360.0f, 360.0f); P.bFactory = false; break;
-	case RowSat: P.S = FMath::Clamp(P.S + Dir * 0.05f, 0.0f, 1.0f); P.bFactory = false; break;
-	case RowVal: P.V = FMath::Clamp(P.V + Dir * 0.05f, 0.0f, 1.0f); P.bFactory = false; break;
 	case RowFinish: P.Finish = Cycle(P.Finish, Dir, ODCarPaint::FinishNames); break;
 	case RowPattern: P.Pattern = Cycle(P.Pattern, Dir, ODCarPaint::PatternNames); break;
 	case RowAccent: P.Accent = Cycle(P.Accent, Dir, ODCarPaint::Swatches); break;
@@ -1642,7 +1636,7 @@ void AODMainMenu::Adjust(int32 Dir)
 		ApplyExhaust();
 		SaveExhaustConfig();
 		break;
-	case RowColor: case RowHue: case RowSat: case RowVal:
+	case RowColor:
 	case RowFinish: case RowPattern: case RowAccent: case RowRims:
 		if (AODVehiclePawn* Pawn = FindPawn())
 		{
@@ -2589,7 +2583,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutLabel = TEXT("Paint & Wheels");
 		OutValue.Empty();
 		break;
-	case RowColor: case RowHue: case RowSat: case RowVal:
+	case RowColor:
 	case RowFinish: case RowPattern: case RowAccent: case RowRims:
 		if (const AODVehiclePawn* Pawn = FindPawn())
 		{
