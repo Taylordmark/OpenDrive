@@ -10,6 +10,7 @@ SMOKE_MAX, SMOKE_SLIP_LO, SMOKE_SLIP_HI = 40.0, 3.0, 12.0
 DUST_MAX, DUST_STIR_LO, DUST_STIR_HI, DUST_WET_CUT = 30.0, 2.0, 25.0, 0.85
 SPRAY_MAX, SPRAY_WET_LO, SPRAY_WET_HI = 35.0, 0.1, 0.6
 SPRAY_SPEED_LO, SPRAY_SPEED_HI = 4.0, 30.0
+POWDER_MAX, POWDER_SNOW_LO, POWDER_SNOW_HI, POWDER_STIR_LO, POWDER_STIR_HI = 22.0, 0.05, 0.6, 3.0, 25.0
 
 
 def clamp01(x):
@@ -25,18 +26,20 @@ def smoothstep(a, b, x):  # FMath::SmoothStep
     return t * t * (3.0 - 2.0 * t)
 
 
-def rates(surface, slip, speed, wet):
-    """(smoke, dust, spray) puffs/s for one wheel. surface: None/'asphalt'/'loose'."""
+def rates(surface, slip, speed, wet, snow=0.0):
+    """(smoke, dust, spray, powder) puffs/s for one wheel. surface: None/'asphalt'/'loose'."""
     wet = clamp01(wet)
+    if surface is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    stir = speed + 2 * slip
+    pw = smoothstep(POWDER_SNOW_LO, POWDER_SNOW_HI, snow)
+    powder = POWDER_MAX * pw * clamp01((stir - POWDER_STIR_LO) / (POWDER_STIR_HI - POWDER_STIR_LO))
     if surface == "asphalt":
-        return (SMOKE_MAX * smoothstep(SMOKE_SLIP_LO, SMOKE_SLIP_HI, slip) * (1 - wet), 0.0,
+        return (SMOKE_MAX * smoothstep(SMOKE_SLIP_LO, SMOKE_SLIP_HI, slip) * (1 - wet) * (1 - pw), 0.0,
                 SPRAY_MAX * smoothstep(SPRAY_WET_LO, SPRAY_WET_HI, wet)
-                * clamp01((speed - SPRAY_SPEED_LO) / (SPRAY_SPEED_HI - SPRAY_SPEED_LO)))
-    if surface == "loose":
-        stir = speed + 2 * slip
-        return (0.0, DUST_MAX * clamp01((stir - DUST_STIR_LO) / (DUST_STIR_HI - DUST_STIR_LO))
-                * (1 - DUST_WET_CUT * wet), 0.0)
-    return (0.0, 0.0, 0.0)
+                * clamp01((speed - SPRAY_SPEED_LO) / (SPRAY_SPEED_HI - SPRAY_SPEED_LO)), powder)
+    return (0.0, DUST_MAX * clamp01((stir - DUST_STIR_LO) / (DUST_STIR_HI - DUST_STIR_LO))
+            * (1 - DUST_WET_CUT * wet) * (1 - pw), 0.0, powder)
 
 
 def drive(t):
@@ -68,17 +71,23 @@ def integrate(pos, vel, accel, drag, dt):  # UODVehicleFX::Integrate, one axis
 
 
 # --- mapping ---
-assert rates("asphalt", 0.5, 20, 0) == (0, 0, 0)            # grip driving: nothing
+assert rates("asphalt", 0.5, 20, 0) == (0, 0, 0, 0)         # grip driving: nothing
 assert rates("asphalt", 15, 5, 0)[0] == SMOKE_MAX            # burnout: full smoke
 assert 0 < rates("asphalt", 7, 20, 0)[0] < SMOKE_MAX         # partial slide: some
 assert rates("asphalt", 15, 5, 1)[0] == 0                    # soaked road doesn't smoke
 assert rates("asphalt", 0, 30, 1)[2] == SPRAY_MAX            # wet + fast: full spray
 assert rates("asphalt", 0, 3, 1)[2] == 0                     # wet but crawling: none
 assert rates("asphalt", 0, 30, 0.05)[2] == 0                 # damp: none
-assert rates("loose", 0, 1, 0) == (0, 0, 0)                  # parked on gravel
+assert rates("loose", 0, 1, 0) == (0, 0, 0, 0)               # parked on gravel
 assert rates("loose", 0, 30, 0)[1] == DUST_MAX               # gravel run
 assert rates("loose", 0, 30, 1)[1] < 0.2 * DUST_MAX          # mud, not dust
-assert rates(None, 20, 40, 0) == (0, 0, 0)                   # grass/air: none
+assert rates(None, 20, 40, 0, 1) == (0, 0, 0, 0)             # grass/air: none
+assert rates("asphalt", 0, 30, 0, 1)[3] == POWDER_MAX        # snowy road at speed: full powder
+assert rates("asphalt", 0, 30, 0, 0)[3] == 0                 # bare road: none
+assert rates("asphalt", 0, 2, 0, 1)[3] == 0                  # crawling: none
+assert rates("asphalt", 15, 5, 0, 1)[0] == 0                 # burnout in snow throws powder, not smoke
+assert rates("asphalt", 15, 5, 0, 1)[3] > 0
+assert rates("loose", 0, 30, 0, 1)[1] == 0                   # snow-covered dirt: no dust
 for s in (0, 2, 5, 9, 12, 30):                               # monotonic in slip
     assert rates("asphalt", s, 20, 0)[0] <= rates("asphalt", s + 0.5, 20, 0)[0]
 
@@ -97,7 +106,7 @@ for fps in (24, 30, 60, 90, 144, 240):
 print("smoke puffs over the 10 s drive by fps:", counts, f"(integral {expected:.1f})")
 
 # --- frame-rate independence: motion ---
-for accel, drag in ((40, 1.6), (-30, 2.0), (-350, 2.5)):     # smoke, dust, spray
+for accel, drag in ((40, 1.6), (-30, 2.0), (-350, 2.5), (-20, 2.2)):   # smoke, dust, spray, powder
     ref = None
     for fps in (24, 60, 240, 1000):
         p, v = 0.0, 300.0
