@@ -23,6 +23,7 @@ struct FODFxRates
 	float Smoke = 0.0f;
 	float Dust = 0.0f;
 	float Spray = 0.0f;
+	float Powder = 0.0f;   // loose snow kicked into a lingering white cloud
 };
 
 /**
@@ -62,8 +63,9 @@ public:
 
 	static EODFxSurface Classify(const UPhysicalMaterial* Mat);
 	/** SlipMs: contact-patch sliding speed, m/s. SpeedMs: contact speed over
-	 *  ground, m/s. Wetness: AODWeatherController::Wetness, 0..1. */
-	static FODFxRates Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness);
+	 *  ground, m/s. Wetness: water on the surface, 0..1. Snow: loose snow
+	 *  under the tyre, 0 none .. 1 a few cm or more. */
+	static FODFxRates Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness, float Snow = 0.0f);
 
 	/** Grime/wet/snow + axles into the car meshes' custom primitive data;
 	 *  Dt > 0 also advances the car's own snow load (CarSnow). */
@@ -91,7 +93,7 @@ private:
 	TArray<FPuff> Puffs;
 	float CarSnow = 0.0f;           // 0..1 snow on the car: builds in snowfall, blows off at speed, melts
 	int32 Next = 0;                 // ring cursor: a full pool recycles the oldest-spawned slot
-	TArray<float> Debt;             // NumWheels x 3 effects, fractional puffs owed
+	TArray<float> Debt;             // NumWheels x 4 effects, fractional puffs owed
 	FRandomStream Rng{ 0x0DF7 };
 	bool bDrawnLive = false;        // last Draw had live puffs (so one more clears them)
 

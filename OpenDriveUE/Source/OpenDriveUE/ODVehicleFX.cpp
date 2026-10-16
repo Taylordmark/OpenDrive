@@ -21,11 +21,17 @@ namespace
 	constexpr float SprayMax = 35.0f;
 	constexpr float SprayWetLo = 0.1f, SprayWetHi = 0.6f;
 	constexpr float SpraySpeedLo = 4.0f, SpraySpeedHi = 30.0f; // m/s
+	// Powder (2026-10-16): snow under the tyre goes up as a big slow white
+	// cloud that hangs in the air behind the car (NFS / The Crew), not spray.
+	constexpr float PowderMax = 22.0f;
+	constexpr float PowderSnowLo = 0.05f, PowderSnowHi = 0.6f;
+	constexpr float PowderStirLo = 3.0f, PowderStirHi = 25.0f; // m/s of speed + 2 x slip
 
 	// Pool: 4 wheels x 40/s smoke x ~2.6 s life ~= 420 live at a full
 	// burnout. A full pool recycles the oldest slot, which is fps-independent
 	// (the spawn count is), so a hard limit only shortens the longest trails.
-	constexpr int32 PoolSize = 512;
+	// + powder: 4 x 22/s x ~3.5 s ~= 310 more in deep snow.
+	constexpr int32 PoolSize = 768;
 	constexpr int32 NumCustom = 4;   // R, G, B, Alpha - read by M_FXPuff
 
 	struct FKind
@@ -40,11 +46,15 @@ namespace
 		FVector Accel;     // cm/s^2 (buoyancy +, droplets -)
 		FLinearColor Color;
 	};
-	// index = 0 smoke, 1 dust, 2 spray (the FODFxRates order)
-	const FKind Kinds[3] = {
+	// index = 0 smoke, 1 dust, 2 spray, 3 powder (the FODFxRates order)
+	constexpr int32 NumKinds = 4;
+	const FKind Kinds[NumKinds] = {
 		{ 2.6f, 60.0f, 340.0f, 0.50f, 1.6f, 0.25f,  70.0f,  30.0f, FVector(0, 0, 40),   FLinearColor(0.80f, 0.80f, 0.82f) },
 		{ 1.8f, 50.0f, 280.0f, 0.45f, 2.0f, 0.35f, 110.0f, 120.0f, FVector(0, 0, -30),  FLinearColor(0.52f, 0.45f, 0.35f) },
 		{ 0.7f, 30.0f, 170.0f, 0.28f, 2.5f, 0.55f, 120.0f, 140.0f, FVector(0, 0, -350), FLinearColor(0.80f, 0.82f, 0.85f) },
+		// powder: barely inherits the car's speed and stops fast, so it hangs
+		// where it was thrown, swells, and settles slowly
+		{ 3.5f, 60.0f, 480.0f, 0.38f, 2.2f, 0.20f, 160.0f, 170.0f, FVector(0, 0, -20),  FLinearColor(0.93f, 0.94f, 0.97f) },
 	};
 }
 
@@ -73,21 +83,27 @@ EODFxSurface UODVehicleFX::Classify(const UPhysicalMaterial* Mat)
 	return EODFxSurface::None;   // grass, guardrail, anything new
 }
 
-FODFxRates UODVehicleFX::Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness)
+FODFxRates UODVehicleFX::Rates(EODFxSurface Surface, float SlipMs, float SpeedMs, float Wetness, float Snow)
 {
 	FODFxRates R;
 	const float Wet = FMath::Clamp(Wetness, 0.0f, 1.0f);
+	if (Surface == EODFxSurface::None)
+	{
+		return R;
+	}
+	const float Stir = SpeedMs + 2.0f * SlipMs;
+	const float Powder = FMath::SmoothStep(PowderSnowLo, PowderSnowHi, Snow);
+	R.Powder = PowderMax * Powder * FMath::Clamp((Stir - PowderStirLo) / (PowderStirHi - PowderStirLo), 0.0f, 1.0f);
 	if (Surface == EODFxSurface::Asphalt)
 	{
-		R.Smoke = SmokeMax * FMath::SmoothStep(SmokeSlipLo, SmokeSlipHi, SlipMs) * (1.0f - Wet);
+		R.Smoke = SmokeMax * FMath::SmoothStep(SmokeSlipLo, SmokeSlipHi, SlipMs) * (1.0f - Wet) * (1.0f - Powder);
 		R.Spray = SprayMax * FMath::SmoothStep(SprayWetLo, SprayWetHi, Wet)
 			* FMath::Clamp((SpeedMs - SpraySpeedLo) / (SpraySpeedHi - SpraySpeedLo), 0.0f, 1.0f);
 	}
 	else if (Surface == EODFxSurface::Loose)
 	{
-		const float Stir = SpeedMs + 2.0f * SlipMs;
 		R.Dust = DustMax * FMath::Clamp((Stir - DustStirLo) / (DustStirHi - DustStirLo), 0.0f, 1.0f)
-			* (1.0f - DustWetCut * Wet);
+			* (1.0f - DustWetCut * Wet) * (1.0f - Powder);   // snow-covered dirt doesn't dust
 	}
 	return R;
 }
@@ -195,10 +211,13 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	// Spray needs water ON the road (2026-10-16): a drying, merely damp
 	// surface throws little; falling rain or standing puddles throw the full
-	// rooster tail, and loose road snow kicks up a white plume the same way.
+	// rooster tail. Loose snow throws powder instead: the road's depth on
+	// asphalt, the deeper roadside/off-road depth on dirt and the landscape.
 	const AODWeatherController* Wx = WeatherCtl.Get();
-	const float Wet = Wx ? FMath::Max3(Wx->Wetness * (0.4f + 0.6f * FMath::Min(Wx->RainRate * 2.0f, 1.0f)),
-		Wx->Puddles, FMath::Min(Wx->RoadSnowCm / 3.0f, 1.0f)) : 0.0f;
+	const float Wet = Wx ? FMath::Max(Wx->Wetness * (0.4f + 0.6f * FMath::Min(Wx->RainRate * 2.0f, 1.0f)),
+		Wx->Puddles) : 0.0f;
+	const float RoadSnow = Wx ? FMath::Min(Wx->RoadSnowCm / 3.0f, 1.0f) : 0.0f;
+	const float SideSnow = Wx ? FMath::Min(Wx->SideSnowCm / 5.0f, 1.0f) : 0.0f;
 
 	const UODVehicleMovement* Move = Owner->FindComponentByClass<UODVehicleMovement>();
 	const UPrimitiveComponent* Body = Cast<UPrimitiveComponent>(Owner->GetRootComponent());
@@ -206,9 +225,9 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (Move && Body && Body->IsSimulatingPhysics())
 	{
 		const int32 NumWheels = Move->NumWheels();
-		if (Debt.Num() != NumWheels * 3)
+		if (Debt.Num() != NumWheels * NumKinds)
 		{
-			Debt.Init(0.0f, NumWheels * 3);
+			Debt.Init(0.0f, NumWheels * NumKinds);
 		}
 		const FTransform BodyXf = Body->GetComponentTransform();
 		const FVector Up = BodyXf.GetUnitAxis(EAxis::Z);
@@ -226,15 +245,17 @@ void UODVehicleFX::TickComponent(float DeltaTime, ELevelTick TickType,
 			// contact-patch sliding speed: tire surface vs ground, both axes
 			const float SlipMs = (float)FVector2D(Move->GetWheelOmega(i) * RadiusCm - FVector::DotProduct(V, Fwd),
 				FVector::DotProduct(V, Right)).Size() / 100.0f;
-			const FODFxRates R = Rates(Classify(Move->GetContactSurface(i)), SlipMs, (float)V.Size() / 100.0f, Wet);
-			const float PerKind[3] = { R.Smoke, R.Dust, R.Spray };
-			for (int32 k = 0; k < 3; ++k)
+			const EODFxSurface Surface = Classify(Move->GetContactSurface(i));
+			const FODFxRates R = Rates(Surface, SlipMs, (float)V.Size() / 100.0f, Wet,
+				Surface == EODFxSurface::Asphalt ? RoadSnow : SideSnow);
+			const float PerKind[NumKinds] = { R.Smoke, R.Dust, R.Spray, R.Powder };
+			for (int32 k = 0; k < NumKinds; ++k)
 			{
 				if (PerKind[k] <= 0.0f)
 				{
 					continue;
 				}
-				float& D = Debt[i * 3 + k];
+				float& D = Debt[i * NumKinds + k];
 				D += PerKind[k] * DeltaTime;
 				for (int32 Budget = Puffs.Num(); D >= 1.0f && Budget > 0; --Budget)
 				{

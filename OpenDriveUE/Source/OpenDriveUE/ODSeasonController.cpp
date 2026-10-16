@@ -6,6 +6,7 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -617,39 +618,49 @@ void AODSeasonController::EnsureSnowfallComponent()
 	// 2026-10-16: + a far layer of 300 bigger, fainter instances (custom data
 	// 1 = fade) in a 3x wider box, drawn only outside the near box, so heavy
 	// precipitation thickens toward the horizon instead of stopping at 9 m.
-	constexpr int32 NumFlakes = 520;
+	// 2026-10-16 (2): flakes cut from 11 cm to 1.5-2.5 cm (real flakes are
+	// 0.5-2 cm, aggregates ~5 cm) with soft edges in M_SnowFlake, so the pool
+	// grows to 1200 to keep the same read - Snow (0.5) shows 600.
+	constexpr int32 NumFlakes = 1200;
 	constexpr int32 NumFar = 300;
+	// + blowing snow (2026-10-16): long faint wisps skimming 5-40 cm over the
+	// ground along the wind, whenever it is windy and snow is lying - even
+	// under a clear sky (a ground blizzard).
+	constexpr int32 NumDrift = 160;
 	constexpr float HalfExtentXYCm = 900.0f;
 	constexpr float HalfHeightCm = 700.0f;
 	FRandomStream Rng(12345);
 	SnowFxNumNear = NumFlakes;
-	SnowFxLocalOffsets.Reserve(NumFlakes + NumFar);
-	PrecipFxSnowRoll.Reserve(NumFlakes + NumFar);
-	PrecipFxRoll.Reserve(NumFlakes + NumFar);
+	SnowFxNumPrecip = NumFlakes + NumFar;
+	const int32 NumAll = NumFlakes + NumFar + NumDrift;
+	SnowFxLocalOffsets.Reserve(NumAll);
+	PrecipFxSnowRoll.Reserve(NumAll);
+	PrecipFxRoll.Reserve(NumAll);
 	TArray<FTransform> Transforms;
-	Transforms.Reserve(NumFlakes + NumFar);
-	for (int32 i = 0; i < NumFlakes + NumFar; ++i)
+	Transforms.Reserve(NumAll);
+	for (int32 i = 0; i < NumAll; ++i)
 	{
-		const float Ext = i < NumFlakes ? 1.0f : 3.0f;
+		const float Ext = i < NumFlakes || i >= SnowFxNumPrecip ? 1.0f : 3.0f;
 		const FVector Offset(
 			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm) * Ext,
 			Rng.FRandRange(-HalfExtentXYCm, HalfExtentXYCm) * Ext,
-			Rng.FRandRange(-HalfHeightCm, HalfHeightCm) * (i < NumFlakes ? 1.0f : 1.5f));
+			i >= SnowFxNumPrecip ? Rng.FRandRange(5.0f, 40.0f)
+				: Rng.FRandRange(-HalfHeightCm, HalfHeightCm) * (i < NumFlakes ? 1.0f : 1.5f));
 		SnowFxLocalOffsets.Add(Offset);
 		PrecipFxSnowRoll.Add(Rng.FRand());
-		PrecipFxRoll.Add(FVector3f(Rng.FRandRange(0.6f, 1.4f), Rng.FRandRange(0.8f, 1.2f), Rng.FRandRange(0.0f, 2.0f * PI)));
+		PrecipFxRoll.Add(FVector3f(Rng.FRandRange(0.5f, 1.6f), Rng.FRandRange(0.8f, 1.2f), Rng.FRandRange(0.0f, 2.0f * PI)));
 		FTransform T;
 		T.SetLocation(Offset);
-		T.SetScale3D(FVector(0.11f));   // ~11 cm sphere - reads as a soft flake at driving distance
+		T.SetScale3D(FVector(0.02f));   // ~2 cm (Sphere is 100 cm); UpdateSnowfallFX sets the real size
 		Transforms.Add(T);
 	}
 	SnowFxHism->SetNumCustomDataFloats(2);
 	SnowFxHism->AddInstances(Transforms, false);
-	PrecipFxIsSnow.Init(1, NumFlakes + NumFar);
-	for (int32 i = 0; i < NumFlakes + NumFar; ++i)
+	PrecipFxIsSnow.Init(1, NumAll);
+	for (int32 i = 0; i < NumAll; ++i)
 	{
 		SnowFxHism->SetCustomDataValue(i, 0, 1.0f, false);
-		SnowFxHism->SetCustomDataValue(i, 1, i < NumFlakes ? 1.0f : 0.35f, false);
+		SnowFxHism->SetCustomDataValue(i, 1, i < NumFlakes ? 1.0f : i < SnowFxNumPrecip ? 0.35f : 0.22f, false);
 	}
 }
 
@@ -669,7 +680,11 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	const AODWeatherController* Weather = WeatherCtl.Get();
 	const float Precip = Weather ? Weather->PrecipIntensity : 0.0f;
-	const bool bVisible = Precip > 0.02f && CamMgr != nullptr && !(Weather && Weather->IsSheltered());
+	const float WindMs = Weather ? Weather->WindSpeedMs : 0.0f;
+	// blowing snow: wind over lying snow (the season's cover or the roadside depth)
+	const float LyingSnow = FMath::Max(SnowCover, Weather ? FMath::Min(Weather->SideSnowCm / 20.0f, 1.0f) : 0.0f);
+	const float Drift = FMath::SmoothStep(4.0f, 14.0f, WindMs) * FMath::Clamp(LyingSnow, 0.0f, 1.0f);
+	const bool bVisible = (Precip > 0.02f || Drift > 0.02f) && CamMgr != nullptr && !(Weather && Weather->IsSheltered());
 	if (SnowFxHism->IsVisible() != bVisible)
 	{
 		SnowFxHism->SetVisibility(bVisible);
@@ -699,7 +714,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	constexpr float StreakSeconds = 0.055f;     // streak length = relative speed x this (50 cm at a parked 9 m/s fall)
 	constexpr float StreakMaxCm = 250.0f;
 	constexpr float FlutterCm = 18.0f;
-	constexpr float FarScale = 2.2f;            // far layer: bigger so it reads at 10-27 m
+	constexpr float FarScale = 2.0f;            // far layer: ~5 cm so it reads at 10-27 m
 
 	const FVector CamLoc = CamMgr->GetCameraLocation();
 	const FVector Center = CamLoc + CamMgr->GetCameraRotation().Vector().GetSafeNormal2D() * AheadCm;
@@ -717,13 +732,12 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	bSnowFxCentered = true;
 	SnowFxHism->SetWorldLocation(Center);
 
-	const float WindMs = Weather ? Weather->WindSpeedMs : 0.0f;
 	const float WindYaw = FMath::DegreesToRadians(Weather ? Weather->WindDirDeg : 0.0f);
 	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
 	const float SnowType = Weather ? Weather->PrecipType : 1.0f;
 	const float Pellet = 1.0f - FMath::SmoothStep(0.55f, 0.85f, SnowType);   // sleet: snow-kind = ice pellets
 	const float SnowFall = FMath::Lerp(SnowFallCmS, PelletFallCmS, Pellet);
-	const float FlakeScale = FMath::Lerp(FMath::Lerp(0.11f, 0.06f, FMath::Clamp(WindMs / 20.0f, 0.0f, 1.0f)), 0.035f, Pellet);
+	const float FlakeScale = FMath::Lerp(FMath::Lerp(0.025f, 0.015f, FMath::Clamp(WindMs / 20.0f, 0.0f, 1.0f)), 0.01f, Pellet);
 	const FVector SnowVel = WindDir * (0.8f * WindMs * 100.0f) - FVector(0, 0, SnowFall);
 	const FVector RainVel = WindDir * (0.9f * WindMs * 100.0f) - FVector(0, 0, RainFallCmS);
 	// Streaks rake along velocity relative to the CAR (PLAN-REALISM Phase 6,
@@ -742,7 +756,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const float SnowSmearCm = FMath::Min(SnowRel.Size() * StreakSeconds * 0.35f, 120.0f);
 	const float Time = GetWorld()->GetTimeSeconds();
 
-	const int32 Num = SnowFxLocalOffsets.Num();
+	const int32 Num = SnowFxNumPrecip;
 	const int32 NumNear = SnowFxNumNear;
 	const float Active = FMath::Clamp(Precip, 0.0f, 1.0f);
 	const int32 NumActiveNear = FMath::RoundToInt(NumNear * Active);
@@ -791,7 +805,48 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 			T.SetScale3D(FVector(0.015f * Scale, 0.015f * Scale, StreakCm / 100.0f * Roll.Y * Scale));   // ~1.5 cm wide streak (Sphere is 100 cm)
 		}
 		T.SetLocation(Drawn);
-		SnowFxHism->UpdateInstanceTransform(i, T, false, i == Num - 1, true);
+		SnowFxHism->UpdateInstanceTransform(i, T, false, false, true);
+	}
+
+	// Blowing snow: wisps 1.5-4 m long, 3-7 cm thick, riding the near-ground
+	// wind (~0.6x) along a ground plane from one trace under the camera
+	// (tilted by the hit normal, so it follows a grade). They shrink to
+	// nothing near the box edge, so wrapping never pops.
+	constexpr float DriftWindFrac = 0.6f;
+	constexpr float DriftEdgeCm = 250.0f;
+	FHitResult Hit;
+	FCollisionQueryParams Q(SCENE_QUERY_STAT(SnowDrift), false, UGameplayStatics::GetPlayerPawn(this, 0));
+	const bool bGround = Drift > 0.02f && GetWorld()->LineTraceSingleByChannel(
+		Hit, CamLoc, CamLoc - FVector(0, 0, 5000), ECC_Visibility, Q) && Hit.ImpactNormal.Z > 0.5f;
+	const FVector DriftVel = WindDir * (DriftWindFrac * WindMs * 100.0f);
+	const FQuat DriftRot = FRotationMatrix::MakeFromZ(WindDir).ToQuat();
+	const int32 NumAll = SnowFxLocalOffsets.Num();
+	const int32 NumActiveDrift = bGround ? FMath::RoundToInt((NumAll - Num) * Drift) : 0;
+	for (int32 i = Num; i < NumAll; ++i)
+	{
+		const FVector3f& Roll = PrecipFxRoll[i];
+		FVector& Offset = SnowFxLocalOffsets[i];
+		Offset.X = FMath::Wrap(Offset.X + (DriftVel.X * Roll.Y * DeltaSeconds - Shift.X), -HalfExtentXYCm, HalfExtentXYCm);
+		Offset.Y = FMath::Wrap(Offset.Y + (DriftVel.Y * Roll.Y * DeltaSeconds - Shift.Y), -HalfExtentXYCm, HalfExtentXYCm);
+		FTransform T;
+		if (i - Num >= NumActiveDrift)
+		{
+			T.SetScale3D(FVector::ZeroVector);
+		}
+		else
+		{
+			const FVector W = Center + FVector(Offset.X, Offset.Y, 0.0);
+			const FVector N = Hit.ImpactNormal;
+			const double GroundZ = Hit.ImpactPoint.Z - (N.X * (W.X - Hit.ImpactPoint.X) + N.Y * (W.Y - Hit.ImpactPoint.Y)) / N.Z;
+			const float Edge = FMath::Clamp(
+				(float)FMath::Min(HalfExtentXYCm - FMath::Abs(Offset.X), HalfExtentXYCm - FMath::Abs(Offset.Y)) / DriftEdgeCm, 0.0f, 1.0f);
+			const float Thick = 0.05f * Roll.X * Edge;
+			T.SetLocation(FVector(Offset.X, Offset.Y,
+				GroundZ - Center.Z + Offset.Z + 8.0 * FMath::Sin(Time * 2.3f + Roll.Z)));
+			T.SetRotation(DriftRot);
+			T.SetScale3D(FVector(Thick, Thick, 2.5f * Roll.X * Edge));
+		}
+		SnowFxHism->UpdateInstanceTransform(i, T, false, i == NumAll - 1, true);
 	}
 }
 
