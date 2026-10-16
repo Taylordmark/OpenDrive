@@ -80,6 +80,10 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
+	/** 2026-10-16: "Wetness" / "SnowCover" on the shared facade + roof MIDs
+	 *  (AODSeasonController pushes them with the ground's). */
+	void SetWeather(float Wetness, float SnowCover);
+
 	/** Loading-gate readiness (2026-10-14, AODMainMenu's loading screen): every
 	 *  tile within SpawnRadius of AroundPos is built or known-missing and no
 	 *  building is still waiting on ground (those give up after

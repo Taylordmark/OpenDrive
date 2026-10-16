@@ -84,9 +84,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float WetUpSeconds = 180.0f;
 
-	/** Wetness 1 -> 0 time once precipitation stops - dries slowly. */
+	/** Wetness 1 -> 0 time once precipitation stops, at 15 C and calm air
+	 *  (x Evaporation(): faster warm and windy, slower cold and still). */
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float DrySeconds = 1200.0f;
+
+	/** Standing water (Puddles) approaches its rain-rate level with this time
+	 *  constant - puddles lag the surface film by minutes. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float PuddleFillSeconds = 300.0f;
+
+	/** Puddles 1 -> 0 once the rain eases (x Evaporation()) - they outlast
+	 *  the film, so a road dries in patches with water left in the ruts. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float PuddleDrainSeconds = 2700.0f;
 
 	// ---- snow accumulation (2026-10-06, TickSnow; pipeline/check_snow_depth.py
 	// mirrors the formula). Ambient depths below are the uncleared value; each
@@ -188,6 +199,19 @@ public:
 	/** Surface wetness: accumulates under precipitation, dries slowly. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float Wetness = 0.0f;
+
+	/** Rain falling right now, 0..1 (PrecipIntensity x liquid share): drives
+	 *  puddle ripples, the live water film and road spray. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float RainRate = 0.0f;
+
+	/** Standing water 0..1 (ruts, sags, ground hollows): fills toward
+	 *  PuddleTarget(RainRate) over PuddleFillSeconds, drains slowly after. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float Puddles = 0.0f;
+
+	/** Drying speed multiplier from air temperature and wind, ~0.3..3. */
+	float Evaporation() const;
 
 	/** Air temperature from the last roll (month temp + lapse), C. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")

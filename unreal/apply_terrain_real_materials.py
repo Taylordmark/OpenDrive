@@ -154,6 +154,21 @@ OFF_Z_CM = 1.0e7     # param defaults = no treeline/snow/beach (walls use the ra
 WET_DARKEN = 0.6
 WET_ROUGHNESS_FLAT = 0.5
 WET_ROUGHNESS_STEEP = 0.25
+# 2026-10-16. Standing water ("Puddles", AODWeatherController: fills over
+# minutes of rain, drains slower than the surface dries) pools in the
+# cavities (low AO) of flat ground, in 6 m noise "low spots": dark, mirror
+# smooth, flat normal. The snow edge (partial cover) is wet melt - dark and
+# glossy. Snow sparkle: 1.5 cm world cells, ~12% get a random facet normal +
+# near-mirror roughness so the sun glints off crystals; within
+# SPARKLE_FADE_CM, off at Low quality (QualitySwitch).
+POOL_CELL_CM = 600.0
+POOL_FLAT_POW = 8.0              # flat_w^this: only near-level ground holds water
+POOL_DARKEN = 0.7
+POOL_ROUGHNESS = 0.04
+MELT_EDGE_DARKEN = 0.72
+MELT_EDGE_ROUGHNESS = 0.3
+SPARKLE_CELL_CM = 1.5
+SPARKLE_FADE_CM = 1500.0
 # road shoulder - identical to apply_ground_material.py (C++ texture contract)
 ROAD_DIST_RANGE_M = 16.0
 ROAD_DIST_COVERAGE_CM = 51200.0
@@ -344,6 +359,25 @@ class G:
 
     def contrast(self, x, k):
         return self.sat(self.add(self.mul(self.sub(x, self.c(0.5)), self.c(k)), self.c(0.5)))
+
+    def custom(self, code, out_type, **ins):
+        n = self.node(unreal.MaterialExpressionCustom, code=code, output_type=out_type)
+        pins = []
+        for name in ins:
+            i = unreal.CustomInput()
+            i.set_editor_property("input_name", name)
+            pins.append(i)
+        n.set_editor_property("inputs", pins)
+        for name, src in ins.items():
+            self.req(MEL.connect_material_expressions(src, "", n, name), f"Custom.{name}")
+        return n
+
+    def quality(self, default, low):
+        """QualitySwitch: `low` on Low material quality, `default` otherwise."""
+        n = self.node(unreal.MaterialExpressionQualitySwitch)
+        self.req(MEL.connect_material_expressions(default, "", n, "Default"), "QualitySwitch.Default")
+        self.req(MEL.connect_material_expressions(low, "", n, "Low"), "QualitySwitch.Low")
+        return n
 
     def scalar_param(self, name, default):
         n = self.node(unreal.MaterialExpressionScalarParameter, parameter_name=name)
@@ -684,6 +718,15 @@ def build_ground():
     base["albedo"] = g.mul(base["albedo"], g.lerp(one, g.c(WET_DARKEN), wet))
     wet_rough = g.lerp(g.c(WET_ROUGHNESS_FLAT), g.c(WET_ROUGHNESS_STEEP), steep_w)
     base["rough"] = g.lerp(base["rough"], g.minv(base["rough"], wet_rough), wet)
+    # standing water in the hollows of level ground
+    hollow = g.add(g.sub(one, base["ao"]), g.mul(g.sub(g.noise_xy(xy, POOL_CELL_CM, (7.0, 83.0)), g.c(0.5)), g.c(0.8)))
+    standing = g.scalar_param("Puddles", 0.0)
+    pool = g.mul(g.mul(g.sat(g.mul(g.sub(hollow, g.sub(g.c(0.9), g.mul(standing, g.c(0.6)))), g.c(8.0))),
+                       g.power(flat_w, g.c(POOL_FLAT_POW))),
+                 g.sat(g.mul(standing, g.c(4.0))))   # exactly dry at Puddles 0
+    base["albedo"] = g.mul(base["albedo"], g.lerp(one, g.c(POOL_DARKEN), pool))
+    base["rough"] = g.lerp(base["rough"], g.c(POOL_ROUGHNESS), pool)
+    base["normal"] = g.lerp(base["normal"], g.c3(0.0, 0.0, 1.0), pool)
 
     # snow: same altitude params, noise patches, fills crevices first
     lo, hi = g.scalar_param("SnowLineLowZCm", OFF_Z_CM), g.scalar_param("SnowLineHighZCm", OFF_Z_CM + 45000.0)
@@ -691,7 +734,28 @@ def build_ground():
                          g.mul(g.sub(g.noise_xy(xy, SNOW_NOISE_SCALE_CM, (91.0, 37.0)), g.c(0.5)),
                                g.c(SNOW_NOISE_STRENGTH))))
     snow_amt = g.mul(snow_t, g.sub(one, g.mul(steep_w, g.c(SNOW_STEEP_REDUCTION))))
-    out = blend_layers(g, base, L["snow"], g.height_blend(snow_amt, base["ao"], g.sub(g.c(1.1), base["ao"])))
+    snow_w = g.height_blend(snow_amt, base["ao"], g.sub(g.c(1.1), base["ao"]))
+    out = blend_layers(g, base, L["snow"], snow_w)
+    # melt rim: partial cover = wet, dark, glossy (4 w (1 - w) peaks at 0.5)
+    melt = g.mul(g.mul(snow_w, g.sub(one, snow_w)), g.c(4.0))
+    out["albedo"] = g.mul(out["albedo"], g.lerp(one, g.c(MELT_EDGE_DARKEN), melt))
+    out["rough"] = g.lerp(out["rough"], g.minv(out["rough"], g.c(MELT_EDGE_ROUGHNESS)), melt)
+    # sparkle: x = glint mask, yzw = facet normal (tangent space)
+    sparkle = g.custom(
+        "float3 c = floor(W / Cell);\n"
+        "float h = frac(sin(dot(c, float3(12.9898, 78.233, 37.719))) * 43758.5453);\n"
+        "float3 r = frac(h * float3(31.7, 57.3, 91.1)) * 2 - 1;\n"
+        "float g = (h < 0.12) * F;\n"
+        "return float4(g, normalize(float3(r.xy * 0.6, 1)));",
+        unreal.CustomMaterialOutputType.CMOT_FLOAT4,
+        W=wp, Cell=g.c(SPARKLE_CELL_CM), F=g.sub(one, g.ramp(depth, 0.0, SPARKLE_FADE_CM)))
+    sparkle = g.quality(sparkle, g.node(unreal.MaterialExpressionConstant4Vector,
+                                        constant=unreal.LinearColor(0.0, 0.0, 0.0, 1.0)))
+    glint = g.mul(g.mask(sparkle, r=True), g.sat(g.mul(g.sub(snow_w, g.c(0.6)), g.c(2.5))))
+    facet = g.node(unreal.MaterialExpressionComponentMask, r=False, g=True, b=True, a=True)
+    G.req(MEL.connect_material_expressions(sparkle, "", facet, ""), "ComponentMask(facet)")
+    out["rough"] = g.lerp(out["rough"], g.c(0.06), glint)
+    out["normal"] = g.lerp(out["normal"], facet, glint)
     out["albedo"] = g.mul(out["albedo"], g.lerp(g.c(0.85), one, out["ao"]))   # cavity darkening
     finish(g, path, f"{MAT_DIR}/M_GroundStylized", out)
 

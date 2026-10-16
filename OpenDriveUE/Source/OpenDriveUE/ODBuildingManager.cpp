@@ -14,6 +14,7 @@
 #include "DynamicMesh/MeshNormals.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/Crc.h"
 #include "Misc/FileHelper.h"
@@ -134,8 +135,29 @@ void AODBuildingManager::BeginPlay()
 			TEXT("/Game/OpenDrive/Materials/M_BuildingRoof_real.M_BuildingRoof_real"),
 			nullptr, LOAD_NoWarn | LOAD_Quiet)
 		: nullptr;
+	// one shared MID each so SetWeather reaches every building at once
+	if (FacadeMat)
+	{
+		FacadeMat = UMaterialInstanceDynamic::Create(FacadeMat, this);
+	}
+	if (RoofMat)
+	{
+		RoofMat = UMaterialInstanceDynamic::Create(RoofMat, this);
+	}
 
 	ClampSpawnRadiusToTerrainCollision();
+}
+
+void AODBuildingManager::SetWeather(float Wetness, float SnowCover)
+{
+	for (UMaterialInterface* Mat : { FacadeMat.Get(), RoofMat.Get() })
+	{
+		if (UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mat))
+		{
+			Mid->SetScalarParameterValue(TEXT("Wetness"), Wetness);
+			Mid->SetScalarParameterValue(TEXT("SnowCover"), SnowCover);
+		}
+	}
 }
 
 void AODBuildingManager::ClampSpawnRadiusToTerrainCollision()

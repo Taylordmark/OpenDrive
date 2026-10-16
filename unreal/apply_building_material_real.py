@@ -144,6 +144,18 @@ TRANSOM_V = 0.58
 SILL_V = 0.04            # sill depth below the window, floor fraction (~13 cm)
 SILL_OVERHANG_U = 0.03
 STREAK_LEN_V = 0.3       # rain streaks run ~1 m under each sill
+# Weather (2026-10-16), AODBuildingManager::SetWeather; both 0 = the dry,
+# bare look. Wet masonry soaks up and darkens (glass and trim don't);
+# snow lies on roofs by pitch - full on flat roofs, gone past ~50 deg - in
+# drift patches, thinning toward the steep side.
+WET_WALL_DARKEN = 0.62
+WET_WALL_ROUGH = 0.35
+WET_ROOF_DARKEN = 0.7
+WET_ROOF_ROUGH = 0.25
+ROOF_SNOW_COLOR = (0.88, 0.9, 0.94)
+ROOF_SNOW_ROUGH = 0.8
+ROOF_SNOW_SLIDE_NZ = 0.62   # normal.z below this (~52 deg pitch) sheds snow
+ROOF_SNOW_PATCH_CM = 180.0
 STREAK_DARK = 0.3
 STREAK_COLUMNS = 12.0    # streak columns per bay
 SPLASH_M = 0.7           # ground splash height
@@ -547,6 +559,12 @@ def build_facade(mat):
                     BW=bay_w, FH=g.lerp(upper_h, ground_h, ground))
     emissive = g.mul(room, nits)
 
+    # wet weather: the porous wall darkens, glass/trim/doors stay as they are
+    soak = g.mul(weather_param(g, "Wetness"), g.sub(1.0, flat_w))
+    facade_a = g.mul(facade_a, g.lerp(1.0, WET_WALL_DARKEN, soak))
+    facade_r = g.lerp(facade_r, g.minv(facade_r, g.c(WET_WALL_ROUGH)), soak)
+    weather_param(g, "SnowCover")   # in the interface for SetWeather; walls take no snow
+
     return {
         unreal.MaterialProperty.MP_BASE_COLOR: facade_a,
         unreal.MaterialProperty.MP_NORMAL: facade_n,
@@ -592,11 +610,31 @@ def build_roof(mat):
         s["D"].set_editor_property("max_default", ROOF_DETAIL[1])
     thr = [(i + 1) / n for i in range(n - 1)]
     out = {k: g.select(pick, [s[k] for s in sets], thr) for k in ("D", "N", "R")}
+    albedo = g.mul(g.mask(vc, r=True, gg=True, b=True), out["D"])
+    wet = weather_param(g, "Wetness")
+    albedo = g.mul(albedo, g.lerp(1.0, WET_ROOF_DARKEN, wet))
+    rough = g.lerp(out["R"], g.minv(out["R"], g.c(WET_ROOF_ROUGH)), wet)
+    # snow by pitch + drift patches: cover - slope penalty + noise, sharpened
+    nz = g.mask(g.node(unreal.MaterialExpressionVertexNormalWS), b=True)
+    patch = g.value_noise(g.mul(g.mask(g.node(unreal.MaterialExpressionWorldPosition), r=True, gg=True),
+                                1.0 / ROOF_SNOW_PATCH_CM))
+    cover = weather_param(g, "SnowCover")
+    snow = g.sat(g.mul(g.add(g.sub(g.mul(cover, 1.3),
+                                   g.mul(g.sub(1.0, nz), 1.0 / (1.0 - ROOF_SNOW_SLIDE_NZ))),
+                             g.mul(g.sub(patch, 0.5), 0.5)), 4.0))
+    snow = g.mul(g.mul(snow, g.sat(g.mul(g.sub(nz, ROOF_SNOW_SLIDE_NZ), 20.0))),
+                 g.sat(g.mul(cover, 4.0)))   # exactly bare at SnowCover 0
     return {
-        unreal.MaterialProperty.MP_BASE_COLOR: g.mul(g.mask(vc, r=True, gg=True, b=True), out["D"]),
-        unreal.MaterialProperty.MP_NORMAL: out["N"],
-        unreal.MaterialProperty.MP_ROUGHNESS: out["R"],
+        unreal.MaterialProperty.MP_BASE_COLOR: g.lerp(albedo, g.c3(ROOF_SNOW_COLOR), snow),
+        unreal.MaterialProperty.MP_NORMAL: g.lerp(out["N"], g.c3((0.0, 0.0, 1.0)), snow),
+        unreal.MaterialProperty.MP_ROUGHNESS: g.lerp(rough, ROOF_SNOW_ROUGH, snow),
     }
+
+
+def weather_param(g, name):
+    n = g.node(unreal.MaterialExpressionScalarParameter, parameter_name=name)
+    n.set_editor_property("default_value", 0.0)
+    return n
 
 
 USAGE_FLAGS = ("used_with_instanced_static_meshes", "used_with_nanite", "used_with_skeletal_mesh",
