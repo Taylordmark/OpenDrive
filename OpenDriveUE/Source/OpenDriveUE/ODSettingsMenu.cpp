@@ -18,6 +18,7 @@
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
 #include "ODVisualStyle.h"
+#include "ODWheel.h"
 
 namespace
 {
@@ -86,16 +87,18 @@ enum ESettingsRow : int32
 	RowResolution, RowWindowMode, RowQuality, RowUpscaling, RowRenderScale, RowVSync, RowAssetDetail, RowVisualStyle,
 	RowMaster, RowVehicle, RowAmbient,
 	RowTraction, RowAbs, RowMiniMap, RowUnits, RowTraffic, RowCredits,
-	RowInputDevice, RowSteerDeadzone, RowSteerSensitivity, RowPedalDeadzone, RowBindings,
+	RowInputDevice, RowSteerDeadzone, RowSteerSensitivity, RowPedalDeadzone,
+	RowGearbox, RowWheelRotation, RowWheelLinearity, RowWheelDeadzone, RowFfbStrength, RowFfbDamping, RowFfbInvert,
+	RowBindings,
 	RowClose,
 	NumSettingsRows,
 };
-static_assert(NumSettingsRows == 23, "keep AODSettingsMenu::NumRows() in sync");
+static_assert(NumSettingsRows == 30, "keep AODSettingsMenu::NumRows() in sync");
 const FODMenuTab SettingsTabs[] = {
 	{TEXT("DISPLAY"), RowResolution, 8},
 	{TEXT("AUDIO"), RowMaster, 3},
 	{TEXT("GAME"), RowTraction, 6},
-	{TEXT("CONTROLS"), RowInputDevice, 5},
+	{TEXT("CONTROLS"), RowInputDevice, 12},
 };
 
 FString Percent(float V)
@@ -258,6 +261,31 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 	case RowPedalDeadzone:
 		FODInputConfig::SetThrottleBrakeDeadzone(FODInputConfig::GetThrottleBrakeDeadzone() + Dir * 0.05f);
 		break;
+	// racing wheel (Arc 6): gearbox is global, the rest is the connected
+	// wheel's own profile (FODRacingWheel)
+	case RowGearbox:
+		FODRacingWheel::SetManualGearbox(!FODRacingWheel::IsManualGearbox());
+		break;
+	case RowWheelRotation:
+	case RowWheelLinearity:
+	case RowWheelDeadzone:
+	case RowFfbStrength:
+	case RowFfbDamping:
+	case RowFfbInvert:
+	{
+		FODWheelProfile& P = FODRacingWheel::Profile();
+		switch (Selected)
+		{
+		case RowWheelRotation: P.RotationDeg = FMath::Clamp(P.RotationDeg + Dir * 30.0f, 180.0f, 2520.0f); break;
+		case RowWheelLinearity: P.Linearity = FMath::Clamp(P.Linearity + Dir * 0.1f, 0.5f, 3.0f); break;
+		case RowWheelDeadzone: P.SteerDeadzone = FMath::Clamp(P.SteerDeadzone + Dir * 0.01f, 0.0f, 0.2f); break;
+		case RowFfbStrength: P.FfbStrength = FMath::Clamp(P.FfbStrength + Dir * 0.05f, 0.0f, 1.5f); break;
+		case RowFfbDamping: P.FfbDamping = FMath::Clamp(P.FfbDamping + Dir * 0.05f, 0.0f, 1.0f); break;
+		default: P.bFfbInvert = !P.bFfbInvert; break;
+		}
+		FODRacingWheel::Save();
+		break;
+	}
 	default: break;   // Credits / Key Bindings / Close: Activate() only
 	}
 }
@@ -715,6 +743,34 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 	case RowPedalDeadzone:
 		OutLabel = TEXT("Pedal Deadzone");
 		OutValue = Percent(FODInputConfig::GetThrottleBrakeDeadzone());
+		break;
+	case RowGearbox:
+		OutLabel = TEXT("Gearbox");
+		OutValue = FODRacingWheel::IsManualGearbox() ? TEXT("Manual") : TEXT("Automatic");
+		break;
+	case RowWheelRotation:
+		OutLabel = TEXT("Wheel Rotation");
+		OutValue = FString::Printf(TEXT("%.0f deg"), FODRacingWheel::Profile().RotationDeg);
+		break;
+	case RowWheelLinearity:
+		OutLabel = TEXT("Wheel Linearity");
+		OutValue = FString::Printf(TEXT("%.1f"), FODRacingWheel::Profile().Linearity);
+		break;
+	case RowWheelDeadzone:
+		OutLabel = TEXT("Wheel Deadzone");
+		OutValue = Percent(FODRacingWheel::Profile().SteerDeadzone);
+		break;
+	case RowFfbStrength:
+		OutLabel = TEXT("Force Feedback");
+		OutValue = FODRacingWheel::Profile().FfbStrength > 0.0f ? Percent(FODRacingWheel::Profile().FfbStrength) : FString(TEXT("Off"));
+		break;
+	case RowFfbDamping:
+		OutLabel = TEXT("FFB Damping");
+		OutValue = Percent(FODRacingWheel::Profile().FfbDamping);
+		break;
+	case RowFfbInvert:
+		OutLabel = TEXT("FFB Direction");
+		OutValue = FODRacingWheel::Profile().bFfbInvert ? TEXT("Inverted") : TEXT("Normal");
 		break;
 	case RowBindings:
 		OutLabel = TEXT("Key Bindings");

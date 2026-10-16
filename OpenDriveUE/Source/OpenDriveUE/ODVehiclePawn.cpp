@@ -24,6 +24,8 @@
 #include "ODVehicleDef.h"
 #include "ODVehicleFX.h"
 #include "ODVehicleMovement.h"
+#include "ODWheel.h"
+#include "ODWheelDevice.h"
 #include "UObject/UObjectIterator.h"
 
 namespace
@@ -497,6 +499,7 @@ void AODVehiclePawn::BeginPlay()
 	// player last picked in the menu (or Auto, the default for a fresh install)
 	DeviceMode = LoadInputDeviceMode();
 	ActiveDevice = EODInputDevice::Keyboard;
+	FODWheelDevice::Start();
 
 	// selectable cars: discover defs, spawn as index 0 (the base coupe). Falls
 	// back to the hardcoded coupe meshes if no def assets exist yet.
@@ -998,6 +1001,8 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::SteerRight, &AODVehiclePawn::RightPressed, &AODVehiclePawn::RightReleased},
 		{EODInputAction::Handbrake, &AODVehiclePawn::HandbrakePressed, &AODVehiclePawn::HandbrakeReleased},
 		{EODInputAction::ResetVehicle, &AODVehiclePawn::ResetVehicle, nullptr},
+		{EODInputAction::ShiftUp, &AODVehiclePawn::KeyShiftUp, nullptr},
+		{EODInputAction::ShiftDown, &AODVehiclePawn::KeyShiftDown, nullptr},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1090,38 +1095,8 @@ void AODVehiclePawn::SetupGamepadAndWheelInput(UInputComponent* Input)
 	// needing a keyboard to reach the menu's Drive/Resume row from in-car).
 	Input->BindKey(EKeys::Gamepad_Special_Right, IE_Pressed, this, &AODVehiclePawn::CycleVehicle);
 
-	// --- racing wheel: RawInput plugin's GenericUSBController_AxisN, bound
-	// via manual-set lambdas (index-parametrized) rather than named per-axis
-	// functions - see the RawWheelAxis[] declaration comment for why. These
-	// keys only actually fire if the RawInput plugin is enabled (it is, see
-	// OpenDriveUE.uproject) AND its default-device auto-registration picked
-	// up a connected HID joystick/wheel; with nothing plugged in they simply
-	// never fire and RawWheelAxis[] stays at its startup default. The
-	// IsBindableAxis1DKey guard covers the case (confirmed live, 2026-08-27)
-	// where the plugin hasn't registered these FNames as keys at all yet -
-	// FKey::IsValid() is false for an unregistered name, so the ensure that
-	// used to fire here is now a one-line warning log instead. */
-	for (int32 i = 0; i < NumWheelAxesBound; ++i)
-	{
-		const FKey WheelAxisKey(FName(*FString::Printf(TEXT("GenericUSBController_Axis%d"), i + 1)));
-		if (!IsBindableAxis1DKey(WheelAxisKey, *FString::Printf(TEXT("WheelAxis%d"), i + 1)))
-		{
-			continue;
-		}
-		Input->BindAxisKey(WheelAxisKey).AxisDelegate.GetDelegateForManualSet().BindLambda(
-			[this, i](float Value)
-			{
-				RawWheelAxis[i] = Value;
-			});
-	}
-	// Button 1 is a guess at "the first button on the wheel" for the
-	// handbrake (most wheels put paddle-shifters/face buttons there) -
-	// remap by changing this one key if a specific wheel differs. BindKey
-	// (digital) has no IsAxis1D()-style ensure, so no guard needed here.
-	Input->BindKey(FKey(FName(TEXT("GenericUSBController_Button1"))), IE_Pressed,
-		this, &AODVehiclePawn::WheelHandbrakePressed);
-	Input->BindKey(FKey(FName(TEXT("GenericUSBController_Button1"))), IE_Released,
-		this, &AODVehiclePawn::WheelHandbrakeReleased);
+	// racing wheel: not key binds at all - FODWheelDevice (DirectInput) is
+	// polled directly in TickWheel, per device, with force feedback
 }
 
 void AODVehiclePawn::GamepadSteerAxis(float Value)
@@ -1195,6 +1170,77 @@ FString AODVehiclePawn::InputDeviceModeToString(EODInputDevice Mode)
 	}
 }
 
+void AODVehiclePawn::KeyShiftUp()
+{
+	if (Movement->bManualGearbox && !bInShowroom)
+	{
+		Movement->ShiftUp();
+	}
+}
+
+void AODVehiclePawn::KeyShiftDown()
+{
+	if (Movement->bManualGearbox && !bInShowroom)
+	{
+		Movement->ShiftDown();
+	}
+}
+
+void AODVehiclePawn::TickWheel()
+{
+	FODRacingWheel::UseDevice(FODWheelDevice::PrimaryVidPid());
+	Movement->bManualGearbox = FODRacingWheel::IsManualGearbox();
+	const FODWheelProfile& P = FODRacingWheel::Profile();
+	auto Btn = [&P](EODWheelButton B) -> const FODWheelBind& { return P.Buttons[static_cast<int32>(B)]; };
+	auto Pressed = [&Btn](EODWheelButton B) { return FODWheelDevice::Pressed(Btn(B).Device, Btn(B).Index); };
+
+	// average of the fixed steps since last frame - always consumed so a
+	// keyboard stretch doesn't pile up stale torque
+	const float RimNm = Movement->ConsumeFfbRimNm();
+	bWheelHandbrake = FODWheelDevice::Button(Btn(EODWheelButton::Handbrake).Device,
+		Btn(EODWheelButton::Handbrake).Index);
+	if (bInShowroom)
+	{
+		return;   // no force: the watchdog zeroes it
+	}
+	if (Pressed(EODWheelButton::Reset))
+	{
+		ResetVehicle();
+	}
+	if (Movement->bManualGearbox)
+	{
+		if (Pressed(EODWheelButton::ShiftUp))
+		{
+			Movement->ShiftUp();
+		}
+		if (Pressed(EODWheelButton::ShiftDown))
+		{
+			Movement->ShiftDown();
+		}
+		// H-shifter: a slot selects its gear; leaving it is neutral
+		for (int32 b = static_cast<int32>(EODWheelButton::Gear1); b <= static_cast<int32>(EODWheelButton::GearR); ++b)
+		{
+			const int32 G = b == static_cast<int32>(EODWheelButton::GearR) ? -1 : b - static_cast<int32>(EODWheelButton::Gear1) + 1;
+			const FODWheelBind& B = P.Buttons[b];
+			if (FODWheelDevice::Pressed(B.Device, B.Index))
+			{
+				Movement->RequestGear(G);
+				WheelHGear = G;
+			}
+			else if (WheelHGear == G && !FODWheelDevice::Button(B.Device, B.Index))
+			{
+				Movement->RequestGear(0);
+				WheelHGear = 0;
+			}
+		}
+	}
+	if (ActiveDevice == EODInputDevice::Wheel && Body->IsSimulatingPhysics())
+	{
+		FODWheelDevice::SetForce(FODRacingWheel::FfbCommand(RimNm, P.FfbStrength, P.bFfbInvert), P.FfbDamping,
+			FODRacingWheel::SoftLockFrac(P.RotationDeg, Movement->GetSteeringLockToLockDeg()));
+	}
+}
+
 void AODVehiclePawn::UpdateActiveInputDevice()
 {
 	const double Now = GetWorld()->GetTimeSeconds();
@@ -1216,22 +1262,12 @@ void AODVehiclePawn::UpdateActiveInputDevice()
 	PrevGamepadThrottleRaw = GamepadThrottleRaw;
 	PrevGamepadBrakeRaw = GamepadBrakeRaw;
 
-	// wheel: any bound axis moved since last tick (pedals commonly idle at a
-	// hard extreme rather than 0.5, so "away from center" can't tell idle
-	// from active - a CHANGE can)
-	bool bWheelChanged = bWheelHandbrake;
-	for (int32 i = 0; i < NumWheelAxesBound; ++i)
+	// wheel: any axis moved or button pressed on a wheel/pedal/shifter
+	// device (FODWheelDevice tracks it as it polls - pedals idle at a hard
+	// extreme, so it's movement that counts, not distance from centre)
+	if (FODWheelDevice::LastActivityTime() > LastWheelActivitySeen)
 	{
-		// vs the last value that counted, not last tick's: a slow squeeze
-		// moves < 0.0005 per frame at high fps and never registered
-		if (!FMath::IsNearlyEqual(RawWheelAxis[i], PrevWheelAxis[i], 0.0005f))
-		{
-			bWheelChanged = true;
-			PrevWheelAxis[i] = RawWheelAxis[i];
-		}
-	}
-	if (bWheelChanged)
-	{
+		LastWheelActivitySeen = FODWheelDevice::LastActivityTime();
 		LastWheelInputTime = Now;
 	}
 
@@ -1410,6 +1446,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// controller/wheel device selection (2026-08-27) - resolves ActiveDevice
 	// (Auto = last-device-wins) from this frame's latched axis/key state.
 	UpdateActiveInputDevice();
+	TickWheel();
 
 	// scripted-drive hooks override the keys (headless verification)
 	const float Now = GetWorld()->GetTimeSeconds();
@@ -1475,6 +1512,10 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		SmSteer = 0.5f;
 	}
 
+	// clutch is wheel-only; wheel steering is 1:1, so no speed taper
+	Movement->SetClutchInput(0.0f);
+	Movement->bSteerTaper = ActiveDevice != EODInputDevice::Wheel;
+
 	// controller/wheel device selection (2026-08-27): feed Movement from
 	// whichever device is active this tick. Gamepad/wheel axes are already
 	// their own final values (deadzone+curve applied in the Gamepad*Axis
@@ -1492,24 +1533,23 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	}
 	else if (ActiveDevice == EODInputDevice::Wheel)
 	{
-		// wheel: full range, 1:1, NO deadzone and NO response curve (unlike
-		// the gamepad stick above) - only the configurable degrees-of-
-		// rotation scale and per-pedal invert flags, per the task spec.
-		auto WheelAxis = [this](int32 OneBasedIndex) -> float
+		// wheel: 1:1 with the car's steering wheel (rim angle / steering
+		// ratio = road-wheel angle, no speed taper) - see FODRacingWheel::Steer
+		const FODWheelProfile& P = FODRacingWheel::Profile();
+		auto AxisV = [&P](EODWheelAxis A)
 		{
-			const int32 Idx = FMath::Clamp(OneBasedIndex - 1, 0, NumWheelAxesBound - 1);
-			return RawWheelAxis[Idx];
+			const FODWheelBind& B = P.Axes[static_cast<int32>(A)];
+			return FODWheelDevice::Axis(B.Device, B.Index);
 		};
-		const float SteerRaw01 = WheelAxis(WheelSteerAxisIndex);
-		const float WheelSteer = FMath::Clamp(
-			(SteerRaw01 * 2.0f - 1.0f) * WheelDegreesOfRotationScale, -1.0f, 1.0f);
-		float WheelThrottle = WheelAxis(WheelThrottleAxisIndex);
-		float WheelBrake = WheelAxis(WheelBrakeAxisIndex);
-		if (bWheelInvertThrottle) { WheelThrottle = 1.0f - WheelThrottle; }
-		if (bWheelInvertBrake) { WheelBrake = 1.0f - WheelBrake; }
-		Movement->SetSteeringInput(WheelSteer);
-		Movement->SetThrottleInput(WheelThrottle);
-		Movement->SetBrakeInput(WheelBrake);
+		Movement->SetSteeringInput(FODRacingWheel::Steer(AxisV(EODWheelAxis::Steer),
+			P.Axes[static_cast<int32>(EODWheelAxis::Steer)], P.RotationDeg,
+			Movement->GetSteeringLockToLockDeg(), P.SteerDeadzone, P.Linearity));
+		Movement->SetThrottleInput(FODRacingWheel::Pedal(AxisV(EODWheelAxis::Throttle),
+			P.Axes[static_cast<int32>(EODWheelAxis::Throttle)], P.PedalDeadzone));
+		Movement->SetBrakeInput(FODRacingWheel::Pedal(AxisV(EODWheelAxis::Brake),
+			P.Axes[static_cast<int32>(EODWheelAxis::Brake)], P.PedalDeadzone));
+		Movement->SetClutchInput(FODRacingWheel::Pedal(AxisV(EODWheelAxis::Clutch),
+			P.Axes[static_cast<int32>(EODWheelAxis::Clutch)], P.PedalDeadzone));
 		Movement->SetHandbrakeInput(bWheelHandbrake);
 	}
 	else   // Keyboard (also the Auto-mode default with nothing else plugged in)

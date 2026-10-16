@@ -36,5 +36,11 @@ public class OpenDriveUE : ModuleRules
 			// ODTileSource: -ODTileServer live tile fetch.
 			"HTTP"
 		});
+
+		// ODWheelDevice: racing wheel input + force feedback (Arc 6)
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib" });
+		}
 	}
 }

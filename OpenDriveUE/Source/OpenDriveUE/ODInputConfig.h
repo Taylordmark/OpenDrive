@@ -55,6 +55,8 @@ enum class EODInputAction : uint8
 	ZoomMapOut,
 	WorldMap,     // SS7.37 full-screen world map + navigation
 	ClearRoute,
+	ShiftUp,      // manual gearbox (Arc 6); ignored in automatic
+	ShiftDown,
 	Count  // sentinel, not a real action
 };
 

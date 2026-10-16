@@ -367,33 +367,8 @@ public:
 	EODInputDevice GetActiveInputDevice() const { return ActiveDevice; }
 	static FString InputDeviceModeToString(EODInputDevice Mode);
 
-	/** Degrees-of-rotation scale for a wheel's steering axis (1.0 = wheel's
-	 *  full physical lock-to-lock maps 1:1 to the car's full steering lock;
-	 *  0.5 would mean the wheel needs to turn twice as far - use this to
-	 *  match a specific wheel's configured rotation range without adding any
-	 *  response curve, which wheel steering must not have). */
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	float WheelDegreesOfRotationScale = 1.0f;
-
-	/** Which RawInput GenericUSBController_AxisN (1-based) feeds each wheel
-	 *  channel - varies per wheel model/driver, so these are exposed rather
-	 *  than guessed. Defaults are a reasonable Logitech/Thrustmaster-shaped
-	 *  starting guess (1=wheel rotation, 2=throttle, 3=brake); adjust to taste
-	 *  once real hardware is plugged in (see class comment / task report). */
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelSteerAxisIndex = 1;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelThrottleAxisIndex = 2;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelBrakeAxisIndex = 3;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	bool bWheelInvertThrottle = false;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	bool bWheelInvertBrake = false;
+	// racing wheel setup (rotation, axes, buttons, FFB) is per device in
+	// FODRacingWheel's profiles (ODWheel.h), edited in the settings/rebind menus
 
 private:
 	void ThrottlePressed() { bThrottleKey = true; }
@@ -583,17 +558,15 @@ private:
 	// Controller (gamepad) + racing wheel input (2026-08-27). Kept entirely
 	// separate from the keyboard block above so the two can be edited without
 	// conflicting: this section only ever WRITES its own dedicated members
-	// (GamepadSteerAxis/GamepadThrottleAxis/... below, RawWheelAxis[]) and
+	// (GamepadSteerAxis/GamepadThrottleAxis/... below) and
 	// reads them back in Tick(); it never reaches into bThrottleKey/bLeftKey/
 	// SmSteer/etc. Analog gamepad/wheel axes deliberately BYPASS the keyboard
 	// smoothing (SmSteer/SmThrottle/SmBrake) - an analog input is already
 	// smooth, so routing it through the same rate-limited interpolation used
 	// to fake analog behavior out of on/off keys would only add lag. Wheel
-	// axes additionally get NO response curve and NO deadzone (full 1:1
-	// range, scaled only by WheelDegreesOfRotationScale) - unlike the gamepad
-	// stick, a wheel is already a precise analog position, not a spring-
-	// loaded stick that rests dead-center and needs a curve to feel good off
-	// center.
+	// steering is 1:1 with the car's own steering wheel (FODRacingWheel::Steer);
+	// its deadzone/linearity default to none, since a wheel is already a
+	// precise position, not a spring-loaded stick.
 	// ===========================================================================
 
 	void GamepadSteerAxis(float Value);
@@ -617,20 +590,16 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Input|Gamepad")
 	float GamepadLookSensitivityDegPerSec = 120.0f;
 
-	/** RawInput GenericUSBController_Axis1..6 (0-based here), latched
-	 *  raw/normalized 0..1 by the RawInput plugin - see WheelSteerAxisIndex
-	 *  etc. (public section above) for which of these feeds which channel.
-	 *  Bound via lambdas in SetupPlayerInputComponent (BindAxisKey's
-	 *  GetDelegateForManualSet()), not named per-axis functions, since the
-	 *  RawInput key names are only known at runtime (module registers them on
-	 *  plugin load) and there's no way to know in advance which physical axis
-	 *  a given wheel model puts steering/throttle/brake on. */
-	static constexpr int32 NumWheelAxesBound = 6;
-	float RawWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
-	float PrevWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+	/** Racing wheel (Arc 6): FODWheelDevice (DirectInput) is polled on the
+	 *  core ticker; TickWheel reads it through the active FODRacingWheel profile,
+	 *  handles its buttons (shift, H-gears, handbrake, reset) and pushes
+	 *  force feedback from the sim's per-step rim torque. */
+	void TickWheel();
 	bool bWheelHandbrake = false;
-	void WheelHandbrakePressed() { bWheelHandbrake = true; }
-	void WheelHandbrakeReleased() { bWheelHandbrake = false; }
+	int32 WheelHGear = 0;            // gear of the H-shifter slot held, 0 = none
+	double LastWheelActivitySeen = 0.0;
+	void KeyShiftUp();
+	void KeyShiftDown();
 
 	void SetupGamepadAndWheelInput(UInputComponent* Input);
 
