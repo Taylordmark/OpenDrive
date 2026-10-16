@@ -61,6 +61,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Traffic")
 	float SpawnRadiusCm = 80000.0f;
 
+	/** Cars past this draw as the far tier (see FModel). */
+	UPROPERTY(EditAnywhere, Category = "Traffic")
+	float NearTierCm = 15000.0f;
+
 	/** Agents past this are removed. */
 	UPROPERTY(EditAnywhere, Category = "Traffic")
 	float DespawnRadiusCm = 95000.0f;
@@ -102,15 +106,19 @@ private:
 		bool bShown = false;
 	};
 
-	// components below are owned (outer = this, registered), so plain pointers are GC-safe
+	// components below are owned (outer = this, registered), so plain pointers are GC-safe.
+	// [0] near tier (Visual Style mesh, shadows) / [1] far tier past NearTierCm
+	// (stylized low-poly mesh, no shadow / distance field / ray tracing): 450
+	// shadow-casting 18k-tri non-Nanite _real cars out to 950 m cost ~70 ms
+	// a frame on summit_county (2026-10-16 logs, fps fell with car count).
 	struct FModel
 	{
-		UInstancedStaticMeshComponent* Body = nullptr;
-		UInstancedStaticMeshComponent* Braking = nullptr;   // same body, brake lamps lit
-		UMaterialInstanceDynamic* LampMID = nullptr;
-		UMaterialInstanceDynamic* BrakeMID = nullptr;
+		UInstancedStaticMeshComponent* Body[2] = {};
+		UInstancedStaticMeshComponent* Braking[2] = {};   // same body, brake lamps lit
+		UMaterialInstanceDynamic* LampMID[2] = {};
+		UMaterialInstanceDynamic* BrakeMID[2] = {};
 		UStaticMesh* Chassis = nullptr;
-		int32 Wheel = -1;         // index into WheelIsms
+		int32 Wheel[2] = { -1, -1 };   // index into WheelIsms
 		float FrontX = 132.0f, RearX = -128.0f, HalfTrack = 84.0f, WheelR = 34.0f;
 		FVector BoundsOrigin = FVector::ZeroVector;
 		FVector HalfExtent = FVector(230.0f, 95.0f, 70.0f);
