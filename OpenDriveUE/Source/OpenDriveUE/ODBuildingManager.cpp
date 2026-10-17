@@ -481,10 +481,30 @@ bool AODBuildingManager::GroundAt(double WorldX, double WorldY, const AActor* Ig
 	{
 		Params.AddIgnoredActor(Ignore);    // the player's car
 	}
-	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
+	// Only terrain or road counts as ground. Anything else blocking the trace
+	// is walked through. The level's sea-level ocean plane is one: where a
+	// tile's terrain collision is still async-cooking, the trace fell through
+	// to it and buildings were planted up to 94 m underground (SF Russian
+	// Hill, minDeltaCm=-9380). A miss here goes to the pending-retry queue,
+	// which re-traces once the terrain collision exists.
+	for (int32 Attempt = 0;; ++Attempt)
 	{
-		++NoHitRejectCount;
-		return false;
+		if (Attempt == 4 || !GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
+		{
+			++NoHitRejectCount;
+			return false;
+		}
+		const AActor* HitActor = Hit.GetActor();
+		if (Cast<AODTerrainManager>(HitActor) || Cast<AODRoadManager>(HitActor))
+		{
+			break;
+		}
+		if (!HitActor)
+		{
+			++NoHitRejectCount;
+			return false;
+		}
+		Params.AddIgnoredActor(HitActor);
 	}
 	// Same suspected-phantom-surface guard as AODForestManager::GroundAt() -
 	// see this class's header comment on GroundSanityMaxDeltaCm: local relief
