@@ -174,6 +174,8 @@ struct FODCarPaint
 		MID->SetScalarParameterValue(TEXT("BaseRoughness"), Rough[Finish]);
 		MID->SetScalarParameterValue(TEXT("CoatRoughness"), Coat[Finish]);
 		MID->SetScalarParameterValue(TEXT("Pearl"), Finish == 3 ? 1.0f : 0.0f);
+		// base-layer flakes (build_car_materials_real.py) only on Metallic and Pearl; solid Gloss and Matte stay clean
+		MID->SetScalarParameterValue(TEXT("MetalFlake"), Finish == 1 || Finish == 3 ? Parent(TEXT("MetalFlake")) : 0.0f);
 	}
 
 	void ApplyRim(UMeshComponent* Wheel) const

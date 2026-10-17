@@ -8,9 +8,11 @@ Style = Realistic. Stylized assets are only read, never touched (V4).
   M_Car<Cat>_real      instances of those, rougher where faceted Standard
                        meshes would turn a mirror finish into a disco ball
 
-  body    Clear Coat shading model: smooth glossy coat over a metallic
-          base. No flake texture: at any strength it read as a grainy
-          texture on the paint, not smooth paint (Taylor 2026-10-16).
+  body    Clear Coat shading model: mirror coat over a mostly dielectric
+          base (metallic 0.3, roughness 0.3). Metallic finishes get a
+          procedural flake normal on the BASE layer only (clear coat bottom
+          normal, r.ClearCoatNormal=True), so the coat stays a mirror; the
+          old flake texture on the main normal read as grainy paint.
   glass   dark tinted translucent, Fresnel opacity (reflective at grazing),
           forward-shaded surface so it gets real specular.
   lights  glossy lens + the exact lamp emissive of apply_car_lights_material.py
@@ -325,7 +327,16 @@ def body(g):
     # legacy Clear Coat pins, not a Substrate Simple Clear Coat slab: in this
     # project's Substrate setup that slab lit with no diffuse at all (base
     # colour right, lit colour black: only the coat's highlights showed, so
-    # every car read black whatever the paint, Taylor 2026-10-16)
+    # every car read black whatever the paint, Taylor 2026-10-16).
+    # Lumen and the coat: with r.Substrate.ProjectGBufferFormat=0 (blendable
+    # GBuffer) a material with no FrontMaterial compiles on the LEGACY path
+    # (SubstrateTranslatorCommon: bSubstrateMaterialUsesLegacyMaterialCompilation),
+    # so this is a plain SHADINGMODELID_CLEAR_COAT GBuffer and Lumen already
+    # traces its reflection rays at the coat roughness (LumenMaterial.ush
+    # TopLayerRoughness = CustomData.y). A Substrate haziness slab would be
+    # worse here: the export bakes haziness into one roughness. What hid the
+    # coat was the base: metallic 0.6 at roughness 0.38 is a bright tinted
+    # satin lobe ~10x the coat's 4 % Fresnel, so the sharp image drowned.
     g.m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_CLEAR_COAT)
     st = g.car_state()
     paint = g.vparam("PaintColor")
@@ -343,13 +354,26 @@ Rough = lerp(BaseR, 0.85, 1.0 - k);
 Cov = (1.0 - 0.9 * grime) * (1.0 - snow);
 CoatR = lerp(CoatR0 + 0.12 * Dirt, CoatR0 * 0.6, Wet);
 TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
+// metallic flakes: a random tilt per 0.4 mm cell of the car-local surface on
+// the base layer only (BotN = clear coat bottom normal). Cells far below a
+// pixel average out, so the tilt fades with pixel footprint and turns into
+// base roughness instead of shimmering.
+float2 fq = w.x > w.y && w.x > w.z ? P.yz : (w.y > w.z ? P.xz : P.xy);
+uint2 fc = uint2(int2(floor(fq / 0.04)) + 65536);
+uint fh = fc.x * 1664525u + fc.y * 1013904223u;
+fh ^= fh >> 16; fh *= 0x7feb352du; fh ^= fh >> 15; fh *= 0x846ca68bu; fh ^= fh >> 16;
+float2 fr = float2(fh & 0xffffu, fh >> 16) / 65535.0 * 2.0 - 1.0;
+float fade = saturate(0.25 / px);
+float famp = FlakeAmt * k * 0.18 * fade;
+Rough += FlakeAmt * k * 0.08 * (1.0 - fade);
+BotN = normalize(float3(fr * famp, 1.0));
 return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
 """
-    O = [("MetalO", F1), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3)]
+    O = [("MetalO", F1), ("Rough", F1), ("Cov", F1), ("CoatR", F1), ("TopN", F3), ("BotN", F3)]
     c = g.custom(code, F3, outputs=O, P=g.local_pos(), N=g.true_local_normal(), Dist=g.cam_dist(),
                  Flake=g.tex(flake), Drops=g.tex(drops_tex), Alb=paint_col,
-                 Metal=g.param("BaseMetallic", 0.6),
-                 BaseR=g.param("BaseRoughness", 0.38), CoatR0=g.param("CoatRoughness", 0.035),
+                 Metal=g.param("BaseMetallic", 0.3), FlakeAmt=g.param("MetalFlake", 1.0),
+                 BaseR=g.param("BaseRoughness", 0.3), CoatR0=g.param("CoatRoughness", 0.035),
                  Pearl=g.param("Pearl", 0.0), V=g.node(unreal.MaterialExpressionCameraVectorWS),
                  NW=g.node(unreal.MaterialExpressionVertexNormalWS), **st)
     # the clear coat pins (CustomData0/1) are hidden from Python: go through Make Material Attributes
@@ -361,6 +385,8 @@ return lerp(lerp(Alb2 * occ, dirtCol * ao, grime), snowCol, snow);
                      ("CoatR", "ClearCoatRoughness"), ("TopN", "Normal")):
         g.wire((c, out), ma, pin)
     g.pin(ma, MP.MP_MATERIAL_ATTRIBUTES)
+    # base-layer normal under the coat (needs r.ClearCoatNormal=True, DefaultEngine.ini)
+    g.wire((c, "BotN"), g.node(unreal.MaterialExpressionClearCoatNormalCustomOutput, x=-150), "")
 
 
 def trim(rough, metal, spec, grille=False, tint=1.0):
@@ -369,7 +395,7 @@ def trim(rough, metal, spec, grille=False, tint=1.0):
     def build(g):
         st = g.car_state()
         code = FRAME + CAR + """
-float3 alb = saturate(Pal * Tint) * ao;
+float3 alb = saturate(Pal * Tint) * lerp(ao, 1.0, M0);   // metal: ao on F0 greys a mirror, Lumen occludes it
 float rgh = R;
 float met = M0;
 """ + ("""
@@ -390,7 +416,7 @@ alb *= lerp(1.0, 0.08, front * hole);
 rgh = lerp(rgh, 0.9, front * hole);
 """ if grille else "") + """
 float k = max(grime, snow);
-Rough = lerp(lerp(rgh, 0.85, grime), 0.75, snow);
+Rough = lerp(lerp(rgh, lerp(0.85, 0.3, M0), grime), 0.75, snow);
 MetalO = met * (1.0 - k);
 return lerp(lerp(alb, dirtCol * ao, grime), snowCol, snow);
 """
@@ -416,7 +442,7 @@ TopN = normalize(float3((dr.rg * 2.0 - 1.0) * bead * 2.0, 1.0));
 return Pal * D;
 """, F3, outputs=[("Rough", F1), ("TopN", F3)], P=g.local_pos(), N=g.true_local_normal(),
                  Dist=g.cam_dist(), Drops=g.tex(drops_tex), Pal=g.palette(),
-                 D=g.param("GlassDarken", 0.4), R=g.param("Roughness", 0.02), Wet=g.cpd("Wetness", 1))
+                 D=g.param("GlassDarken", 0.4), R=g.param("Roughness", 0.04), Wet=g.cpd("Wetness", 1))
     g.legacy(c, (c, "Rough"), 0.0, 0.5)
     g.pin((c, "TopN"), MP.MP_NORMAL)
     fr = g.node(unreal.MaterialExpressionFresnel, exponent=4.0, base_reflect_fraction=0.04)
@@ -546,8 +572,9 @@ BUILD = {
 
 # Standard-tier instances: faceted normals need a softer highlight
 STANDARD_OVERRIDES = {
-    "body": {"CoatRoughness": 0.12, "BaseRoughness": 0.45},
+    "body": {"CoatRoughness": 0.12, "BaseRoughness": 0.4, "MetalFlake": 0.0},   # no flakes on far/faceted cars
     "chrome": {"Roughness": 0.1},
+    "glass": {"Roughness": 0.12},   # faceted windscreen at 0.02 sparkled as a white crackle
     "rim": {"Roughness": 0.3},
 }
 
