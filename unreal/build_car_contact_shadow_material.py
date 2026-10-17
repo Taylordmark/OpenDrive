@@ -61,8 +61,12 @@ def link(a, b, pin, what):
 
 
 def mask(src, chan):
-    m = node(unreal.MaterialExpressionComponentMask, r=chan == "r", g=False, b=False, a=chan == "a")
-    link(src, m, "", f"mask.{chan}")
+    # Read DecalColor's own named scalar pin ("R"/"A") and mask its R: the
+    # default pin resolves as RGB float3 on SM6, so an alpha mask off it fails
+    # "Not enough components ... for component mask 0001" (same fix as
+    # apply_road_material.py's VertexColor alpha).
+    m = node(unreal.MaterialExpressionComponentMask, r=True, g=False, b=False, a=False)
+    req(MEL.connect_material_expressions(src, chan.upper(), m, ""), f"mask.{chan}")
     return m
 
 
