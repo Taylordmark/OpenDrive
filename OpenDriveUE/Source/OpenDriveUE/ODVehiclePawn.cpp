@@ -27,6 +27,7 @@
 #include "ODVehicleMovement.h"
 #include "ODWheel.h"
 #include "ODWheelDevice.h"
+#include "ODPauseMenu.h"
 #include "UObject/UObjectIterator.h"
 
 namespace
@@ -1204,6 +1205,7 @@ void AODVehiclePawn::SetInputDeviceMode(EODInputDevice Mode)
 {
 	DeviceMode = Mode;
 	SaveInputDeviceMode(Mode);
+	FODWheelDevice::Rescan();
 }
 
 FString AODVehiclePawn::InputDeviceModeToString(EODInputDevice Mode)
@@ -1236,6 +1238,15 @@ void AODVehiclePawn::KeyShiftDown()
 
 void AODVehiclePawn::TickWheel()
 {
+	// no device search during a drive (it stalls ~90 ms): a lost wheel pauses
+	// instead, and the pause menu's rescan picks up the replug
+	if (ActiveDevice == EODInputDevice::Wheel && FODWheelDevice::IsLost())
+	{
+		for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+		{
+			It->OpenForWheelLost();
+		}
+	}
 	FODRacingWheel::UseDevice(FODWheelDevice::PrimaryVidPid());
 	Movement->bManualGearbox = FODRacingWheel::IsManualGearbox();
 	const FODWheelProfile& P = FODRacingWheel::Profile();

@@ -2333,7 +2333,7 @@ void AODRaceHUD::DrawHUD()
 		}
 		else
 		{
-			DrawMenuPanel(TEXT("Paused"), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+			DrawMenuPanel(Menu->GetTitle(), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
 				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
 			const float S = MenuScale();
 			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),

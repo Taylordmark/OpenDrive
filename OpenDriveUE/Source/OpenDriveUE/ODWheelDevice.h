@@ -24,6 +24,12 @@ public:
 	/** Idempotent: registers the ticker on first call. */
 	static void Start();
 
+	/** Re-enumerate devices on the next tick (~90 ms stall - pause menu only).
+	 *  Start scans once; nothing scans during a drive. */
+	static void Rescan();
+	/** A device stopped answering since the last scan (unplugged). */
+	static bool IsLost();
+
 	/** (VID << 16) | PID of the primary wheel (first with force feedback,
 	 *  else the first driving device); 0 = none connected. */
 	static uint32 PrimaryVidPid();

@@ -41,7 +41,11 @@ namespace
 	TArray<FDev> GDevs;
 	int32 GPrimary = INDEX_NONE;
 	bool GStarted = false;
-	double GNextEnum = 0.0;
+	// EnumDevices stalls the game thread 85-98 ms even with nothing attached
+	// (measured 2026-10-16), so it runs only at startup and on Rescan (pause
+	// menu open / input type change) - never during a drive.
+	bool GScanPending = true;
+	bool GLost = false;   // a device stopped answering since the last scan
 	double GLastForceCall = -1.0;
 	double GLastActivity = 0.0;
 	bool GForceZeroed = true;
@@ -188,18 +192,18 @@ namespace
 		return DIENUM_CONTINUE;
 	}
 
-	void Enumerate()
+	bool Enumerate()
 	{
 		const HWND Hwnd = GameHwnd();
 		if (!Hwnd)
 		{
-			return;
+			return false;
 		}
 		if (!GDI && FAILED(DirectInput8Create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8W,
 			reinterpret_cast<void**>(&GDI), nullptr)))
 		{
 			GDI = nullptr;
-			return;
+			return false;
 		}
 		ReleaseAll();
 		GDI->EnumDevices(DI8DEVCLASS_GAMECTRL, EnumCb, Hwnd, DIEDFL_ATTACHEDONLY);
@@ -211,6 +215,7 @@ namespace
 		{
 			GPrimary = GDevs[i].bDriving ? i : INDEX_NONE;
 		}
+		return true;
 	}
 
 	void PushForce(float Command)
@@ -280,10 +285,11 @@ namespace
 				GLastActivity = bCount && Dv.Btn[b] && !Dv.PrevBtn[b] ? Now : GLastActivity;
 			}
 		}
-		if ((GDevs.Num() == 0 || bAnyLost) && Now >= GNextEnum)
+		GLost |= bAnyLost;
+		if (GScanPending && Enumerate())   // false = no window yet; retry next tick
 		{
-			GNextEnum = Now + 2.0;   // ponytail: no hot-add while a wheel is open; replug = relaunch
-			Enumerate();
+			GScanPending = false;
+			GLost = false;
 		}
 		// watchdog: nobody driving the force -> zero it, drop the soft lock
 		if (!GForceZeroed && Now - GLastForceCall > 0.1)
@@ -338,6 +344,16 @@ void FODWheelDevice::Start()
 			GDI = nullptr;
 		}
 	});
+}
+
+void FODWheelDevice::Rescan()
+{
+	GScanPending = true;
+}
+
+bool FODWheelDevice::IsLost()
+{
+	return GLost;
 }
 
 uint32 FODWheelDevice::PrimaryVidPid()
@@ -440,6 +456,8 @@ void FODWheelDevice::SetForce(float Command, float Damping, float SoftLockFrac)
 #else
 
 void FODWheelDevice::Start() {}
+void FODWheelDevice::Rescan() {}
+bool FODWheelDevice::IsLost() { return false; }
 uint32 FODWheelDevice::PrimaryVidPid() { return 0; }
 float FODWheelDevice::Axis(uint32, int32) { return 0.0f; }
 bool FODWheelDevice::Button(uint32, int32) { return false; }
