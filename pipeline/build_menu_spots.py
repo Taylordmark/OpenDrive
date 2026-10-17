@@ -69,9 +69,9 @@ from test_areas import AREA_NAME, AREAS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, 
 # Snapped to the nearest road station.
 OVERRIDES = {
     # "summit_county": (39.6303, -106.0434, 180.0, 270.0),
-    # Hyde St by the cable-car turnaround, Beach..North Point: north over the
-    # bay, Alcatraz/Angel Island/Marin left of the car; uphill = car_heading()
-    "sf_russian_hill": (37.8062, -122.42047, 171.0, 10.0),
+    # Hyde St bay view: retired 2026-10-16, 23 buildings in sight and the vista
+    # draws none - the picker chooses SF now.
+    # "sf_russian_hill": (37.8062, -122.42047, 171.0, 10.0),
 }
 
 ROOT = Path(__file__).resolve().parent.parent
