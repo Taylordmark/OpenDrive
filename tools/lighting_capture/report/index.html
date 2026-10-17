@@ -66,7 +66,7 @@ code { font-family: var(--mono); font-size: .86em; }
     <li><b>The wet road barely reads after 8 minutes of rain.</b></li>
     <li><b>The car contact-shadow material fails to compile on SM6</b> (one-line fix known).</li>
     <li><b>Frames run about ⅔ stop dark, and the zenith is a dull mid-blue.</b></li>
-    <li><b>Performance (measurement caveat):</b> the GPU took 24–38 ms at 1280×720. A rain-only game-thread build-up reaches 190 ms.</li>
+    <li><b>Performance:</b> the GPU takes 24.7 ms at Gasquet noon at only 1280×720, measured clean with Ollama stopped. That is already over the 22 ms budget, and other shots ran 24–38 ms. A rain-only game-thread build-up reaches 190 ms.</li>
   </ol>
 </div>
 
@@ -185,7 +185,7 @@ code { font-family: var(--mono); font-size: .86em; }
   <div class="rank">Gap 8</div>
   <h2>Performance, with a caveat</h2>
   <p class="nums">ODPerf GPU ms @1280x720 sg3: Gasquet noon 25.1 · 08:00 30.6 · 17:30 31.7 · overcast 26.0 · rain 29–35 · Deals Gap noon 26.4 · 17:30 38.3 · SF/Summit similar.</p>
-  <p><b>Caveat:</b> an Ollama <code>llama-server</code> sat on the GPU for every run (RTX 5050 Laptop, 7.6 of 8.1 GB VRAM in use). Absolute ms are inflated, and VRAM pressure may also have shrunk texture/VSM pools. Re-measure with it stopped before using these numbers against the 22 ms budget. The relative steps still hold: low sun costs +6–12 ms over noon (volumetric fog/cloud at grazing angles is the first suspect).</p>
+  <p><b>Clean baseline (Ollama stopped, 0 of 8151 MiB VRAM in use before launch):</b> a Gasquet noon clear re-run settles at <span class="nums">GPU 24.7 ms, frame 25.8 ms, game 6.2 ms, 851 draws, 0.49 M tris</span>. The Ollama-loaded run measured 24.8 ms, so the VRAM contention made no measurable difference and the other numbers below stand. At 1280×720 the scene is already ~3 ms over the 22 ms budget. Low sun costs +6–12 ms over noon (volumetric fog/cloud at grazing angles is the first suspect).</p>
   <p><b>Rain game-thread build-up (not lighting; flagged to the weather owner):</b> with Rain held, the game thread climbs roughly linearly, from 8 ms to 60 ms (1.5 min) to 100 ms (3.5 min) to 140–190 ms (8 min), ending at 4–7 fps. Clear and overcast stay at 8 ms. Log: <code>out/cap_gasquet_h12_rain_settled.log</code>.</p>
 </section>
 
