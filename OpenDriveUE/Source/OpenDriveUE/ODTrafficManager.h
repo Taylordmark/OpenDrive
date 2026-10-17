@@ -127,8 +127,8 @@ private:
 
 	struct FWreck
 	{
-		UStaticMeshComponent* Comp = nullptr;
-		TArray<UStaticMeshComponent*, TInlineAllocator<4>> Wheels;   // attached to Comp
+		UBoxComponent* Comp = nullptr;   // the physics body, chassis + wheel colliders in one box
+		TArray<UStaticMeshComponent*, TInlineAllocator<5>> Parts;   // chassis, 4 wheels; attached to Comp
 		double Born = 0.0;
 	};
 
@@ -225,4 +225,8 @@ private:
 	double LastDiag = 0.0;
 	double LastRoadCheck = -100.0;
 	float PeakMs = 0.0f;
+	// diag window (5 s): AI-AI footprint overlaps and why slow cars are slow
+	TSet<uint64> OverlapPairs;
+	int32 OverlapJunction = 0, OverlapSteps = 0, DiagSteps = 0;
+	int32 SlowWhy[4] = {};
 };
