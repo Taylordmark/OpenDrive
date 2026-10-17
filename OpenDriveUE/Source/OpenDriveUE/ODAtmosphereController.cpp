@@ -51,11 +51,24 @@ constexpr float RealisticFogDensity = 0.0013f;   // Stylized 0.001
 // ---- Weather W2 (sec 7.40) targets at full weight ----
 const FLinearColor DustTan(1.0f, 0.72f, 0.42f);
 const FLinearColor StormGreen(0.62f, 0.9f, 0.55f);   // W4 tornado sky (StormTint)
-constexpr float FullCloudCoverage = 0.5f;     // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
-constexpr float OvercastSkyLuminance = 0.35f; // x SkyLuminanceFactor
-constexpr float OvercastSun = 0.25f;          // x sun intensity
-constexpr float OvercastSkyLight = 0.6f;      // x sky light intensity
+// Under a real overcast the direct sun is ~0 and the bright grey dome gives
+// nearly all the light; at 0.25 sun auto-exposure just gave the 2 stops back
+// and hard shadows stayed (2026-10-16 lighting audit, Gap 2).
+constexpr float FullCloudCoverage = 0.95f;    // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
+constexpr float OvercastSkyLuminance = 0.6f;  // x SkyLuminanceFactor
+constexpr float OvercastSun = 0.04f;          // x sun intensity
+constexpr float OvercastSkyLight = 1.2f;      // x sky light intensity
+constexpr float OvercastSunAngleDeg = 8.0f;   // sun LightSourceAngle at full cover: what shadow is left goes soft
+constexpr float FullCoverAt = 0.85f;          // CloudCover reaching full weight (Overcast's own target)
 constexpr float FlashSeconds = 0.35f;
+
+// ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
+// Was -1: frames ran ~2/3 stop darker than the reference photos.
+constexpr float AutoExposureBiasEV = -0.5f;
+// Local exposure: compresses sun vs canopy shade the way a camera's HDR does
+// (1 = off). Forest shade sat 14+ stops under the sunlit road and crushed to 0.
+constexpr float LocalShadowContrast = 0.7f;
+constexpr float LocalHighlightContrast = 0.85f;
 
 // ---- Lightning bolt + flash light (PLAN-REALISM Phase 6, 2026-10-09) ----
 // Mirrored in pipeline/check_lightning.py.
@@ -445,12 +458,18 @@ void AODAtmosphereController::SpawnGradeVolume()
 	// is an exposure/grade issue, not a material-graph or vertex-color one).
 	// Restored to match that proven value rather than re-derived from
 	// scratch, then confirmed by re-render at all three §7.15 vantages.
+	// 2026-10-16: eased to -0.5 (AutoExposureBiasEV) - the lighting audit
+	// found frames ~2/3 stop darker than reference photos of the same places.
 	S.bOverride_AutoExposureBias = true;
-	S.AutoExposureBias = -1.0f;
+	S.AutoExposureBias = AutoExposureBiasEV;
 	S.bOverride_AutoExposureSpeedUp = true;
 	S.AutoExposureSpeedUp = 3.0f;
 	S.bOverride_AutoExposureSpeedDown = true;
 	S.AutoExposureSpeedDown = 1.0f;
+	S.bOverride_LocalExposureShadowContrastScale = true;
+	S.LocalExposureShadowContrastScale = LocalShadowContrast;
+	S.bOverride_LocalExposureHighlightContrastScale = true;
+	S.LocalExposureHighlightContrastScale = LocalHighlightContrast;
 
 	// Visual Style Realistic (PLAN-VISUALS.md Track A): the "car ad" grade -
 	// warm highlights, firmer shadows, more bloom, no grain. Color-grading
@@ -520,7 +539,7 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	// returns its baseline bit-for-bit.
 	auto Weight = [](float X) { X = FMath::Clamp(X, 0.0f, 1.0f); return X < 1e-3f ? 0.0f : X; };
 	const float FogW = Weight((20000.0f - Weather->VisibilityM) / 15000.0f);
-	const float CloudW = Weight((Weather->CloudCover - 0.1f) / 0.9f);
+	const float CloudW = Weight((Weather->CloudCover - 0.1f) / (FullCoverAt - 0.1f));
 	const float DustW = Weight(Weather->DustAmount);
 	const float TintW = Weight(Weather->StormTint);
 	const FLinearColor Green = FMath::Lerp(FLinearColor::White, StormGreen, TintW);
@@ -571,6 +590,7 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	if (UDirectionalLightComponent* Sun = SunComp.Get(); Sun && BaseSunIntensity > 0.0f && Sun->Intensity > 0.0f)
 	{
 		Sun->SetIntensity(BaseSunIntensity * FMath::Lerp(1.0f, OvercastSun, CloudW));
+		Sun->SetLightSourceAngle(FMath::Lerp(BaseSunAngle, OvercastSunAngleDeg, CloudW));
 	}
 	// Lightning (Phase 6): the bolt glows and FlashLight fires with Flash -
 	// day or night, since the night sun is below the horizon. Skipped in the
@@ -632,6 +652,7 @@ void AODAtmosphereController::FindLights()
 			}
 		}
 		BaseSunIntensity = SunComp.IsValid() ? SunComp->Intensity : 0.0f;
+		BaseSunAngle = SunComp.IsValid() ? SunComp->LightSourceAngle : 0.0f;
 	}
 	if (BaseSkyLightIntensity <= 0.0f)
 	{

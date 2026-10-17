@@ -109,7 +109,7 @@ private:
 	FColor BaseFogAlbedo = FColor::White;
 	FLinearColor BaseSkyLuminance = FLinearColor::White;
 	float BaseCloudCoverage = 0.0f, BaseStormClouds = 0.0f;
-	float BaseSunIntensity = 0.0f, BaseSkyLightIntensity = 0.0f;
+	float BaseSunIntensity = 0.0f, BaseSkyLightIntensity = 0.0f, BaseSunAngle = 0.0f;
 
 	float LastFogW = -1.0f, LastCloudW = -1.0f, LastDustW = -1.0f, LastTintW = -1.0f, LastFlash = -1.0f;
 	float StrikeCountdown = 5.0f;

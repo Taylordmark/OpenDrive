@@ -2162,7 +2162,10 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// exact apart from the shadow not swaying; Tick() switches swaying
 		// shadows back on when slow (see bSwayShadows).
 		Hism->ShadowCacheInvalidationBehavior = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
-		Hism->SetAffectDynamicIndirectLighting(false);
+		// Trees stay in Lumen's scene: their canopy bounce and transmission is
+		// most of the light in forest shade (2026-10-16 lighting audit, Gap 1).
+		// Low veg and rocks stay out - small, many, little bounce.
+		Hism->SetAffectDynamicIndirectLighting(bIsTree);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
 		Tile.Hisms.Add(Hism);
