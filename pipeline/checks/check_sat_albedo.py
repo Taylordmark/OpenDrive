@@ -152,7 +152,7 @@ near = sat_macro(alb, sat, np.ones(1000), 1.0, np.zeros(1000), tint, fw) / alb
 check(np.all(np.abs(near - 1) <= (max(hi, 1 / lo) - 1) * C["SAT_STRENGTH"] * C["SAT_NEAR_W"] + 1e-9),
       f"up close the nudge is at most SAT_NEAR_W={C['SAT_NEAR_W']} of full")
 body = src[src.index("def build_ground"):src.index("def sat_macro")]
-check(body.index("sat_macro(") < body.index('scalar_param("Wetness"') < body.index('L["snow"]'),
+check(body.index("sat_macro(") < body.index('scalar_param("Wetness"') < body.index('snow_w = '),
       "sat_macro before wetness and snow (snow covers it)")
 if tint_ratio:
     k = float(np.median(np.concatenate(tint_ratio)))

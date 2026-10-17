@@ -5,6 +5,9 @@
 #include "HAL/PlatformTime.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
+#include "Engine/World.h"
 
 namespace ODGroundCover
 {
@@ -35,6 +38,40 @@ namespace ODGroundCover
 	static constexpr float BandEndCm = 6000.0f;    // ...fading to FillFrac here and beyond
 	static constexpr float FillFrac = 0.2f;
 	static constexpr float ShrubClearCm = 150.0f;  // shrubs stay this much further off the shoulder
+	// Clumping (terrain survey 2026-10-16: evenly spaced identical tufts read
+	// as dots on bare ground). A value-noise field per class gathers cards,
+	// shrubs and pebbles into patches with open ground between; the terrain
+	// material's grass layer carries the open ground.
+	static constexpr float ClumpCellCm[4] = {600.0f, 600.0f, 1500.0f, 900.0f};   // grass, weed, shrub, pebble
+	static constexpr uint32 ClumpSalt[4] = {0x1F3u, 0x2A7u, 0x3C1u, 0x4D9u};
+	static constexpr float ClumpLo = 0.4f;     // noise below this = empty ...
+	static constexpr float ClumpHi = 0.75f;    // ... above this = clump core
+	static constexpr float ClumpGain = 1.6f;   // core density multiplier (mean over the field ~0.6)
+
+	static float Hash01(int64 X, int64 Y, uint32 Salt)
+	{
+		uint32 H = ((uint32)X * 0x8DA6B343u) ^ ((uint32)Y * 0xD8163841u) ^ (Salt * 0xCB1AB31Fu);
+		H ^= H >> 15;
+		H *= 0x2C1B3C6Du;
+		H ^= H >> 12;
+		H *= 0x297A2D39u;
+		H ^= H >> 15;
+		return (float)(H & 0xFFFFFFu) / 16777216.0f;
+	}
+
+	float Clump(double X, double Y, int32 Class)
+	{
+		Class = FMath::Clamp(Class, 0, 3);
+		const double Gx = X / ClumpCellCm[Class], Gy = Y / ClumpCellCm[Class];
+		const double Fx0 = FMath::FloorToDouble(Gx), Fy0 = FMath::FloorToDouble(Gy);
+		const int64 Ix = (int64)Fx0, Iy = (int64)Fy0;
+		const float Fx = FMath::SmoothStep(0.0f, 1.0f, (float)(Gx - Fx0));
+		const float Fy = FMath::SmoothStep(0.0f, 1.0f, (float)(Gy - Fy0));
+		const uint32 S = ClumpSalt[Class];
+		const float V = FMath::Lerp(FMath::Lerp(Hash01(Ix, Iy, S), Hash01(Ix + 1, Iy, S), Fx),
+			FMath::Lerp(Hash01(Ix, Iy + 1, S), Hash01(Ix + 1, Iy + 1, S), Fx), Fy);
+		return FMath::SmoothStep(ClumpLo, ClumpHi, V) * ClumpGain;
+	}
 
 	int32 CapFor(int32 Slot, int32 Detail)
 	{
@@ -65,13 +102,15 @@ namespace ODGroundCover
 				}
 				const float Z00 = C.Z[i00], Z10 = C.Z[i10], Z01 = C.Z[i01], Z11 = C.Z[i11];
 				const float Slope = FVector2f((Z10 + Z11 - Z00 - Z01) * 0.5f, (Z01 + Z11 - Z00 - Z10) * 0.5f).Size() / C.Step;
-				const float Road = C.RoadEdgeCm(C.X0 + (sx + 0.5) * C.Step, C.Y0 + (sy + 0.5) * C.Step);
+				const double Cx = C.X0 + (sx + 0.5) * C.Step, Cy = C.Y0 + (sy + 0.5) * C.Step;
+				const float Road = C.RoadEdgeCm(Cx, Cy);
 				const float Band = FMath::Lerp(1.0f, FillFrac, FMath::Clamp((Road - BandFullCm) / (BandEndCm - BandFullCm), 0.0f, 1.0f));
 				for (int32 k = 0; k < 4; ++k)
 				{
 					// cards and shrubs thin past ~6 deg and stop at ~31; pebbles hold to ~56
 					const float Gate = k == 3 ? FMath::Clamp(1.5f - Slope, 0.0f, 1.0f) : FMath::Clamp(1.2f - 2.0f * Slope, 0.0f, 1.0f);
-					const float Expected = PerSqM[k] * DetailDensity[D] * B[k] * Band * Gate * Area;
+					const float Cl = Clump(Cx, Cy, k);
+					const float Expected = PerSqM[k] * DetailDensity[D] * B[k] * Band * Gate * Cl * Area;
 					const int32 Count = FMath::FloorToInt(Expected) + (Rng.FRand() < FMath::Frac(Expected) ? 1 : 0);
 					for (int32 c = 0; c < Count; ++c)
 					{
@@ -107,6 +146,10 @@ namespace ODGroundCover
 							Slot = Pebble;
 							P.Rot = FRotator(R1 * 20.0f - 10.0f, Yaw, R2 * 20.0f - 10.0f);
 							P.Scale = FVector(1.0f, 0.8f + R1 * 0.4f, 0.55f + R2 * 0.4f) * (0.06f + S * 0.22f);
+						}
+						if (k < 3)
+						{
+							P.Scale *= 0.85f + 0.3f * Cl / ClumpGain;   // clump cores stand taller
 						}
 						Out[Slot].Add(P);
 					}
@@ -156,6 +199,9 @@ void FODGroundCoverAssets::Load(UObject* Outer)
 	{
 		CardMID = UMaterialInstanceDynamic::Create(Card, Outer);
 	}
+	SeasonMPC = LoadObject<UMaterialParameterCollection>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/MPC_Season.MPC_Season"), nullptr, LOAD_NoWarn | LOAD_Quiet);
+	World = Outer ? Outer->GetWorld() : nullptr;
 	// unbuilt assets (unreal/build_ground_cover_real.py not run): stay off
 	bOn = Meshes[ODGroundCover::Grass] && Meshes[ODGroundCover::Weed] && CardMID;
 	UE_LOG(LogTemp, Display, TEXT("ODGroundCover: Realistic ground cover %s (grass %d weed %d bush %d sage %d pebble %d mat %d)"),
@@ -251,7 +297,19 @@ void FODGroundCoverAssets::BuildCell(const ODGroundCover::FCell& C, USceneCompon
 
 void FODGroundCoverAssets::SyncSeason(const UMaterialInstanceDynamic* From) const
 {
-	if (!From || !CardMID)
+	if (!From)
+	{
+		return;
+	}
+	float Snow;
+	if (SeasonMPC && World.IsValid() && From->GetScalarParameterValue(FMaterialParameterInfo(TEXT("SnowCover")), Snow))
+	{
+		if (UMaterialParameterCollectionInstance* Inst = World->GetParameterCollectionInstance(SeasonMPC))
+		{
+			Inst->SetScalarParameterValue(TEXT("SnowCover"), Snow);
+		}
+	}
+	if (!CardMID)
 	{
 		return;
 	}

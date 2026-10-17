@@ -11,7 +11,9 @@ generated) with
   - distance fade: PerInstanceFadeAmount vs PerInstanceRandom drops cards
     out over each HISM's cull band, so a cell thins instead of popping;
   - SnowCover / Wetness scalars (ODForestManager copies them in from the
-    foliage season MID);
+    foliage season MID): snow buries most cards and leaves the rest as
+    frosted straw (no white subsurface glow);
+  - root shade eases off past ~15 m so the field doesn't read as dots;
   - tip flutter by world position offset from the Time node (frame-rate
     independent), off past WpoDisableCm.
 
@@ -115,17 +117,26 @@ lum = node(unreal.MaterialExpressionDotProduct, (tex, "RGB"), c3(0.3, 0.59, 0.11
 straw = mul(lum, c3(2.3, 1.9, 1.15))
 col = lerp((tex, "RGB"), straw, dry)
 col = mul(col, lerp(c3(0.86, 0.88, 0.82), c3(1.08, 1.06, 1.0), pir))     # per-clump tint
-col = mul(col, lerp(c1(0.5), c1(1.0), tip))                              # root shade
+# root shade, eased off past ~15 m: dark-rooted cards repeated across the
+# ground read as a dot pattern there (terrain survey 2026-10-16, gap 5)
+depth = node(unreal.MaterialExpressionPixelDepth)
+far = sat(mul(sub(depth, c1(1500.0)), c1(1.0 / 2500.0)))
+col = mul(col, lerp(lerp(c1(0.5), c1(0.85), far), c1(1.0), tip))
 wet = param("Wetness")
 col = mul(col, lerp(c1(1.0), c1(0.7), wet))
-snow = sat(mul(mul(param("SnowCover"), lerp(c1(0.82), c1(1.0), pir)), c1(1.45)))
-col = lerp(col, c3(0.92, 0.94, 0.97), snow)
+# snow: most cards are buried (opacity below); the ones still standing are
+# dead straw with a little frost on the tips - not glowing white cards
+cover = param("SnowCover")
+snow = sat(mul(mul(cover, lerp(c1(0.82), c1(1.0), pir)), c1(1.45)))
+col = lerp(col, mul(straw, c1(0.8)), snow)
+col = lerp(col, c3(0.62, 0.64, 0.68), mul(mul(snow, tip), c1(0.35)))
 out(col, unreal.MaterialProperty.MP_BASE_COLOR)
-out(mul(col, c1(0.75)), unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
+out(mul(col, mul(c1(0.75), sub(c1(1.0), mul(snow, c1(0.7))))), unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
 out(lerp(c1(0.85), c1(0.45), wet), unreal.MaterialProperty.MP_ROUGHNESS)
 
 fade = node(unreal.MaterialExpressionPerInstanceFadeAmount)
-keep = sat(mul(sub(fade, pir), c1(8.0)))
+buried = sat(mul(sub(sub(mul(cover, c1(1.1)), c1(0.35)), mul(pir, c1(0.8))), c1(4.0)))
+keep = mul(sat(mul(sub(fade, pir), c1(8.0))), sub(c1(1.0), buried))
 out(mul((tex, "A"), keep), unreal.MaterialProperty.MP_OPACITY_MASK)
 
 t = node(unreal.MaterialExpressionTime)
