@@ -213,7 +213,7 @@ constexpr double AreaMapShiftW = 0.2;          // camera aims this fraction of t
 constexpr double AreaFitMargin = 1.1;
 constexpr double AreaZoomIn = 0.125, AreaZoomOut = 1.5;   // wheel limits around the framing altitude
 constexpr float AreaTabSec = 1.0f;             // Q/E: fly to the sibling area's drape
-constexpr double StartVistaWaitSec = 6.0;      // Start: the globe stays up at most this long for the vista to stream
+constexpr double StartVistaWaitSec = 10.0;     // Start: the globe stays up at most this long for the vista to stream
 constexpr float StartFadeSec = 0.15f;          // globe <-> vista: fade to black, cut, fade back in (each half)
 constexpr double DriveEaseSec = 1.0;           // Drive here: camera to the chase spot
 constexpr double DriveFadeSec = 0.5;           // Drive elsewhere: fade to black before OpenArea
@@ -322,6 +322,10 @@ void AODMainMenu::BeginPlay()
 	if (const TCHAR* V = Url.GetOption(TEXT("odtunepreset="), nullptr))
 	{
 		CarriedTuneIdx = FCString::Atoi(V);
+	}
+	if (const TCHAR* V = Url.GetOption(TEXT("odweather="), nullptr))
+	{
+		CarriedWeather = FCString::Atoi(V);   // validated in StartAtTown
 	}
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!PC)
@@ -454,35 +458,18 @@ void AODMainMenu::BeginPlay()
 void AODMainMenu::OpenMenu()
 {
 	Stage = EODMenuStage::Menu;
-	bGarageMode = false;
 	SetScreen(EODMenuScreen::Main, RowOpenDrive);
 	HoveredTownIdx = INDEX_NONE;
 	bEntered = false;   // EnterCarConfig() re-runs once the pawn is confirmed
-	// Deliberately NOT pausing here (unlike OpenGarage() below): the camera
-	// manager's cached view stops updating while paused, freezing the
-	// showroom camera at its first, unpositioned frame. The preview pawn
-	// can't drive off anyway (PlaceInShowroom disables physics). OpenGarage()
-	// pauses because it opens mid-drive, with the camera already placed.
+	// Deliberately NOT pausing here: the camera manager's cached view stops
+	// updating while paused, freezing the showroom camera at its first,
+	// unpositioned frame. The preview pawn can't drive off anyway
+	// (PlaceInShowroom disables physics).
 	// The pause menu's "Main Menu" row arrives here PAUSED (2026-10-09,
 	// Taylor: "selecting main menu when driving should take you back to the
 	// garage view") - unpause so it runs exactly like a fresh boot: pawn,
 	// sky and the re-spawned vista managers all tick again.
 	UGameplayStatics::SetGamePaused(this, false);
-	SetCursorVisible(true);
-}
-
-void AODMainMenu::OpenGarage()
-{
-	Stage = EODMenuStage::Menu;
-	bGarageMode = true;
-	SetScreen(EODMenuScreen::Garage, RowCar);
-	bEntered = false;   // re-sync the displayed engine/drivetrain with reality
-	UGameplayStatics::SetGamePaused(this, true);
-	// 2026-08-27 fix: this call was missing entirely, so the pause menu's
-	// "Garage" row left the cursor exactly as the driving path had set it
-	// (hidden, FInputModeGameOnly) - unlike OpenMenu(), which has always
-	// called this. Without it the mouse is invisible and every click/move
-	// goes to the game instead of the garage UI.
 	SetCursorVisible(true);
 }
 
@@ -607,7 +594,7 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	{
 		EnterCarConfig();
 	}
-	if (bEntered && bAutoStart && !bGarageMode)
+	if (bEntered && bAutoStart)
 	{
 		bAutoStart = false;
 		ApplyTrack();
@@ -676,41 +663,31 @@ void AODMainMenu::EnterCarConfig()
 	{
 		return;   // pawn not spawned yet - retry next tick
 	}
-	if (!bGarageMode)
+	// Taylor, 2026-07-28 live: "you spawn directly under the car and the car
+	// isn't moving." Root cause: this actor pauses the game (so the
+	// frozen preview pawn can't drive off) before AODVehiclePawn's own
+	// BeginPlay ground-snap wait has necessarily finished - neither the
+	// pawn nor the tile-streaming managers tick while paused, so the car
+	// could be frozen mid-air at ANY point of that wait (including its
+	// initial spawn-height lift) for as long as the player stays on this
+	// screen. Fixed by not depending on the real world at all here: move
+	// the preview to a fixed, self-contained void first (capturing the
+	// real spawn point once, so "Drive" with no town picked still starts
+	// in the right place - see StartAt()).
+	if (!bCapturedSpawn)
 	{
-		// Fresh boot only - NOT the pause menu's "Garage" reopen, where the
-		// car is already correctly settled on real road and OpenGarage()'s
-		// own contract is to leave it exactly there (no re-teleport). Taylor,
-		// 2026-07-28 live: "you spawn directly under the car and the car
-		// isn't moving." Root cause: this actor pauses the game (so the
-		// frozen preview pawn can't drive off) before AODVehiclePawn's own
-		// BeginPlay ground-snap wait has necessarily finished - neither the
-		// pawn nor the tile-streaming managers tick while paused, so the car
-		// could be frozen mid-air at ANY point of that wait (including its
-		// initial spawn-height lift) for as long as the player stays on this
-		// screen. Fixed by not depending on the real world at all here: move
-		// the preview to a fixed, self-contained void first (capturing the
-		// real spawn point once, so "Drive" with no town picked still starts
-		// in the right place - see StartAt()).
-		if (!bCapturedSpawn)
-		{
-			CapturedSpawnLoc = Pawn->GetActorLocation();
-			CapturedSpawnYaw = Pawn->GetActorRotation().Yaw;
-			bCapturedSpawn = true;
-		}
-		Pawn->PlaceInShowroom(ShowroomLocationCm);
+		CapturedSpawnLoc = Pawn->GetActorLocation();
+		CapturedSpawnYaw = Pawn->GetActorRotation().Yaw;
+		bCapturedSpawn = true;
 	}
+	Pawn->PlaceInShowroom(ShowroomLocationCm);
 	Pawn->SetShowroom(true);
 	// static display angle, not a spin (Taylor, 2026-07-28: "stop the car
 	// rotating stuff too") - a single fixed 3/4 view, set once.
 	Pawn->SetActorRotation(FRotator(0.0f, ShowroomYawDeg, 0.0f));
 
-	// Garage room (2026-08): built around wherever the car is RIGHT NOW, which
-	// covers both entry paths this function serves - fresh boot just placed
-	// the pawn at ShowroomLocationCm a few lines up, and a mid-drive
-	// OpenGarage() reopen leaves the pawn at its real on-map location. Either
-	// way, "current location" is the correct pivot, so one call site here
-	// covers both.
+	// Garage room (2026-08): built around wherever the car is RIGHT NOW (the
+	// pawn was just placed at ShowroomLocationCm a few lines up).
 	if (AODGarageEnvironment* Garage = EnsureGarageEnvironment())
 	{
 		// pawn's actor origin is the body pivot at axle height, not ground
@@ -737,32 +714,28 @@ void AODMainMenu::EnterCarConfig()
 	ApplyEngine();
 	ApplyDrivetrain();
 	ApplyExhaust();
-	ApplySeason();
-	if (!bGarageMode)
+	ApplySeason();   // StartAtTown re-applies season + weather at the real start
+	float OdHour = 0.0f;
+	if (!FParse::Value(FCommandLine::Get(), TEXT("odhour="), OdHour))
 	{
-		// fresh menu only: a mid-drive garage visit keeps the running clock and sky
-		float OdHour = 0.0f;
-		if (!FParse::Value(FCommandLine::Get(), TEXT("odhour="), OdHour))
-		{
-			ApplyTimeOfDay();
-		}
-		if (WeatherIdx != 0)
-		{
-			ApplyWeather();
-		}
-		if (UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>())
-		{
-			GarageCamXf = Cam->GetComponentTransform();
-		}
-		ShownVista = INDEX_NONE;   // the start vista spawns on demand (ShowStartVista)
-		// the car sits in the garage room now: freeze the real managers at once
-		// (as SpawnVistas did here), not only when the first vista spawns
-		AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
-		if (!bAutoStart && !bVistasSpawned && GM)
-		{
-			bVistasSpawned = true;
-			GM->FreezeStreaming(true);
-		}
+		ApplyTimeOfDay();
+	}
+	if (WeatherIdx != 0)
+	{
+		ApplyWeather();
+	}
+	if (UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>())
+	{
+		GarageCamXf = Cam->GetComponentTransform();
+	}
+	ShownVista = INDEX_NONE;   // the area vista spawns on entering an area (ShowStartVista)
+	// the car sits in the garage room now: freeze the real managers at once
+	// (as SpawnVistas did here), not only when the first vista spawns
+	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+	if (!bAutoStart && !bVistasSpawned && GM)
+	{
+		bVistasSpawned = true;
+		GM->FreezeStreaming(true);
 	}
 	bEntered = true;
 }
@@ -902,6 +875,7 @@ void AODMainMenu::SetTab(int32 Tab)
 		{
 			FocusArea(Siblings[Tab]);   // tabs are the cluster's areas: re-drape and fly there
 			FlyToArea(AreaTabSec);
+			ShowStartVista(AreaIdx);    // its vista streams while a turnout is picked
 		}
 		Selected = GetTabs()[TabIdx].First;
 	}
@@ -990,7 +964,7 @@ void AODMainMenu::Activate()
 			{
 				TownPick = Picks[Pick].Town;     // one of the two is always empty:
 				TrackPick = Picks[Pick].Track;   // Open Drive is free roam, a track starts at its line
-				ShowStartVista(AreaIdx, Pick);   // the globe holds until it streams (Tick)
+				ShowStartVista(AreaIdx);   // no-op when preloaded; the globe holds until it streams (Tick)
 				AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // the cap counts from here, reused set or not
 				SetScreen(EODMenuScreen::Start, RowDrive);
 			}
@@ -1028,12 +1002,7 @@ void AODMainMenu::Back()
 	}
 	else if (Screen == EODMenuScreen::Sound || Screen == EODMenuScreen::Paint)
 	{
-		// before the garage-mode resume below
 		SetScreen(EODMenuScreen::Garage, Screen == EODMenuScreen::Sound ? RowSound : RowPaint);
-	}
-	else if (bGarageMode)
-	{
-		ResumeFromGarage();   // the pause menu's garage: Back resumes driving
 	}
 	else if (Screen == EODMenuScreen::Start)
 	{
@@ -1041,7 +1010,7 @@ void AODMainMenu::Back()
 		const int32 Pick = Picks.IndexOfByPredicate([this](const FODMenuPick& K) { return K.Town == TownPick && K.Track == TrackPick; });
 		SetScreen(EODMenuScreen::AreaMap, RowPick + FMath::Max(0, Pick));
 		TabIdx = FMath::Max(0, Siblings.IndexOfByKey(AreaIdx));
-		ClearStartVista();
+		// the area's vista stays up (2026-10-16): another turnout shows the same one
 		if (!bGlobeView)
 		{
 			CutTo(Globe.Get());   // no fade-out: the pawn camera is already back in the garage room
@@ -1057,6 +1026,7 @@ void AODMainMenu::Back()
 	}
 	else if (Screen == EODMenuScreen::AreaMap)
 	{
+		ClearStartVista();   // leaving the area
 		ShowWorld();   // flies back out; Tick clears the drape once there
 	}
 	else if (Screen != EODMenuScreen::Main)
@@ -1132,7 +1102,7 @@ void AODMainMenu::SetFocusedPin(int32 Pin)
 	{
 		return;
 	}
-	FocusedPin = Pin;   // no vista on hover (2026-10-14): ShowStartVista, once a start is picked
+	FocusedPin = Pin;   // no vista on hover (2026-10-14): ShowStartVista, once the pin is picked
 }
 
 void AODMainMenu::PickPin(int32 Pin)
@@ -1153,6 +1123,7 @@ void AODMainMenu::PickPin(int32 Pin)
 	FocusArea(ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area);
 	PickingPin = Pin;
 	FlyToArea(WorldPickSec);
+	ShowStartVista(AreaIdx);   // preload (2026-10-16): streams during the fly-in and the turnout pick
 }
 
 void AODMainMenu::FlyToArea(float Seconds)
@@ -1492,23 +1463,47 @@ void AODMainMenu::DriveGo()
 
 void AODMainMenu::StartAtTown(const FString& Town)
 {
-	DestroyVistas();   // the vista copies carry the same town names
-	// the road-snapped start its vista showed (2026-10-14), "" = the menu spot
-	if (const FTransform* Pose = StartPoses.IsValidIndex(AreaIdx) ? StartPoses[AreaIdx].Find(Town) : nullptr)
+	// the Auto weather the area's vista showed (2026-10-16): carried by OpenArea's
+	// odweather=, or this level's live vista - the drive opens on that sky
+	AODWeatherController* Weather = FindActor<AODWeatherController>(GetWorld());
+	int32 Shown = CarriedWeather;
+	CarriedWeather = INDEX_NONE;
+	if (Shown == INDEX_NONE && VistaArea != INDEX_NONE && Weather)
 	{
-		StartAt(-1, nullptr, Pose);   // a picked track still overrides it, as before
-		return;
+		Shown = (int32)Weather->State;
 	}
-	for (TActorIterator<AODRoadManager> It(GetWorld()); It && !Town.IsEmpty(); ++It)
+	DestroyVistas();   // the vista copies carry the same town names
+	[&]
 	{
-		if (const int32 i = It->GetTownNodes().IndexOfByPredicate([&](const FTownNode& N) { return N.Name == Town; });
-			i != INDEX_NONE)
+		// the turnout's road-snapped start, "" = the menu spot
+		if (const FTransform* Pose = StartPoses.IsValidIndex(AreaIdx) ? StartPoses[AreaIdx].Find(Town) : nullptr)
 		{
-			StartAt(i, *It);
+			StartAt(-1, nullptr, Pose);   // a picked track still overrides it, as before
 			return;
 		}
+		for (TActorIterator<AODRoadManager> It(GetWorld()); It && !Town.IsEmpty(); ++It)
+		{
+			if (const int32 i = It->GetTownNodes().IndexOfByPredicate([&](const FTownNode& N) { return N.Name == Town; });
+				i != INDEX_NONE)
+			{
+				StartAt(i, *It);
+				return;
+			}
+		}
+		StartAt(-1);   // default start (or the track's, which StartAt applies either way)
+	}();
+	// season + weather at the real start (2026-10-16): EnterCarConfig applied
+	// them at the showroom, XY (0, 0), not in this area's biome
+	ApplySeason();
+	if (WeatherIdx != 0)
+	{
+		ApplyWeather();
 	}
-	StartAt(-1);   // default start (or the track's, which StartAt applies either way)
+	else if (Weather && Shown >= 0 && Shown <= (int32)EODWeatherState::Hurricane
+		&& Weather->CanProduce((EODWeatherState)Shown))
+	{
+		Weather->ResumeAuto((EODWeatherState)Shown);
+	}
 }
 
 void AODMainMenu::OnClick()
@@ -2054,24 +2049,6 @@ void AODMainMenu::StartAt(int32 TownIdx, const AODRoadManager* InRoad, const FTr
 	UGameplayStatics::SetGamePaused(this, false);
 }
 
-void AODMainMenu::ResumeFromGarage()
-{
-	// no teleport here - the car was already sitting on real road when the
-	// pause menu opened it, so there's nothing to wait on (unlike StartAt()).
-	if (AODVehiclePawn* Pawn = FindPawn())
-	{
-		Pawn->SetShowroom(false);
-	}
-	if (GarageEnv.IsValid())
-	{
-		GarageEnv->SetActive(false);
-	}
-	Stage = EODMenuStage::Playing;
-	SetCursorVisible(false);
-	UGameplayStatics::SetGamePaused(this, false);
-	bGarageMode = false;
-}
-
 void AODMainMenu::FindAreaLevels()
 {
 	AreaLevels.Reset();
@@ -2131,6 +2108,11 @@ void AODMainMenu::OpenArea()
 		Tuning && Tuning->GetPresetIndex() != INDEX_NONE)
 	{
 		Options += FString::Printf(TEXT("?odtunepreset=%d"), Tuning->GetPresetIndex());
+	}
+	if (const AODWeatherController* Weather = FindActor<AODWeatherController>(GetWorld());
+		Weather && WeatherIdx == 0 && VistaArea != INDEX_NONE)
+	{
+		Options += FString::Printf(TEXT("?odweather=%d"), (int32)Weather->State);   // StartAtTown resumes Auto from it
 	}
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Area -> %s (%s)"), *AreaLevels[AreaIdx], *Options);
 	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
@@ -2298,33 +2280,18 @@ FODVistaRegion AODMainMenu::VistaRegion() const
 	return Region;
 }
 
-void AODMainMenu::ShowStartVista(int32 Area, int32 PickIdx)
+void AODMainMenu::ShowStartVista(int32 Area)
 {
 	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
-	if (!GM || !bEntered || bAutoStart || !Spots.IsValidIndex(Area) || !Spots[Area].bValid)
+	if (!GM || !bEntered || bAutoStart || !Spots.IsValidIndex(Area) || !Spots[Area].bValid || Area == VistaArea)
 	{
-		return;
-	}
-	if (Area != AreaIdx)
-	{
-		FocusArea(Area);   // Picks are AreaIdx's rows
-	}
-	if (!Picks.IsValidIndex(PickIdx) || (Area == VistaArea && PickIdx == VistaPick))
-	{
-		return;   // reuse the live set
+		return;   // none, or reuse the live set
 	}
 	ClearStartVista();
-	// the pick's road-snapped pose (the Drive spawn's, StartAtTown), else the area's spot
-	const FODMenuPick& K = Picks[PickIdx];
+	// the area's one spot (2026-10-16, was each turnout's road-snapped pose):
+	// build_menu_spots.py's wild viewpoint, whatever turnout Drive starts at
 	VistaSpot = Spots[Area];
-	if (K.bHasStart && !(K.Town.IsEmpty() && K.Track.IsEmpty()))   // the Default Start keeps the spot's view
-	{
-		VistaSpot.CarCm = K.Start.GetLocation();
-		VistaSpot.CarYawDeg = (float)K.Start.Rotator().Yaw;
-		VistaSpot.ViewYawDeg = VistaSpot.CarYawDeg - StartViewOffsetDeg;
-	}
 	VistaArea = Area;
-	VistaPick = PickIdx;
 	bVistaDirty = true;
 	AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // Tick's vista-stream wait cap
 	AODWeatherController::LoadClimateFile(AreaKeys[Area] + TEXT("_test"), VistaSpot.Climate);
@@ -2353,13 +2320,14 @@ void AODMainMenu::ShowStartVista(int32 Area, int32 PickIdx)
 			VistaActors.Add(Sea);
 		}
 	}
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: start vista %s '%s' at (%.0f, %.0f, %.0f) yaw %.0f (%d actor(s))"),
-		*AreaKeys[Area], *K.Label, VistaSpot.CarCm.X, VistaSpot.CarCm.Y, VistaSpot.CarCm.Z, VistaSpot.CarYawDeg, VistaActors.Num());
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: area vista %s at (%.0f, %.0f, %.0f) yaw %.0f (%d actor(s))"),
+		*AreaKeys[Area], VistaSpot.CarCm.X, VistaSpot.CarCm.Y, VistaSpot.CarCm.Z, VistaSpot.CarYawDeg, VistaActors.Num());
 	if (!bVistasSpawned)
 	{
 		bVistasSpawned = true;
 		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
 	}
+	SetWeatherClimate(Area);   // its climate; Auto rolls once here and holds for the visit
 }
 
 void AODMainMenu::ClearStartVista()
@@ -2372,12 +2340,12 @@ void AODMainMenu::ClearStartVista()
 		}
 	}
 	VistaActors.Reset();
-	if (ShownVista != INDEX_NONE)
-	{
-		SetWeatherClimate(INDEX_NONE);   // its forest copy is gone
-	}
 	VistaSpot.Forest = nullptr;
-	VistaArea = VistaPick = INDEX_NONE;
+	if (VistaArea != INDEX_NONE)
+	{
+		VistaArea = INDEX_NONE;
+		SetWeatherClimate(INDEX_NONE);   // home climate: its forest copy is gone
+	}
 	bVistaDirty = true;   // UpdateScene: back to the garage room unless a new set follows
 }
 
@@ -2406,7 +2374,10 @@ bool AODMainMenu::IsStartVistaReady() const
 	{
 		const AODTerrainManager* T = Cast<AODTerrainManager>(A);
 		const AODRoadManager* R = Cast<AODRoadManager>(A);
-		if ((T && !T->IsInitialStreamingSettled(VistaSpot.CarCm)) || (R && !R->IsInitialStreamingSettled()))
+		const AODForestManager* F = Cast<AODForestManager>(A);
+		const AODWaterManager* W = Cast<AODWaterManager>(A);
+		if ((T && !T->IsInitialStreamingSettled(VistaSpot.CarCm)) || (R && !R->IsInitialStreamingSettled())
+			|| (F && !F->IsInitialStreamingSettled()) || (W && !W->IsInitialStreamingSettled()))
 		{
 			return false;
 		}
@@ -2426,7 +2397,7 @@ FTransform AODMainMenu::VistaCamGoal() const
 
 void AODMainMenu::UpdateScene()
 {
-	if (bGarageMode || !bEntered || bSettingsOpen)
+	if (!bEntered || bSettingsOpen)
 	{
 		return;
 	}
@@ -2451,7 +2422,6 @@ void AODMainMenu::UpdateScene()
 		Pawn->PlaceInShowroom(ShowroomLocationCm);
 		Pawn->SetShowroom(true);
 		Pawn->SetActorRotation(FRotator(0.0f, ShowroomYawDeg, 0.0f));
-		SetWeatherClimate(INDEX_NONE);   // home climate, sampled at the showroom like level start
 		if (Cam)
 		{
 			Cam->SetWorldTransform(GarageCamXf);
@@ -2470,7 +2440,6 @@ void AODMainMenu::UpdateScene()
 	Pawn->PlaceInShowroom(VistaCarWorld() + FVector(0.0, 0.0, Move ? Move->GetRestGroundClearanceCm() : 0.0f));
 	Pawn->SetActorRotation(FRotator(0.0f, VistaSpot.CarYawDeg, 0.0f));
 	Pawn->SetShowroom(true);   // detaches the camera; placed for the vista below
-	SetWeatherClimate(Want);   // this vista's climate (2026-10-05)
 	if (Cam)
 	{
 		Cam->SetWorldTransform(VistaCamGoal());
@@ -2649,7 +2618,7 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 		OutValue.Empty();
 		break;
 	case RowBack:
-		OutLabel = bGarageMode ? TEXT("Resume") : TEXT("Back");
+		OutLabel = TEXT("Back");
 		OutValue.Empty();
 		break;
 	case RowQuit:

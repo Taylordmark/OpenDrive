@@ -282,6 +282,10 @@ public:
 	/** Immediate re-roll (garage season lock changed) - no-op while forced. */
 	void Reroll();
 
+	/** Menu Drive (2026-10-16): Auto, snapped to S (the state the start vista
+	 *  showed) with a fresh hold - no roll, so the drive opens on that sky. */
+	void ResumeAuto(EODWeatherState S);
+
 	/** Garage Weather row (2026-10-05): true if S has weight > 0 under the
 	 *  Auto walk's weighting (StateWeights) in at least one month of the
 	 *  active climate (only the locked month when a season is locked,

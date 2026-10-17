@@ -1603,7 +1603,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		{
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")},
 				{TEXT("Enter"), Screen == EODMenuScreen::Start ? TEXT("Drive") : TEXT("Confirm")},
-				{TEXT("Esc"), Screen == EODMenuScreen::Garage && Menu->IsGarageMode() ? TEXT("Resume") : TEXT("Back")}});
+				{TEXT("Esc"), TEXT("Back")}});
 		}
 		return;
 	}
