@@ -6,6 +6,7 @@
 class UHierarchicalInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
+class UMaterialParameterCollection;
 class UStaticMesh;
 
 /**
@@ -52,6 +53,13 @@ namespace ODGroundCover
 	/** Deterministic scatter for one cell, capped per slot (CapFor). */
 	void Place(const FCell& C, TArray<FPlaced> (&Out)[NumSlots]);
 
+	/** Density multiplier at a world XY for a placement class (0 grass,
+	 *  1 weed, 2 shrub, 3 pebble): low-frequency clump noise, ~40% of the
+	 *  ground empty, mean ~0.6, peaks ClumpGain. Pure function of position.
+	 *  AODForestManager's grass carpet can multiply its per-square density by
+	 *  Clump(X, Y, 0) so the tufts gather into the same clumps. */
+	float Clump(double X, double Y, int32 Class);
+
 	int32 CapFor(int32 Slot, int32 Detail);
 }
 
@@ -73,6 +81,13 @@ struct FODGroundCoverAssets
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> CardMID;
 
+	/** MPC_Season (unreal/apply_terrain_real_materials.py): SyncSeason copies
+	 *  SnowCover into it so M_Rock030_real (boulders, pebbles) gets snow on
+	 *  its tops. Null = asset not built, rocks stay bare. */
+	UPROPERTY()
+	TObjectPtr<UMaterialParameterCollection> SeasonMPC;
+
+	TWeakObjectPtr<UWorld> World;
 	TArray<float> BaseZ;   // mesh bounds Min.Z per slot (pivot -> base)
 	bool bOn = false;
 
@@ -85,6 +100,7 @@ struct FODGroundCoverAssets
 		TFunctionRef<void(UHierarchicalInstancedStaticMeshComponent*)> FoliageMat,
 		TArray<UHierarchicalInstancedStaticMeshComponent*>& OutComps) const;
 
-	/** Copy SnowCover / Wetness from the forest's season MID. */
+	/** Copy SnowCover / Wetness from the forest's season MID (and SnowCover
+	 *  into SeasonMPC). */
 	void SyncSeason(const UMaterialInstanceDynamic* From) const;
 };

@@ -3,7 +3,7 @@ Track K). A line-for-line Python mirror of ODGroundCover::Place
 (OpenDriveUE/Source/OpenDriveUE/ODGroundCover.cpp), incl. UE's FRandomStream,
 run on synthetic 16 m grass cells beside a straight road. Asserts:
 determinism, shoulder clearance, nothing on non-terrain lattice squares,
-per-cell caps, the road band, biome dryness and the slope cutoff; prints
+per-cell caps, the road band, biome dryness, the slope cutoff and clumping; prints
 instance counts per cell and per 120 m grass ring at each Model Detail level.
 Change both files together.
 
@@ -32,10 +32,39 @@ BASE_CAP = [96, 48, 6, 6, 40]
 BAND_FULL, BAND_END, FILL = 3000.0, 6000.0, 0.2
 SHRUB_CLEAR = 150.0
 M32 = 0xFFFFFFFF
+CLUMP_CELL = [600.0, 600.0, 1500.0, 900.0]
+CLUMP_SALT = [0x1F3, 0x2A7, 0x3C1, 0x4D9]
+CLUMP_LO, CLUMP_HI, CLUMP_GAIN = 0.4, 0.75, 1.6
 
 
 def cap_for(slot, detail):
     return math.ceil(BASE_CAP[slot] * DETAIL_DENSITY[detail])
+
+
+def smoothstep(a, b, x):
+    t = clamp((x - a) / (b - a), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def hash01(x, y, salt):
+    h = ((x * 0x8DA6B343) & M32) ^ ((y * 0xD8163841) & M32) ^ ((salt * 0xCB1AB31F) & M32)
+    h ^= h >> 15
+    h = (h * 0x2C1B3C6D) & M32
+    h ^= h >> 12
+    h = (h * 0x297A2D39) & M32
+    h ^= h >> 15
+    return (h & 0xFFFFFF) / 16777216.0
+
+
+def clump(x, y, k):
+    k = clamp(k, 0, 3)
+    gx, gy = x / CLUMP_CELL[k], y / CLUMP_CELL[k]
+    ix, iy = math.floor(gx), math.floor(gy)
+    fx, fy = smoothstep(0, 1, gx - ix), smoothstep(0, 1, gy - iy)
+    s = CLUMP_SALT[k]
+    h = lambda a, b: hash01(a & M32, b & M32, s)
+    v = (h(ix, iy) + (h(ix + 1, iy) - h(ix, iy)) * fx) * (1 - fy) +         (h(ix, iy + 1) + (h(ix + 1, iy + 1) - h(ix, iy + 1)) * fx) * fy
+    return smoothstep(CLUMP_LO, CLUMP_HI, v) * CLUMP_GAIN
 
 
 def cell_seed(kx, ky, seed):
@@ -70,11 +99,13 @@ def place(key, x0, y0, step, n, z, good, biome, detail, seed, shoulder, road_edg
                 continue
             z00, z10, z01, z11 = z[i00], z[i10], z[i01], z[i11]
             slope = math.hypot((z10 + z11 - z00 - z01) * 0.5, (z01 + z11 - z00 - z10) * 0.5) / step
-            road = road_edge(x0 + (sx + 0.5) * step, y0 + (sy + 0.5) * step)
+            cx, cy = x0 + (sx + 0.5) * step, y0 + (sy + 0.5) * step
+            road = road_edge(cx, cy)
             band = 1.0 + (FILL - 1.0) * clamp((road - BAND_FULL) / (BAND_END - BAND_FULL), 0.0, 1.0)
             for k in range(4):
                 gate = clamp(1.5 - slope, 0, 1) if k == 3 else clamp(1.2 - 2.0 * slope, 0, 1)
-                expected = PER_SQM[k] * DETAIL_DENSITY[detail] * b[k] * band * gate * area
+                cl = clump(cx, cy, k)
+                expected = PER_SQM[k] * DETAIL_DENSITY[detail] * b[k] * band * gate * cl * area
                 count = math.floor(expected) + (1 if rng.frand() < expected - math.floor(expected) else 0)
                 for _ in range(count):
                     u, v, yaw = rng.frand(), rng.frand(), rng.frand() * 360.0
@@ -86,7 +117,8 @@ def place(key, x0, y0, step, n, z, good, biome, detail, seed, shoulder, road_edg
                     zb = (z00 + (z10 - z00) * u) * (1 - v) + (z01 + (z11 - z01) * u) * v
                     dry = clamp(b[4] + (r1 - 0.5) * 0.6, 0.0, 1.0)
                     slot = [0, 1, 3 if r2 < b[4] else 2, 4][k]
-                    out[slot].append((x, y, zb, yaw, s, dry))
+                    scale = (0.85 + 0.3 * cl / CLUMP_GAIN) if k < 3 else 1.0
+                    out[slot].append((x, y, zb, yaw, s, dry, scale))
     for s in range(len(SLOTS)):
         c, num = cap_for(s, detail), len(out[s])
         if num > c:
@@ -158,6 +190,26 @@ def main():
     assert mean_dry(B["DesertScrub"]) > 0.7 and mean_dry(B["Wetland"]) < 0.2
     steep = mean_count(B["PlainsGrassland"], 2, [1, 2], slope=0.7)
     assert steep[0] == steep[1] == steep[2] == steep[3] == 0 and steep[4] > 0, steep
+
+    # clumping: ~40% of the ground empty, mean ~0.6, and grass gathers -
+    # per-2 m-square counts are overdispersed vs an even (Poisson) field
+    vals = [clump(x * 137.0 + 11.0, y * 173.0 - 5.0, k) for k in range(4) for x in range(-150, 150) for y in range(-20, 20)]
+    empty = sum(v == 0 for v in vals) / len(vals)
+    mean = sum(vals) / len(vals)
+    print(f"clump: {empty:.0%} empty, mean {mean:.2f}, max {max(vals):.2f}")
+    assert 0.3 < empty < 0.55 and 0.45 < mean < 0.8 and max(vals) > 1.5, (empty, mean)
+    sq = {}
+    for kx in range(0, 12):
+        for ky in (1, 2, -2, -3):
+            for x, y, *_ in run_cell(kx, ky, B["PlainsGrassland"], 2)[0][0]:
+                key = (int(x // STEP), int(y // STEP))
+                sq[key] = sq.get(key, 0) + 1
+    n_sq = 12 * 4 * N * N
+    cnt = list(sq.values()) + [0] * (n_sq - len(sq))
+    m = sum(cnt) / n_sq
+    var = sum((c - m) ** 2 for c in cnt) / n_sq
+    print(f"grass per 2 m square: mean {m:.2f}, var/mean {var / m:.2f} (even field = 1)")
+    assert var / m > 1.2, var / m   # caps thin the cores, so well short of the raw field
 
     # report: per 16 m cell in the full band (ky=1 -> 12-28 m from the road
     # edge) and the worst cell, then the whole grass ring (120 m radius,
