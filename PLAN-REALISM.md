@@ -19,7 +19,7 @@ check per new piece of logic). Runtime C++ is verified by a headless
 All new world content follows standing decision 2. It is generated
 deterministically from OSM vectors and rasters into the rebuildable cache,
 and nothing per-instance is hand-placed. The art follows decision 1:
-stylized, low-poly, intentional.
+realistic, matched against how the real place looks.
 
 ---
 
@@ -71,7 +71,7 @@ see `status.md`). Sidewalks are concrete ODS1 solids beside the ribbon, not
 part of the road mesh, so `M_Road` didn't need regenerating.
 
 **Drive check:** a town (Frisco/Breck) day and night, and one rural pass.
-Do the signs and lights read as stylized, and is the density right?
+Do the signs and lights read as real, and is the density right?
 
 ---
 

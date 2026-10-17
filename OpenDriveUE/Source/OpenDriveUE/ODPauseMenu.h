@@ -30,7 +30,7 @@ public:
 	AODPauseMenu();
 	virtual void BeginPlay() override;
 
-	enum : int32 { RowWorldMap, RowGarage, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
+	enum : int32 { RowWorldMap, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
 
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
