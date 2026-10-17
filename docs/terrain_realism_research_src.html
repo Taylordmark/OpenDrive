@@ -1,0 +1,179 @@
+<title>Ground Truth Survey</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,600&display=swap">
+<style>
+:root{--bg:#f6f4ee;--panel:#fffdf8;--fg:#24251f;--muted:#6a6b5f;--rule:#dcd8cb;--accent:#5d6b2e;--warn:#9a5a1c;--chip:#ebe7da;--good:#3f6b4a;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171813;--panel:#1f201a;--fg:#e8e6dc;--muted:#a3a493;--rule:#34362c;--accent:#b5c46e;--warn:#e0a061;--chip:#2a2c23;--good:#8fc39b;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#171813;--panel:#1f201a;--fg:#e8e6dc;--muted:#a3a493;--rule:#34362c;--accent:#b5c46e;--warn:#e0a061;--chip:#2a2c23;--good:#8fc39b;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:1080px;margin:0 auto;padding-block:32px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:40px}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,serif;font-weight:600;text-wrap:balance;margin:0;line-height:1.2}
+h1{font-size:2.1rem}h2{font-size:1.5rem;border-top:2px solid var(--fg);padding-top:12px}h3{font-size:1.12rem}
+p,li{max-width:70ch}p{margin:0}
+.lede{display:grid;gap:12px}.kicker{font:500 12px "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.muted{color:var(--muted)}
+section{display:grid;gap:16px;min-width:0}
+figure{margin:0;display:grid;gap:6px;min-width:0}figure img{width:100%;height:auto;border-radius:4px;display:block}
+figcaption{font-size:13px;color:var(--muted)}
+.mono,td.n{font-family:"IBM Plex Mono",monospace;font-size:13px}
+.tbl{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{padding:7px 10px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font-weight:600;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:var(--chip)}
+tr:last-child td{border-bottom:0}
+.gap{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:20px;display:grid;gap:14px;min-width:0}
+.gap header{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.rank{font:600 13px "IBM Plex Mono",monospace;background:var(--fg);color:var(--bg);border-radius:4px;padding:2px 8px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.opts{display:grid;gap:10px}
+.opt{border-left:3px solid var(--accent);padding:4px 0 4px 12px;display:grid;gap:4px}
+.opt b{font-weight:600}
+.meta{display:flex;flex-wrap:wrap;gap:6px}.meta span{font:12px "IBM Plex Mono",monospace;background:var(--chip);border-radius:3px;padding:1px 7px}
+.rec{color:var(--good);font-weight:600}
+.note{border-left:3px solid var(--warn);padding:8px 12px;background:var(--panel);border-radius:0 6px 6px 0}
+ul{margin:0;padding-left:20px;display:grid;gap:4px}
+a{color:var(--accent)}
+</style>
+<main>
+<div class="lede">
+  <div class="kicker">OpenDrive · terrain &amp; ground realism · research only · 2026-10-16</div>
+  <h1>How the ground compares with the real places</h1>
+  <p>Six in-game captures from four areas, each set beside an openly licensed photo of the same road or valley, with colour statistics measured on the ground band. Below are the gaps, ranked by how much they hurt the picture, each with 1–3 fix options. No game code or content was changed.</p>
+  <p class="muted">Short version: far and mid hills already read correctly from the satellite colour. The trouble is the first 100 m. Every area gets the same olive-tan ground. Ground cover reads as evenly spaced dots, not a surface. The road edge is one mossy strip everywhere, even under snow. Slopes have no erosion detail.</p>
+</div>
+
+<section>
+  <h2>Ranked gaps at a glance</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>Gap</th><th>Seen at</th><th>Cheapest real fix</th><th>GPU</th><th>Effort</th></tr>
+    <tr><td class="n">1</td><td>Same olive-tan ground everywhere (hue 41–46° at all six spots)</td><td>all six; worst at Oahu and Skagit</td><td>Let satellite colour drive the near ground; recalibrate texture albedo</td><td class="n">~0 ms</td><td>S</td></tr>
+    <tr><td class="n">2</td><td>Ground cover reads as dots: identical evenly spaced tufts, or none at all</td><td>Green Valley, Blue River, Dillon (grid), Skagit (empty)</td><td>Grass as a material layer, cards only as clumped accents</td><td class="n">≤0.1 ms</td><td>M</td></tr>
+    <tr><td class="n">3</td><td>Road edge: one dark mossy strip in every climate and season; no gravel shoulder, ditch or snowbank</td><td>all six</td><td>Paler, wider, climate- and snow-aware shoulder layer</td><td class="n">0 ms</td><td>S</td></tr>
+    <tr><td class="n">4</td><td>Smooth or faceted slopes: no gullies, outcrops or erosion</td><td>Green Valley, Blue River, Skagit</td><td>DEM-derived normal and curvature texture per area</td><td class="n">~0.1 ms</td><td>M</td></tr>
+    <tr><td class="n">5</td><td>Snow is a flat grey-white sheet; rocks and shoulder bare; cards glow</td><td>Blue River winter</td><td>Raise snow albedo, slope- and aspect-driven patches, snow on rock tops</td><td class="n">≤0.05 ms</td><td>S</td></tr>
+    <tr><td class="n">6</td><td>Screen-door dot pattern on mid-range ground</td><td>Oahu, Dillon</td><td>Find the source (dither fade or mip), then fix</td><td class="n">0 ms</td><td>S</td></tr>
+  </table></div>
+  <p class="muted">GPU figures are estimates from comparable material and instance costs, not measured. The frame is already at the ~22 ms budget, so the zero-cost options come first.</p>
+</section>
+
+<section>
+  <h2>Measurements</h2>
+  <p>Ground band = the lower 45% of the frame minus its middle third, which drops the car and HUD. Luma is mean linear luminance; saturation is the median HSV S; hue is the circular mean over saturated pixels; detail is the median 16 px block standard deviation of luma, divided by the mean.</p>
+  <div class="tbl"><table>
+    <tr><th>Spot</th><th>Luma game / ref</th><th>Saturation game / ref</th><th>Hue game / ref</th><th>Detail game / ref</th></tr>
+    {{stats}}
+  </table></div>
+  <ul>
+    <li><b>The hue never moves.</b> Game ground sits at 41–46° (olive-tan) in desert, alpine meadow, tropical coast and Cascade pasture alike. The references span 28° (Green Valley dirt) to 75° (Skagit pasture).</li>
+    <li><b>Saturation runs the wrong way.</b> Dry places come out 2–4× too saturated (Green Valley 0.43 vs 0.10). Green places come out half as saturated as they should and too yellow (Skagit 0.23 vs 0.43).</li>
+    <li><b>Detail is lower at five of six spots</b> (0.16–0.22 vs 0.19–0.73), and the deficit is largest where real ground is busiest (Oahu, Green Valley).</li>
+    <li>Source albedo, measured on the ambientCG colour maps: Grass001 S = 0.55 and Ground037 S = 0.44, which is already more saturated than any real ground band here. Snow006 linear luma is 0.58; real fresh snow is 0.8–0.9. The per-area Sentinel-2 albedo has S = 0.10–0.31, close to the photos, but it gets only 25% weight near the camera.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Side by side</h2>
+  <p class="muted">Game on the left (as captured, HUD included), reference on the right. The strip underneath is the hue histogram of the ground band.</p>
+  {{sbs}}
+</section>
+
+<section>
+  <h2>Gaps and fix options</h2>
+
+  <article class="gap">
+    <header><span class="rank">1</span><h3>One ground colour for every place</h3></header>
+    <p>Waimanalo, a lawn-and-red-dirt beach park under ironwoods, renders as grey-beige gravel. Concrete WA, a wet green pasture valley, renders as a dry brown field. Agua Dulce gets a strong ochre where the real dirt is pale and dusty. The near ground is mostly the ambientCG layer tinted by the biome colour (TINT_KEEP 0.35). The satellite colour, the only per-place colour source, gets just 25% weight until 200 m out. Its texels are 20 m.</p>
+    <div class="two"><figure><img src="{{img:crop_oahu_ground.jpg}}" alt="Oahu ground close-up: uniform grey dotted ground"><figcaption>Oahu, Waimanalo Beach: the ground near the road reads as fine grey gravel, with no grass.</figcaption></figure>
+    <figure><img src="{{img:crop_gv_shoulder.jpg}}" alt="Green Valley shoulder and tufts"><figcaption>Green Valley: saturated ochre dirt, a mossy green shoulder, and evenly spaced identical tufts.</figcaption></figure></div>
+    <div class="opts">
+      <div class="opt"><b>A. Let the satellite colour set hue and value near the camera</b> <span class="rec">recommended first</span><p>Raise the sat_macro near weight from 25% to about 60%. Then use the ambientCG layers only for detail: luminance-normalise each layer and multiply by the satellite albedo, rather than tinting the layer. Every area then inherits its own measured colour.</p><div class="meta"><span>gain: high</span><span>GPU ~0 ms (same samples)</span><span>effort S: apply_terrain_real_materials.py</span><span>licence: Sentinel-2 open data, already used</span></div></div>
+      <div class="opt"><b>B. Recalibrate the texture albedo to measured ranges</b><p>Clamp each layer's mean S and luma to photo-measured targets (grass S≈0.30, dry dirt S≈0.15, snow luma ≥0.8) at import time. Keep a small per-biome palette taken from Sentinel-2 class means, so cured grass in Green Valley and lush grass at Oahu stop sharing one colour.</p><div class="meta"><span>gain: medium-high</span><span>GPU 0 ms</span><span>effort S</span><span>licence: existing CC0 textures</span></div></div>
+      <div class="opt"><b>C. 10 m Sentinel-2 bands instead of 20 m</b><p>B2/B3/B4 are native 10 m: four times the texels, so fields, dirt lots and gravel pads keep their shape at 50–200 m.</p><div class="meta"><span>gain: medium (mid range)</span><span>GPU ~0 ms, +~30–60 MB VRAM per area</span><span>effort S: build_sat_albedo.py</span><span>licence: Copernicus open</span></div></div>
+    </div>
+  </article>
+
+  <article class="gap">
+    <header><span class="rank">2</span><h3>Ground cover reads as dots, not cover</h3></header>
+    <p>Real verges and fields are a continuous, mixed surface: short grass, cured stems, forbs and litter, with shrubs in clumps. The game puts identical tufts at even spacing on bare ground, which gives a polka-dot look. At Dillon the shrubs form a visible grid. At Concrete there is almost nothing: the log shows 1 cell built with 0 grass. Cards stop at 72–120 m, and nothing fills in beyond that.</p>
+    <div class="two"><figure><img src="{{img:crop_dillon_lattice.jpg}}" alt="Dillon field: shrubs in a grid"><figcaption>Dillon: shrubs on a regular lattice, with a screen-door pattern on the field behind.</figcaption></figure>
+    <figure><img src="{{img:crop_blueriver_verge.jpg}}" alt="Blue River verge"><figcaption>Blue River: isolated tufts and a yellow forb band on flat pale ground; the reference has continuous meadow.</figcaption></figure></div>
+    <div class="opts">
+      <div class="opt"><b>A. Make grass a ground layer, with cards as accents</b> <span class="rec">recommended</span><p>Paint the base layer as dense short grass (or cured grass, per biome) using a grass albedo plus a fine normal, with height-blended bare patches driven by noise and the satellite colour. Then use cards only for tall clumps. This removes the bare-dirt-between-tufts look at every distance, including past 120 m.</p><div class="meta"><span>gain: high</span><span>GPU ≤0.1 ms (one more layer sample)</span><span>effort M</span><span>licence: ambientCG CC0 grass sets, or procedural</span></div></div>
+      <div class="opt"><b>B. Clumped, mixed placement</b><p>Replace lattice and uniform placement with jittered placement weighted by a low-frequency clump noise. Mix 2–3 scales and a cured/green colour variant per instance, and pick species per biome. The instance count stays the same.</p><div class="meta"><span>gain: medium-high</span><span>GPU 0 ms (same count)</span><span>effort S-M: ODGroundCover.cpp</span><span>licence: n/a</span></div></div>
+      <div class="opt"><b>C. Fix the empty spots</b><p>Trace why Concrete builds 1 cell with 0 grass; the town and field mask is the likely cause. Cover there should match the ditch and field edges.</p><div class="meta"><span>gain: medium (local)</span><span>GPU small</span><span>effort S</span><span>licence: n/a</span></div></div>
+    </div>
+  </article>
+
+  <article class="gap">
+    <header><span class="rank">3</span><h3>The road edge is one mossy strip everywhere</h3></header>
+    <p>All six spots show the same olive-moss band of about 1.5 m, in desert, alpine, coastal and Cascade settings, and under snow. Real roads here have a pale gravel or dust shoulder 1–3 m wide (CO 9 reference), then a foreslope and ditch, then the verge. In winter they have ploughed banks. The shoulder texture Gravel040 has linear luma 0.128, darker than most of the surrounding ground. No ditch geometry exists anywhere; embankment skirts only cover drops of 2.5–7 m.</p>
+    <div class="two"><figure><img src="{{img:crop_winter_edge.jpg}}" alt="Winter road edge"><figcaption>Winter: the shoulder stays green under snow, with no snowbank, and the boulder has no snow on top.</figcaption></figure>
+    <figure><img src="{{img:crop_blueriver_hill.jpg}}" alt="Blue River cut slope"><figcaption>Blue River cut slope: smooth, with no rock, ditch or erosion.</figcaption></figure></div>
+    <div class="opts">
+      <div class="opt"><b>A. Retune the shoulder layer</b> <span class="rec">recommended first</span><p>Swap in a paler CC0 gravel (target luma ~0.25–0.30, like Gravel030), widen it to 1.5–2.5 m with a noisy edge, choose dust or gravel by climate, and let snow cover it in winter.</p><div class="meta"><span>gain: medium-high</span><span>GPU 0 ms</span><span>effort S</span><span>licence: ambientCG CC0</span></div></div>
+      <div class="opt"><b>B. Verge strip mesh with a ditch profile</b><p>Build a road-parallel strip (shoulder, foreslope, ditch, backslope) the way build_road_embankments.py builds skirts. It can also carry ploughed snowbanks in winter.</p><div class="meta"><span>gain: high</span><span>GPU ~0.1–0.3 ms</span><span>effort M</span><span>licence: n/a</span></div></div>
+      <div class="opt"><b>C. RVT road-edge blend (planned Join J)</b><p>Write the roads into a runtime virtual texture so terrain blends into asphalt with dirt and tyre tracks.</p><div class="meta"><span>gain: medium</span><span>GPU ~0.3–0.5 ms</span><span>effort M-H</span><span>licence: n/a</span></div></div>
+    </div>
+  </article>
+
+  <article class="gap">
+    <header><span class="rank">4</span><h3>Slopes lack erosion detail and show facets</h3></header>
+    <p>The real San Gabriel foothills behind Agua Dulce are cut with gullies and pale bare rock. In the game the same hills are smooth with broad colour changes. Near slopes show large flat triangles, because the RTIN tiles carry per-vertex normals only. The terrain material binds no normal or detail map from the DEM.</p>
+    <figure><img src="{{img:crop_skagit_hill.jpg}}" alt="Skagit hillside"><figcaption>Skagit: faceted hillside with isolated conifers on lime grass. The reference has continuous dark forest (see the forest note below).</figcaption></figure>
+    <div class="opts">
+      <div class="opt"><b>A. A DEM normal and curvature texture per area</b> <span class="rec">recommended</span><p>Bake a normal plus curvature map from USGS 3DEP 1 m lidar (public domain; the US areas) or the current DEM elsewhere, using the same world-XY projection as SatTex. The normals restore gullies and ridges at every range. Curvature drives rock and dirt into gullies and grass onto ridges.</p><div class="meta"><span>gain: high</span><span>GPU ~0.1 ms (1–2 samples)</span><span>effort M (pipeline + material)</span><span>licence: USGS public domain</span></div></div>
+      <div class="opt"><b>B. Denser near-tile mesh</b><p>Lower martini error near the road, or use more edge loops on cut slopes, to cut the facets in silhouette.</p><div class="meta"><span>gain: low-medium</span><span>GPU ~0.2 ms (triangles)</span><span>effort S</span><span>licence: n/a</span></div></div>
+      <div class="opt"><b>C. Nanite terrain with displacement</b><p>Rebuild the terrain as Nanite static meshes. Best silhouettes, but a large rewrite and real GPU cost on this laptop.</p><div class="meta"><span>gain: high</span><span>GPU 1–3 ms</span><span>effort H</span><span>not recommended now</span></div></div>
+    </div>
+  </article>
+
+  <article class="gap">
+    <header><span class="rank">5</span><h3>Snow is a flat sheet</h3></header>
+    <p>In winter the ground is an even grey-white with no patches, drifts or bare south faces. Rocks and the shoulder stay bare, and the grass cards turn bright white and pop out. The Frisco reference (early winter) shows straw grass with snow patchy by aspect. Snow006 is 0.58 linear luma against 0.8–0.9 for fresh snow. The lighting session also logged white-twig snow on foliage while the ground stayed bare under the saved Winter season.</p>
+    <div class="opts">
+      <div class="opt"><b>A. Snow albedo plus patchiness</b> <span class="rec">recommended</span><p>Lift snow to about 0.8 albedo. Drive cover by slope, aspect (south faces melt), DEM curvature (drifts in hollows) and noise, so partial seasons look like Frisco in December.</p><div class="meta"><span>gain: medium-high</span><span>GPU 0 ms</span><span>effort S</span><span>licence: existing CC0</span></div></div>
+      <div class="opt"><b>B. Snow on top of rocks, shoulder and cards</b><p>Add a world-normal-Z snow mask in the rock and ground-cover materials, tied to the same season parameter, and dim card albedo in snow.</p><div class="meta"><span>gain: medium</span><span>GPU ≤0.05 ms</span><span>effort S</span><span>licence: n/a</span></div></div>
+    </div>
+  </article>
+
+  <article class="gap">
+    <header><span class="rank">6</span><h3>Screen-door pattern on mid-range ground</h3></header>
+    <p>A fine regular dot pattern covers the field at Dillon and the open ground at Oahu, at 15–60 m. It may be the dithered fade of the grass carpet, which spans 60–120 m, or high-frequency texture aliasing from the anti-tiling copy (×3.7). The cause is not yet confirmed.</p>
+    <div class="opts">
+      <div class="opt"><b>A. Isolate, then fix</b><p>Capture once with the grass carpet off, then once with the far texture copy off. Then either soften the dither (wider fade, TSR-friendly noise) or add mip bias and texture bombing.</p><div class="meta"><span>gain: medium</span><span>GPU 0 ms</span><span>effort S</span><span>licence: n/a</span></div></div>
+    </div>
+  </article>
+
+  <div class="note"><b>Outside this scope, noted for the forest and distance-LOD owners:</b> at Skagit the forested hills render as scattered conifers on bright grass, where the real valley sides are continuous dark canopy. Far hills elsewhere (Dillon, Green Valley) already read well from the satellite colour.</div>
+</section>
+
+<section>
+  <h2>Capture settings</h2>
+  <p>All shots used the real <span class="mono">-game</span> path on the GPU, launched from the main checkout's OpenDriveUE.uproject at commit fdc7f2c. Settings as played: <span class="mono">sp 100 sg 3 style 1</span> (from the ODPerf line), Asset Detail Standard (0, from the saved GameUserSettings), Lumen, VSM, <span class="mono">_real</span> materials, forest, far-forest cards, ground cover, buildings and traffic all on. The window ran at 1280×720 (<span class="mono">-resx=1920 -resy=1080</span> was requested). Each screenshot fired at <span class="mono">-odshot=480</span> s, well after the loading gate released.</p>
+  <p class="mono muted">UnrealEditor.exe OpenDriveUE.uproject /Game/Areas/OpenWorld_&lt;area&gt; -game -windowed -resx=1920 -resy=1080 -odpick=&lt;town&gt; -odhour=13 -odshot=480 -odseason=summer|winter -NoZenAutoLaunch -ExecCmds="od.Weather Clear"</p>
+  <div class="tbl"><table>
+    <tr><th>Spot</th><th>Area / -odpick</th><th>Season</th><th>Weather rolled → forced</th><th>UTC start</th><th>GPU ms (last ODPerf)</th></tr>
+    <tr><td>Blue River</td><td>summit_county / Blue River (CO 9)</td><td>summer</td><td>Clear → Clear</td><td class="n">02:14</td><td class="n">51.8*</td></tr>
+    <tr><td>Blue River winter</td><td>summit_county / Blue River</td><td>winter</td><td>Snow → Clear</td><td class="n">02:24</td><td class="n">57.4*</td></tr>
+    <tr><td>Dillon</td><td>summit_county / Dillon (Buffalo St)</td><td>summer</td><td>Fog → Clear</td><td class="n">02:37</td><td class="n">72.6*</td></tr>
+    <tr><td>Green Valley</td><td>green_valley / Agua Dulce</td><td>summer</td><td>Clear → Clear</td><td class="n">02:46</td><td class="n">95.0*</td></tr>
+    <tr><td>Oahu</td><td>oahu / Kalanianaʻole (Waimanalo)</td><td>summer</td><td>Clear → Clear</td><td class="n">02:55</td><td class="n">51.3*</td></tr>
+    <tr><td>Skagit</td><td>skagit_cascades / Concrete (SR 20)</td><td>summer</td><td>Rain → Clear</td><td class="n">03:06</td><td class="n">18.0</td></tr>
+  </table></div>
+  <p class="note">* Taken while a local LLM server held most of the 8 GB of VRAM; Taylor stopped it before the Skagit shot. Frame times marked * are not valid performance numbers. The images are unaffected: same settings, same content, fully streamed. Weather is normally a random climate roll; it was forced Clear so the spots compare with each other and with sunny reference photos.</p>
+</section>
+
+<section>
+  <h2>Reference photos</h2>
+  <p class="muted">For internal comparison only; never shipped. All from Wikimedia Commons, with licences checked against the Commons API.</p>
+  <div class="tbl"><table>
+    <tr><th>Used for</th><th>Photo</th><th>Author</th><th>Licence</th></tr>
+    <tr><td>Blue River</td><td><a href="https://commons.wikimedia.org/wiki/File:Colorado_State_Highway_9_near_Hoosier_Pass,_July_2016.jpg">CO 9 near Hoosier Pass, July 2016</a></td><td>Thomson200</td><td>CC0</td></tr>
+    <tr><td>Blue River winter</td><td><a href="https://commons.wikimedia.org/wiki/File:I-70_West_in_Frisco,_CO.jpg">I-70 West in Frisco, Dec 2012</a></td><td>Bidgee</td><td>CC BY-SA 3.0 AU</td></tr>
+    <tr><td>Dillon</td><td><a href="https://commons.wikimedia.org/wiki/File:2022-09-09_24_59_24_UTC_minus_6_View_south_along_Colorado_State_Route_91_just_south_of_Interstate_70_in_Copper_Mountain,_Summit_County,_Colorado.jpg">CO 91 at Copper Mountain, Sep 2022</a></td><td>Famartin</td><td>CC BY-SA 4.0</td></tr>
+    <tr><td>Green Valley</td><td><a href="https://commons.wikimedia.org/wiki/File:Sierra_Highway.jpg">Sierra Highway, Canyon Country, 2008</a></td><td>Jeffrey Beall</td><td>CC BY 2.0</td></tr>
+    <tr><td>Oahu</td><td><a href="https://commons.wikimedia.org/wiki/File:Waimanalo,_Hawaii_(27217129814).jpg">Waimanalo, Hawaii, Jun 2016</a></td><td>Thomas Woodtli</td><td>CC BY-SA 2.0</td></tr>
+    <tr><td>Skagit</td><td><a href="https://commons.wikimedia.org/wiki/File:Looking_north_from_Washington_SR_20_from_just_west_of_SR_530.jpg">North from SR 20 near Rockport, May 2015</a></td><td>Joe Mabel</td><td>CC BY-SA 3.0</td></tr>
+  </table></div>
+  <p class="muted">Tooling: pipeline/checks/capture_ground_spots.py (launch and settle-wait, rejects loading screens) and pipeline/checks/compare_ground_pairs.py (side by sides plus stats), on branch claude/stoic-meitner-20f059.</p>
+</section>
+</main>
