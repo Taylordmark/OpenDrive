@@ -338,6 +338,8 @@ void AODWaterManager::Tick(float DeltaSeconds)
 		}
 	}
 
+	bSettled = Dispatched == 0 && PendingTiles.IsEmpty();
+
 	TArray<FIntPoint> Gone;
 	for (const auto& Pair : Tiles)
 	{

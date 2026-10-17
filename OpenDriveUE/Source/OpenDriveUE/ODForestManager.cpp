@@ -2760,7 +2760,9 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
+	const int32 FarBefore = FarChunks.Num();
 	UpdateFarForest(Loc);   // vista too: the backdrop's hills are what it shows
+	bSettled = Built == 0 && FarChunks.Num() == FarBefore;
 	if (Vista.bActive)
 	{
 		return;

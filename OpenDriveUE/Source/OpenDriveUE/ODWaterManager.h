@@ -109,7 +109,13 @@ public:
 	 *  identical reasoning. AODSeasonController drives FreezeBlend on this. */
 	UMaterialInstanceDynamic* GetWaterMID() const { return WaterMID; }
 
+	/** Every wanted tile in reach loaded (or known missing) - the menu's start
+	 *  vista waits on it (2026-10-16). */
+	bool IsInitialStreamingSettled() const { return bSettled; }
+
 private:
+	bool bSettled = false;
+
 	static bool ParseWaterTileFile(const FString& Path, FParsedWaterTile& Out);
 
 	void RequestTileLoad(const FIntPoint& Key);
