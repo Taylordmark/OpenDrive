@@ -3,6 +3,7 @@
 #include "Algo/Sort.h"
 #include "Algo/BinarySearch.h"
 #include "Async/Async.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/BoxComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -1076,7 +1077,10 @@ bool AODTrafficManager::JunctionClear(int32 Cluster, int32 SelfLink) const
 		}
 		const FAgent& B = Agents[Order[SliceStart[In] + SliceNum[In] - 1]];   // nearest the junction
 		const float Dist = L.Length - B.S;
-		if (B.Link == In && Dist < 8000.0f && Dist / FMath::Max(B.V, 100.0f) < GapAcceptS)
+		// only a car that is arriving: one stood near the node (often stopped by the
+		// yielder's own nose on a skewed junction) blocked the side road for good;
+		// once the yielder goes, the any-link corridor test keeps the two apart
+		if (B.Link == In && Dist < 8000.0f && B.V > 100.0f && Dist / B.V < GapAcceptS)
 		{
 			return false;
 		}
@@ -1175,7 +1179,18 @@ bool AODTrafficManager::SpawnAgent(int32 Link, float S, uint8 Lane, float V, uin
 	Pose(Ag, Ag.CurPos, Ag.CurRot);
 	Ag.PrevPos = Ag.CurPos;
 	Ag.PrevRot = Ag.CurRot;
+	++WindowSpawns;
+	MinSpawnCm = FMath::Min(MinSpawnCm, FVector::Dist2D(Ag.CurPos, PlayerPos));
 	return true;
+}
+
+bool AODTrafficManager::Noticed(const FVector& P) const
+{
+	// 2D: TeleportToSpawn parks the pawn 6 km up until its ground snap, and the
+	// old 3D 15 m test let a refill drop cars right under it (Deals Gap 17:30)
+	const FVector2D D(P - PlayerPos);
+	const double Dist = D.Size();
+	return Dist < ClearCm || (Dist < PopInCm && FVector2D::DotProduct(D, CamFwd) > 0.25 * Dist);
 }
 
 void AODTrafficManager::UpdateRange(bool bFill)
@@ -1256,8 +1271,7 @@ void AODTrafficManager::UpdateRange(bool bFill)
 			while (S < RL.ExitS)
 			{
 				const FVector P = PosAt(RL.Link, S, -1);
-				if (FVector2D::DistSquared(FVector2D(P), FVector2D(PlayerPos)) < (double)SpawnRadiusCm * SpawnRadiusCm
-					&& FVector::DistSquared(P, PlayerPos) > 1500.0 * 1500.0)
+				if (FVector2D::DistSquared(FVector2D(P), FVector2D(PlayerPos)) < (double)SpawnRadiusCm * SpawnRadiusCm && !Noticed(P))
 				{
 					Made += SpawnAgent(RL.Link, S, Lane, V, Seed) ? 1 : 0;
 				}
@@ -1305,37 +1319,57 @@ void AODTrafficManager::TopUp()
 	const FODTrafficGraph& G = *Graph;
 	int32 Budget = 40;
 	TArray<int32> Remove;
-	for (const FRangeLink& RL : RangeLinks)
+	// one quota for the whole range: the old per-link roll (Have + rand > Target)
+	// kept a car on every short link whatever its share (Target 0.1), so SF's
+	// 517 block links filled ~6x over demand and locked its junctions solid
+	float TotalTarget = 0.0f;
+	int32 TotalHave = 0;
+	TArray<TPair<float, int32>> Short;   // (deficit, range link)
+	for (int32 r = 0; r < RangeLinks.Num(); ++r)
 	{
-		float V;
-		const float K = TargetPerCm(RL.Link, &V);
-		const float Target = K * RL.InRangeCm;
+		const FRangeLink& RL = RangeLinks[r];
+		const float Target = TargetPerCm(RL.Link) * RL.InRangeCm;
 		const int32 Have = SliceStamp[RL.Link] == StepId ? SliceNum[RL.Link] : 0;
-		const FODTrafficGraph::FLink& L = G.Links[RL.Link];
+		TotalTarget += Target;
+		TotalHave += Have;
 		if (Have > Target * 1.5f + 2.0f)
 		{
 			// the clock moved off a peak: thin the link out where nobody sees it
 			for (int32 o = SliceStart[RL.Link] + Have - 1; o >= SliceStart[RL.Link]; --o)
 			{
-				if (FVector::DistSquared(Agents[Order[o]].CurPos, PlayerPos) > (double)PopInCm * PopInCm)
+				if (FVector::DistSquared2D(Agents[Order[o]].CurPos, PlayerPos) > (double)PopInCm * PopInCm)
 				{
 					Remove.Add(Order[o]);
 					break;
 				}
 			}
-			continue;
 		}
-		++TopUpSalt;
-		if (Budget <= 0 || Have + Unit(TopUpSalt * 7 + RL.Link) > Target)
+		else if (Have < Target)
 		{
-			continue;
+			Short.Emplace(Target - Have, r);
 		}
+	}
+	Short.Sort([](const TPair<float, int32>& A, const TPair<float, int32>& B) { return A.Key > B.Key; });
+	for (const TPair<float, int32>& Sh : Short)
+	{
+		if (Budget <= 0 || TotalHave + 1 > TotalTarget + 0.5f)
+		{
+			break;
+		}
+		const FRangeLink& RL = RangeLinks[Sh.Value];
+		const FODTrafficGraph::FLink& L = G.Links[RL.Link];
+		const int32 Have = SliceStamp[RL.Link] == StepId ? SliceNum[RL.Link] : 0;
+		float V;
+		TargetPerCm(RL.Link, &V);
+		++TopUpSalt;
 		// alternate the two ends of the in-range stretch, so the road ahead of
 		// the player fills as well as the road behind
 		const float S = (TopUpSalt & 1) ? RL.EntryS : FMath::Max(RL.EntryS, RL.ExitS - 2000.0f);
-		if (FVector::DistSquared(PosAt(RL.Link, S, -1), PlayerPos) < (double)PopInCm * PopInCm)
+		const FVector P = PosAt(RL.Link, S, -1);
+		if (FVector::DistSquared2D(P, PlayerPos) < (double)PopInCm * PopInCm
+			|| Agents.ContainsByPredicate([&P](const FAgent& B) { return FVector::DistSquared2D(B.CurPos, P) < 1000.0 * 1000.0; }))
 		{
-			continue;
+			continue;   // a link start is a junction exit: a car crossing it is on another link
 		}
 		const float Need = CarLenCm + IdmMinGap * 100.0f + V * IdmHeadway * 0.5f;
 		int32 BestLane = -1;
@@ -1364,6 +1398,7 @@ void AODTrafficManager::TopUp()
 		if (BestLane >= 0 && SpawnAgent(RL.Link, S, (uint8)BestLane, V, TopUpSalt))
 		{
 			--Budget;
+			++TotalHave;
 		}
 	}
 	Remove.Sort([](int32 A, int32 B) { return A > B; });
@@ -1430,7 +1465,20 @@ void AODTrafficManager::Step(float Dt)
 		double Along;
 		if (InCorridor(Ag.CurPos, Ag.CurRot, PlayerPos, 15000.0, 220.0, Along))
 		{
+			// a parked player: after a short wait, steer round it (the corridor test
+			// lets go once the player is 2.2 m to the side) instead of queuing forever
+			// (Summit, a capture with the car parked on the road). ponytail: no check
+			// for oncoming traffic in the lane it swings into.
+			if (Ag.Dodge == 0.0f && Ag.StillS > 2.0f && Along < 2000.0 && PlayerVel.SizeSquared2D() < 100.0 * 100.0)
+			{
+				const float Side = FVector::DotProduct(PlayerPos - Ag.CurPos, Ag.CurRot.GetRightVector());
+				Ag.Dodge = Side >= 0.0f ? Side - 260.0f : Side + 260.0f;
+			}
 			Lead(Along, PlayerVel, 2);
+		}
+		if (Ag.Dodge != 0.0f && FVector::DistSquared2D(Ag.CurPos, PlayerPos) > 3000.0 * 3000.0)
+		{
+			Ag.Dodge = 0.0f;   // past it: back into the lane
 		}
 		for (const FVector& P : WreckPos)
 		{
@@ -1451,7 +1499,7 @@ void AODTrafficManager::Step(float Dt)
 						const FAgent& B = Agents[j];
 						// same link: FindLeader and the lane rules own it (and an adjacent
 						// lane on a bend would read as in the way)
-						if (B.Link != Ag.Link && Blocks(Ag.CurPos, Ag.CurRot, Ag.Id, B.CurPos, B.CurRot, B.Id, Along))
+						if (B.Link != Ag.Link && SimTime >= Ag.GhostUntil && Blocks(Ag.CurPos, Ag.CurRot, Ag.Id, B.CurPos, B.CurRot, B.Id, Along))
 						{
 							Lead(Along, B.CurRot.GetForwardVector() * B.V, 1);
 						}
@@ -1464,6 +1512,13 @@ void AODTrafficManager::Step(float Dt)
 			Lead(CarLenCm, FVector::ZeroVector, 2);   // bumped: stand
 		}
 		const float CarGap = Gap, CarV = LV;   // stop lines below are targets, not contacts
+		if (Why == 1 && Ag.StillS > 10.0f)
+		{
+			// a ring of cars each waiting on the next across a junction never clears
+			// (SF gridlock): the one stood longest drives through for a moment.
+			// ponytail: brief visible overlap; a junction reservation would avoid it.
+			Ag.GhostUntil = SimTime + 3.0;
+		}
 
 		const float DistEnd = L.Length - Ag.S;
 		auto StopAt = [&](float Dist)
@@ -1478,7 +1533,13 @@ void AODTrafficManager::Step(float Dt)
 		const FODTrafficGraph::FLink* NL = Ag.Next >= 0 ? &G.Links[Ag.Next] : nullptr;
 		if (!NL)
 		{
-			StopAt(DistEnd - StopLineCm);   // dead end with no way round: despawned there
+			StopAt(DistEnd - StopLineCm);
+			// dead end with no way round: it stops short of the end, so the S >= Length
+			// removal below never fired and a queue stood behind it for good
+			if (DistEnd < StopLineCm + 500.0f && Ag.V < 50.0f && !Noticed(Ag.CurPos))
+			{
+				Remove.AddUnique(i);
+			}
 		}
 		// a lane that ends: MOBIL safety test for the lane inside, else wait at its end
 		if (NL && Ag.Lane >= NL->Lanes && DistEnd < 30000.0f)
@@ -1572,13 +1633,14 @@ void AODTrafficManager::Step(float Dt)
 		Ag.A = Idm(Ag.V, V0, Gap, LV);
 		Advance(Ag.S, Ag.V, Ag.A, Dt, CarGap, CarV);
 		SlowWhy[Why] += Ag.V < 300.0f ? 1 : 0;
+		Ag.StillS = Ag.V < 50.0f ? Ag.StillS + Dt : 0.0f;
 
 		while (Ag.S >= G.Links[Ag.Link].Length)
 		{
 			if (Ag.Next < 0)
 			{
 				Ag.S = G.Links[Ag.Link].Length;
-				Remove.Add(i);
+				Remove.AddUnique(i);
 				break;
 			}
 			const FODTrafficGraph::FLink& Old = G.Links[Ag.Link];
@@ -1622,7 +1684,7 @@ void AODTrafficManager::Step(float Dt)
 			Ag.StopTime = 0.0f;
 		}
 		// ease toward the lane centre (lane changes and lane-count changes)
-		const float LatTarget = LaneLat(Ag.Link, Ag.Lane);
+		const float LatTarget = LaneLat(Ag.Link, Ag.Lane) + Ag.Dodge;
 		Ag.Lat += FMath::Clamp(LatTarget - Ag.Lat, -150.0f * Dt, 150.0f * Dt);
 		Ag.PrevPos = Ag.CurPos;
 		Ag.PrevRot = Ag.CurRot;
@@ -1988,8 +2050,11 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 		Body->OnComponentHit.AddUniqueDynamic(this, &AODTrafficManager::OnPlayerHit);
 		HookedPlayerBody = Body;
 	}
+	const FVector WasPos = PlayerPos;
 	PlayerPos = Pawn->GetActorLocation();
 	PlayerVel = Pawn->GetVelocity();
+	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	CamFwd = FVector2D(Cam ? Cam->GetCameraRotation().Vector() : Pawn->GetActorForwardVector()).GetSafeNormal();
 
 	int32 Hour, Dow;
 	ClockHourDow(Hour, Dow);
@@ -1998,7 +2063,9 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 
 	// a jump (spawn, teleport, area swap) refills the range; a drive tops it up
 	const double Moved = FVector2D::Distance(FVector2D(PlayerPos), FVector2D(RangeCenter));
-	if (Moved > SpawnRadiusCm)
+	// a teleport shorter than the radius (respawn on a nearby road) also refills,
+	// or it could land the player on a car that was already there
+	if (Moved > SpawnRadiusCm || FVector::Dist2D(WasPos, PlayerPos) > 10000.0)
 	{
 		ClearAgents();
 		UpdateRange(true);
@@ -2044,6 +2111,23 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 		const float N = FMath::Max(DiagSteps, 1);
 		UE_LOG(LogTemp, Display, TEXT("ODTrafficManager: AI-AI contacts %d pair(s) (%d at junctions), %.1f overlapping on average; slow cars held by lane leader %.0f, other-link car %.0f, player/wreck/bump %.0f, stop line %.0f"),
 			OverlapPairs.Num(), OverlapJunction, OverlapSteps / N, SlowWhy[0] / N, SlowWhy[1] / N, SlowWhy[2] / N, SlowWhy[3] / N);
+		// the health line: what "traffic flows" means, checkable from a log alone
+		TArray<float> Kmh;
+		int32 Hist[5] = {}, Still20 = 0, Still60 = 0;
+		for (const FAgent& Ag : Agents)
+		{
+			const float K = Ag.V * 0.036f;
+			Kmh.Add(K);
+			++Hist[K < 11.0f ? 0 : K < 30.0f ? 1 : K < 50.0f ? 2 : K < 80.0f ? 3 : 4];
+			Still20 += Ag.StillS > 20.0f ? 1 : 0;
+			Still60 += Ag.StillS > 60.0f ? 1 : 0;
+		}
+		Kmh.Sort();
+		UE_LOG(LogTemp, Display, TEXT("ODPerfTraffic: '%s' cars %d | slow<11kmh %.0f%% median %.0f km/h | kmh 0-11/11-30/30-50/50-80/80+ %d/%d/%d/%d/%d | still>20s %d still>60s %d | spawns %d min spawn dist %.0f m"),
+			*Graph->Name, Agents.Num(), Agents.Num() ? 100.0f * Hist[0] / Agents.Num() : 0.0f, Kmh.Num() ? Kmh[Kmh.Num() / 2] : 0.0f,
+			Hist[0], Hist[1], Hist[2], Hist[3], Hist[4], Still20, Still60, WindowSpawns, WindowSpawns ? MinSpawnCm / 100.0 : -1.0);
+		WindowSpawns = 0;
+		MinSpawnCm = 1.0e12;
 		OverlapPairs.Reset();
 		OverlapJunction = OverlapSteps = DiagSteps = 0;
 		FMemory::Memzero(SlowWhy);
