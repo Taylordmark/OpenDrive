@@ -106,6 +106,18 @@ code { font-family: var(--mono); font-size: .86em; }
     <tr><td>Gasquet noon</td><td class="n">.43</td><td class="n">.45</td><td class="n">.44</td><td class="n">.42</td><td class="n">.26</td></tr>
   </table></div>
   <p>Default set to <b>0.6</b>. It costs no GPU time; it's a constant term in Lumen's gather. Tune it live with <code>od.SkyLeak</code>. <b>Gasquet noon doesn't respond:</b> even with the sky fully unblocked it stays 26 % black. Here the sun-to-shade ratio is the limit. The open, sunlit road sets the exposure, and the trees stand back from it in their own shade (Howland Hill Rd has canopy over the road). Local shadow contrast is already 0.5. Next options: more bounce light under the trees (a brighter forest floor, foliage transmission per Gap 1B), or canopy closer over the road in the Gasquet forest layout.</p>
+  <h3>The tone-curve toe was the noon crush</h3>
+  <figure><img src="img/diag_toe_sweep.jpg" alt="Gasquet noon at FilmToe 0.55, 0.25 and 0.1"><figcaption>Gasquet noon at <code>od.FilmToe</code> 0.55 (engine) · 0.25 · 0.1</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet noon</th><th>mean</th><th>p5 / p50 / p95</th><th>black</th><th>DR (stops)</th></tr>
+    <tr><td>Toe 0.55 (engine)</td><td class="n">89</td><td class="n">0 / 20 / 229</td><td class="n">.425</td><td class="n">16.4</td></tr>
+    <tr><td>Toe 0.4</td><td class="n">89</td><td class="n">1 / 34 / 224</td><td class="n">.246</td><td class="n">16.4</td></tr>
+    <tr><td>Toe 0.25</td><td class="n">89</td><td class="n">3 / 44 / 218</td><td class="n">.092</td><td class="n">11.5</td></tr>
+    <tr><td>Toe 0.1</td><td class="n">90</td><td class="n">6 / 52 / 210</td><td class="n">.016</td><td class="n">9.7</td></tr>
+    <tr><td>Howland Hill photo</td><td class="n">109</td><td class="n">19 / 61 / –</td><td class="n">~.01</td><td class="n">8.8</td></tr>
+  </table></div>
+  <figure><img src="img/diag_toe_night.jpg" alt="Night headlights at toe 0.55 and 0.1"><figcaption>Night at toe 0.55 · 0.1: the flat 0.1 lifts the forest to dusk (mean 23 → 37, sky 3 → 19)</figcaption></figure>
+  <p>The shade wasn't missing light. The engine's 0.55 toe was crushing it to black. Toe 0.1 matches the photo at noon, but at night it lifts the dark forest to dusk and shows the low-LOD tree cards. So the toe now follows the sun: 0.55 with the sun at or below the horizon, easing to 0.1 by 15° of elevation (commit 1c068b7). <code>od.FilmToe</code> ≥ 0 still overrides it.</p>
   <details><summary>All ten after-fix pairs</summary><div class="stack">
     <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
     <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>
