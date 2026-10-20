@@ -154,6 +154,31 @@ def check_cured_grass():
         assert out[name][1] >= 0.85, f"{name} should open up into bare ground"
 
 
+def check_snow_aspect_drift():
+    """Gap 5: mirror of build_ground's snow_amt. South faces barer than north,
+    hollows fuller than ridges, flat open ground and no-DEM areas unchanged,
+    and no drift snow below the snow line."""
+    sat = lambda x: min(max(x, 0.0), 1.0)
+
+    def amt(snow_t, slope_deg, south, gully=0.0, ridge=0.0):
+        a = math.radians(slope_deg)
+        nz, ny = math.cos(a), math.sin(a) * (1 if south else -1)
+        steep_w = 1 - sat(nz) ** C["SLOPE_SOFTNESS"]
+        v = snow_t * (1 - steep_w * C["SNOW_STEEP_REDUCTION"])
+        k = ny * C["SNOW_ASPECT_GAIN"]
+        v *= 1 - sat(k) * C["SNOW_ASPECT_MELT"] + sat(-k) * C["SNOW_ASPECT_HOLD"]
+        return sat(v * (1 - ridge * C["SNOW_RIDGE_THIN"]) + gully * snow_t * C["SNOW_DRIFT_GULLY"])
+
+    s, n = amt(0.6, 25, True), amt(0.6, 25, False)
+    print(f"  snow 25 deg slope @ snow_t 0.6: south {s:.2f}  north {n:.2f}; "
+          f"gully {amt(0.6, 0, True, gully=1):.2f}  ridge {amt(0.6, 0, True, ridge=1):.2f}  flat {amt(0.6, 0, True):.2f}")
+    assert amt(0.6, 0, True) == amt(0.6, 0, False) == 0.6, "flat ground must not change"
+    assert s < 0.5 * n, "south faces should be clearly barer than north"
+    assert amt(0.6, 0, True, gully=1) > 0.8 and amt(0.6, 0, True, ridge=1) < 0.45
+    assert amt(0.0, 0, True, gully=1) == 0.0, "drifts must not appear below the snow line"
+    assert amt(1.0, 25, True) > 0.2, "south faces at full snow should still hold some"
+
+
 def contrast(x, k):
     return np.clip((x - 0.5) * k + 0.5, 0, 1)
 
@@ -229,6 +254,7 @@ def main():
     check_road_edge()
     check_layer_means()
     check_cured_grass()
+    check_snow_aspect_drift()
     print(f"OK - wrote {out / 'terrain_real_tiling.png'}")
 
 

@@ -166,6 +166,16 @@ SNOW_NOISE_STRENGTH = 1.3
 SNOW_STEEP_REDUCTION = 0.65
 SNOW_ALBEDO_GAIN = 1.45  # Snow006 mean albedo 0.58 -> ~0.84 (fresh snow 0.8-0.9)
 SNOW_ALBEDO_MAX = 0.95
+# snow by aspect + DEM (terrain research gap 5): sun faces melt first, wind
+# scours ridges and drifts fill hollows. pipeline/checks/check_terrain_real.py
+# check_snow_aspect_drift mirrors these.
+# ponytail: sun assumed south (every area is northern hemisphere); flip the
+# sign of nrm.y if a southern-hemisphere area is added
+SNOW_ASPECT_GAIN = 3.0     # x nrm.y (UE +y = south): a ~20 deg slope is a full sun/shade face
+SNOW_ASPECT_MELT = 0.6     # share of the snow a south face loses
+SNOW_ASPECT_HOLD = 0.25    # extra snow a north face keeps
+SNOW_DRIFT_GULLY = 0.5     # x gully x snow_t added (drifts; none below the snow line)
+SNOW_RIDGE_THIN = 0.4      # share of the snow ridges lose
 FOREST_LUMA_LOW = 0.075
 FOREST_LUMA_HIGH = 0.16
 SPRING_GREEN_COLOR = (0.30, 0.48, 0.15)
@@ -852,6 +862,11 @@ def build_ground():
                          g.mul(g.sub(g.noise_xy(xy, SNOW_NOISE_SCALE_CM, (91.0, 37.0)), g.c(0.5)),
                                g.c(SNOW_NOISE_STRENGTH))))
     snow_amt = g.mul(snow_t, g.sub(one, g.mul(steep_w, g.c(SNOW_STEEP_REDUCTION))))
+    ny = g.mul(g.mask(nrm, gg=True), g.c(SNOW_ASPECT_GAIN))
+    snow_amt = g.mul(snow_amt, g.add(g.sub(one, g.mul(g.sat(ny), g.c(SNOW_ASPECT_MELT))),
+                                     g.mul(g.sat(g.mul(ny, g.c(-1.0))), g.c(SNOW_ASPECT_HOLD))))
+    snow_amt = g.sat(g.add(g.mul(snow_amt, g.sub(one, g.mul(ridge, g.c(SNOW_RIDGE_THIN)))),
+                           g.mul(g.mul(gully, snow_t), g.c(SNOW_DRIFT_GULLY))))
     snow_w = g.height_blend(snow_amt, base["ao"], g.sub(g.c(1.1), base["ao"]))
     # ploughed bank: the shoulder fills first, with road grit in it
     snow_w = g.maxv(snow_w, g.mul(g.sat(g.mul(snow_t, g.c(SNOWBANK_GAIN))), shoulder_m))
