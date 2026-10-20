@@ -76,6 +76,8 @@ constexpr float NightFilmToe = 0.55f;
 constexpr float DayFilmToe = 0.1f;
 constexpr float FullDayToeElevDeg = 15.0f;
 TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (< 0 = follow sun elevation)."));
+// White balance sweep for the blue forest shade at 17:30 (audit Gap 3); unset = engine 6500 K.
+TAutoConsoleVariable<float> CVarWhiteTemp(TEXT("od.WhiteTemp"), -1.0f, TEXT("Grade volume WhiteTemp override in K (< 0 = engine default)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
@@ -525,18 +527,21 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	const UDirectionalLightComponent* SunLight = SunComp.Get();
+	const float SunElevDeg = SunLight ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-SunLight->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
 	if (APostProcessVolume* PPV = GradeVolume.Get())
 	{
 		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
 		float Toe = CVarFilmToe.GetValueOnGameThread();
 		if (Toe < 0.0f)
 		{
-			const UDirectionalLightComponent* Sun = SunComp.Get();
-			const float ElevDeg = Sun ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-Sun->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
-			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(ElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
+			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(SunElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
 		}
 		PPV->Settings.bOverride_FilmToe = true;
 		PPV->Settings.FilmToe = Toe;
+		const float WhiteTemp = CVarWhiteTemp.GetValueOnGameThread();
+		PPV->Settings.bOverride_WhiteTemp = WhiteTemp >= 0.0f;
+		PPV->Settings.WhiteTemp = WhiteTemp >= 0.0f ? WhiteTemp : 6500.0f;
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
@@ -583,9 +588,9 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		DiagAcc = 0.0f;
 		const UDirectionalLightComponent* S = SunComp.Get();
 		const USkyLightComponent* K = SkyLightComp.Get();
-		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f | sky %.2f (base %.2f)"),
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f)"),
 			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
-			S ? S->LightSourceAngle : -1.0f, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
 	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
