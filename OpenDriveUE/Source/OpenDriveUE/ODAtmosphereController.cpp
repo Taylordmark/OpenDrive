@@ -470,6 +470,11 @@ void AODAtmosphereController::SpawnGradeVolume()
 	S.LocalExposureShadowContrastScale = LocalShadowContrast;
 	S.bOverride_LocalExposureHighlightContrastScale = true;
 	S.LocalExposureHighlightContrastScale = LocalHighlightContrast;
+	// 2026-10-20 audit: Lumen treats masked canopy as solid, so forest shade
+	// got ~0 sky (overcast x30 sky light still 37 % black; Lumen GI off: 0.2 %).
+	// Real canopy passes ~10-20 % of open sky through/around the leaves.
+	S.bOverride_LumenSkylightLeaking = true;
+	S.LumenSkylightLeaking = 0.1f;
 
 	// Visual Style Realistic (PLAN-VISUALS.md Track A): the "car ad" grade -
 	// warm highlights, firmer shadows, more bloom, no grain. Color-grading
