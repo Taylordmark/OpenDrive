@@ -67,6 +67,8 @@ constexpr float FlashSeconds = 0.35f;
 // overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
 // for capture sweeps; re-applied every Tick (one float write).
 TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
+// Tone-curve toe sweep (2026-10-20 audit): < 0 leaves the engine curve alone.
+TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (engine 0.55; < 0 = no override)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
@@ -519,6 +521,9 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	if (APostProcessVolume* PPV = GradeVolume.Get())
 	{
 		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
+		const float Toe = CVarFilmToe.GetValueOnGameThread();
+		PPV->Settings.bOverride_FilmToe = Toe >= 0.0f;
+		if (Toe >= 0.0f) { PPV->Settings.FilmToe = Toe; }
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
