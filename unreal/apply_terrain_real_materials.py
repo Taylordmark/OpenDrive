@@ -12,8 +12,8 @@ Mostly the CC0 ambientCG sets the stylized versions already import
 ambientCG sets (content_src/realistic/terrain/manifest.json, imported here to
 /Game/OpenDrive/Realistic/Terrain/): Rock051 bedded cliff rock for steep
 ground and cut walls, Ground076 leaf litter for the forest floor, Moss002 for
-boulder moss, Gravel040 crushed stone for the road shoulder and embankment
-gravel. The rest is material math:
+boulder moss, Gravel040 crushed stone (no longer sampled since the shoulder
+and embankment gravel moved to the paler Gravel030 in the 2026-10-16 survey fix). The rest is material math:
   - anti-tiling: every planar layer is sampled twice, at its own tile and at
     a FAR_MUL-times larger, ROT_DEG-rotated, offset copy; a 17 m noise mixes
     the two up close and the far copy takes over with distance (DIST_*), so
@@ -36,6 +36,13 @@ gravel. The rest is material math:
     UDynamicMeshComponents and can't be Nanite. UE 5.8 needs no project
     setting (r.Nanite.Tessellation defaults to 1); `r.Nanite.Tessellation 0`
     turns it off.
+
+Terrain survey 2026-10-16 (docs/terrain_realism_research_src.html):
+satellite colour weighted more up close (SAT_NEAR_W), grass/dirt desaturated
+(*_SAT_KEEP), lush ground shows the grass layer (the ground cover cards are
+clumped accents), paler wider Gravel030 shoulder with dry-climate dust and a
+ploughed snowbank, snow at fresh-snow albedo, snow on boulder tops through
+MPC_Season (created here when missing).
 
 Track L: sat_macro() multiplies in a Sentinel-2 macro colour (SatTex, bound by
 AODTerrainManager in Realistic only; SatAmount 0 = off) before wetness/snow.
@@ -86,7 +93,7 @@ LAYERS = {
     "snow": ("Snow006", 1800.0),
     "boulder": ("Rock030", 260.0),
     "moss": ("Moss002", 300.0),
-    "shoulder": ("Gravel040", 300.0),
+    "shoulder": ("Gravel030", 300.0),   # was Gravel040 (linear luma 0.13, read as a dark mossy strip)
 }
 ROCK_TINT = (0.68, 0.67, 0.72)   # Rock051 -> Rock030's mean albedo (0.31), a touch cooler
 FAR_MUL = 3.7            # far copy's tile = near tile * this (incommensurate on purpose)
@@ -101,6 +108,17 @@ FAR_W_AT_DIST = 0.8      # never 1: two periods stay mixed at range too
 DIST_NORMAL_FLATTEN = 0.5
 
 TINT_KEEP = 0.35         # share of the texture's own chroma kept under the biome tint
+# terrain survey 2026-10-16 (docs/terrain_realism_research_src.html): the
+# ambientCG grass (S 0.56) and dirt (S 0.43) are far more saturated than the
+# real ground - keep this share of their saturation (lerp from grey)
+GRASS_SAT_KEEP = 0.6
+DIRT_SAT_KEEP = 0.55     # apply_road_material.py RealEdgeDirtSatKeep mirrors it
+# dry vs lush from the biome vertex tint's R/G (deciduous 0.38 .. desert 1.31):
+# lush ground shows the grass layer through (fewer dirt patches - the cards are
+# only clumped accents now), dry shoulders get dustier
+DRY_RG_LO = 0.6
+DRY_RG_HI = 1.2
+LUSH_DIRT_MUL = 0.35
 TINT_GAIN = 2.0          # same regain as the stylized hue_from_tint
 HEIGHT_BLEND = 0.6       # how far AO-as-height bends a blend's edge (0 = plain lerp)
 
@@ -127,6 +145,8 @@ SNOW_HIGH_CM = (3950.0 - ORIGIN_HEIGHT_M) * 100.0
 SNOW_NOISE_SCALE_CM = 4000.0
 SNOW_NOISE_STRENGTH = 1.3
 SNOW_STEEP_REDUCTION = 0.65
+SNOW_ALBEDO_GAIN = 1.45  # Snow006 mean albedo 0.58 -> ~0.84 (fresh snow 0.8-0.9)
+SNOW_ALBEDO_MAX = 0.95
 FOREST_LUMA_LOW = 0.075
 FOREST_LUMA_HIGH = 0.16
 SPRING_GREEN_COLOR = (0.30, 0.48, 0.15)
@@ -169,20 +189,24 @@ MELT_EDGE_DARKEN = 0.72
 MELT_EDGE_ROUGHNESS = 0.3
 SPARKLE_CELL_CM = 1.5
 SPARKLE_FADE_CM = 1500.0
-# road shoulder - identical to apply_ground_material.py (C++ texture contract)
+# road shoulder - ROAD_DIST_* identical to apply_ground_material.py (C++ texture contract)
 ROAD_DIST_RANGE_M = 16.0
 ROAD_DIST_COVERAGE_CM = 51200.0
-SHOULDER_MIN_M = 1.5
+SHOULDER_MIN_M = 2.0     # + jitter <= 3.5 m = ODForestManager GrassShoulderClearCm
 SHOULDER_MAX_M = 3.0
 SHOULDER_JITTER_M = 0.5
 SHOULDER_SOFT_M = 0.35
-SHOULDER_TINT = (1.05, 0.98, 0.9)   # Gravel040 (mean 0.39) - slightly warm grey
+SHOULDER_TINT = (1.08, 1.02, 0.92)  # Gravel030 (linear mean 0.26) - pale warm grey road gravel
+SHOULDER_DUST = 0.45     # extra dirt share on dry-climate shoulders ...
+SHOULDER_DUST_FROM_M = 0.4   # ... from here out (the road fringe only matches the plain mix)
+SNOWBANK_GAIN = 1.8      # ploughed bank: shoulder snow ahead of the open ground
+SNOWBANK_GRIT = (0.82, 0.8, 0.78)   # road grit / spray in the bank
 SHOULDER_EDGE_FADE_CM = 8000.0
 
 # satellite macro colour (Track L, sat_macro; pipeline/checks/check_sat_albedo.py
 # parses these)
 SAT_STRENGTH = 0.85      # overall share at full distance weight
-SAT_NEAR_W = 0.25        # weight up close, where texture detail leads ...
+SAT_NEAR_W = 0.6         # weight up close (was 0.25: one hue everywhere, survey gap 1) ...
 SAT_NEAR_CM = 3000.0     # ... until 30 m, ramping to full ...
 SAT_FAR_CM = 20000.0     # ... at 200 m
 SAT_TINT_LUMA_K = 0.24   # S2 luminance expected per unit biome-tint luminance (flat ground) ...
@@ -206,6 +230,12 @@ MOSS_UP_LO = 0.45        # normal.z where moss starts ...
 MOSS_UP_HI = 0.8         # ... and where it's full
 MOSS_NOISE_CM = 250.0
 MOSS_MAX = 0.85
+# snow on boulder tops: MPC_Season.SnowCover (ODGroundCover::SyncSeason
+# copies the foliage SnowCover in; the boulders have no MID)
+SEASON_MPC = f"{MAT_DIR}/MPC_Season"
+ROCK_SNOW_UP_LO = 0.35
+ROCK_SNOW_UP_HI = 0.75
+ROCK_SNOW_GAIN = 1.6
 # Nanite displacement: Rock030 has no published real-world size; at the
 # 260 cm boulder tile 8 cm full range (p5-p95 of the height map ~ 5.6 cm) reads as
 # weathered relief without swallowing the 20-50 cm small boulders. Centre =
@@ -437,6 +467,36 @@ def mul_albedo(g, layer, tint):
     return dict(layer, albedo=g.mul(layer["albedo"], tint))
 
 
+def desat_layer(g, layer, keep):
+    """Keep `keep` of the albedo's saturation (lerp from its grey)."""
+    return dict(layer, albedo=g.lerp(g.desat(layer["albedo"]), layer["albedo"], g.c(keep)))
+
+
+def snow_layer(g, layer):
+    """Snow006 brightened to fresh-snow albedo."""
+    return dict(layer, albedo=g.minv(g.mul(layer["albedo"], g.c(SNOW_ALBEDO_GAIN)), g.c(SNOW_ALBEDO_MAX)))
+
+
+def season_mpc():
+    """MPC_Season with a SnowCover scalar. Created only when missing: a
+    rebuild would mint a new parameter Id and break the compiled reference."""
+    if unreal.EditorAssetLibrary.does_asset_exist(SEASON_MPC):
+        mpc = unreal.load_asset(SEASON_MPC)
+    else:
+        mpc = tools.create_asset("MPC_Season", MAT_DIR, unreal.MaterialParameterCollection,
+                                 unreal.MaterialParameterCollectionFactoryNew())
+        p = unreal.CollectionScalarParameter()
+        p.set_editor_property("parameter_name", "SnowCover")
+        p.set_editor_property("default_value", 0.0)
+        mpc.set_editor_property("scalar_parameters", [p])
+        if not unreal.EditorAssetLibrary.save_asset(SEASON_MPC, only_if_is_dirty=False):
+            raise RuntimeError(f"save failed: {SEASON_MPC}")
+    names = [str(p.get_editor_property("parameter_name")) for p in mpc.get_editor_property("scalar_parameters")]
+    if "SnowCover" not in names:
+        raise RuntimeError(f"{SEASON_MPC} has no SnowCover scalar ({names})")
+    return mpc
+
+
 def strata(g, world_pos, world_xy, band_cm, seed):
     """Albedo multiplier (vec3) + band value: world-Z rock layers, warped by
     XY noise so they dip and undulate instead of reading as contour lines."""
@@ -650,6 +710,10 @@ def build_ground():
     luma = g.dot(vtint, g.c3(0.2126, 0.7152, 0.0722))
 
     L = {k: planar_layer(g, SETS[k], xy, var_w, dist_t) for k in ("grass", "forest", "dirt", "scree", "snow")}
+    L["grass"] = desat_layer(g, L["grass"], GRASS_SAT_KEEP)
+    L["dirt"] = desat_layer(g, L["dirt"], DIRT_SAT_KEEP)
+    L["snow"] = snow_layer(g, L["snow"])
+    dry_t = g.ramp(g.div(g.mask(vtint, r=True), g.maxv(g.mask(vtint, gg=True), g.c(0.01))), DRY_RG_LO, DRY_RG_HI)
 
     def biome_tint(albedo):
         """Vertex tint leads the hue (stylized desaturate-and-retint), then
@@ -672,6 +736,7 @@ def build_ground():
                               g.noise_xy(xy, PATCH_COARSE_SCALE_CM, (59.0, 11.0)), g.c(0.6)), 1.8)
     dirt_alpha = g.sat(g.add(g.mul(g.noise_xy(xy, MACRO_DIRT_SCALE_CM, (0.0, 0.0)), g.c(DIRT_PATCH_STRENGTH)),
                              g.mul(g.ramp(patch, 0.78, 0.95), g.c(0.75))))
+    dirt_alpha = g.mul(dirt_alpha, g.lerp(g.c(LUSH_DIRT_MUL), one, dry_t))
     veg = blend_layers(g, veg, L["dirt"], g.height_blend(dirt_alpha, veg["ao"], L["dirt"]["ao"]))
     veg["albedo"] = g.lerp(veg["albedo"], g.mul(veg["albedo"], g.c3(*PATCH_DRY_MUL)), g.ramp(patch, 0.5, 0.72))
 
@@ -702,7 +767,6 @@ def build_ground():
     steep = blend_layers(g, rock, scree, treeline_t)
 
     base = blend_layers(g, steep, veg, g.height_blend(flat_w, steep["ao"], veg["ao"]))
-    base = road_edge_blend(g, base, xy, flat_w, L["dirt"])
 
     # sand / beach (stylized parity; no-op inland)
     sand = g.mul(g.sat(g.div(g.sub(g.c(BEACH_BAND_CM), g.sub(z, g.scalar_param("SeaLevelZCm", -OFF_Z_CM))),
@@ -711,6 +775,9 @@ def build_ground():
     base["rough"] = g.lerp(base["rough"], g.c(SAND_ROUGHNESS), sand)
 
     base["albedo"] = sat_macro(g, base["albedo"], xy, depth, vtint, flat_w)
+    # shoulder after the satellite: its 10 m texels mix road and verge and
+    # only green the gravel into a mossy strip
+    base, shoulder_m = road_edge_blend(g, base, xy, flat_w, L["dirt"], dry_t)
     base = pave_layer(g, base, xy, var_w, dist_t, flat_w)
 
     # wetness: soil darkens and soaks it up (more in crevices), rock gets slick
@@ -735,7 +802,10 @@ def build_ground():
                                g.c(SNOW_NOISE_STRENGTH))))
     snow_amt = g.mul(snow_t, g.sub(one, g.mul(steep_w, g.c(SNOW_STEEP_REDUCTION))))
     snow_w = g.height_blend(snow_amt, base["ao"], g.sub(g.c(1.1), base["ao"]))
-    out = blend_layers(g, base, L["snow"], snow_w)
+    # ploughed bank: the shoulder fills first, with road grit in it
+    snow_w = g.maxv(snow_w, g.mul(g.sat(g.mul(snow_t, g.c(SNOWBANK_GAIN))), shoulder_m))
+    snow = mul_albedo(g, L["snow"], g.lerp(g.c3(1.0, 1.0, 1.0), g.c3(*SNOWBANK_GRIT), shoulder_m))
+    out = blend_layers(g, base, snow, snow_w)
     # melt rim: partial cover = wet, dark, glossy (4 w (1 - w) peaks at 0.5)
     melt = g.mul(g.mul(snow_w, g.sub(one, snow_w)), g.c(4.0))
     out["albedo"] = g.mul(out["albedo"], g.lerp(one, g.c(MELT_EDGE_DARKEN), melt))
@@ -823,9 +893,12 @@ def pave_layer(g, base, xy, var_w, dist_t, flat_w):
     return blend_layers(g, base, pave, w)
 
 
-def road_edge_blend(g, base, xy, flat_w, dirt):
+def road_edge_blend(g, base, xy, flat_w, dirt, dry_t):
     """Gravel/dirt shoulder from the C++ RoadDistTex field (contract identical
-    to M_GroundStylized). apply_road_material.py's RealEdge* fringe mirrors it."""
+    to M_GroundStylized). apply_road_material.py's RealEdge* fringe mirrors it
+    (set, tile, tint, dirt noise, dirt saturation). Dry climates get a dustier
+    shoulder away from the pavement edge. Returns (layer, shoulder mask) - the
+    mask also places the ploughed snowbank."""
     white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
     origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="RoadDistOrigin")
     cov = g.c(ROAD_DIST_COVERAGE_CM)
@@ -848,12 +921,14 @@ def road_edge_blend(g, base, xy, flat_w, dirt):
     gravel = g.sample(s["A"], uv, "A")
     sh = dict(
         albedo=g.lerp(g.mul(gravel, g.c3(*SHOULDER_TINT), a_out="RGB"), g.mul(dirt["albedo"], g.c(0.9)),
-                      g.sat(g.mul(g.sub(fine, g.c(0.3)), g.c(2.5)))),
+                      g.sat(g.add(g.mul(g.sub(fine, g.c(0.3)), g.c(2.5)),
+                                  g.mul(g.mul(dry_t, g.c(SHOULDER_DUST)),
+                                        g.ramp(road_d, SHOULDER_DUST_FROM_M, SHOULDER_DUST_FROM_M + 0.8))))),
         normal=g.sample(s["N"], uv, "N"),
         rough=g.c(0.9),
         ao=g.mask(g.sample(s["AO"], uv, "AO"), r=True, a_out="RGB"),
     )
-    return {k: g.lerp(base[k], sh[k], m, b_out="RGB" if k == "normal" else "") for k in base}
+    return {k: g.lerp(base[k], sh[k], m, b_out="RGB" if k == "normal" else "") for k in base}, m
 
 
 # =========================================================== M_Embankment_real
@@ -861,9 +936,9 @@ def build_embankment():
     mat, path = new_material("M_Embankment_real")
     g = G(mat)
     wp, xy, nrm, depth, dist_t, var_w = shared_signals(g)
-    dirt = planar_layer(g, SETS["dirt"], xy, var_w, dist_t)
+    dirt = desat_layer(g, planar_layer(g, SETS["dirt"], xy, var_w, dist_t), DIRT_SAT_KEEP)
     gravel = mul_albedo(g, planar_layer(g, SETS["shoulder"], xy, var_w, dist_t, tile_cm=450.0), g.c3(*SHOULDER_TINT))
-    grass = planar_layer(g, SETS["grass"], xy, var_w, dist_t)
+    grass = desat_layer(g, planar_layer(g, SETS["grass"], xy, var_w, dist_t), GRASS_SAT_KEEP)
     v = g.mask(g.node(unreal.MaterialExpressionTextureCoordinate, coordinate_index=0), gg=True)
 
     out = blend_layers(g, dirt, gravel, g.height_blend(
@@ -894,6 +969,15 @@ def build_rock():
     up = g.ramp(g.mask(nrm, b=True), MOSS_UP_LO, MOSS_UP_HI)
     moss_alpha = g.mul(g.mul(up, g.contrast(g.noise_xy(xy, MOSS_NOISE_CM, (43.0, 31.0)), 1.6)), g.c(MOSS_MAX))
     out = blend_layers(g, rock, moss, g.height_blend(moss_alpha, rock["ao"], g.sub(g.c(1.0), rock["ao"])))
+    # snow on the tops (world up), crevices first
+    cover = g.node(unreal.MaterialExpressionCollectionParameter)
+    cover.set_editor_property("collection", season_mpc())   # collection first: the name resolves the Id
+    cover.set_editor_property("parameter_name", "SnowCover")
+    sup = g.ramp(g.mask(nrm, b=True), ROCK_SNOW_UP_LO, ROCK_SNOW_UP_HI)
+    snow_alpha = g.sat(g.sub(g.mul(g.mul(sup, cover), g.c(ROCK_SNOW_GAIN)),
+                             g.mul(g.noise_xy(xy, MOSS_NOISE_CM, (11.0, 71.0)), g.c(0.4))))
+    snow = snow_layer(g, planar_layer(g, SETS["snow"], xy, var_w, dist_t, tile_cm=600.0))
+    out = blend_layers(g, out, snow, g.height_blend(snow_alpha, out["ao"], g.sub(g.c(1.1), out["ao"])))
     out["albedo"] = g.mul(out["albedo"], g.lerp(g.c(0.8), g.c(1.0), out["ao"]))
     out["h"] = rock["h"]
     disp = unreal.DisplacementScaling()

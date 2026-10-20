@@ -3268,13 +3268,21 @@ def _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy, bounds
             continue   # the flattest road keeps its own profile untouched
         lo, hi = bounds[seg]
         k0, k1 = max(lo, e["edge"] - half), min(hi, e["edge"] + half)
+        # a bridge/tunnel inside the transition pins its own grade: the blend
+        # must reach 0 at it, not stop dead beside it (2026-10-15, Oahu
+        # (16152,-20771): approach lifted 2.45 m right up to a tunnel portal
+        # whose station kept its grade - a 2.5 m pavement step at the bore)
+        st = [s_m[k] - e["s"] for k in range(k0, k1 + 1) if structural[k]]
+        span_lo = -max((v for v in st if v <= 0), default=-TRANSITION_LEN_M)
+        span_hi = min((v for v in st if v >= 0), default=TRANSITION_LEN_M)
         for k in range(k0, k1 + 1):
             if structural[k]:
                 continue
             d = abs(s_m[k] - e["s"])
-            if d > TRANSITION_LEN_M:
+            span = min(TRANSITION_LEN_M, span_lo if s_m[k] < e["s"] else span_hi)
+            if d >= span and d > 0:
                 continue
-            t = d / TRANSITION_LEN_M
+            t = d / span if span > 0 else 0.0
             weight = 1.0 - (3.0 * t * t - 2.0 * t * t * t)   # 1 at crossing, 0 at edge
             regraded[k] = elev[k] * (1.0 - weight) + junction_elev * weight
             regraded_east[k] = east[k] * (1.0 - weight) + snap_xy[0] * weight

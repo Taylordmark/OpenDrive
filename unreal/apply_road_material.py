@@ -243,7 +243,7 @@ RealWetFlatten = 0.35           # normal flattened toward up at Wetness 1
 # Road-edge blend (PLAN-VISUALS join J). The pavement used to stop in a hard
 # line against the terrain's gravel shoulder (M_GroundStylized_real's
 # road_edge_blend, which starts right at the pavement edge). Now the outer
-# decimetres break up into that same shoulder: Gravel040 + Ground037 sampled
+# decimetres break up into that same shoulder: Gravel030 + Ground037 sampled
 # in WORLD XY at the terrain's tiles, tint and 150 cm dirt-mix noise, so the
 # gravel pattern runs on across the seam. The fringe width wanders along the
 # road (RealEdgeCellM) and crumbles (RealEdgeCrumble*); the wrap lip (no
@@ -261,11 +261,12 @@ RealWetFlatten = 0.35           # normal flattened toward up at Wetness 1
 # pipeline/checks/check_terrain_real.py mirrors this and checks the
 # terrain-matching constants against apply_terrain_real_materials.py;
 # pipeline/checks/check_pad_edge.py checks the pad/junction side on real tiles.
-RealEdgeSet = ("Gravel040", "/Game/OpenDrive/Realistic/Terrain")   # = terrain LAYERS["shoulder"]
+RealEdgeSet = ("Gravel030", "/Game/OpenDrive/Textures/Ground")     # = terrain LAYERS["shoulder"]
 RealEdgeTileCm = 300.0
-RealEdgeTint = (1.05, 0.98, 0.9)                                   # = terrain SHOULDER_TINT
+RealEdgeTint = (1.08, 1.02, 0.92)                                  # = terrain SHOULDER_TINT
 RealEdgeDirtSet = ("Ground037", "/Game/OpenDrive/Textures/Ground")  # = terrain LAYERS["dirt"]
 RealEdgeDirtTileCm = 850.0
+RealEdgeDirtSatKeep = 0.55      # = terrain DIRT_SAT_KEEP
 RealEdgeDirtNoiseCm = 150.0     # = road_edge_blend's `fine` noise
 RealEdgeDirtSeed = (5.0, 67.0)
 RealEdgeMinM = 0.1              # fringe width range (m of pavement eaten) ...
@@ -790,8 +791,11 @@ if REAL:   # road-edge blend into the terrain shoulder (see RealEdge*)
     e_ao.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
     gravel_e = g.mul(g.mask(g.sample(e_set["albedo"], uv_e), r=True, gg=True, b=True, a_out="RGB"),
                      g.const3(*RealEdgeTint))
-    dirt_e = g.mul(g.mask(g.sample(load_asphalt(*RealEdgeDirtSet)["albedo"], g.mul(wxy, g.const(1.0 / RealEdgeDirtTileCm))),
-                          r=True, gg=True, b=True, a_out="RGB"), g.const(0.9))
+    dirt_e = g.mask(g.sample(load_asphalt(*RealEdgeDirtSet)["albedo"], g.mul(wxy, g.const(1.0 / RealEdgeDirtTileCm))),
+                    r=True, gg=True, b=True, a_out="RGB")
+    # = the terrain's desat_layer (Desaturation node's default luminance weights)
+    dirt_e = g.lerp(g.dotp(dirt_e, g.const3(0.3, 0.59, 0.11)), dirt_e, g.const(RealEdgeDirtSatKeep))
+    dirt_e = g.mul(dirt_e, g.const(0.9))
     dirt_mix = g.clamp01(g.mul(g.sub(world_noise(RealEdgeDirtNoiseCm, RealEdgeDirtSeed), g.const(0.3)), g.const(2.5)))
     edge_albedo = g.mul(g.lerp(gravel_e, dirt_e, dirt_mix),
                         g.lerp(g.const(0.85), g.const(1.0), g.mask(e_ao, r=True)))   # terrain's cavity darkening

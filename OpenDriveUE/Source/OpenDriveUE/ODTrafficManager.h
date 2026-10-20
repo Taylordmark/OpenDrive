@@ -69,9 +69,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Traffic")
 	float DespawnRadiusCm = 95000.0f;
 
-	/** Top-up spawns never land closer to the player than this (pop-in). */
+	/** Top-up spawns never land closer to the player than this (pop-in); a refill
+	 *  (load / teleport) only keeps out of the camera's view inside it. */
 	UPROPERTY(EditAnywhere, Category = "Traffic")
 	float PopInCm = 30000.0f;
+
+	/** No spawn of any kind lands closer to the player than this (2D). */
+	UPROPERTY(EditAnywhere, Category = "Traffic")
+	float ClearCm = 6000.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Traffic")
 	int32 MaxAgents = 1500;
@@ -95,6 +100,9 @@ private:
 		float Lat = 0.0f;         // lateral offset (cm, + = right), eased
 		float V0Factor = 1.0f;    // 0.9..1.1 of the limit
 		float StopTime = 0.0f;    // seconds stood at a stop line
+		float StillS = 0.0f;      // seconds stood still (any reason)
+		float Dodge = 0.0f;       // lateral bias (cm) to pass a parked player
+		double GhostUntil = 0.0;  // deadlock breaker: ignores other-link cars until this sim time
 		double HoldUntil = 0.0;   // bumped by the player: stands until this sim time
 		uint32 Seed = 0;
 		uint8 Lane = 0;           // 0 = kerb lane
@@ -163,6 +171,7 @@ private:
 	bool FindLeader(int32 Self, uint8 Lane, float& OutGap, float& OutV) const;
 	void ClockHourDow(int32& OutHour, int32& OutDow) const;
 	bool TrafficWanted();
+	bool Noticed(const FVector& P) const;   // a car appearing or vanishing here would be seen
 	void BuildModels();
 
 	UFUNCTION()
@@ -185,6 +194,7 @@ private:
 	FVector RangeCenter = FVector(1.0e12);
 	FVector PlayerPos = FVector::ZeroVector;
 	FVector PlayerVel = FVector::ZeroVector;
+	FVector2D CamFwd = FVector2D(1.0, 0.0);
 	uint32 TopUpSalt = 0;
 
 	TArray<double> ClusterBusyUntil;   // junction cluster -> sim time a yielder's crossing ends
@@ -229,4 +239,6 @@ private:
 	TSet<uint64> OverlapPairs;
 	int32 OverlapJunction = 0, OverlapSteps = 0, DiagSteps = 0;
 	int32 SlowWhy[4] = {};
+	int32 WindowSpawns = 0;
+	double MinSpawnCm = 1.0e12;
 };

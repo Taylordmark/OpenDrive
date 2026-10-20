@@ -1012,3 +1012,10 @@ void AODWeatherController::Reroll()
 		Roll();
 	}
 }
+
+void AODWeatherController::ResumeAuto(EODWeatherState S)
+{
+	ForceState(StateName(S), /*bInstant*/true);
+	bForced = false;
+	HoldLeft = FMath::FRandRange(HOLD_MIN_S, HOLD_MAX_S);
+}

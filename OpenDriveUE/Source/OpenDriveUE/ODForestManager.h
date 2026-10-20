@@ -131,6 +131,10 @@ public:
 	 *  Set before FinishSpawning so BeginPlay's elevation/centerline/station
 	 *  loads keep only points within VistaLoadPadCm of the wedge. */
 	FODVistaRegion Vista;
+
+	/** A Tick that built no near tile and no far chunk - everything in reach
+	 *  is up. The menu's start vista waits on it (2026-10-16). */
+	bool IsInitialStreamingSettled() const { return bSettled; }
 	static constexpr double VistaLoadPadCm = 25000.0;   // > ForestBandCm + one tile
 
 	/** Read-only accessor into BiomeRecipeTable (ODForestManager.cpp,
@@ -814,6 +818,7 @@ private:
 	// BuildTile() and UpdateCollision() log at different points in Tick().
 	double LastGroundCoverLogTime = 0.0;
 	bool bReady = false;
+	bool bSettled = false;
 
 	// Player's last-known world Z (2026-08-26, live-drive bug: trees found
 	// rendered far below the terrain surface on Green Valley). GroundAt()'s/

@@ -1499,7 +1499,12 @@ void AODRaceHUD::DrawLoadingScreen(const AODMainMenu* Menu, float Veil) const
 
 	float Target = 1.0f;
 	FString Status = TEXT("Ready");
-	if (Veil >= 1.0f && Menu)
+	if (Veil >= 1.0f && Menu && Menu->IsStartLoading())
+	{
+		Target = 0.9f;   // the start vista streaming behind the screen (no tile counts for it)
+		Status = TEXT("Preparing start");
+	}
+	else if (Veil >= 1.0f && Menu)
 	{
 		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
 		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
@@ -1540,7 +1545,10 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	// (2026-08-27, spawn-loading-screen task) - fully opaque so the player
 	// never sees the car airborne/popping in, or the world visibly filling in
 	// around it, while a fresh area's road/terrain tiles are still streaming.
-	if (Menu->IsLoading())
+	// ...and the Start screen's vista (Taylor, 2026-10-16): the globe used to sit
+	// there half-interactive while the vista streamed, then cut; now the screen
+	// holds until AODMainMenu's fade-cut, whose camera fade-in reveals the vista
+	if (Menu->IsLoading() || Menu->IsStartLoading())
 	{
 		DrawLoadingScreen(Menu, 1.0f);
 		return;
@@ -1593,13 +1601,9 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		}
 		else
 		{
-			if (Menu->IsStartLoading())   // Start (2026-10-14): still on the globe while the vista streams
-			{
-				P.Text(TEXT("Loading start\u2026"), Canvas->SizeX * 0.05f, Canvas->SizeY * 0.9f, 16.0f, EMenuWeight::SemiBold, DimCol);
-			}
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")},
 				{TEXT("Enter"), Screen == EODMenuScreen::Start ? TEXT("Drive") : TEXT("Confirm")},
-				{TEXT("Esc"), Screen == EODMenuScreen::Garage && Menu->IsGarageMode() ? TEXT("Resume") : TEXT("Back")}});
+				{TEXT("Esc"), TEXT("Back")}});
 		}
 		return;
 	}
@@ -2186,7 +2190,7 @@ void AODRaceHUD::DrawHUD()
 			LoadingShownAt = -1.0;
 			LoadingEndedAt = FPlatformTime::Seconds();
 		}
-		else if (!LoadMenu->IsLoading())
+		else if (!LoadMenu->IsLoading() && !LoadMenu->IsStartLoading())
 		{
 			LoadingShownAt = -1.0;   // back to a menu screen: no fade over it
 		}

@@ -62,6 +62,9 @@ def check_road_edge():
     assert R["RealEdgeSet"][0] == C["LAYERS"]["shoulder"][0] and R["RealEdgeTileCm"] == C["LAYERS"]["shoulder"][1],         "road fringe gravel != terrain shoulder set/tile"
     assert R["RealEdgeDirtSet"][0] == C["LAYERS"]["dirt"][0] and R["RealEdgeDirtTileCm"] == C["LAYERS"]["dirt"][1],         "road fringe dirt != terrain dirt set/tile"
     assert tuple(R["RealEdgeTint"]) == tuple(C["SHOULDER_TINT"]), "road fringe tint != SHOULDER_TINT"
+    assert R["RealEdgeDirtSatKeep"] == C["DIRT_SAT_KEEP"], "road fringe dirt saturation != DIRT_SAT_KEEP"
+    assert R["RealEdgeSet"][1] == ("/Game/OpenDrive/Realistic/Terrain" if C["LAYERS"]["shoulder"][0] in C["REAL_SETS"]
+                                   else "/Game/OpenDrive/Textures/Ground"), "road fringe gravel loads from the wrong dir"
     assert f"g.noise_xy(xy, {R['RealEdgeDirtNoiseCm']}, {tuple(R['RealEdgeDirtSeed'])})" in src,         "road fringe dirt-mix noise != road_edge_blend's fine noise"
 
     v0 = np.arange(0.0, 5000.0, 0.02) + 12345.0          # 5 km of road, 2 cm steps

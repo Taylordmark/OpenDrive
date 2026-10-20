@@ -1,0 +1,237 @@
+<title>OpenDrive Light Audit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a single reading column of ranked findings; each finding = evidence image, measured numbers, fix-option table. */
+:root {
+  --bg: #f3f4f2; --panel: #ffffff; --fg: #1d2421; --muted: #5d6863; --line: #d5dad6;
+  --accent: #b86b0c;      /* low-sun amber */
+  --accent-soft: #f6e7d1;
+  --bad: #b3261e; --ok: #2f7a4a;
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141816; --panel: #1c211f; --fg: #e3e8e5; --muted: #9aa59f; --line: #2f3633;
+  --accent: #f0a640; --accent-soft: #3a2c17; --bad: #ff8a80; --ok: #7fd19c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #141816; --panel: #1c211f; --fg: #e3e8e5; --muted: #9aa59f; --line: #2f3633;
+  --accent: #f0a640; --accent-soft: #3a2c17; --bad: #ff8a80; --ok: #7fd19c; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 17px/1.55 var(--body); }
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 32px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.1; margin: 0; }
+h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-weight: 700; letter-spacing: .01em; }
+h2 { font-size: 1.9rem; font-weight: 700; }
+h3 { font-size: 1.25rem; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+p, li { max-width: 68ch; }
+a { color: var(--accent); }
+.lede { font-size: 1.15rem; color: var(--muted); margin-top: 10px; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+section.find { display: flex; flex-direction: column; gap: 14px; padding-block: 28px; border-top: 1px solid var(--line); }
+.rank { font-family: var(--mono); font-size: .8rem; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
+figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+figure img { width: 100%; height: auto; border-radius: 4px; border: 1px solid var(--line); background: #000; }
+figcaption { font-size: .88rem; color: var(--muted); }
+.nums { font-family: var(--mono); font-size: .86rem; font-variant-numeric: tabular-nums; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; min-width: 640px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--display); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; font-size: .85rem; color: var(--muted); }
+td.n { font-family: var(--mono); font-size: .82rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pick { background: var(--accent-soft); }
+.summary { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; }
+.summary ol { margin: 8px 0 0; padding-left: 1.3em; display: flex; flex-direction: column; gap: 4px; }
+code { font-family: var(--mono); font-size: .86em; }
+.tag { font-family: var(--mono); font-size: .75rem; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; }
+.tag.bad { color: var(--bad); } .tag.ok { color: var(--ok); }
+</style>
+
+<div class="wrap stack">
+<header class="stack">
+  <div class="rank">Lighting · sky · cars research — 2026-10-16 — branch claude/gracious-kare-03c239 @ fdc7f2c</div>
+  <h1>OpenDrive Light Audit</h1>
+  <p class="lede">The game was captured as it plays now, at 5 spots and 5 lighting conditions, plus the car in the garage. Each shot sits next to an openly licensed photo of a similar real place and is measured. Gaps are ranked by how much they cost the "looks like the real place" bar. Every gap lists fix options with gain, GPU cost, effort and licensing. No game code or content was changed.</p>
+</header>
+
+<div class="summary">
+  <h3>Ranked gaps</h3>
+  <ol>
+    <li><b>Forest shade renders pure black.</b> 46 % of the Gasquet frame is ≤5/255 in every channel; real redwood roads are 0–1 %. Diagnostics show the sky and bounce light is there but 14+ stops under the sun, so exposure crushes it. The fix is local exposure plus restoring canopy bounce and transmission.</li>
+    <li><b>Overcast and rain look like clear sun.</b> Hard shadows and a blue sky remain. Dynamic range is 16.3 stops against 5.8 in a real overcast photo.</li>
+    <li><b>Golden hour inside forest turns blue.</b> Open terrain at 17:30 reads correctly warm.</li>
+    <li><b>Car paint reads satin, not lacquer.</b> In the garage the floor mirrors the hex lights but the car body shows none of them.</li>
+    <li><b>The wet road barely reads after 8 minutes of rain.</b></li>
+    <li><b>The car contact-shadow material fails to compile on SM6</b> (one-line fix known).</li>
+    <li><b>Frames run about ⅔ stop dark, and the zenith is a dull mid-blue.</b></li>
+    <li><b>Performance:</b> the GPU takes 24.7 ms at Gasquet noon at only 1280×720, measured clean with Ollama stopped. That is already over the 22 ms budget, and other shots ran 24–38 ms. A rain-only game-thread build-up reaches 190 ms.</li>
+  </ol>
+</div>
+
+<section class="find">
+  <h3>How every shot was taken</h3>
+  <p>Each shot used the real <code>-game</code> path on the GPU (no <code>-nullrhi</code>, no offscreen). The run used the main checkout at fdc7f2c with the normal launch scalability, and ODPerf confirmed the same on every shot: <span class="nums">1280x720 sp 100 sg 3 style 1</span>. Lumen, VSM, the <code>_real</code> materials, forest, buildings and traffic were all on.</p>
+  <p>Season was pinned with <code>-odseason=summer</code> to match summer photos (the saved season is Winter). Hour was set with <code>-odhour</code>, weather with <code>od.Weather</code>, and driving started with <code>-odgo=8</code>.</p>
+  <p>A shot only counts if the loading gate released normally (<code>LOADSCREEN released</code>, not the failsafe) <i>before</i> the screenshot. The screenshot came 40–450 s after release. Every driving shot (12 looks + 8 diagnostics) passes. The garage shot is the boot menu, which has no gate.</p>
+  <p>Console weather (<code>od.Weather</code>) blends in over 90 s and wetness builds over ~400 s, so overcast and rain were re-shot at 150 s and 480 s. A player who picks Rain in the menu gets it instantly. Tooling: <code>tools/lighting_capture/</code> (capture.ps1, batch.ps1, followup.ps1, diag.ps1, measure.py). The two ShowFlag diagnostics are <code>diag.ps1 round3</code>.</p>
+  <p class="nums">Metrics are computed on the top 72 % of the frame (HUD cropped): mean / p5 / p95 = sRGB luminance 0–255 · DR = log2(p99/p1) of linear luminance · sat = mean HSV saturation · black = share of pixels ≤5 in all channels.</p>
+</section>
+
+<section class="find" id="forest">
+  <div class="rank">Gap 1 · highest impact</div>
+  <h2>Forest shade is unlit</h2>
+  <figure><img src="img/01_gasquet_noon.jpg" alt="Gasquet noon in game beside Howland Hill Road photo">
+    <figcaption>Gasquet, Sierra Wood Rd, 12:00 clear, vs Howland Hill Rd near Crescent City (NPS, public domain). Game: p5 0, DR 16.4 stops, sat 0.22. Photo: p5 19, DR 8.8, sat 0.40.</figcaption></figure>
+  <figure><img src="img/diag_forest.jpg" alt="Three versions of the same Gasquet frame">
+    <figcaption>Same frame, diagnostic overrides (not the normal look). With white albedo the forest is still black, so the light itself is missing. With Lumen GI off the forest's mean only drops from 3.8 to 3.6 /255, so Lumen currently adds almost nothing under the canopy.</figcaption></figure>
+  <p>Pixels ≤5/255 in every channel: Gasquet noon <b>46 %</b>, Gasquet 08:00 34 %, Deals Gap noon 26 %, Summit 16 %. The references score 0–1 %: Howland Hill 0 %, Tail of the Dragon 0 %, redwood morning light 1 %. San Francisco has no trees, and there the game's DR (9.3 stops) matches the reference (9.7). So the tonemapper and exposure are fine in the open. The failure is specific to canopy shade.</p>
+  <figure><img src="img/diag_light.jpg" alt="Normal, direct light off, sky light off">
+    <figcaption>Left: normal. Middle: <code>ShowFlag.DirectLighting 0</code>. Auto-exposure lifts the frame, and the forest is fully lit by sky and bounce light. Right: <code>ShowFlag.SkyLighting 0</code>, which looks almost identical to normal.</figcaption></figure>
+  <p id="forest-cause"><b>Cause (measured).</b> Six diagnostics ruled out Lumen. The forest stayed black with Lumen GI off, with hit lighting, with short-range AO off and with screen traces off. The direct-light-off shot shows the fill light <i>is</i> there. It is just far too weak next to the 75 000 lux sun (<code>build_openworld_test_level.py:435</code>, sky light at default intensity 1). Auto-exposure meters on the sunlit road and the <code>AutoExposureBias −1</code> in the priority-100 code volume (<code>ODAtmosphereController.cpp:448</code>), so the shade lands 14+ stops down, in the crushed toe. A real camera or eye sees about 3–4 stops between sun and canopy shade. Several things make that gap larger here than in reality. The trees are left out of Lumen (<code>ODForestManager.cpp:2165/2397</code> <code>SetAffectDynamicIndirectLighting(false)</code>), so there is no green bounce off the canopy. The foliage SSS is dim (0.10, 0.28, 0.08), so leaves don't glow when backlit. And there is no local exposure. (The local-exposure diagnostic used a wrong cvar name and is void.)</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Local exposure in the code grade volume: <code>LocalExposureShadowContrastScale</code> ~0.6–0.75 and <code>LocalExposureHighlightContrastScale</code> ~0.8. This is how a real camera's HDR compresses sun and shade. Tune it against the Howland Hill pair: p5 should go from 0 to about 15–20.</td><td>Large: shade opens up and the open scenes keep their contrast</td><td class="n">~0.2–0.4 ms</td><td>XS: two PP fields + rerun</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> Restore the missing light paths. Put tree HISMs back into Lumen (keep low-veg off) and raise the foliage <code>MP_SUBSURFACE_COLOR</code> in <code>build_flora_materials.py</code> roughly 2–3×. The result is green and warm fill under the canopy, which is also Gap 3's fix.</td><td>Large: the redwood colour, not just brightness</td><td class="n">+0.5–1.5 ms est.<br>(surface cache)</td><td>S</td><td>n/a</td></tr>
+    <tr><td><b>C.</b> Rebalance the ratio: sky light intensity ~1.5–2, or drop the −1 EV bias now that the ground-bleach bug it covered is fixed. This lifts every shadow, not just forest.</td><td>Medium; risks flattening open scenes</td><td class="n">0</td><td>XS</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 2</div>
+  <h2>Overcast and rain still have a hard sun</h2>
+  <figure><img src="img/weather_strip.jpg" alt="Clear, overcast and rain at the same Gasquet spot">
+    <figcaption>The same spot after the weather blend completed. Overcast differs from clear only slightly. Rain (480 s) shows full sun through a blue sky.</figcaption></figure>
+  <figure><img src="img/04_gasquet_overcast.jpg" alt="Game overcast vs Tail of the Dragon overcast photo">
+    <figcaption>Overcast vs Tail of the Dragon 2 (William Klos, CC BY 2.0). Game DR 16.3 stops, p5 0. Photo DR 5.8, p5 57: soft and shadowless.</figcaption></figure>
+  <p>Why, in <code>ODAtmosphereController.cpp:54-57, 564-611</code>: at full cover the sun is scaled by <code>OvercastSun = 0.25</code>. That is only 2 stops, and auto-exposure (speed 3 up) gives it straight back. Meanwhile sky light is also <i>reduced</i> (×0.6), and <code>FullCloudCoverage = 0.5</code> never closes the volumetric cloud deck. Under a real overcast, direct sun is roughly 0 and the bright sky dome provides nearly all the light.</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Retune the four constants: sun ×0.02–0.05 at full cover, sky light ×1.0–1.3 (not 0.6), <code>FullCloudCoverage</code> ~0.9–1.0, sky luminance ~×0.6. Exposure then settles on the dome.</td><td>Large: shadowless grey days and rain that reads as rain</td><td class="n">0</td><td>S</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> Widen the sun's <code>LightSourceAngle</code> with cloud (0.5° → 5–10°) for broken-cloud days, so the shadows that remain go soft.</td><td>Medium</td><td class="n">≈0 (VSM)</td><td>XS</td><td>n/a</td></tr>
+    <tr><td><b>C.</b> Turn on volumetric-cloud shadows on the sun (<code>bCastCloudShadows</code>) so the sun dims where the deck actually is.</td><td>Medium: moving cloud shade</td><td class="n">+0.2–0.5 ms</td><td>S</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 3</div>
+  <h2>Golden hour goes blue under trees</h2>
+  <figure><img src="img/golden_strip.jpg" alt="17:30 at Deals Gap, San Francisco and Gasquet">
+    <figcaption>17:30 at three spots. In the open (SF) the sunlit hill is warm orange and the shade a cool grey, which is right. In Gasquet's forest the whole frame goes blue-cyan.</figcaption></figure>
+  <figure><img src="img/03_gasquet_golden.jpg" alt="Gasquet 17:30 vs sunset forest road photo">
+    <figcaption>Gasquet 17:30 vs Black Forest high road at sunset (Carsten Frenzl, CC BY 2.0). Shadow tint (B−R)/(B+R) of the darkest 15 %: game +0.44 (blue), photo −0.44 (warm).</figcaption></figure>
+  <p>The low sun is blocked by the canopy, so only the blue sky light reaches the road, and exposure lifts it. In a real forest at golden hour, warm light bounces and transmits through the sunlit canopy tops. That is the same missing path as Gap 1.</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Fix Gap 1 option A or B first. Warm bounce from the canopy is the real-world mechanism.</td><td>Large</td><td class="n">see Gap 1</td><td>S</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> Drive the code grade volume's white balance from sun elevation (e.g. <code>WhiteTemp</code> 6500 → 5600 K below 15°), so the camera is balanced for the warm sun and not the blue shade.</td><td>Medium, every scene</td><td class="n">0</td><td>S</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 4</div>
+  <h2>Car paint has no lacquer</h2>
+  <figure><img src="img/11_car_garage.jpg" alt="Game car in garage vs auto-show car">
+    <figcaption>Garage (boot menu) vs GT3 RS at NYIAS (Nan Palmero, CC BY 2.0; shown only for paint response). The real car has sharp highlight lines along every crease and a mirror coat. The game car shows soft blotches and no image of the hex ceiling, although the floor next to it reflects the hex grid.</figcaption></figure>
+  <figure><img src="img/12_car_road.jpg" alt="Game car on road vs car on road photo">
+    <figcaption>On the road at noon the body reads pale mint with no sky reflection on the flat rear deck. Chrome exhaust tips read as flat grey.</figcaption></figure>
+  <p>The body is <code>MSM_CLEAR_COAT</code> (base metallic 0.6, roughness 0.38, coat roughness 0.035, legacy clear coat since fffd577), with <code>Substrate=True</code> in DefaultEngine.ini. Lumen reflections plainly work on the garage floor. So the missing coat reflection points at the clear-coat path under Substrate, or at the car mesh not reaching the reflection pass. This needs one diagnostic pair before a change: <code>viewmode reflections</code>, and <code>r.Lumen.Reflections.Allow 0</code> against 1, in the garage.</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Run the diagnostic pair, then put the coat on Substrate's native Slab coat (<code>Haziness</code>/second specular lobe) or confirm the legacy coat's top lobe is the one Lumen traces.</td><td>Large: the hero object reads real</td><td class="n">≈0</td><td>S–M</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> Base layer tune: metallic 0.6 → 0.2–0.35 for solid colours (real solid paint is a dielectric) and roughness 0.38 → 0.3, plus a procedural flake normal for metallic colours.</td><td>Medium: deeper, saturated colour</td><td class="n">0</td><td>S</td><td>n/a (procedural)</td></tr>
+    <tr><td><b>C.</b> Chrome tips and glass: chrome needs a reflection to show (same root cause as A). The windscreen in the garage shows a white crackle artifact worth one look in <code>build_car_materials_real.py</code>.</td><td>Small</td><td class="n">0</td><td>S</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 5</div>
+  <h2>Rain doesn't wet the road</h2>
+  <figure><img src="img/05_gasquet_rain.jpg" alt="Game rain vs rainy country road photo">
+    <figcaption>After 480 s of Rain vs a rainy country road (Shixart1985, CC BY 2.0). Only faint streaks show in the ruts. The photo has dark asphalt with a sky sheen and a grey, low-contrast world (DR 7.6 vs 16.3).</figcaption></figure>
+  <p>Wetness should be ~1 by 400 s (<code>WetUpSeconds 180</code> ÷ precip 0.45), and the road material has WetDarken 0.55 and WetRoughness 0.12. The sheen would show even under this blue sky. So first confirm that <code>Wetness</code> actually reaches the road MID (print <code>od.Weather</code>, then inspect the road material parameter).</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Verify the wetness → road parameter path and fix if broken. Fixing Gap 2 also removes the blue sky the road would reflect.</td><td>Large in rain</td><td class="n">0</td><td>S</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> Once wet, rely on Lumen reflections at roughness 0.12 (already paid for). Optionally add a procedural ripple normal on puddles.</td><td>Medium</td><td class="n">0–0.2 ms</td><td>S</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 6</div>
+  <h2>Car contact shadow is missing</h2>
+  <p><code>M_CarContactShadow</code> fails on SM6 with <i>Not enough components in (Local5.rgb: float3) for component mask 0001</i>. The cause is <code>mask(dcol, "a")</code> on an RGB output in <code>unreal/build_car_contact_shadow_material.py:63-79</code>. The fix: read the texture sample's named <b>A</b> pin instead, as <code>apply_road_material.py:551-558</code> already does. The five decals per car (<code>ODContactShadow.cpp</code>) then ground the car where VSM resolution runs out at distance. No capsule shadows exist.</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> The pin fix above, then rebuild the material via the script.</td><td>Medium: cars stop floating at distance and in shade</td><td class="n">~0.05 ms (5 decals × cars)</td><td>XS</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 7</div>
+  <h2>Exposure and sky colour</h2>
+  <figure><img src="img/10_summit_noon.jpg" alt="Summit noon vs Breckenridge photo">
+    <figcaption>Summit County noon vs East of Breckenridge (좀비 브렌다, CC BY-SA 4.0). Game mean 105 vs 147. Zenith RGB: game (69,106,148), photo (29,144,210).</figcaption></figure>
+  <p>Across the eight matched daytime pairs the game frame averages 20–40 levels darker than the photo. Both grade volumes apply exposure bias −1. At 2,900 m the sky should be a deep saturated blue; the game's zenith is a greyed mid-blue, about ⅔ stop dark. SF noon (77,115,156) is similarly muted. Contrast 1.12 and saturation 0.98 in the priority-100 code volume flatten it further. The level's 1.22 saturation never applies, because the priority-100 volume wins.</p>
+  <div class="tbl"><table>
+    <tr><th>Option</th><th>Visual gain</th><th>GPU</th><th>Effort</th><th>Licence</th></tr>
+    <tr class="pick"><td><b>A.</b> Exposure bias −1 → −0.5 in the code volume (<code>ODAtmosphereController.cpp</code> ~392-477), checked against SF and Summit.</td><td>Medium</td><td class="n">0</td><td>XS</td><td>n/a</td></tr>
+    <tr><td><b>B.</b> SkyAtmosphere: lower Mie scattering (0.009 → ~0.004) at high-altitude areas, or make it per-area from climate json, for a deeper zenith.</td><td>Medium in mountains</td><td class="n">0</td><td>S</td><td>n/a</td></tr>
+  </table></div>
+</section>
+
+<section class="find">
+  <div class="rank">Gap 8</div>
+  <h2>Performance, with a caveat</h2>
+  <p class="nums">ODPerf GPU ms @1280x720 sg3: Gasquet noon 25.1 · 08:00 30.6 · 17:30 31.7 · overcast 26.0 · rain 29–35 · Deals Gap noon 26.4 · 17:30 38.3 · SF/Summit similar.</p>
+  <p><b>Clean baseline (Ollama stopped, 0 of 8151 MiB VRAM in use before launch):</b> a Gasquet noon clear re-run settles at <span class="nums">GPU 24.7 ms, frame 25.8 ms, game 6.2 ms, 851 draws, 0.49 M tris</span>. The Ollama-loaded run measured 24.8 ms, so the VRAM contention made no measurable difference and the other numbers below stand. At 1280×720 the scene is already ~3 ms over the 22 ms budget. Low sun costs +6–12 ms over noon (volumetric fog/cloud at grazing angles is the first suspect).</p>
+  <p><b>Rain game-thread build-up (not lighting; flagged to the weather owner):</b> with Rain held, the game thread climbs roughly linearly, from 8 ms to 60 ms (1.5 min) to 100 ms (3.5 min) to 140–190 ms (8 min), ending at 4–7 fps. Clear and overcast stay at 8 ms. Log: <code>out/cap_gasquet_h12_rain_settled.log</code>.</p>
+</section>
+
+<section class="find">
+  <h3>Out of scope, seen in passing</h3>
+  <ul>
+    <li><b>SF Russian Hill shows no buildings</b> near Hyde St, though ODBuildingManager logs <span class="nums">placed=983, minDeltaCm=-9380</span> (sunk ~94 m?). See <code>sf_h12_clear.png</code>.</li>
+    <li><b>Saved Winter season:</b> twig snow whitens all foliage while the ground is bare.</li>
+    <li><b>Traffic:</b> spawned overlapping the player at Deals Gap 17:30, and stationary queues at Summit and SF.</li>
+  </ul>
+</section>
+
+<section class="find">
+  <h3>Time of day at one spot</h3>
+  <figure><img src="img/tod_gasquet.jpg" alt="Gasquet at 08:00, 12:00 and 17:30">
+    <figcaption>Gasquet at 08:00 / 12:00 / 17:30. At 08:00 the sunlit road clips (9 % of pixels ≥250) while the shade is black. Every other pair is in the appendix below.</figcaption></figure>
+</section>
+
+<section class="find">
+  <h3>Appendix: every pair</h3>
+  <div class="stack">
+    <figure><img src="img/02_gasquet_morning.jpg" alt=""><figcaption>Gasquet 08:00 vs Early morning light, redwoods (Sheila Sund, CC BY 2.0)</figcaption></figure>
+    <figure><img src="img/06_dealsgap_noon.jpg" alt=""><figcaption>Deals Gap noon vs TailOfTheDragon.jpg (CC BY 2.5)</figcaption></figure>
+    <figure><img src="img/07_dealsgap_golden.jpg" alt=""><figcaption>Deals Gap 17:30 vs Black Forest high road sunset (Carsten Frenzl, CC BY 2.0)</figcaption></figure>
+    <figure><img src="img/08_sf_noon.jpg" alt=""><figcaption>SF Hyde St noon vs Filbert St towards Russian Hill (Ilkka Simomaa, CC BY 4.0)</figcaption></figure>
+    <figure><img src="img/09_sf_golden.jpg" alt=""><figcaption>SF 17:30 vs Vallejo St towards Russian Hill (Ilkka Simomaa, CC BY 4.0)</figcaption></figure>
+    <figure><img src="img/car_strip.jpg" alt=""><figcaption>Garage boot menu and Summit noon, full frames</figcaption></figure>
+  </div>
+</section>
+
+<section class="find">
+  <h3>References (comparison only, never shipped)</h3>
+  <div class="tbl"><table>
+    <tr><th>Photo</th><th>Author</th><th>Licence</th></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Visitor_on_Howland_Hill_Road_(647d3dcf-1dd8-b71b-0bc4-e57559d5f290).jpg">Visitor on Howland Hill Road</a></td><td>NPS</td><td>Public domain</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Early_morning_light_(50774406482).jpg">Early morning light</a></td><td>Sheila Sund</td><td>CC BY 2.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Sunset_on_the_black_forest_high_road_(14629331887).jpg">Sunset on the black forest high road</a></td><td>Carsten Frenzl</td><td>CC BY 2.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Tail_of_the_Dragon_2.jpg">Tail of the Dragon 2</a></td><td>William Klos</td><td>CC BY 2.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:TailOfTheDragon.jpg">TailOfTheDragon.jpg</a></td><td>(see page)</td><td>CC BY 2.5</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Driving_on_a_rainy_day_through_a_blurred_windshield_on_a_country_road_in_early_morning_hours.jpg">Driving on a rainy day…</a></td><td>Shixart1985</td><td>CC BY 2.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Filbert_Street_view_towards_Russian_Hill,_San_Francisco_2021-11-17.jpg">Filbert Street towards Russian Hill</a></td><td>Ilkka Simomaa</td><td>CC BY 4.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:View_up_Vallejo_Street_towards_Russian_Hill,_San_Francisco_2021-11-17.jpg">View up Vallejo Street</a></td><td>Ilkka Simomaa</td><td>CC BY 4.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:East_of_Breckenridge,_Colorado.jpg">East of Breckenridge, Colorado</a></td><td>좀비 브렌다</td><td>CC BY-SA 4.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Porsche_911_GT3_RS_and_911_Carrera_T_at_the_New_York_International_Auto_Show_NYIAS_(39516092240).jpg">GT3 RS and Carrera T, NYIAS</a></td><td>Nan Palmero</td><td>CC BY 2.0</td></tr>
+    <tr><td><a href="https://commons.wikimedia.org/wiki/File:Newfound_Gap_Road_-_Great_Smoky_Mountains_National_Park,_TN.jpg">Newfound Gap Road</a> (also gathered)</td><td>Phil Varney</td><td>Public domain</td></tr>
+  </table></div>
+  <p>Side-by-side sheets crop and resize the photos; no other changes. The CC BY-SA photo is shown under its own licence.</p>
+</section>
+</div>

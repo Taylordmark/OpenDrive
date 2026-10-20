@@ -3,7 +3,7 @@
 #include "ODVisualStyle.h"
 
 #include "Camera/PlayerCameraManager.h"
-#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -166,6 +166,14 @@ namespace
 			/ FMath::Max(B.SnowWinterHighCm - B.SnowWinterLowCm, 1.0f), 0.0f, 1.0f);
 		return FMath::Lerp(FMath::Lerp(B.SnowSummerLowCm, B.SnowWinterLowCm, SnowCover),
 			SnowLineLowIdentityRamp(B, SnowCover, RefZ), WinterAtRef);
+	}
+
+	// M_GroundStylized's snow coverage at height Z for these lines (its
+	// SnowLineLowZCm..SnowLineHighZCm ramp, before the 40 m noise).
+	// pipeline/tests/test_foliage_snow_cover.py mirrors this whole block.
+	float SnowCoverAt(float Low, float High, float Z)
+	{
+		return FMath::Clamp((Z - Low) / FMath::Max(High - Low, 1.0f), 0.0f, 1.0f);
 	}
 }
 
@@ -426,27 +434,32 @@ void AODSeasonController::PushParamsToMIDs()
 	// minutes, drain slower than the surface dries) - AODWeatherController.
 	const float Rain = Wx ? Wx->RainRate : 0.0f;
 	const float Puddles = Wx ? Wx->Puddles : 0.0f;
+	// Reference elevation for the melt-compression fix's identity ramp: the
+	// player pawn's own current world Z, not a fixed guessed constant (see
+	// the big comment above SnowLineLowIdentity). This keeps the visible
+	// altitude-band crossing centered on wherever the camera/car actually
+	// is, at any QA vantage or any real drive, instead of only working near
+	// one hardcoded elevation. Falls back to the lake-bed constant before the
+	// pawn exists yet (e.g. the very first param push at BeginPlay).
+	float RefZ = SnowValleyRefZFallbackCm;
+	if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
+	{
+		RefZ = Player->GetActorLocation().Z;
+	}
+	// Foliage/bark snow follows the snow actually lying on the ground around
+	// the player (2026-10-17): the season's Cover is only the snow LINE's
+	// sweep, so in a warm area (lines above all terrain) a Winter lock used to
+	// whiten every tree over bare ground. -1 = no terrain bound yet.
+	float GroundCoverAtRef = -1.0f;
 	for (TActorIterator<AODTerrainManager> It(World); It; ++It)
 	{
 		AODTerrainManager* Terrain = *It;
 		if (UMaterialInstanceDynamic* GroundMID = Terrain->GetGroundMID())
 		{
-			// Reference elevation for the melt-compression fix's identity
-			// ramp: the player pawn's own current world Z, not a fixed
-			// guessed constant (see the big comment above SnowLineLowIdentity).
-			// This keeps the visible altitude-band crossing centered on
-			// wherever the camera/car actually is, at any QA vantage or any
-			// real drive, instead of only working near one hardcoded
-			// elevation. Falls back to the lake-bed constant before the
-			// pawn exists yet (e.g. the very first param push at BeginPlay).
-			float RefZ = SnowValleyRefZFallbackCm;
-			if (APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0))
-			{
-				RefZ = Player->GetActorLocation().Z;
-			}
 			const FODGroundBands& Bands = Terrain->GetGroundBandsWorld();
 			const float Low = SnowLineLowForCover(Bands, Cover, RefZ);
 			const float High = SnowLineHighForCover(Bands, Cover);
+			GroundCoverAtRef = FMath::Max(GroundCoverAtRef, SnowCoverAt(Low, High, RefZ));
 			if (FParse::Param(FCommandLine::Get(), TEXT("odtrace")) && !bLoggedSnowDebugOnce)
 			{
 				bLoggedSnowDebugOnce = true;
@@ -461,6 +474,11 @@ void AODSeasonController::PushParamsToMIDs()
 			GroundMID->SetScalarParameterValue(TEXT("Puddles"), Puddles);
 		}
 	}
+	// ponytail: one value per shared forest MID, taken at the player's height -
+	// a tree far up/down the slope gets the player's snow, not its own. Per-tree
+	// would need the flora material to read the same snow lines by WorldPosition.
+	const float FreshSnow = Wx ? FMath::Clamp(Wx->SideSnowCm / 15.0f, 0.0f, 1.0f) : 0.0f;
+	const float FoliageCover = GroundCoverAtRef < 0.0f ? Cover : FMath::Max(GroundCoverAtRef, FreshSnow);
 	for (TActorIterator<AODWaterManager> It(World); It; ++It)
 	{
 		AODWaterManager* Water = *It;
@@ -480,7 +498,7 @@ void AODSeasonController::PushParamsToMIDs()
 		AODForestManager* Forest = *It;
 		if (UMaterialInstanceDynamic* FoliageMID = Forest->GetFoliageSeasonMID())
 		{
-			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
+			FoliageMID->SetScalarParameterValue(TEXT("SnowCover"), FoliageCover);
 			FoliageMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 			// FallBlend is deliberately NOT pushed here (2026-09 deciduous-arc
 			// follow-up): this MID is the Conifer/evergreen species batch
@@ -501,23 +519,48 @@ void AODSeasonController::PushParamsToMIDs()
 		// never receives LeafDrop, so evergreen canopies can't dissolve.
 		if (UMaterialInstanceDynamic* DeciduousFoliageMID = Forest->GetDeciduousFoliageMID())
 		{
-			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
+			DeciduousFoliageMID->SetScalarParameterValue(TEXT("SnowCover"), FoliageCover);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("FallBlend"), FallBlend);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("LeafDrop"), LeafDrop);
 			DeciduousFoliageMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 		}
 		if (UMaterialInstanceDynamic* DeciduousBarkMID = Forest->GetDeciduousBarkMID())
 		{
-			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), Cover);
+			DeciduousBarkMID->SetScalarParameterValue(TEXT("SnowCover"), FoliageCover);
 			DeciduousBarkMID->SetScalarParameterValue(TEXT("Wetness"), Wet);
 		}
 	}
 	// Weather W2 (sec 7.40): wet road = darker + glossier (unreal/
 	// apply_road_material.py's "Wetness" param, 0 = the dry baseline).
 	bool bAnyRoadMgr = false;
+	const bool bWxLog = Wx && Wet > 0.0f && ++WxLogPushes % 45 == 0;   // ~15 s at ParamPushHz 3
 	for (TActorIterator<AODRoadManager> It(World); It; ++It)
 	{
 		It->SetWetness(Wet, Rain, Puddles);
+		if (bWxLog && !bAnyRoadMgr)
+		{
+			// Readback (2026-10-17): what a road chunk's material actually holds,
+			// so "rain doesn't wet the road" splits into "the param never lands"
+			// (has 0 = the parent material lacks "Wetness": rerun the road
+			// material scripts) vs "it lands but the look is too weak".
+			float ChunkWet = -1.0f;
+			FString Parent(TEXT("none"));
+			TInlineComponentArray<UMeshComponent*> Meshes(*It);
+			for (UMeshComponent* M : Meshes)
+			{
+				if (UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(M->GetMaterial(0)))
+				{
+					if (!MID->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Wetness")), ChunkWet))
+					{
+						ChunkWet = -1.0f;
+					}
+					Parent = MID->Parent ? MID->Parent->GetName() : Parent;
+					break;
+				}
+			}
+			UE_LOG(LogTemp, Display, TEXT("ODWeather: wet %.2f rain %.2f puddles %.2f | road chunk Wetness %.2f (-1 = param missing) on %s"),
+				Wet, Rain, Puddles, ChunkWet, *Parent);
+		}
 		bAnyRoadMgr = true;
 	}
 	if (!bAnyRoadMgr)
@@ -586,21 +629,21 @@ void AODSeasonController::EnsureSnowfallComponent()
 		return;
 	}
 
-	SnowFxHism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
-	SnowFxHism->SetupAttachment(RootComponent);
-	SnowFxHism->SetStaticMesh(SphereMesh);
+	SnowFxIsm = NewObject<UInstancedStaticMeshComponent>(this);
+	SnowFxIsm->SetupAttachment(RootComponent);
+	SnowFxIsm->SetStaticMesh(SphereMesh);
 	if (SnowFxMat)
 	{
-		SnowFxHism->SetMaterial(0, UMaterialInstanceDynamic::Create(SnowFxMat, this));
+		SnowFxIsm->SetMaterial(0, UMaterialInstanceDynamic::Create(SnowFxMat, this));
 	}
-	SnowFxHism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	SnowFxHism->SetCastShadow(false);
-	SnowFxHism->SetAffectDynamicIndirectLighting(false);
-	SnowFxHism->SetVisibility(false);
+	SnowFxIsm->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	SnowFxIsm->SetCastShadow(false);
+	SnowFxIsm->SetAffectDynamicIndirectLighting(false);
+	SnowFxIsm->SetVisibility(false);
 	// World-aligned box (2026-10-06): UpdateSnowfallFX moves it, nothing rotates it.
-	SnowFxHism->SetUsingAbsoluteLocation(true);
-	SnowFxHism->SetUsingAbsoluteRotation(true);
-	SnowFxHism->RegisterComponent();
+	SnowFxIsm->SetUsingAbsoluteLocation(true);
+	SnowFxIsm->SetUsingAbsoluteRotation(true);
+	SnowFxIsm->RegisterComponent();
 
 	// A box of tiny flakes around the camera (see UpdateSnowfallFX). Fixed
 	// pool, seeded once; only visibility + per-instance fall/drift motion
@@ -654,19 +697,20 @@ void AODSeasonController::EnsureSnowfallComponent()
 		T.SetScale3D(FVector(0.02f));   // ~2 cm (Sphere is 100 cm); UpdateSnowfallFX sets the real size
 		Transforms.Add(T);
 	}
-	SnowFxHism->SetNumCustomDataFloats(2);
-	SnowFxHism->AddInstances(Transforms, false);
+	SnowFxIsm->SetNumCustomDataFloats(2);
+	SnowFxIsm->AddInstances(Transforms, false);
 	PrecipFxIsSnow.Init(1, NumAll);
+	SnowFxXf = MoveTemp(Transforms);
 	for (int32 i = 0; i < NumAll; ++i)
 	{
-		SnowFxHism->SetCustomDataValue(i, 0, 1.0f, false);
-		SnowFxHism->SetCustomDataValue(i, 1, i < NumFlakes ? 1.0f : i < SnowFxNumPrecip ? 0.35f : 0.22f, false);
+		SnowFxIsm->SetCustomDataValue(i, 0, 1.0f, false);
+		SnowFxIsm->SetCustomDataValue(i, 1, i < NumFlakes ? 1.0f : i < SnowFxNumPrecip ? 0.35f : 0.22f, false);
 	}
 }
 
 void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 {
-	if (!SnowFxHism)
+	if (!SnowFxIsm)
 	{
 		return;
 	}
@@ -685,9 +729,9 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	const float LyingSnow = FMath::Max(SnowCover, Weather ? FMath::Min(Weather->SideSnowCm / 20.0f, 1.0f) : 0.0f);
 	const float Drift = FMath::SmoothStep(4.0f, 14.0f, WindMs) * FMath::Clamp(LyingSnow, 0.0f, 1.0f);
 	const bool bVisible = (Precip > 0.02f || Drift > 0.02f) && CamMgr != nullptr && !(Weather && Weather->IsSheltered());
-	if (SnowFxHism->IsVisible() != bVisible)
+	if (SnowFxIsm->IsVisible() != bVisible)
 	{
-		SnowFxHism->SetVisibility(bVisible);
+		SnowFxIsm->SetVisibility(bVisible);
 	}
 	if (!bVisible)
 	{
@@ -730,7 +774,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 	SnowFxCenter = Center;
 	SnowFxPrevCam = CamLoc;
 	bSnowFxCentered = true;
-	SnowFxHism->SetWorldLocation(Center);
+	SnowFxIsm->SetWorldLocation(Center);
 
 	const float WindYaw = FMath::DegreesToRadians(Weather ? Weather->WindDirDeg : 0.0f);
 	const FVector WindDir(FMath::Cos(WindYaw), FMath::Sin(WindYaw), 0.0f);
@@ -771,7 +815,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 		if (PrecipFxIsSnow[i] != (uint8)bSnow)
 		{
 			PrecipFxIsSnow[i] = bSnow;
-			SnowFxHism->SetCustomDataValue(i, 0, bSnow ? 1.0f : 0.0f, false);
+			SnowFxIsm->SetCustomDataValue(i, 0, bSnow ? 1.0f : 0.0f, false);
 		}
 		const FVector3f& Roll = PrecipFxRoll[i];
 		FVector& Offset = SnowFxLocalOffsets[i];
@@ -805,7 +849,7 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 			T.SetScale3D(FVector(0.015f * Scale, 0.015f * Scale, StreakCm / 100.0f * Roll.Y * Scale));   // ~1.5 cm wide streak (Sphere is 100 cm)
 		}
 		T.SetLocation(Drawn);
-		SnowFxHism->UpdateInstanceTransform(i, T, false, false, true);
+		SnowFxXf[i] = T;
 	}
 
 	// Blowing snow: wisps 1.5-4 m long, 3-7 cm thick, riding the near-ground
@@ -846,15 +890,17 @@ void AODSeasonController::UpdateSnowfallFX(float DeltaSeconds)
 			T.SetRotation(DriftRot);
 			T.SetScale3D(FVector(Thick, Thick, 2.5f * Roll.X * Edge));
 		}
-		SnowFxHism->UpdateInstanceTransform(i, T, false, i == NumAll - 1, true);
+		SnowFxXf[i] = T;
 	}
+	// one batch for the whole pool (custom data changes above ride its render-state dirty)
+	SnowFxIsm->BatchUpdateInstancesTransforms(0, SnowFxXf, false, true, true);
 }
 
 void AODSeasonController::HidePrecipFx()
 {
-	if (SnowFxHism)
+	if (SnowFxIsm)
 	{
-		SnowFxHism->SetVisibility(false);
+		SnowFxIsm->SetVisibility(false);
 	}
 	bSnowFxCentered = false;
 }

@@ -27,8 +27,8 @@ Road/ via import_ground_textures.py; apply_road_material.py's RealCrack*
 layer samples it.
 
 Needs import_road_textures.py + import_ground_textures.py to have run, and
-apply_terrain_real_materials.py (imports Gravel040, which the RealEdge*
-road-edge blend samples).
+apply_terrain_real_materials.py (the RealEdge* road-edge blend samples its
+shoulder set, Gravel030, and must match its constants).
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
     -script="<this file>" -nullrhi -unattended -nosplash -nop4 -stdout

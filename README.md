@@ -1,7 +1,7 @@
 # OpenDrive
 
 Procedurally generated racing across real-world places at 1:1 scale, built
-entirely from open data. Stylized "real places, storybook look" art direction.
+entirely from open data. Realistic art direction: it should look like the real place.
 UE 5.8, C++ + Python. Target: free public release (itch/GitHub).
 
 **Current stage:** Tail of the Dragon — the real US-129 (Deals Gap → Tabcat

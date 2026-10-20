@@ -249,6 +249,13 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 3. Gameplay and UX
 
+- **In scope (Taylor, 2026-10-16), from a Crew 2 gap review:**
+  - **Cameras:** cockpit, hood and bumper views alongside the chase cam.
+  - **Landmarks:** recognisable real buildings and structures per area,
+    beyond the procedural footprints.
+  - **Lighting and reflections:** visuals still need a good bit of work.
+  - Paint (below) and the wheel with force feedback (§8, Arc 6) are in this
+    batch too.
 - **Stage 3 vehicle work:**
   - retune the five presets on the new physics;
   - make drift a progressive rear breakaway;
@@ -424,7 +431,7 @@ gravel crunch, and the snow/wet grip feel.
   - pedals and an H-shifter;
   - per-device profiles in `GameUserSettings.ini`.
   - Acceptance: fully playable on a wheel.
-  - Force feedback comes after v1.
+  - Force feedback is in scope (Taylor, 2026-10-16), right after v1.
   - The deadzone/sensitivity hook from §7.32 is where to start.
 - **5.3, simulated engine sample banks:**
   - render an RPM × load sample grid offline per engine config (Engine
@@ -433,3 +440,4 @@ gravel crunch, and the snow/wet grip feel.
   - the 5.1 synth stays as the fallback.
 - **Optional:** a scripted whole-town review drive (pure pursuit on the
   §7.37 graph).
+- **Way later (Taylor, 2026-10-16):** speed traps, and an in-game radio.

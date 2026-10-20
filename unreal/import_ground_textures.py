@@ -61,6 +61,10 @@ for entry in entries:
     dest_dir = f"{TEX_DIR}/{asset_id}"
 
     if not local_dir.exists():
+        # source is gitignored: a checkout that already imported it can rebuild materials without re-downloading
+        if unreal.EditorAssetLibrary.does_directory_have_assets(dest_dir):
+            log(f"SKIP {asset_id}: no source, keeping the already-imported {dest_dir}")
+            continue
         missing.append(asset_id)
         log(f"SKIP {asset_id}: {local_dir} not found - run "
             f"content_src/textures/ground/download_ground_textures.py first")
