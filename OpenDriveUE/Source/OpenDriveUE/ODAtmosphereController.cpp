@@ -64,11 +64,11 @@ constexpr float FlashSeconds = 0.35f;
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
-constexpr float AutoExposureBiasEV = -0.5f;
+constexpr float AutoExposureBiasEV = -1.0f;
 // Local exposure: compresses sun vs canopy shade the way a camera's HDR does
 // (1 = off). Forest shade sat 14+ stops under the sunlit road and crushed to 0.
-constexpr float LocalShadowContrast = 0.7f;
-constexpr float LocalHighlightContrast = 0.85f;
+constexpr float LocalShadowContrast = 0.5f;
+constexpr float LocalHighlightContrast = 0.7f;
 
 // ---- Lightning bolt + flash light (PLAN-REALISM Phase 6, 2026-10-09) ----
 // Mirrored in pipeline/check_lightning.py.
@@ -544,6 +544,15 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	const float TintW = Weight(Weather->StormTint);
 	const FLinearColor Green = FMath::Lerp(FLinearColor::White, StormGreen, TintW);
 	const float Flash = UpdateLightning(DeltaSeconds, *Weather);
+	if ((DiagAcc += DeltaSeconds) >= 10.0f)
+	{
+		DiagAcc = 0.0f;
+		const UDirectionalLightComponent* S = SunComp.Get();
+		const USkyLightComponent* K = SkyLightComp.Get();
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f | sky %.2f (base %.2f)"),
+			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
+			S ? S->LightSourceAngle : -1.0f, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
 	// nothing moved (most frames).
@@ -628,7 +637,11 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	}
 	if (USkyLightComponent* Sky = SkyLightComp.Get(); Sky && BaseSkyLightIntensity > 0.0f && Sky->Intensity > 0.0f)
 	{
-		Sky->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.0f, OvercastSkyLight, CloudW) * (1.0f + Flash));
+		// SkyAtmosphere radiance scales with the sun's lux, so the real-time
+		// capture dims with the sun: divide that back out, else overcast keeps
+		// clear-sky's sun:sky ratio (hard shadows, black forest) at lower exposure.
+		const float SunScale = FMath::Lerp(1.0f, OvercastSun, CloudW);
+		Sky->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.0f, OvercastSkyLight, CloudW) / SunScale * (1.0f + Flash));
 	}
 }
 
