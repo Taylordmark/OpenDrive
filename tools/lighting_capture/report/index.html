@@ -96,6 +96,16 @@ code { font-family: var(--mono); font-size: .86em; }
     <tr class="pick"><td>Summit noon</td><td class="n">105 → 115 (147)</td><td class="n">102 → 115 (150)</td><td class="n">15.7 → 10.1 (6.9)</td><td class="n">.44 → .39 (.55)</td><td class="n">.16 → .12</td></tr>
   </table></div>
   <p><b>Open terrain improved:</b> Summit and SF noon moved toward the photos. <b>Forest scenes didn't:</b> Gasquet and Deals Gap still sit at ~16 stops against 8–10, and SF 17:30 got darker (mean 95 → 73) with exposure −1. The after shots ran at 1536×816 (the saved resolution changed between runs); Deals Gap noon ran at 1280×720. The first noon attempt crashed out of system RAM (WSL held 10 GB) and was re-shot.</p>
+  <h3>Gap 1C: Lumen sky leaking</h3>
+  <figure><img src="img/diag_lumen_sky.jpg" alt="Overcast normal, direct light off, Lumen GI off"><figcaption>Overcast: normal (37 % black) · direct light off (different spot, the car had rolled forward) · Lumen diffuse indirect off (0.2 % black). Lumen blocks the sky under masked canopy.</figcaption></figure>
+  <figure><img src="img/diag_leak_sweep.jpg" alt="Overcast at skylight leaking 0, 0.3 and 0.6"><figcaption>Overcast at <code>od.SkyLeak</code> 0 · 0.3 · 0.6</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Black share</th><th>no leak</th><th>0.1</th><th>0.3</th><th>0.6</th><th>Lumen GI off</th></tr>
+    <tr><td>Gasquet overcast</td><td class="n">.37</td><td class="n">.28</td><td class="n">.19</td><td class="n">.13</td><td class="n">.002</td></tr>
+    <tr><td>Deals Gap noon</td><td class="n">.19</td><td class="n">.17</td><td class="n">.14</td><td class="n">.11</td><td class="n">–</td></tr>
+    <tr><td>Gasquet noon</td><td class="n">.43</td><td class="n">.45</td><td class="n">.44</td><td class="n">.42</td><td class="n">.26</td></tr>
+  </table></div>
+  <p>Default set to <b>0.6</b>. It costs no GPU time; it's a constant term in Lumen's gather. Tune it live with <code>od.SkyLeak</code>. <b>Gasquet noon doesn't respond:</b> even with the sky fully unblocked it stays 26 % black. Here the sun-to-shade ratio is the limit. The open, sunlit road sets the exposure, and the trees stand back from it in their own shade (Howland Hill Rd has canopy over the road). Local shadow contrast is already 0.5. Next options: more bounce light under the trees (a brighter forest floor, foliage transmission per Gap 1B), or canopy closer over the road in the Gasquet forest layout.</p>
   <details><summary>All ten after-fix pairs</summary><div class="stack">
     <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
     <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>

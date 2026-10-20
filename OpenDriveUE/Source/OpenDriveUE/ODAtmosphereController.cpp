@@ -63,9 +63,10 @@ constexpr float OvercastSunAngleDeg = 8.0f;   // sun LightSourceAngle at full co
 constexpr float FullCoverAt = 0.85f;          // CloudCover reaching full weight (Overcast's own target)
 constexpr float FlashSeconds = 0.35f;
 
-// Lumen sky leaking into canopy shade (2026-10-20 audit, Gap 1C). Live-tunable
+// Lumen sky leaking into canopy shade (2026-10-20 audit, Gap 1C; sweep 0.1/0.3/0.6:
+// overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
 // for capture sweeps; re-applied every Tick (one float write).
-TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.1f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
+TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
