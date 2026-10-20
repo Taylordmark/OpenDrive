@@ -19,7 +19,7 @@ check per new piece of logic). Runtime C++ is verified by a headless
 All new world content follows standing decision 2. It is generated
 deterministically from OSM vectors and rasters into the rebuildable cache,
 and nothing per-instance is hand-placed. The art follows decision 1:
-stylized, low-poly, intentional.
+realistic, matched against how the real place looks.
 
 ---
 
@@ -66,14 +66,12 @@ Steps 1–6 built 2026-10-06 (see `status.md`). They need the combined
 Phase 3 can read junction control from `road_furniture.json`'s `controls`
 list (one entry per signal/stop/give-way node, with its approaches).
 
-What's left:
-
-1. **Phase 1b:** sidewalks in settlements (a curb strip from the
-   road edge, part of the road mesh) and `highway=service` driveway stubs,
-   limited to the first 30 m off the road for perf.
+Phase 1b (sidewalks + driveway stubs) built 2026-10-15 (`build_sidewalks.py`,
+see `status.md`). Sidewalks are concrete ODS1 solids beside the ribbon, not
+part of the road mesh, so `M_Road` didn't need regenerating.
 
 **Drive check:** a town (Frisco/Breck) day and night, and one rural pass.
-Do the signs and lights read as stylized, and is the density right?
+Do the signs and lights read as real, and is the density right?
 
 ---
 
@@ -93,29 +91,39 @@ in `next steps.md` §2. 3c has to merge the 5 m station edges into lane
 polylines between junctions; the file has no polyline of its own.
 
 ### 3b. Traffic demand (pipeline, D4)
-Density comes from real volumes and real daily patterns, not a setting.
-- **Volumes:** FHWA HPMS AADT (annual average daily traffic) for each
-  federal-aid road segment. It's public domain and nationwide, and covers
-  I-5, US/state routes and major arterials. A new fetch goes in the §7.50
-  cache. Match it to OSM chains by `ref` plus distance along the
-  centerline. Add it to README § Data credits / `build_credits.py`
-  (decision 6).
-- **Fallback for unmatched roads** (locals, most residential): AADT from
-  highway class × the population around it. Population comes from the US
-  Census block-group density raster (public domain), sampled per station.
-  This also replaces the settlement guess for local streets.
-- **Hourly and weekly shape:** the FHWA Traffic Monitoring Guide hourly and
-  day-of-week factors (urban vs rural, weekday vs weekend). Urban
-  interstates get the two-peak commute curve (7–9 and 16–19), with the
-  peak direction set by the side of the edge facing the city centre.
-- **Per directed edge, store:** AADT, direction split, the urban/rural
-  profile id and capacity (lanes × ~1,900 veh/h/lane on freeways, less on
-  arterials). Put it next to 3a's ODG1 lane block.
-- **Check:** a test that I-5 near a city at 17:30 on a weekday has demand
-  above capacity (so it jams) and is free-flowing at 03:00. A per-area plot
-  of demand / capacity by hour goes in `scratchpad/`.
+Built 2026-10-14 (see `status.md`): `build_traffic_demand.py` writes
+`traffic_<area>_test.bin` (ODT1) per lane-graph edge from FHWA HPMS, with the
+hourly/weekly curves and `demand_vph()` that 3c mirrors. What's left, only if
+drives show it:
+- Census block-group population for unmatched local streets (buildings per
+  2 km tile stand in now).
+- Recreational profiles (I-70's Sunday ski jam): one national urban/rural
+  curve can't produce it; the TMG factor groups can.
 
 ### 3c. Traffic runtime (`AODTrafficManager`)
+Built 2026-10-14 with 3d and 3e (see `status.md`; compiled, not driven):
+`ODTrafficManager.cpp` merges the ODG1 edges into directed links, fills the
+range from `demand_vph()` on the fundamental diagram, and runs IDM at a fixed
+20 Hz. `AODDayNightController` counts days (Monday on a fresh start,
+`-odday=`). Check: `pipeline/tests/test_traffic_runtime.py`. Built
+differently from the plan below, or left:
+- **One tier, no CTM.** IDM agents out to 800 m (max 1500), drawn as
+  instanced meshes. The FD congested speed caps each link's desired speed,
+  which holds a jam in place. A far CTM tier (and its handoff test) only if a
+  full jam outgrows the agent cap or the 1.5 ms budget. The log prints the
+  peak ms every 5 s.
+- Mandatory lane change only where a lane ends (MOBIL safety test, else wait
+  at the lane end). No lane-up before a split or exit, and no discretionary
+  changes.
+- Junctions: signals are fixed-cycle by approach axis, stop signs are a full
+  stop then gap acceptance, give-way is gap acceptance. Equal-priority
+  approaches don't check each other inside the junction box. Signal heads in
+  the furniture aren't synced to the cycle.
+- Wrecks are physics props. Traffic doesn't brake for them, and they have no
+  wheels.
+- No seam handoff: the manager swaps to the nearest area's graph and refills.
+- No trucks: a truck counts as 2 cars in the density but is drawn as a car.
+
 - **Clock:** `AODDayNightController` has `TimeOfDay` but no day count. Add
   a day counter (it ticks when the hour wraps) so weekday/weekend works.
   Weekdays are the default on a fresh start.
@@ -159,6 +167,9 @@ Density comes from real volumes and real daily patterns, not a setting.
   area's edge.
 
 ### 3d. Look and sound
+Built 2026-10-14 apart from paint: M_CarBody samples a palette texture and
+has no colour parameter. Random paint needs that material change (shared
+with 4.3).
 - The five car meshes with a random paint parameter (shared with 4.3
   cosmetics). Headlights at night, and brake lights from IDM deceleration
   (far tier: from the cell speed dropping). A jam at night reads as a river
@@ -167,6 +178,9 @@ Density comes from real volumes and real daily patterns, not a setting.
   A jam adds an idle-traffic ambient bed, scaled by nearby density.
 
 ### 3e. Modes
+Built 2026-10-14: off when any `AODRaceManager` has gates, `-odtraffic=0`,
+and a Settings > Game > Traffic On/Off row (D4: no density knob). Snowplows
+are still to do.
 - Race (D3): the race manager turns traffic off on a stage.
 - There's no density setting (D4). The only knob is a hidden
   `-odtraffic=0` QA flag.
@@ -193,18 +207,8 @@ how traffic reacts to the player.
 
 ## Phase 4 — Water and coast (medium; needed for the coast ranges and Hawaii in scope)
 
-1. **Coastline:** stitch `natural=coastline` ways into closed land rings,
-   clipped to the area bbox.
-2. **Sea plane:** world members share datum 0 (sea level, 2026-10-05), so a
-   Tier 0 sea plane is a flat Z=0 mesh outside the land rings, with the
-   existing water material. Bake the offshore tiles that are skipped today.
-3. **Lake islands:** subtract the `inner` members of lake multipolygons.
-4. **Culverts:** at unbridged ribbon crossings (gap-clipped today), keep the
-   ribbon and add a culvert mouth mesh on each side of the embankment.
-5. **Oahu water tiles,** so hurricane rough water can show there.
-6. **Check:** a test for ring stitching on a synthetic broken coastline,
-   plus a `verify_*` count of tiles with water and of any lake polygon that
-   still covers an island.
+Built 2026-10-15 (coastline rings, Z=0 sea tiles, lake islands, culvert
+mouths, Oahu water, `verify_water.py`; see `status.md`).
 
 **Drive check:** Oahu coast road, and a lake with an island.
 
@@ -212,20 +216,11 @@ how traffic reacts to the player.
 
 ## Phase 5 — Tunnels and stacked crossings (medium–large)
 
-1. **Tunnel bore:** pavement through the tunnel, along the real `elev_m`
-   the stations already keep (`build_road_network.py:26`). Add an extruded
-   stylized arch with full collision, dark interior lighting and portal
-   faces. The terrain needs no hole, because the bore runs below it and the
-   portal faces cover the seam. Check the carve stop at the portal still
-   leaves an opening, and lower the terrain there if it doesn't.
-2. **Stacked crossings:** use `layer` in the elevation-conflict detection
-   (`next steps.md` §4, OSM tag consumers). Grade-separated crossings with
-   no structure get a bridge from the existing ODB1 path.
-3. **I-70 East Portal:** split the two benched carriageways into separate
-   carve corridors.
-4. **Check:** `verify_road_fit` covers tunnel stations (pavement continuous
-   portal to portal), plus a count of stacked crossings without a structure
-   (target 0).
+Built 2026-10-13..15 (bore + dark-interior post-process, synthesized spans
+for untagged `layer` stacks, per-road-pair East Portal walls, and the
+`verify_road_fit` TUNNEL PAVEMENT / STACKED CROSSINGS gates; see
+`status.md`). The East Portal "30 m off the DEM" no longer reproduces: the
+worst road-vs-DEM gap near the portal is now a 9 m bridge ramp.
 
 **Drive check:** Eisenhower/Johnson tunnel and one interchange.
 
@@ -234,16 +229,30 @@ how traffic reacts to the player.
 ## Phase 6 — Wet weather (small–medium)
 
 1. A global wetness parameter (already used for the road) also drives the
-   terrain and foliage materials (darker, glossier).
+   terrain and foliage materials (darker, glossier). **Done (2026-10-09):**
+   `AODSeasonController::PushParamsToMIDs` pushes `Wetness` to the ground,
+   `M_Foliage` and the bark MIDs.
 2. Puddles: a deterministic noise mask × the road profile's sags (low
-   points between stations), only when wetness > 0.6.
-3. Rain streaks follow the car's velocity.
+   points between stations), only when wetness > 0.6. **Done (2026-10-09):**
+   per-vertex sag in UV3.x (`RoadSagCm`), pooled by `M_Road`'s puddle term.
+   `check_puddle_sag.py` also mirrors the mask (2026-10-14): none at
+   wetness ≤ 0.6, growing with wetness and sag. On Summit, 8.5% of stations
+   reach full sag.
+3. Rain streaks follow the car's velocity. **Done (2026-10-14):** the
+   streak slant uses the pawn's velocity (fixed 120 Hz physics) instead of
+   the per-frame camera delta.
 4. Lightning: a bolt mesh/flash plus a cloud flash, timed to the existing
-   thunder.
+   thunder. **Done (2026-10-09; timing 2026-10-14):** jagged bolt ISM plus
+   a flash directional light at atmosphere index 1. The strike keeps its
+   countdown overshoot, so the strike and thunder instants don't depend on
+   fps. The flash shows the envelope's mean over each frame, so every
+   frame rate gets the same light per strike (`check_lightning.py`).
 5. The Dragon's road gets wetness (it isn't an `AODRoadManager` mesh, so it
-   needs the parameter on its material).
+   needs the parameter on its material). **Done (2026-10-09):** its
+   `M_Road` slots share one MID (`Wetness`, `PuddleAmount` 0, since its
+   OBJ has no UV3).
 
-**Drive check:** a rain → clear cycle on Summit at night.
+**Drive check:** a rain → clear cycle on Summit at night. Not driven yet.
 
 ---
 

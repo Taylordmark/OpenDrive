@@ -22,7 +22,7 @@ R/G/B payload this material reads back below.
 
 Vertex color channels: R = wall texture set, baked per building from OSM
 type + height (pipeline/build_building_mesh.py pick_facade(), carried in the
-ODU2 tile's WallSet byte, encoded mid-bucket as (idx+0.5)/5); G = lit-window
+ODU2 tile's WallSet byte, encoded mid-bucket as (idx+0.5)/len(WALL_LAYERS)); G = lit-window
 seed hash; B = roof type (1 = flat roof using the Concrete034 wall set, 0 =
 shingle ROOF_LAYER).
 
@@ -82,7 +82,12 @@ BAY_WIDTH_M = 2.5
 # per-building vertex-color R channel selects between. Two brick variants
 # first (most common "read as a real street" material), then siding/
 # stucco/concrete for the rest of the mix.
-WALL_LAYERS = ["Bricks074", "Bricks053", "WoodSiding001", "Plaster001", "Concrete034"]
+# Realism B4: + stone and log (Poly Haven CC0) for the Rockies palette; the
+# pipeline picks per region (build_building_mesh.REGION_PALETTE).
+WALL_LAYERS = ["Bricks074", "Bricks053", "WoodSiding001", "Plaster001", "Concrete034",
+               "stacked_stone_wall", "wood_trunk_wall"]
+WALL_GAIN = [1.0, 1.0, 6.0, 1.0, 1.0, 1.5, 1.6]   # WoodSiding001 albedo is near-black (0.020)
+LAYER_TILE_M = {"stacked_stone_wall": 2.0, "wood_trunk_wall": 1.25}   # real-world size of non-4 m sets
 ROOF_LAYER = "RoofingTiles007"
 
 # Window grid tuning (by feel, Crew-2-reference bar: dark glass rectangles,
@@ -221,7 +226,9 @@ class G:
         return self.node(unreal.MaterialExpressionTextureCoordinate)
 
     def sample(self, tex, uv, is_normal=False, uv_out=""):
-        n = self.node(unreal.MaterialExpressionTextureSample, texture=tex)
+        # shared wrap sampler: 7 wall sets x 3 + roof = 24 textures > 16 own samplers
+        n = self.node(unreal.MaterialExpressionTextureSample, texture=tex,
+                      sampler_source=unreal.SamplerSourceMode.SSM_WRAP_WORLD_GROUP_SETTINGS)
         if is_normal:
             n.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
         ok = False
@@ -315,18 +322,27 @@ ndotup = g.dotp(normal_ws, up)
 roof_mask = g.clamp01(g.mul(g.sub(ndotup, g.const(ROOF_MASK_THRESHOLD)), g.const(20.0)))
 
 # ---------------------------------------------------------------- wall variant select (hard pick, not a blend)
+def layer_uv(asset_id):
+    return g.mul(uv, g.const(FACADE_TILE_M / LAYER_TILE_M[asset_id])) if asset_id in LAYER_TILE_M else uv
+
+
+def gained(node, gain):
+    return node if gain == 1.0 else g.mul(node, g.const(gain), a_out="RGB")
+
+
 wall_samples = [
     dict(
-        albedo=g.sample(t["albedo"], uv),
-        normal=g.sample(t["normal"], uv, is_normal=True),
-        rough=g.rough_scalar(g.sample(t["rough"], uv)),
+        albedo=gained(g.sample(t["albedo"], layer_uv(a)), gain),
+        albedo_out="RGB" if gain == 1.0 else "",
+        normal=g.sample(t["normal"], layer_uv(a), is_normal=True),
+        rough=g.rough_scalar(g.sample(t["rough"], layer_uv(a))),
     )
-    for t in WALL_TEXTURES
+    for a, t, gain in zip(WALL_LAYERS, WALL_TEXTURES, WALL_GAIN)
 ]
 thresholds = [i / len(WALL_LAYERS) for i in range(1, len(WALL_LAYERS))]  # e.g. 5 layers -> .2/.4/.6/.8
 
 wall_albedo_node, wall_albedo_out = g.select_n(
-    variant_r, [(s["albedo"], "RGB") for s in wall_samples], thresholds)
+    variant_r, [(s["albedo"], s["albedo_out"]) for s in wall_samples], thresholds)
 wall_normal_node, wall_normal_out = g.select_n(
     variant_r, [(s["normal"], "RGB") for s in wall_samples], thresholds)
 wall_rough_node, wall_rough_out = g.select_n(

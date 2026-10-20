@@ -18,7 +18,22 @@ ROOT = Path(__file__).resolve().parent.parent
 CPP = (ROOT / "OpenDriveUE/Source/OpenDriveUE/ODRoadManager.cpp").read_text(encoding="utf-8")
 MAT = (ROOT / "unreal/apply_road_material.py").read_text(encoding="utf-8")
 HALF = int(re.search(r"PuddleSagHalfWindow = (\d+);", CPP).group(1))
-SAG_FULL = float(re.search(r"^PuddleSagFullCm = ([\d.]+)", MAT, re.M).group(1))
+
+
+def mat_const(name):
+    return float(re.search(rf"^{name} = ([\d.]+)", MAT, re.M).group(1))
+
+
+SAG_FULL = mat_const("PuddleSagFullCm")
+MAX_COVER, EDGE = mat_const("PuddleMaxCover"), mat_const("PuddleEdge")
+NOISE = np.random.default_rng(0).uniform(0, 1, 20000)   # stands in for M_Road's value noise
+
+
+def puddle_cover(puddles, sag_cm, amount=1.0):
+    """M_Road's puddle term mirror: mean puddle mask over the noise.
+    puddles = the "Puddles" param (AODWeatherController::Puddles, 0..1)."""
+    fill = np.clip(puddles, 0, 1) * np.clip(sag_cm / SAG_FULL, 0, 1) * amount * MAX_COVER
+    return np.clip((NOISE - (1 - fill)) * EDGE, 0, 1).mean()
 
 
 def road_sag_cm(verts, uvs):
@@ -62,6 +77,15 @@ def self_test():
     pad = np.c_[np.zeros((147 + 5, 2)), np.r_[vee, np.zeros(5)]]
     s = road_sag_cm(pad, np.r_[uv, np.full((5, 2), 0.5)])
     assert (s[147:] == 0).all(), "pad verts get no sag"
+    # puddles: none without standing water or on a flat/crest, growing with
+    # both standing water and sag, capped, and off with PuddleAmount 0 (old Dragon)
+    for sag in (0.0, 2.0, SAG_FULL, 50.0):
+        assert puddle_cover(0.0, sag) == 0, "no puddles without standing water"
+    assert puddle_cover(1.0, 0.0) == 0 and puddle_cover(1.0, SAG_FULL, amount=0.0) == 0
+    wets = [puddle_cover(w, SAG_FULL) for w in np.linspace(0.0, 1.0, 9)]
+    sags = [puddle_cover(1.0, g) for g in np.linspace(0, 2 * SAG_FULL, 9)]
+    assert np.all(np.diff(wets) >= 0) and np.all(np.diff(sags) >= 0), "monotone in wetness and sag"
+    assert 0.5 * MAX_COVER < puddle_cover(1.0, SAG_FULL) <= MAX_COVER, "full sag + wet pools ~PuddleMaxCover"
 
 
 def main():
@@ -76,7 +100,10 @@ def main():
     print(f"{AREA_NAME}: {len(paths)} tiles, {len(st)} ribbon stations; sag cm pct 50/90/99 "
           f"{np.round(np.percentile(st, [50, 90, 99]), 1) if len(st) else '-'}; "
           f">1 cm {np.mean(st > 1):.1%}, >= PuddleSagFullCm ({SAG_FULL:g}) {np.mean(st >= SAG_FULL):.1%}")
-    print("PASS: sag mirror self-test")
+    print(f"puddle cover at Puddles 0.3/0.6/1.0, full sag: "
+          f"{puddle_cover(0.3, SAG_FULL):.2f}/{puddle_cover(0.6, SAG_FULL):.2f}/{puddle_cover(1.0, SAG_FULL):.2f}; "
+          f"Puddles 1, sag 2 cm: {puddle_cover(1.0, 2.0):.2f}")
+    print("PASS: sag mirror + puddle mask self-test")
 
 
 if __name__ == "__main__":

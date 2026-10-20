@@ -15,6 +15,7 @@
 #include "EngineUtils.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RandomStream.h"
+#include "ODWeatherController.h"
 
 using namespace UE::Geometry;
 
@@ -114,7 +115,7 @@ void AODGarageEnvironment::BuildRoom()
 		FVector(WallThicknessCm, RoomHalfExtentCm * 2.0f, RoomHeightCm));
 
 	// ---- ceiling backing: same dark wall material, sits just above the hex
-	// tiles so the small gaps between hexes read as dark seams, not void ----
+	// outlines so the hex centres read as dark panels, not void ----
 	CeilingBacking = MakeCubeComp(this, Root, TEXT("CeilingBacking"));
 	const float BackingThicknessCm = 20.0f;
 	CeilingBacking->SetRelativeLocation(FVector(0, 0, RoomHeightCm + BackingThicknessCm * 0.5f));
@@ -134,7 +135,13 @@ void AODGarageEnvironment::BuildRoom()
 	HexCeiling->RegisterComponent();
 	if (UMaterialInterface* HexMat = LoadObject<UMaterialInterface>(nullptr, HexMatPath))
 	{
-		HexCeiling->SetMaterial(0, HexMat);
+		// the outlines carry all the light the filled tiles used to (0.88^2 of
+		// each hex at the material's default 14 lit the car's top through
+		// Lumen; outlines alone at 14 left roofs and bonnets black, 2026-10-16)
+		UMaterialInstanceDynamic* HexMID = UMaterialInstanceDynamic::Create(HexMat, this);
+		const float LitArea = 1.0f - FMath::Square(FMath::Clamp(HexFillRatio, 0.0f, 0.98f));
+		HexMID->SetScalarParameterValue(TEXT("EmissiveStrength"), 14.0f * FMath::Square(0.88f) / LitArea);
+		HexCeiling->SetMaterial(0, HexMID);
 	}
 	BuildHexCeiling();
 
@@ -181,7 +188,7 @@ void AODGarageEnvironment::BuildHexCeiling()
 	}
 
 	const float R = HexRadiusCm;               // nominal circumradius - drives SPACING
-	const float FillR = R * HexFillRatio;       // actually-drawn radius - smaller leaves a gap
+	const float InR = R * HexFillRatio;         // inner edge of the lit outline band
 	const float HorizSpacing = FMath::Sqrt(3.0f) * R;
 	const float VertSpacing = 1.5f * R;
 	const float Margin = R;                     // keep whole hexes clear of the walls
@@ -219,27 +226,25 @@ void AODGarageEnvironment::BuildHexCeiling()
 					continue;
 				}
 
-				// most tiles read as full-brightness LED panels; a small
-				// pseudo-random fraction read dimmer, as if one diode in the
-				// fixture is going - variation, not a broken look.
+				// most outlines read as full-brightness LED strips; a small
+				// pseudo-random fraction read dimmer, as if one strip is going
+				// - variation, not a broken look.
 				const bool bDim = Rng.FRand() < 0.12f;
 				const FVector4f VColor = bDim
 					? FVector4f(0.35f, 0.35f, 0.35f, 1.0f)
 					: FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-				const int32 CenterId = Mesh.AppendVertex(FVector3d(X, Y, CeilingZ));
-				const int32 CenterColorId = Color->AppendElement(VColor);
-
-				int32 OuterIds[6];
-				int32 OuterColorIds[6];
+				// the outline: a ring between InR and R, 12 triangles
+				int32 OutIds[6], InIds[6], ColIds[12];
 				for (int32 i = 0; i < 6; ++i)
 				{
 					// pointy-top hex: vertices at 30,90,...,330 degrees
 					const float Theta = FMath::DegreesToRadians(30.0f + 60.0f * i);
-					const float Vx = X + FillR * FMath::Cos(Theta);
-					const float Vy = Y + FillR * FMath::Sin(Theta);
-					OuterIds[i] = Mesh.AppendVertex(FVector3d(Vx, Vy, CeilingZ));
-					OuterColorIds[i] = Color->AppendElement(VColor);
+					const FVector2d Dir(FMath::Cos(Theta), FMath::Sin(Theta));
+					OutIds[i] = Mesh.AppendVertex(FVector3d(X + R * Dir.X, Y + R * Dir.Y, CeilingZ));
+					InIds[i] = Mesh.AppendVertex(FVector3d(X + InR * Dir.X, Y + InR * Dir.Y, CeilingZ));
+					ColIds[i] = Color->AppendElement(VColor);
+					ColIds[6 + i] = Color->AppendElement(VColor);
 				}
 
 				for (int32 i = 0; i < 6; ++i)
@@ -250,11 +255,15 @@ void AODGarageEnvironment::BuildHexCeiling()
 					// specifically so a wrong-way normal here never shows up
 					// as an invisible/black ceiling (this mesh is never
 					// checked against a real render, only -nullrhi headless).
-					const int32 Tid = Mesh.AppendTriangle(CenterId, OuterIds[i], OuterIds[Next]);
-					if (Tid >= 0)
+					const int32 T0 = Mesh.AppendTriangle(OutIds[i], OutIds[Next], InIds[Next]);
+					if (T0 >= 0)
 					{
-						Color->SetTriangle(Tid,
-							FIndex3i(CenterColorId, OuterColorIds[i], OuterColorIds[Next]));
+						Color->SetTriangle(T0, FIndex3i(ColIds[i], ColIds[Next], ColIds[6 + Next]));
+					}
+					const int32 T1 = Mesh.AppendTriangle(OutIds[i], InIds[Next], InIds[i]);
+					if (T1 >= 0)
+					{
+						Color->SetTriangle(T1, FIndex3i(ColIds[i], ColIds[6 + Next], ColIds[6 + i]));
 					}
 				}
 				++HexCount;
@@ -310,6 +319,10 @@ void AODGarageEnvironment::SetActive(bool bOn)
 	SetActorHiddenInGame(!bOn);
 	SetActorEnableCollision(bOn);
 	OverrideSceneLighting(bOn);
+	for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It)
+	{
+		It->SetIndoors(bOn);
+	}
 	UE_LOG(LogTemp, Display, TEXT("ODGarageEnvironment: garage %s"), bOn ? TEXT("shown, lights on") : TEXT("hidden"));
 }
 

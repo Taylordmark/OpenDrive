@@ -84,9 +84,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float WetUpSeconds = 180.0f;
 
-	/** Wetness 1 -> 0 time once precipitation stops - dries slowly. */
+	/** Wetness 1 -> 0 time once precipitation stops, at 15 C and calm air
+	 *  (x Evaporation(): faster warm and windy, slower cold and still). */
 	UPROPERTY(EditAnywhere, Category = "Weather")
 	float DrySeconds = 1200.0f;
+
+	/** Standing water (Puddles) approaches its rain-rate level with this time
+	 *  constant - puddles lag the surface film by minutes. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float PuddleFillSeconds = 300.0f;
+
+	/** Puddles 1 -> 0 once the rain eases (x Evaporation()) - they outlast
+	 *  the film, so a road dries in patches with water left in the ruts. */
+	UPROPERTY(EditAnywhere, Category = "Weather")
+	float PuddleDrainSeconds = 2700.0f;
 
 	// ---- snow accumulation (2026-10-06, TickSnow; pipeline/check_snow_depth.py
 	// mirrors the formula). Ambient depths below are the uncleared value; each
@@ -126,8 +137,11 @@ public:
 
 	// ---- on-lens precipitation (2026-10-06, TickLens): drops/flakes land on
 	// the player camera, airflow pushes them out toward the screen edges,
-	// flakes stick, then melt into a small water smear. Sizes/positions are in
-	// screen half-widths (1 = center to the left/right edge).
+	// flakes stick, then melt into a small water smear. Parked (2026-10-20):
+	// water beads stick, then slip down in bursts at a wandering angle within
+	// +-10 deg, merge on contact and leave a fading wet trail; airflow takes
+	// over by LENS_STILL_MS. Sizes/positions are in screen half-widths
+	// (1 = center to the left/right edge).
 
 	/** Landings per second at PrecipIntensity 1, parked; x (1 + speed / 20 m/s). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
@@ -135,7 +149,7 @@ public:
 
 	/** Pool size (read once, when the layer is created). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
-	int32 LensMaxDrops = 40;
+	int32 LensMaxDrops = 60;
 
 	/** Mean drop radius, screen half-widths (each drop 0.5..1.4x). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
@@ -189,6 +203,19 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float Wetness = 0.0f;
 
+	/** Rain falling right now, 0..1 (PrecipIntensity x liquid share): drives
+	 *  puddle ripples, the live water film and road spray. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float RainRate = 0.0f;
+
+	/** Standing water 0..1 (ruts, sags, ground hollows): fills toward
+	 *  PuddleTarget(RainRate) over PuddleFillSeconds, drains slowly after. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
+	float Puddles = 0.0f;
+
+	/** Drying speed multiplier from air temperature and wind, ~0.3..3. */
+	float Evaporation() const;
+
 	/** Air temperature from the last roll (month temp + lapse), C. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float AirTempC = -2.0f;
@@ -214,6 +241,20 @@ public:
 	/** QA: force and hold road snow depth (roadside scales to its cap);
 	 *  negative releases the hold. -odsnowdepth=cm, "od.Weather Depth <cm|Auto>". */
 	void SetSnowDepth(float Cm);
+
+	/** The garage room is up (AODGarageEnvironment::SetActive): no falling
+	 *  precipitation, lens drops, rain sound, lightning or car grime/wet/snow.
+	 *  The weather itself keeps running underneath. */
+	void SetIndoors(bool bOn);
+	bool IsIndoors() const { return bIndoors; }
+
+	/** Something solid straight above the camera (tunnel bore, overpass road
+	 *  ribbon) - polled in Tick. Stops falling precipitation, new lens drops,
+	 *  rain/wind sound and new car snow, but unlike the garage the car keeps
+	 *  its grime/wet/snow. Kept apart from bIndoors so leaving a tunnel never
+	 *  re-enables weather in the garage. */
+	bool IsCovered() const { return bCovered; }
+	bool IsSheltered() const { return bIndoors || bCovered; }
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Weather|State")
 	float CloudCover = 0.1f;
@@ -243,6 +284,10 @@ public:
 
 	/** Immediate re-roll (garage season lock changed) - no-op while forced. */
 	void Reroll();
+
+	/** Menu Drive (2026-10-16): Auto, snapped to S (the state the start vista
+	 *  showed) with a fresh hold - no roll, so the drive opens on that sky. */
+	void ResumeAuto(EODWeatherState S);
 
 	/** Garage Weather row (2026-10-05): true if S has weight > 0 under the
 	 *  Auto walk's weighting (StateWeights) in at least one month of the
@@ -303,12 +348,24 @@ private:
 		float Radius = 0.0f, Age = 0.0f, Life = 0.0f;
 		float Kind = 0.0f;   // 1 flake .. 0 water (melting)
 		bool bSnow = false;
+		float Angle = 0.0f, AngleTarget = 0.0f;   // slide heading off straight-down, rad
+		float Stick = 0.0f, Slip = 0.0f;          // s left stuck / s left of the current slip
+		float Stretch = 1.0f;                     // elongation along Angle while sliding
+		float Seed = 0.0f;                        // outline wobble
+		float TrailAcc = 0.0f;                    // slid distance since the last trail piece
+	};
+	/** A fading wet streak a sliding drop leaves behind. */
+	struct FLensTrail
+	{
+		FVector2D Pos = FVector2D::ZeroVector;
+		float Angle = 0.0f, Len = 0.0f, Width = 0.0f, Age = 0.0f, Life = 0.0f, Seed = 0.0f;
 	};
 	void TickLens(float DeltaSeconds);
 	void TickSnow(float DeltaSeconds);
 	bool bSnowHeld = false;
 
 	TArray<FLensDrop> LensDrops;
+	TArray<FLensTrail> LensTrails;
 	UPROPERTY()
 	TObjectPtr<UInstancedStaticMeshComponent> LensISM;
 	TWeakObjectPtr<UCameraComponent> LensCam;
@@ -329,4 +386,10 @@ private:
 	float RampT = 1.0f;
 	float HoldLeft = 0.0f;
 	bool bForced = false;
+	bool bIndoors = false;
+
+	void TickCover(float DeltaSeconds);
+	bool bCovered = false;
+	float CoverPollT = 0.0f;
+	int32 CoverVotes = 0;   // consecutive polls disagreeing with bCovered
 };

@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "InputCoreTypes.h"
 #include "ODInputConfig.h"
+#include "ODWheel.h"
 #include "ODRebindMenu.generated.h"
 
 class UInputComponent;
@@ -33,8 +34,17 @@ class UInputComponent;
  *
  * Layout (2026-10-09): one row per action with Keyboard | Gamepad columns
  * (Left/Right or a click picks the column), then "Reset to Defaults" and
- * "Back". 12 rows fit one screen, so no scrolling. The wheel-conditioning
+ * "Back". The rows + Reset scroll to follow the selection (ODRaceHUD::
+ * DrawRebindPanel, 2026-10-14) - the action list outgrew one screen. The wheel-conditioning
  * sliders moved to AODSettingsMenu's CONTROLS tab.
+ *
+ * WHEEL column (Arc 6): a third column for the racing wheel's buttons on the
+ * actions that have one (handbrake, reset, shift), then wheel-only rows for
+ * the axes and the H-shifter slots. Wheel capture polls FODWheelDevice from
+ * Tick (ticks while paused): the first axis pulled half its travel or the
+ * first new button press, on any wheel/pedal/shifter device. Axis capture
+ * reads direction and rest position, so inverted and combined pedals bind
+ * right without extra settings.
  */
 UCLASS()
 class OPENDRIVEUE_API AODRebindMenu : public AActor
@@ -43,15 +53,23 @@ class OPENDRIVEUE_API AODRebindMenu : public AActor
 
 public:
 	AODRebindMenu();
+	virtual void Tick(float DeltaSeconds) override;
 
-	int32 NumRows() const { return FODInputConfig::NumActions + 2; }
-	int32 ResetRow() const { return FODInputConfig::NumActions; }
-	int32 BackRow() const { return FODInputConfig::NumActions + 1; }
-	bool IsBindingRow(int32 Row) const { return Row >= 0 && Row < FODInputConfig::NumActions; }
+	static constexpr int32 NumWheelRows = static_cast<int32>(EODWheelAxis::Count)
+		+ static_cast<int32>(EODWheelButton::GearR) - static_cast<int32>(EODWheelButton::Gear1) + 1;
+	static constexpr int32 NumCols = 3;   // keyboard, gamepad, wheel
+	int32 NumRows() const { return FODInputConfig::NumActions + NumWheelRows + 2; }
+	int32 ResetRow() const { return FODInputConfig::NumActions + NumWheelRows; }
+	int32 BackRow() const { return ResetRow() + 1; }
+	bool IsBindingRow(int32 Row) const { return Row >= 0 && Row < ResetRow(); }
+	/** Whether Row has a cell in column Col (wheel-only rows: column 2 only;
+	 *  actions without a wheel button: columns 0-1). */
+	bool HasCell(int32 Row, int32 Col) const;
+	static const TCHAR* ColumnHeader(int32 Col);
 	int32 GetSelected() const { return Selected; }
-	int32 GetColumn() const { return Column; }   // 0 keyboard, 1 gamepad
+	int32 GetColumn() const { return CellCol(Selected, Column); }   // 0 keyboard, 1 gamepad, 2 wheel
 	bool IsCapturing() const { return bCapturing; }
-	bool IsCapturingCell(int32 Row, int32 Col) const { return bCapturing && CapturingRow == Row * 2 + Col; }
+	bool IsCapturingCell(int32 Row, int32 Col) const { return bCapturing && CapturingRow == Row * NumCols + Col; }
 	/** True for the frame a capture ended on - that key press (maybe a
 	 *  mouse click) must not also act on the menu. */
 	bool CaptureJustEnded() const { return CaptureEndFrame != 0 && GFrameCounter - CaptureEndFrame <= 1; }
@@ -72,7 +90,11 @@ public:
 	FString GetBinding(int32 Row, int32 Col) const;
 
 private:
-	void BeginCapture(int32 Slot);   // Slot = Action * 2 + (gamepad ? 1 : 0)
+	/** Nearest column with a cell on Row, preferring Col. */
+	int32 CellCol(int32 Row, int32 Col) const;
+	/** The wheel bind behind (Row, column 2): an axis (bAxis) or a button. */
+	FODWheelBind* WheelBind(int32 Row, bool& bAxis) const;
+	void BeginCapture(int32 Slot);   // Slot = Row * NumCols + column
 	void EndCapture();
 	void OnCaptureKey(FKey Key);
 
@@ -80,7 +102,7 @@ private:
 	int32 Column = 0;
 
 	bool bCapturing = false;
-	int32 CapturingRow = -1;     // capture slot, Action * 2 + column
+	int32 CapturingRow = -1;     // capture slot, Row * NumCols + column
 	uint64 CaptureEndFrame = 0;
 	UPROPERTY()
 	TObjectPtr<UInputComponent> CaptureInput;

@@ -1,13 +1,19 @@
 #include "ODWallManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Async/Async.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Engine/World.h"
 #include "Components/DynamicMeshComponent.h"
+#include "Components/PostProcessComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -31,8 +37,50 @@ void AODWallManager::BeginPlay()
 	// PerVertexNormals call in FinalizeTile below) - unlike
 	// AODBuildingManager's M_BuildingFacade, which doesn't read normals at
 	// all and so never needed that call.
-	WallMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
+	WallMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr, *MaterialPath));
+	if (WallMat && Glow >= 0.0f)
+	{
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(WallMat, this);
+		Mid->SetScalarParameterValue(TEXT("Glow"), Glow);
+		WallMat = Mid;
+	}
+
+	if (WallTilePrefix.StartsWith(TEXT("tunnel_")))
+	{
+		TunnelPP = NewObject<UPostProcessComponent>(this, TEXT("TunnelInteriorPP"));
+		TunnelPP->SetupAttachment(RootComponent);
+		TunnelPP->bUnbound = true;
+		TunnelPP->Priority = 1000.0f;   // over AODAtmosphereController's volume (100)
+		TunnelPP->BlendWeight = 0.0f;
+		FPostProcessSettings& S = TunnelPP->Settings;
+		S.bOverride_IndirectLightingIntensity = true;
+		S.IndirectLightingIntensity = 0.2f;
+		S.bOverride_AutoExposureSpeedUp = true;
+		S.AutoExposureSpeedUp = 0.6f;    // outside: 3 - the eye takes a few seconds
+		S.bOverride_AutoExposureBias = true;
+		S.AutoExposureBias = -1.5f;      // outside: -1
+		TunnelPP->RegisterComponent();
+	}
+}
+
+void AODWallManager::UpdateTunnelInterior(float DeltaSeconds)
+{
+	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (!TunnelPP || !Cam)
+	{
+		return;
+	}
+	// Under a bore = straight up hits one of this manager's chunks.
+	const FVector From = Cam->GetCameraLocation();
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ODTunnelInterior), true);
+	const bool bInside = GetWorld()->LineTraceSingleByChannel(
+		Hit, From, From + FVector(0.0, 0.0, 2500.0), ECC_Visibility, Params)
+		&& Hit.GetActor() == this;
+	// exponential approach, same at any frame rate (0.4 s time constant)
+	const float Target = bInside ? 1.0f : 0.0f;
+	TunnelBlend += (Target - TunnelBlend) * (1.0f - FMath::Exp(-DeltaSeconds / 0.4f));
+	TunnelPP->BlendWeight = TunnelBlend;
 }
 
 void AODWallManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -129,12 +177,20 @@ void AODWallManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedWallTile Parsed;
-		const bool bOk = ParseWallTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseWallTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
@@ -183,6 +239,7 @@ void AODWallManager::FinalizeTile(const FIntPoint& Key, FParsedWallTile&& Parsed
 		const uint32 TCount = W.Tris.Num() / 3;
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		const FVector3d Origin = VCount ? FVector3d(W.Verts[0], W.Verts[1], 0.0) : FVector3d::ZeroVector;
 		Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
@@ -265,6 +322,7 @@ void AODWallManager::ReleaseTile(const FIntPoint& Key)
 void AODWallManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	UpdateTunnelInterior(DeltaSeconds);
 
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Player)

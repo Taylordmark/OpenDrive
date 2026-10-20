@@ -1,5 +1,7 @@
 """build_menu_spots (2026-10-05): the wedge score prefers the side with the
 mountain, and the junction / grade filters drop what they should.
+(2026-10-16) strict_view: a building / busy road counts only in the camera's
+FOV and over the terrain's horizon; a town beyond 3 km is flagged.
 
 Run:  python pipeline/tests/test_menu_spots.py"""
 import sys
@@ -8,7 +10,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_menu_spots import JUNCTION_CLEAR_M, candidates, car_heading, score_views, sea_share, ue_yaw
+from scipy.spatial import cKDTree
+
+from build_menu_spots import (BLDG_TOP_M, BUSY_TOP_M, FAR_BLDG_COST, JUNCTION_CLEAR_M, REJECT_COST, TOWN_MIN,
+                              candidates, car_heading, score_views, sea_share, strict_view, ue_yaw)
 
 if __name__ == "__main__":
     # flat valley floor at 0 m, a ridge climbing to 250 m from 300 m east of
@@ -58,4 +63,26 @@ if __name__ == "__main__":
     assert sea_share(bay, 0.0, 0.0, 0.0) > 0.9 and sea_share(bay, 0.0, 0.0, 180.0) == 0.0
     high = lambda e, n: np.where(np.asarray(n) > 3000.0, np.nan, 3000.0) + 0.0 * np.asarray(e)
     assert sea_share(high, 0.0, 0.0, 0.0) == 0.0
+
+    # strict_view: flat plain, a 100 m ridge 1000-1200 m east of the camera
+    ridge = lambda e, n: np.where((np.asarray(e) > 1000.0) & (np.asarray(e) < 1200.0), 100.0, 0.0) + 0.0 * np.asarray(n)
+    pts = lambda *xy: (cKDTree(np.array(xy, float)), np.full(len(xy), BLDG_TOP_M))
+    hidden = strict_view(ridge, 0.0, 0.0, 0.0, 90.0, pts((2000.0, 0.0)), None)        # behind the ridge
+    assert hidden["near_bldg"] == 0 and not hidden["flags"], hidden
+    seen = strict_view(ridge, 0.0, 0.0, 0.0, 270.0, pts((-2000.0, 0.0)), None)        # open plain
+    assert seen["near_bldg"] == 1 and seen["flags"] == ["building <3 km"] and seen["penalty"] >= REJECT_COST
+    assert abs(seen["nearest_bldg_m"] - 2000.0) < 1.0
+    aside = strict_view(ridge, 0.0, 0.0, 0.0, 270.0, pts((0.0, 2000.0)), None)        # outside the 90 deg FOV
+    assert aside["near_bldg"] == 0 and not aside["flags"]
+    # a town on the horizon (TOWN_MIN+ in sight 3-10 km) is a reject; a farm or two only costs
+    town = [(-6000.0 + 20.0 * k, 10.0 * k) for k in range(TOWN_MIN + 5)]
+    t = strict_view(ridge, 0.0, 0.0, 0.0, 270.0, pts(*town), None)
+    assert t["far_bldg"] == len(town) and "town" in t["flags"], t
+    f = strict_view(ridge, 0.0, 0.0, 0.0, 270.0, pts(*town[:3]), None)
+    assert not f["flags"] and f["penalty"] == 3 * FAR_BLDG_COST
+    # a busy road in the open is flagged; past the ridge, or within 150 m (the car's own road), it isn't
+    road = lambda *xy: (cKDTree(np.array(xy, float)), np.full(len(xy), BUSY_TOP_M))
+    assert strict_view(ridge, 0.0, 0.0, 0.0, 270.0, None, road((-1500.0, 0.0)))["flags"] == ["busy road"]
+    assert not strict_view(ridge, 0.0, 0.0, 0.0, 90.0, None, road((2500.0, 0.0)))["flags"]
+    assert not strict_view(ridge, 0.0, 0.0, 0.0, 270.0, None, road((-100.0, 0.0)))["flags"]
     print("ok")

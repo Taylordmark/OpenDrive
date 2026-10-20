@@ -79,7 +79,7 @@ from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, owns
-from road_mesh_common import ROAD_LIFT
+from road_mesh_common import ROAD_LIFT, bake_map
 from road_mesh_common import (CONFLICT_SAME_CHAIN_GAP_STATIONS, STATION_SPACING,
                               WALL_EMBED_MARGIN_M, classify_wall_stations, sample_mesh_heights)
 
@@ -171,7 +171,29 @@ HAIRPIN_MIN_DROP_M = 1.5
 
 
 HAIRPIN_CAUSE = "tight hairpin apex (accepted, see HAIRPIN_GAP_STATIONS)"
-ACCEPTED_CAUSES = ("covered by wall", HAIRPIN_CAUSE)
+COVER_CAUSE = "covered by wall / embankment / bridge"
+ACCEPTED_CAUSES = (COVER_CAUSE, HAIRPIN_CAUSE)
+
+
+def drop_cover_tree():
+    """KD tree (east/north m) over road-owned geometry that hides terrain
+    falling away under a road: retaining-wall surface points plus the
+    embankment/bridge side-run stations of road_embankments.json (2026-10-14:
+    H-3 rides fill and viaducts far above its valleys on purpose - the road
+    stays smooth, the side runs dress the drop; only walls counted before).
+    None if there is nothing."""
+    from scipy.spatial import cKDTree
+    import json
+    walls = json.loads(brw.OUT_PATH.read_text())["walls"] if brw.OUT_PATH.exists() else []
+    pts = [np.einsum("kj,tjc->tkc", brw._BARY,
+                     np.array(w["vertices"], float).reshape(-1, 3)[np.array(w["triangles"]).reshape(-1, 3)]
+                     ).reshape(-1, 3)[:, :2] / 100.0 for w in walls]
+    emb = brw.STATIONS_PATH.parent / "road_embankments.json"
+    if emb.exists():
+        pts += [np.array(r["station_xyzd_cm"], float).reshape(-1, 4)[:, :2] / 100.0
+                for r in json.loads(emb.read_text())["runs"] if r.get("cls") != "none"]
+    pts = np.concatenate(pts) * [1.0, -1.0] if pts else np.zeros((0, 2))
+    return cKDTree(pts) if len(pts) else None
 
 
 def _judge_devs(label, rows):
@@ -180,7 +202,6 @@ def _judge_devs(label, rows):
     fails only if no wall covers it; uncovered ones are reported by cause.
     Returns ok."""
     from scipy.spatial import cKDTree
-    import json
     if not rows:
         return True
     st = np.array([r[0] for r in rows])
@@ -196,12 +217,7 @@ def _judge_devs(label, rows):
 
     east, north, elev, seg_idx, _si, _rn = brw.load_station_arrays()
     hw = brw.load_station_half_widths()
-    walls = json.loads(brw.OUT_PATH.read_text())["walls"] if brw.OUT_PATH.exists() else []
-    wall_xy = [np.einsum("kj,tjc->tkc", brw._BARY,
-                         np.array(w["vertices"], float).reshape(-1, 3)[np.array(w["triangles"]).reshape(-1, 3)]
-                         ).reshape(-1, 3)[:, :2] / 100.0 for w in walls]
-    wall_xy = np.concatenate(wall_xy) * [1.0, -1.0] if wall_xy else np.zeros((0, 2))
-    wall_tree = cKDTree(wall_xy) if len(wall_xy) else None
+    wall_tree = drop_cover_tree()
     st_tree = cKDTree(np.c_[east, north])
     struct = btmt._get_struct_mask(len(east))
     _ex, wall_pairs = classify_wall_stations(east, north, elev, seg_idx, _si, _rn, half_width_m=hw)
@@ -212,7 +228,7 @@ def _judge_devs(label, rows):
     causes = defaultdict(list)
     for i in below:
         if wall_tree is not None and wall_tree.query([east[i], north[i]])[0] <= hw[i] + WALL_COVER_REACH_M:
-            causes["covered by wall"].append(i)
+            causes[COVER_CAUSE].append(i)
             continue
         near = np.asarray(st_tree.query_ball_point([east[i], north[i]], hw[i] + 20.0), dtype=int)
         near = near[(seg_idx[near] != seg_idx[i]) & ~struct[near] & (elev[near] < elev[i] - 2.0)]
@@ -240,17 +256,38 @@ def _judge_devs(label, rows):
     return len(above) == 0 and uncovered == 0
 
 
+SHIPPED_WORKER_GB = 1.0
+
+
+def _shipped_tile_heights(job):
+    """(tile path, mesh height cm per point - NaN off-mesh, None if the tile
+    is missing/unreadable) for one shipped near tile."""
+    (tx, ty), xs_cm, ys_cm = job
+    path = MASKS_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+    parsed = parse_terrain_tile_bin(path)
+    if parsed is None:
+        return path, None
+    positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
+    triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
+    return path, sample_mesh_heights(positions, triangles, xs_cm, ys_cm)
+
+
 def check_shipped_terrain_fit():
     """SHIPPED ARTIFACT CHECK - reads the actual ODT1 .bin tiles in
     Content/OpenDrive/Masks/ and samples the real parsed mesh, per this
     module's docstring section 1."""
     st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data(shipped=True)
 
+    near_d = {k: btmt.tile_min_dist_m(st_x_cm, st_y_cm, k[0], k[1], tile_cm) for k in tiles}
+    # tiles are independent: parse + sample each in the bake pool (2026-10-15)
+    heights = bake_map(_shipped_tile_heights,
+                       [(k, st_x_cm[idxs], st_y_cm[idxs]) for k, idxs in tiles.items()
+                        if near_d[k] <= btmt.NEAR_MARGIN_M], SHIPPED_WORKER_GB)
     dzs, rows = [], []
     misses = 0
     missing_tiles = 0
     for (tx, ty), idxs in tiles.items():
-        d = btmt.tile_min_dist_m(st_x_cm, st_y_cm, tx, ty, tile_cm)
+        d = near_d[(tx, ty)]
         is_near = d <= btmt.NEAR_MARGIN_M
         if not is_near:
             print(f"WARNING: station tile ({tx},{ty}) did not classify as "
@@ -258,18 +295,14 @@ def check_shipped_terrain_fit():
             misses += len(idxs)
             continue
 
-        path = MASKS_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        parsed = parse_terrain_tile_bin(path)
-        if parsed is None:
+        path, hs = next(heights)
+        if hs is None:
             print(f"MISSING/UNREADABLE: {path.name} - {len(idxs)} station(s) "
                   f"in this tile can't be checked against the shipped bake")
             missing_tiles += 1
             misses += len(idxs)
             continue
 
-        positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
-        triangles = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
-        hs = sample_mesh_heights(positions, triangles, st_x_cm[idxs], st_y_cm[idxs])
         for i, h_cm in zip(idxs, hs):
             if np.isnan(h_cm):
                 misses += 1
@@ -474,13 +507,13 @@ def check_wall_coverage():
     hw = brw.load_station_half_widths()
     _exclude, wall_pairs = classify_wall_stations(
         east, north, elev, seg_idx, station_idx, road_name, half_width_m=hw)
-    runs = brw.cluster_runs(wall_pairs, len(east))
+    runs = brw.cluster_runs(wall_pairs, len(east), seg_idx)
 
     tol_m = WALL_EMBED_MARGIN_M + 5.0
     n_checked = n_failed = 0
     for run_stations in runs:
         centroid_ref_cm = brw.own_chain_centroid_cm(run_stations, east, north, seg_idx)
-        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm)
+        mesh = brw.build_wall_run_mesh(run_stations, east, north, elev, hw, centroid_ref_cm, seg_idx)
         if mesh is None:
             continue
         verts, _uvs, _tris = mesh

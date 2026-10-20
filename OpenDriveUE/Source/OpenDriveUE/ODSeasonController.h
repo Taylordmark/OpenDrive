@@ -4,7 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "ODSeasonController.generated.h"
 
-class UHierarchicalInstancedStaticMeshComponent;
+class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class AODTerrainManager;
@@ -58,6 +58,9 @@ public:
 	AODSeasonController();
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** Hide the falling precipitation now (garage, even with the world paused). */
+	void HidePrecipFx();
 
 	/** Real seconds each season holds stable before transitioning. */
 	UPROPERTY(EditAnywhere, Category = "Season")
@@ -152,6 +155,7 @@ private:
 
 	bool bFrozen = false;   // true once a -odseason= QA flag has fixed the clock
 	float PushAccumSeconds = 0.0f;
+	int32 WxLogPushes = 0;   // ODWeather road-wetness readback cadence (PushParamsToMIDs)
 	bool bLoggedSnowDebugOnce = false;   // one-shot -odtrace ground-snow diagnostic (see PushParamsToMIDs)
 
 	TWeakObjectPtr<AODTerrainManager> TerrainMgr;
@@ -186,14 +190,24 @@ private:
 	 *  - visible count scales with PrecipIntensity, each instance is snow when
 	 *  its fixed roll < PrecipType (so sleet is a mix) else a thin fast rain
 	 *  streak slanted along the wind; per-instance custom data 0 (1 snow, 0
-	 *  rain) picks M_SnowFlake's look. */
+	 *  rain) picks M_SnowFlake's look.
+	 *
+	 *  A plain ISM, not a HISM (2026-10-17): every instance moves every tick,
+	 *  and a HISM keeps queueing cluster-tree rebuilds and unbuilt-instance
+	 *  bounds for that, so game + draw time climbed for as long as it rained
+	 *  (8 -> 190 ms over 8 min). One batch update per tick from SnowFxXf. */
 	UPROPERTY()
-	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> SnowFxHism;
+	TObjectPtr<UInstancedStaticMeshComponent> SnowFxIsm;
+
+	TArray<FTransform> SnowFxXf;          // per-tick instance transforms, reused (one batch update)
 
 	TArray<FVector> SnowFxLocalOffsets;   // world-axis offsets from SnowFxCenter
 	TArray<float> PrecipFxSnowRoll;   // fixed [0,1) per instance: snow if < PrecipType
 	TArray<uint8> PrecipFxIsSnow;     // last custom-data value pushed per instance
+	TArray<FVector3f> PrecipFxRoll;   // fixed per instance: size x, fall-speed x, flutter phase (rad)
+	int32 SnowFxNumNear = 0;          // instances [0, N) are the near box, [N, NumPrecip) the far layer,
+	int32 SnowFxNumPrecip = 0;        // [NumPrecip, end) blowing ground snow (offset Z = height above ground)
 	FVector SnowFxCenter = FVector::ZeroVector;   // box center last tick
-	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (streak relative velocity)
+	FVector SnowFxPrevCam = FVector::ZeroVector;  // camera location last tick (box re-center + teleport test)
 	bool bSnowFxCentered = false;                 // false = next tick re-centers without shifting flakes
 };

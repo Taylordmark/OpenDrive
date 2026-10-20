@@ -39,13 +39,13 @@ struct FParsedWaterTile
 	FString GenerationId;
 };
 
-/** Live water components for one loaded tile - ONE UDynamicMeshComponent PER
- *  LAKE (mirrors AODBuildingManager's one-per-feature convention, not
- *  AODTerrainManager's single grid mesh per tile - a tile can hold several
- *  independent lakes/ponds). */
+/** Live water components for one loaded tile - ONE UDynamicMeshComponent
+ *  holding every lake in the tile (2026-10-16 perf pass: one component per
+ *  lake was 1841 draws per pass on summit_county for mostly tiny ponds). */
 struct FWaterTile
 {
 	TArray<TObjectPtr<UDynamicMeshComponent>> Lakes;
+	int32 NumLakes = 0;
 };
 
 /**
@@ -109,7 +109,13 @@ public:
 	 *  identical reasoning. AODSeasonController drives FreezeBlend on this. */
 	UMaterialInstanceDynamic* GetWaterMID() const { return WaterMID; }
 
+	/** Every wanted tile in reach loaded (or known missing) - the menu's start
+	 *  vista waits on it (2026-10-16). */
+	bool IsInitialStreamingSettled() const { return bSettled; }
+
 private:
+	bool bSettled = false;
+
 	static bool ParseWaterTileFile(const FString& Path, FParsedWaterTile& Out);
 
 	void RequestTileLoad(const FIntPoint& Key);
@@ -121,7 +127,7 @@ private:
 	 *  appends it to Tile. No collision (task scope - see class comment) and
 	 *  no Z resolution step: FParsedLake's verts already carry their final
 	 *  world Z from the pipeline bake. */
-	void CreateLakeComponent(FWaterTile& Tile, const FParsedLake& Lk);
+	void CreateLakeComponent(FWaterTile& Tile, const TArray<FParsedLake>& InLakes);
 
 	TMap<FIntPoint, FWaterTile> Tiles;
 	TSet<FIntPoint> PendingTiles;

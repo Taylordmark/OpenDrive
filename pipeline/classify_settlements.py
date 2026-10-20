@@ -66,6 +66,20 @@ RESIDENTIAL_FRACTION_MAX = 0.35   # City requires FEWER than this fraction of
                                     # tagged - confirmed downtown tiles measured
                                     # ~0%, confirmed suburb tiles measured
                                     # 74-99%, so this has wide margin either way
+# City also needs height OR a main street (realism B6, 2026-10-15): a tile
+# of untagged "yes" sheds/houses (whole-bbox Skagit: 100 of 379 tiles)
+# passes both bars above. Height: >= CITY_MIN_TALL footprints with >=
+# CITY_TALL_LEVELS known storeys (OSM levels/height or Microsoft height) -
+# downtown Honolulu / Waikiki 135-256, Kalihi 43, Skagit farm towns 0-23.
+# Main street (1-2 storey downtowns: Mount Vernon 73, Frisco 28): >=
+# CITY_MIN_SHOPS SHOP_TAGS footprints, residential share up to
+# MAIN_STREET_RESIDENTIAL_MAX (Mount Vernon 46%; Ewa 72%, Mililani 62%).
+# Result: oahu 48 -> 18 City tiles, skagit 100 -> 12, summit 30 -> 4, green_valley 2 -> 3.
+CITY_MIN_TALL = 10
+CITY_TALL_LEVELS = 3
+SHOP_TAGS = {"retail", "commercial", "supermarket", "kiosk", "office"}
+CITY_MIN_SHOPS = 25
+MAIN_STREET_RESIDENTIAL_MAX = 0.5
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILDINGS_PATH = ROOT / "data" / "raw" / f"{AREA_NAME}_test" / "osm_buildings.json"
@@ -79,22 +93,30 @@ def footprint_centroid(ring):
     return lat, lon
 
 
-def pick_archetype(building_count, residential_fraction):
+def pick_archetype(building_count, residential_fraction, tall_count, shop_count):
     """Seam for the other 4 archetypes (see module docstring) - for now,
     a density split between an ordinary town block and a real downtown,
     gated on a LOW residential-tagged fraction so a merely dense suburb
-    (lots of small houses) can't pass as one just by footprint count."""
-    if building_count >= CITY_DENSITY_PER_TILE and residential_fraction < RESIDENTIAL_FRACTION_MAX:
+    (lots of small houses) can't pass as one just by footprint count, and
+    on height or a main street (see CITY_MIN_TALL) so untagged sheds can't either."""
+    if building_count >= CITY_DENSITY_PER_TILE and (
+            (residential_fraction < RESIDENTIAL_FRACTION_MAX and tall_count >= CITY_MIN_TALL)
+            or (residential_fraction < MAIN_STREET_RESIDENTIAL_MAX and shop_count >= CITY_MIN_SHOPS)):
         return "City"
     return "AmericanTown"
 
 
 def main():
+    from build_building_mesh import known_levels   # lazy: it imports this module
     buildings = json.loads(BUILDINGS_PATH.read_text())
 
     counts = defaultdict(int)
     residential_counts = defaultdict(int)
+    tall_counts = defaultdict(int)
+    shop_counts = defaultdict(int)
     for b in buildings:
+        if b.get("source") == "ms":
+            continue   # B6 gap-fill is all "yes"-tagged: counting it would flip suburbs to City
         lat, lon = footprint_centroid(b["nodes"])
         east_m, north_m = to_local(lon, lat)
         x_cm, y_cm = east_m * 100.0, -north_m * 100.0
@@ -103,22 +125,27 @@ def main():
         counts[(tx, ty)] += 1
         if b.get("building_tag") in RESIDENTIAL_TAGS:
             residential_counts[(tx, ty)] += 1
+        tall_counts[(tx, ty)] += (known_levels(b) or 0) >= CITY_TALL_LEVELS
+        shop_counts[(tx, ty)] += b.get("building_tag") in SHOP_TAGS
 
     tiles = {}
     for (tx, ty), n in counts.items():
         if n < MIN_BUILDINGS_PER_TILE:
             continue
         frac = residential_counts[(tx, ty)] / n
-        tiles[f"{tx},{ty}"] = pick_archetype(n, frac)
+        tiles[f"{tx},{ty}"] = pick_archetype(n, frac, tall_counts[(tx, ty)], shop_counts[(tx, ty)])
 
-    OUT_PATH.write_text(json.dumps({"tiles": tiles}))
+    # building count per tile too: build_traffic_demand.py's population proxy
+    OUT_PATH.write_text(json.dumps({"tiles": tiles,
+                                    "counts": {f"{tx},{ty}": n for (tx, ty), n in counts.items()}}))
     print(f"{len(counts)} tile(s) with any buildings, {len(tiles)} populated "
           f"(>= {MIN_BUILDINGS_PER_TILE} buildings) -> {OUT_PATH}")
     for k, v in tiles.items():
         tx_ty = tuple(int(p) for p in k.split(","))
         n = counts[tx_ty]
         frac = residential_counts[tx_ty] / n
-        print(f"  tile ({k}): {v} ({n} buildings, {frac:.0%} residential-tagged)")
+        print(f"  tile ({k}): {v} ({n} buildings, {frac:.0%} residential-tagged, "
+              f"{tall_counts[tx_ty]} of {CITY_TALL_LEVELS}+ storeys, {shop_counts[tx_ty]} shops)")
 
 
 if __name__ == "__main__":

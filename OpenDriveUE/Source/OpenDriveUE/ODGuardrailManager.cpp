@@ -1,12 +1,15 @@
 #include "ODGuardrailManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -26,18 +29,33 @@ void AODGuardrailManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	WBeamMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Guardrail_WBeam.M_Guardrail_WBeam"));
-	JerseyMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Guardrail_Jersey.M_Guardrail_Jersey"));
+	WBeamMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Guardrail_WBeam.M_Guardrail_WBeam")));
+	JerseyMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Guardrail_Jersey.M_Guardrail_Jersey")));
 	SlickPhysMat = LoadObject<UPhysicalMaterial>(nullptr,
 		TEXT("/Game/OpenDrive/Physics/PM_GuardrailSlick.PM_GuardrailSlick"));
 	PostMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	// Realistic: a W6x9 post + blockout + delineator (pipeline/make_guardrail_post_mesh.py,
+	// unreal/apply_guardrail_assets_real.py) instead of the cylinder. Not a Pick() twin:
+	// it's placed differently (yawed, behind the rail, unscaled), see FinalizeTile.
+	bRealistic = ODVisualStyle::IsRealistic();
+	bRealPosts = false;
+	if (bRealistic)
+	{
+		if (UStaticMesh* Real = LoadObject<UStaticMesh>(nullptr,
+			TEXT("/Game/OpenDrive/Realistic/Guardrails/SM_GuardrailPost_real.SM_GuardrailPost_real"),
+			nullptr, LOAD_NoWarn | LOAD_Quiet))
+		{
+			PostMesh = Real;
+			bRealPosts = true;
+		}
+	}
 
 	UE_LOG(LogTemp, Display,
 		TEXT("ODGuardrailManager: WBeamMat=%s JerseyMat=%s SlickPhysMat=%s PostMesh=%s"),
-		WBeamMat ? TEXT("OK") : TEXT("FAILED"), JerseyMat ? TEXT("OK") : TEXT("FAILED"),
-		SlickPhysMat ? TEXT("OK") : TEXT("FAILED"), PostMesh ? TEXT("OK") : TEXT("FAILED"));
+		WBeamMat ? *WBeamMat->GetName() : TEXT("FAILED"), JerseyMat ? *JerseyMat->GetName() : TEXT("FAILED"),
+		SlickPhysMat ? TEXT("OK") : TEXT("FAILED"), PostMesh ? *PostMesh->GetName() : TEXT("FAILED"));
 }
 
 void AODGuardrailManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -115,12 +133,20 @@ void AODGuardrailManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedGuardrailTile Parsed;
-		const bool bOk = ParseGuardrailTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseGuardrailTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
@@ -237,6 +263,12 @@ void AODGuardrailManager::BuildRailMesh(UDynamicMeshComponent* Comp, const FPars
 				AddQuad(A, B, C, D, Au, Bu, Cu, Du);
 			}
 		}
+		// Realistic lights the rail with real normals (the _real materials
+		// read them for triplanar mapping); Stylized keeps its flat look.
+		if (bRealistic)
+		{
+			FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
+		}
 	});
 }
 
@@ -259,6 +291,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 		bJersey ? ++NumJersey : ++NumWBeam;
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();
@@ -322,6 +355,7 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 			// Batched into one AddInstances call (2026-09-07 frame-drop pass) -
 			// per-instance AddInstance dirties the HISM tree every call.
 			TArray<FTransform> PostXfs;
+			const float SideSign = Run.Side > 0 ? 1.0f : -1.0f;
 			for (int32 s = 0; s < St.Num() - 1; ++s)
 			{
 				const double SegLen = FVector::Dist(St[s], St[s + 1]);
@@ -329,9 +363,25 @@ void AODGuardrailManager::FinalizeTile(const FIntPoint& Key, FParsedGuardrailTil
 				{
 					const double T = SegLen > 1e-3 ? (NextPost - Accum) / SegLen : 0.0;
 					const FVector P = FMath::Lerp(St[s], St[s + 1], (double)T);
-					PostXfs.Emplace(FRotator::ZeroRotator,
-						P - FVector(0, 0, PostHeightCm * 0.15),   // embed a little below the seat
-						FVector(PostRadiusCm / 50.0f, PostRadiusCm / 50.0f, PostHeightCm / 100.0f));
+					if (bRealPosts)
+					{
+						// Real post: origin = the seat, +X yawed onto BuildRailMesh's
+						// outward direction, so it stands behind the rail, unscaled.
+						FVector Tangent = St[s + 1] - St[s];
+						Tangent.Z = 0.0;
+						if (!Tangent.Normalize())
+						{
+							Tangent = FVector(1, 0, 0);
+						}
+						const FVector Outward = FVector(-Tangent.Y, Tangent.X, 0.0) * SideSign;
+						PostXfs.Emplace(Outward.Rotation(), P, FVector::OneVector);
+					}
+					else
+					{
+						PostXfs.Emplace(FRotator::ZeroRotator,
+							P - FVector(0, 0, PostHeightCm * 0.15),   // embed a little below the seat
+							FVector(PostRadiusCm / 50.0f, PostRadiusCm / 50.0f, PostHeightCm / 100.0f));
+					}
 					++NumPosts;
 					NextPost += PostSpacingCm;
 				}

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
+#include "ODCarPaint.h"
 #include "InputCoreTypes.h"
 #include "ODVehiclePawn.generated.h"
 
@@ -10,6 +11,7 @@ class UInputComponent;
 class UODVehicleDef;
 class UODVehicleMovement;
 class USpringArmComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 /** Which driving input source is in control (2026-08-27 controller/wheel
@@ -24,6 +26,9 @@ enum class EODInputDevice : uint8
 	Gamepad,
 	Wheel,
 };
+
+/** Player camera views, in C-cycle order (see AODVehiclePawn::CameraView). */
+enum class EODCameraView : uint8 { Chase, ChaseFar, ChaseNear, Cockpit, Hood, Bumper, Count };
 
 /**
  * The OD car (Chaos rip-out, 2026-07-18): a simulating static-mesh Body, our
@@ -205,6 +210,17 @@ public:
 	 *  physics). No-op if out of range or already current. */
 	void SetVehicleByIndex(int32 Index);
 
+	/** Garage setup's tyres (AODTuningManager::ApplyPreset, by preset
+	 *  DisplayName): Realistic swaps each axle's wheel for that setup's
+	 *  SM_CarWheel_real_<Kind> (TyreKind in the .cpp); Stylized keeps the one
+	 *  wheel. Kept across car swaps. */
+	void SetTyreSetup(const FString& SetupName);
+
+	/** Garage paint (4.3, ODCarPaint.h): the current car's, loaded on every car
+	 *  swap; SetPaint applies it live and (bSave) saves it for this car. */
+	const FODCarPaint& GetPaint() const { return Paint; }
+	void SetPaint(const FODCarPaint& InPaint, bool bSave = true);
+
 	/** Turntable preview for the car-select menu: freezes physics, levels the
 	 *  car, and detaches the spring-arm yaw so rotating the pawn spins the car
 	 *  in front of a fixed camera (the menu drives the yaw). Off restores the
@@ -360,33 +376,8 @@ public:
 	EODInputDevice GetActiveInputDevice() const { return ActiveDevice; }
 	static FString InputDeviceModeToString(EODInputDevice Mode);
 
-	/** Degrees-of-rotation scale for a wheel's steering axis (1.0 = wheel's
-	 *  full physical lock-to-lock maps 1:1 to the car's full steering lock;
-	 *  0.5 would mean the wheel needs to turn twice as far - use this to
-	 *  match a specific wheel's configured rotation range without adding any
-	 *  response curve, which wheel steering must not have). */
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	float WheelDegreesOfRotationScale = 1.0f;
-
-	/** Which RawInput GenericUSBController_AxisN (1-based) feeds each wheel
-	 *  channel - varies per wheel model/driver, so these are exposed rather
-	 *  than guessed. Defaults are a reasonable Logitech/Thrustmaster-shaped
-	 *  starting guess (1=wheel rotation, 2=throttle, 3=brake); adjust to taste
-	 *  once real hardware is plugged in (see class comment / task report). */
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelSteerAxisIndex = 1;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelThrottleAxisIndex = 2;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	int32 WheelBrakeAxisIndex = 3;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	bool bWheelInvertThrottle = false;
-
-	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
-	bool bWheelInvertBrake = false;
+	// racing wheel setup (rotation, axes, buttons, FFB) is per device in
+	// FODRacingWheel's profiles (ODWheel.h), edited in the settings/rebind menus
 
 private:
 	void ThrottlePressed() { bThrottleKey = true; }
@@ -416,6 +407,17 @@ private:
 
 	int32 CurrentVehicleIdx = 0;
 
+	// the car's wheel after ODVisualStyle::Pick (before the tier Upgrade), and
+	// the garage setup whose tyre kinds ApplyWheelMeshes swaps in
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> WheelBaseMesh;
+	FString TyreSetup;
+	void ApplyWheelMeshes();
+
+	FODCarPaint Paint;
+	FString PaintKey = TEXT("Default");   // the current def's asset name: Paint's ini key
+	void ApplyPaint();          // after any mesh swap: PickSlots dropped the MIDs
+
 	/** Holds the Body kinematic (no physics) from spawn until a downward
 	 *  trace confirms where the actual streamed terrain/road is, then
 	 *  teleports there and releases physics - same ground-snap idea as
@@ -442,6 +444,27 @@ private:
 	float LookPitchDeg = 0.0f;
 	double LastLookInputTime = 0.0;
 	void UpdateFreeLook(float DeltaSeconds);
+
+	// --- camera views (2026-10-16): C / pad Y cycles, persisted in
+	// GameUserSettings [OpenDrive.Camera] View. Chase* ride the spring arm
+	// with exact-exponential lag; the first-person ones pin the arm (length
+	// 0, no lag) at a per-car mount from the def (zero = derived from the
+	// mesh bounds in ResolveCameraMounts) and add head motion on Camera.
+	EODCameraView CameraView = EODCameraView::Chase;
+	FVector CockpitEyeCm, SteeringWheelCm, HoodCamCm, BumperCamCm;
+	FVector HeadAccelG = FVector::ZeroVector;   // smoothed car-local accel, g
+	FVector HeadPrevVel = FVector::ZeroVector;
+	float HeadApexYawDeg = 0.0f;
+	void CycleCameraView();
+	void ApplyCameraView();
+	void ResolveCameraMounts(const UODVehicleDef* Def);
+	void UpdateCameraMotion(float DeltaSeconds);
+
+	// procedural steering wheel (rim/spokes/hub of engine cylinders), shown
+	// only in Cockpit, laid over the Realistic mesh's baked static wheel
+	UPROPERTY()
+	TObjectPtr<USceneComponent> CockpitWheel;
+	void BuildCockpitWheel();
 
 	bool bGroundSnapped = false;
 	bool bInShowroom = false;   // see IsInShowroom() above
@@ -569,17 +592,15 @@ private:
 	// Controller (gamepad) + racing wheel input (2026-08-27). Kept entirely
 	// separate from the keyboard block above so the two can be edited without
 	// conflicting: this section only ever WRITES its own dedicated members
-	// (GamepadSteerAxis/GamepadThrottleAxis/... below, RawWheelAxis[]) and
+	// (GamepadSteerAxis/GamepadThrottleAxis/... below) and
 	// reads them back in Tick(); it never reaches into bThrottleKey/bLeftKey/
 	// SmSteer/etc. Analog gamepad/wheel axes deliberately BYPASS the keyboard
 	// smoothing (SmSteer/SmThrottle/SmBrake) - an analog input is already
 	// smooth, so routing it through the same rate-limited interpolation used
 	// to fake analog behavior out of on/off keys would only add lag. Wheel
-	// axes additionally get NO response curve and NO deadzone (full 1:1
-	// range, scaled only by WheelDegreesOfRotationScale) - unlike the gamepad
-	// stick, a wheel is already a precise analog position, not a spring-
-	// loaded stick that rests dead-center and needs a curve to feel good off
-	// center.
+	// steering is 1:1 with the car's own steering wheel (FODRacingWheel::Steer);
+	// its deadzone/linearity default to none, since a wheel is already a
+	// precise position, not a spring-loaded stick.
 	// ===========================================================================
 
 	void GamepadSteerAxis(float Value);
@@ -603,20 +624,16 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Input|Gamepad")
 	float GamepadLookSensitivityDegPerSec = 120.0f;
 
-	/** RawInput GenericUSBController_Axis1..6 (0-based here), latched
-	 *  raw/normalized 0..1 by the RawInput plugin - see WheelSteerAxisIndex
-	 *  etc. (public section above) for which of these feeds which channel.
-	 *  Bound via lambdas in SetupPlayerInputComponent (BindAxisKey's
-	 *  GetDelegateForManualSet()), not named per-axis functions, since the
-	 *  RawInput key names are only known at runtime (module registers them on
-	 *  plugin load) and there's no way to know in advance which physical axis
-	 *  a given wheel model puts steering/throttle/brake on. */
-	static constexpr int32 NumWheelAxesBound = 6;
-	float RawWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
-	float PrevWheelAxis[NumWheelAxesBound] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+	/** Racing wheel (Arc 6): FODWheelDevice (DirectInput) is polled on the
+	 *  core ticker; TickWheel reads it through the active FODRacingWheel profile,
+	 *  handles its buttons (shift, H-gears, handbrake, reset) and pushes
+	 *  force feedback from the sim's per-step rim torque. */
+	void TickWheel();
 	bool bWheelHandbrake = false;
-	void WheelHandbrakePressed() { bWheelHandbrake = true; }
-	void WheelHandbrakeReleased() { bWheelHandbrake = false; }
+	int32 WheelHGear = 0;            // gear of the H-shifter slot held, 0 = none
+	double LastWheelActivitySeen = 0.0;
+	void KeyShiftUp();
+	void KeyShiftDown();
 
 	void SetupGamepadAndWheelInput(UInputComponent* Input);
 

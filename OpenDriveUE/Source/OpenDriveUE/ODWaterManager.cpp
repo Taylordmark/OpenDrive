@@ -1,10 +1,13 @@
 #include "ODWaterManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
@@ -24,8 +27,8 @@ void AODWaterManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	WaterMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Water.M_Water"));
+	WaterMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Water.M_Water")));
 	if (!WaterMat)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -138,12 +141,20 @@ void AODWaterManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedWaterTile Parsed;
-		const bool bOk = ParseWaterTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseWaterTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
@@ -181,15 +192,20 @@ void AODWaterManager::OnTileParsed(const FIntPoint& Key, bool bOk, FParsedWaterT
 	FinalizeTile(Key, MoveTemp(Parsed));
 }
 
-void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& Lk)
+void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsedLake>& InLakes)
 {
-	const uint32 VCount = Lk.Verts.Num() / 3;
-	const uint32 TCount = Lk.Tris.Num() / 3;
+	const FParsedLake* First = InLakes.FindByPredicate([](const FParsedLake& Lk) { return Lk.Verts.Num() >= 3; });
+	if (!First)
+	{
+		return;
+	}
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetupAttachment(RootComponent);
-	const FVector3d Origin = VCount ? FVector3d(Lk.Verts[0], Lk.Verts[1], 0.0) : FVector3d::ZeroVector;
+	const FVector3d Origin(First->Verts[0], First->Verts[1], 0.0);
 	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
+	// a flat lid over the lake bed: its shadow only lands under itself
+	Comp->SetCastShadow(false);
 	Comp->RegisterComponent();
 	// No relative offset needed - unlike AODBuildingManager, FParsedLake's
 	// verts already carry their final baked world Z (pipeline-time DEM
@@ -201,30 +217,35 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& L
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
 
-		TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
-		TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+		for (const FParsedLake& Lk : InLakes)
+		{
+			const uint32 VCount = Lk.Verts.Num() / 3;
+			const uint32 TCount = Lk.Tris.Num() / 3;
+			TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
+			TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
 
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			VertIds[v] = Mesh.AppendVertex(FVector3d(
-				Lk.Verts[v * 3 + 0] - Origin.X, Lk.Verts[v * 3 + 1] - Origin.Y, Lk.Verts[v * 3 + 2]));
-		}
-		for (uint32 v = 0; v < VCount; ++v)
-		{
-			UvIds[v] = UV->AppendElement(
-				FVector2f(Lk.Uvs[v * 2 + 0], Lk.Uvs[v * 2 + 1]));
-		}
-		for (uint32 t = 0; t < TCount; ++t)
-		{
-			const uint32 I0 = Lk.Tris[t * 3 + 0];
-			const uint32 I1 = Lk.Tris[t * 3 + 1];
-			const uint32 I2 = Lk.Tris[t * 3 + 2];
-			const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
-			if (Tid >= 0)
+			for (uint32 v = 0; v < VCount; ++v)
 			{
-				UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+				VertIds[v] = Mesh.AppendVertex(FVector3d(
+					Lk.Verts[v * 3 + 0] - Origin.X, Lk.Verts[v * 3 + 1] - Origin.Y, Lk.Verts[v * 3 + 2]));
+				UvIds[v] = UV->AppendElement(
+					FVector2f(Lk.Uvs[v * 2 + 0], Lk.Uvs[v * 2 + 1]));
+			}
+			for (uint32 t = 0; t < TCount; ++t)
+			{
+				const uint32 I0 = Lk.Tris[t * 3 + 0];
+				const uint32 I1 = Lk.Tris[t * 3 + 1];
+				const uint32 I2 = Lk.Tris[t * 3 + 2];
+				const int32 Tid = Mesh.AppendTriangle(VertIds[I0], VertIds[I1], VertIds[I2]);
+				if (Tid >= 0)
+				{
+					UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+				}
 			}
 		}
+		// No normal overlay = every vert renders with a default (0,1,0) normal:
+		// lit by sun azimuth, and headlights cut off along the lamp plane.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 
 	// NO collision (task scope, 2026-08-27): driving INTO a lake is a future
@@ -243,12 +264,8 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const FParsedLake& L
 void AODWaterManager::FinalizeTile(const FIntPoint& Key, FParsedWaterTile&& Parsed)
 {
 	FWaterTile& Tile = Tiles.Add(Key);
-	Tile.Lakes.Reserve(Parsed.Lakes.Num());
-
-	for (const FParsedLake& Lk : Parsed.Lakes)
-	{
-		CreateLakeComponent(Tile, Lk);
-	}
+	Tile.NumLakes = Parsed.Lakes.Num();
+	CreateLakeComponent(Tile, Parsed.Lakes);
 
 	// Per-tile surface-Z log (verification evidence for the headless bake
 	// check - "confirm the three named lakes produce meshes at plausible
@@ -325,6 +342,8 @@ void AODWaterManager::Tick(float DeltaSeconds)
 		}
 	}
 
+	bSettled = Dispatched == 0 && PendingTiles.IsEmpty();
+
 	TArray<FIntPoint> Gone;
 	for (const auto& Pair : Tiles)
 	{
@@ -345,7 +364,7 @@ void AODWaterManager::Tick(float DeltaSeconds)
 		int32 NumLakes = 0;
 		for (const auto& Pair : Tiles)
 		{
-			NumLakes += Pair.Value.Lakes.Num();
+			NumLakes += Pair.Value.NumLakes;
 		}
 		UE_LOG(LogTemp, Display,
 			TEXT("ODWaterManager: tiles=%d pending=%d missing=%d lakes=%d"),

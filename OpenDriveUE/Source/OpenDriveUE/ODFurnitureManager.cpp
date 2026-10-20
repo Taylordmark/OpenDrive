@@ -1,6 +1,8 @@
 #include "ODFurnitureManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "ODDayNightController.h"
 #include "Async/Async.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -57,12 +59,12 @@ void AODFurnitureManager::BeginPlay()
 	{
 		const FString Path = FString::Printf(TEXT("/Game/OpenDrive/Furniture/SM_Furn_%s.SM_Furn_%s"),
 			FurnitureTypes[t].Name, FurnitureTypes[t].Name);
-		Meshes[t] = LoadObject<UStaticMesh>(nullptr, *Path);
+		Meshes[t] = ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, *Path));
 		NumOk += Meshes[t] != nullptr;
 	}
 	BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	if (UMaterialInterface* Lamp = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp")))
+	if (UMaterialInterface* Lamp = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp"))))
 	{
 		LampMid = UMaterialInstanceDynamic::Create(Lamp, this);
 		LampMid->SetScalarParameterValue(TEXT("Glow"), 0.0f);
@@ -109,12 +111,20 @@ void AODFurnitureManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedFurnitureTile Parsed;
-		const bool bOk = ParseFurnitureTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseFurnitureTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));

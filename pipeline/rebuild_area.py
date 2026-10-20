@@ -54,6 +54,8 @@ filenames:
  15. export_building_mesh_bin.py -> buildings_*.bin (needs building_mesh.json)
  16. export_building_centroids_bin.py -> building_centroids_*.bin (needs
      building_mesh.json)
+ 16b. build_landmarks.py     -> landmarks_*.bin, landmarks.json (needs
+     road_stations.json; fetches its own OSM footprints)
  17. build_place_labels.py    -> road_labels.json (needs road_stations.json,
      osm_places.json)
  18. export_place_labels_bin.py -> labels_*.bin (needs road_labels.json)
@@ -102,6 +104,7 @@ run immediately (no partial bake left half-updated silently) and this
 script exits non-zero itself with a clear "stage N/23 failed" message.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -158,6 +161,7 @@ STAGES = [
     # after furniture (2026-10-06): the ODG1 lane block reads road_furniture.json
     # `controls`; run earlier it shipped 0 OSM signals/stops
     ("export_road_centerline_bin.py", "export centerline_*.bin / centerline_map_*.bin / routegraph_*.bin"),
+    ("build_traffic_demand.py", "FHWA HPMS volumes per lane-graph edge -> traffic_*.bin (reads routegraph_*.bin)"),
     # EMBANKMENTS (2026-09-07): reuses road_stations.json's own in_junction_box
     # field (Arc 7.18) plus the same DEM-probe drop detection guardrails use -
     # sits right after guardrails for the same "needs terrain's sample_dem
@@ -172,9 +176,16 @@ STAGES = [
     # constraint, needs road_embankments.json first" reason.
     ("build_road_bridges.py", "build road_bridges.json (genuine-span deck points + pier placement)"),
     ("export_road_bridge_bin.py", "export bridge tiles -> Content/OpenDrive/Masks/bridge_*.bin"),
+    # TUNNELS: bore + headwalls + light strips from road_stations.json's
+    # is_tunnel runs (the terrain bake opens the portals from the same runs)
+    ("build_tunnels.py", "export tunnel tiles -> Content/OpenDrive/Masks/tunnel_*.bin, tunnellights_*.bin"),
+    # town sidewalks + the first 30 m of OSM service driveways, concrete
+    # slabs on the shipped road edge / terrain (PLAN-REALISM Phase 1b)
+    ("build_sidewalks.py", "export sidewalk tiles -> Content/OpenDrive/Masks/sidewalk_*.bin"),
     ("build_building_mesh.py", "build building_mesh.json"),
     ("export_building_mesh_bin.py", "export building tiles -> Content/OpenDrive/Masks/buildings_*.bin"),
     ("export_building_centroids_bin.py", "export building_centroids_*.bin"),
+    ("build_landmarks.py", "build landmarks_*.bin"),
     ("build_place_labels.py", "build road_labels.json"),
     ("export_place_labels_bin.py", "export labels_*.bin"),
     ("classify_biomes.py", "classify road-corridor biomes -> road_biomes.json"),
@@ -183,11 +194,19 @@ STAGES = [
     # ODWeatherController's mild default climate. Needs road_test_meta.json +
     # road_biomes.json (storm weights); this area only, not its no-arg "all".
     (f"fetch_climate.py {AREA_NAME}_test", "fetch climate normals + storm weights -> climate_*.json"),
+    ("build_ground_bands.py", "per-area ground bands (treeline/snow/sea) -> groundbands_*.json"),
+    ("build_sat_albedo.py", "Sentinel-2 ground albedo over the near tiles -> sat_*.png/json (Realistic)"),
+    ("build_pave_mask.py", "OSM lots/plazas + WorldCover built-up -> pave_*.png/json (Realistic paved ground)"),
+    ("build_terrain_relief.py", "cached z15 DEM slope detail + gully/ridge -> dem_*.png/json (Realistic relief)"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
+    ("build_far_forest.py", "WorldCover canopy cards + town street trees -> farforest_*.bin"),
+    ("build_horizon.py", "zoom-10 horizon mesh, baked extent + 80 km -> horizon_*.bin"),
     # (2026-10-05, step 3) after the last tile writer: the gates check owned tiles only
     ("prune_unowned_tiles.py", "delete tiles outside the area's owned rect (its halo)"),
     ("build_menu_spots.py", "pick the garage-menu backdrop spot -> menu_spots.json"),
+    # (2026-10-14) Area screen map panel; extent covers centerline_map_*.bin
+    ("bake_area_relief.py", "shaded-relief map backdrop -> relief_<area>.png + relief_<area>.json"),
     ("verify_terrain_fit.py", "offline gate: shipped-artifact terrain fit + generation-id + pre-bake consistency"),
     ("verify_road_fit.py", "offline gate: shipped-artifact road-vs-terrain fit"),
     # (2026-10-05) after the gates: lists every baked world member, this one included
@@ -213,7 +232,9 @@ def main():
 
         print(f"\n[{i}/{len(STAGES)}] {script} - {desc}")
         t0 = time.time()
-        result = subprocess.run([sys.executable, str(script_path), *args])
+        # UTF-8 stdout: OSM names (e.g. Hawaiian macrons) crash cp1252 when piped
+        result = subprocess.run([sys.executable, str(script_path), *args],
+                                env={**os.environ, "PYTHONUTF8": "1"})
         dt = time.time() - t0
 
         if result.returncode != 0:

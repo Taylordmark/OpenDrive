@@ -2,8 +2,10 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GenericPlatform/GenericPlatformFile.h" // IFileHandle (far forest)
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
+#include "ODGroundCover.h"
 #include "ODForestManager.generated.h"
 
 class UCapsuleComponent;
@@ -32,9 +34,11 @@ enum class EODBiome : uint8
 	Farmland,           // sparse bush (hedgerows/fencelines), open fields
 	Savanna,            // sparse scattered trees over grass - E Africa feel
 	Rainforest,         // Blob-heavy, densest - tropical jungle canopy
-	CoastalDune,        // sparse bush only - beach/dune grass, no trees
+	CoastalDune,        // sparse bush only - temperate beach/dune grass
 	CanyonBadlands,     // near-barren, sparse olive scrub - Dragon-style rock cut
 	RockyFoothill,      // Conifer+olive, sparse-medium - plains/alpine transition
+	TropicalCoast,      // palms over sand - CoastalDune's |lat| < 23.5 twin
+	LavaField,          // near-barren basalt, sparse fern/ohia colonizers
 };
 
 /** One biome's recipe against the extended 7-species/2-shrub mesh set -
@@ -53,12 +57,13 @@ enum class EODBiome : uint8
  *  trees. */
 struct FBiomeRecipe
 {
-	// Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak - order
+	// Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak, Palm,
+	// TreeFern, Broadleaf, BroadleafGiant - order
 	// MUST match AODForestManager::TreeMeshes (loaded from
 	// ExtendedTreeMeshPaths in ODForestManager.cpp). All 7 are "woody":
 	// BuildTile() gives every one of them a trunk collision capsule, same as
-	// the original 3.
-	float SpeciesWeight[7] = {1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+	// the original 3. Unlisted trailing entries zero-fill.
+	float SpeciesWeight[NumExtendedTreeSpecies] = {1.f};
 	// Bush, Sagebrush - order MUST match AODForestManager::ShrubMeshes.
 	// Neither gets trunk collision (same as the plain bush always has) -
 	// sagebrush is shrub-class specifically so it never enters the
@@ -126,6 +131,10 @@ public:
 	 *  Set before FinishSpawning so BeginPlay's elevation/centerline/station
 	 *  loads keep only points within VistaLoadPadCm of the wedge. */
 	FODVistaRegion Vista;
+
+	/** A Tick that built no near tile and no far chunk - everything in reach
+	 *  is up. The menu's start vista waits on it (2026-10-16). */
+	bool IsInitialStreamingSettled() const { return bSettled; }
 	static constexpr double VistaLoadPadCm = 25000.0;   // > ForestBandCm + one tile
 
 	/** Read-only accessor into BiomeRecipeTable (ODForestManager.cpp,
@@ -152,6 +161,19 @@ public:
 	 *  baked data instead of falling back to guesses. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float SpawnRadius = 50000.0f;
+
+	/** Far forest (realism eval T3, 2026-10-15): pipeline/build_far_forest.py's
+	 *  farforest_<area>_test.bin (prefix derived from ElevationFilePrefix) -
+	 *  one 8-tri cross-card canopy instance per ESA WorldCover tree cell
+	 *  (20 m), streamed in 1 km chunks out to this radius, plus town street
+	 *  trees (real species meshes, trunk collision). 0 = off. Cards in the
+	 *  near scatter's road band hide while it covers their chunk. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float FarForestRadius = 500000.0f;
+
+	/** Game-thread ms per tick for far chunk builds (at least one per tick). */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float FarBuildMsBudget = 2.0f;
 
 	/** Trees per m^2 at forest weight 1. Thinned 0.075 -> 0.05 (2026-07-25) so
 	 *  the roadside canopy reads as forest, not a wall right over the camera. */
@@ -531,11 +553,43 @@ private:
 	float GrassLeadCm = 0.0f;   // this tick's lead, see GrassLeadSeconds
 	TMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GrassCells;   // null = built, nothing to grow
 	TMap<FIntPoint, double> GrassFirstTry;
+	// Why grass lattice corners come up bare (terrain survey 2026-10-20: the
+	// Concrete spawn had no carpet or cover at all, cause not found offline).
+	// Counted per committed cell, logged by UpdateGrass every 5 s while non-empty.
+	int32 GrassCornerStats[4] = {};   // on terrain, no hit/off the sanity band, in a lake, other actor
+	TMap<FName, int32> GrassOtherHits;   // "other actor" by class
+	double GrassStatsLogAt = 0.0;
+	// Realistic-only extra ground cover on the grass cells (ODGroundCover.h)
+	UPROPERTY()
+	FODGroundCoverAssets GroundCover;
+	TMultiMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GroundCoverCells;
 	void ReleaseTile(const FIntPoint& Key);
 	void UpdateCollision(const FVector& PlayerLoc);
 
-	// 7 entries, order = FBiomeRecipe::SpeciesWeight (Blob, Olive, Conifer,
-	// ScrubOak, Manzanita, Yucca, CanyonOak) - loaded from
+	// Far forest (ODFarForest.cpp) - see FarForestRadius
+	struct FFarChunk
+	{
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player
+		TArray<FVector> Trunks;   // off-band cards + street trees (collision)
+		bool bBandVisible = true;
+	};
+	bool LoadFarForest();
+	void BuildFarChunk(const FIntPoint& Key);
+	void UpdateFarForest(const FVector& Loc);
+	UStaticMesh* MakeCardMesh(int32 AtlasRow, int32 AtlasCol);
+	TUniquePtr<IFileHandle> FarFile;
+	TMap<FIntPoint, TPair<int64, int32>> FarTileRecs;   // 2 km tile -> (record byte offset, count)
+	TMap<FIntPoint, FFarChunk> FarChunks;
+	UPROPERTY()
+	TArray<TObjectPtr<UStaticMesh>> CardMeshes;   // [0] needle (pine cell), [1] broadleaf (aspen cell)
+	double FarLogTime = 0.0;
+	double FarBuildMs = 0.0, FarBuildMaxMs = 0.0;
+	int32 FarBuilt = 0;
+
+	// NumExtendedTreeSpecies entries, order = FBiomeRecipe::SpeciesWeight
+	// (Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca, CanyonOak, Palm,
+	// TreeFern, Broadleaf, BroadleafGiant) - loaded from
 	// ExtendedTreeMeshPaths in ODForestManager.cpp, NOT the shared
 	// TreeMeshPaths[3] in ODBinSidecarUtil.h (that array stays the classic 3
 	// so ODBarrierManager.cpp, its other consumer, is unaffected).
@@ -661,6 +715,9 @@ private:
 	TArray<FVector> PoolAt;   // centre of the obstacle each Pool slot holds (stable slots)
 
 	TMap<FIntPoint, FTile> Tiles;
+	bool bSwayShadows = true;   // forest shadows follow wind WPO (slow) vs VSM-cached Rigid (driving) - Tick()
+	TArray<TWeakObjectPtr<UHierarchicalInstancedStaticMeshComponent>> SwayShadowsPending;   // HISMs still to switch after a flip
+	static constexpr int32 SwayShadowsPerTick = 24;
 
 	// terrain mask CPU copy (downsampled R channel = forest weight) - the
 	// Landscape-actor path (Tail of the Dragon)
@@ -730,6 +787,10 @@ private:
 	{
 		TArray<FVector2D> Ring;   // world cm, closed (last point != first, IsInsideLake wraps)
 		double MinX = 0.0, MaxX = 0.0, MinY = 0.0, MaxY = 0.0;
+		// Water feature this ring belongs to (2026-10-14): a lake with an
+		// island, or a sea tile around one, is several rings of ONE feature,
+		// and even-odd parity runs over all of them so the island stays dry.
+		int32 Feature = 0;
 	};
 	TArray<FLakeRing> LakeRings;
 
@@ -763,6 +824,7 @@ private:
 	// BuildTile() and UpdateCollision() log at different points in Tick().
 	double LastGroundCoverLogTime = 0.0;
 	bool bReady = false;
+	bool bSettled = false;
 
 	// Player's last-known world Z (2026-08-26, live-drive bug: trees found
 	// rendered far below the terrain surface on Green Valley). GroundAt()'s/

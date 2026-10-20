@@ -52,11 +52,17 @@ MAT_DIR = "/Game/OpenDrive/Materials"
 MAT_NAME = "M_SnowFlake"
 
 SNOW_COLOR = (0.95, 0.96, 0.98)
-OPACITY = 0.92
+OPACITY = 0.8
 # Modest push on top of the lit BaseColor (see MSM_DEFAULT_LIT note above) -
 # keeps flakes readable in shadow/backlit conditions without blowing out to
 # a glowing orb in direct sun.
-EMISSIVE_STRENGTH = 1.2
+# 2026-10-16 (2): flakes are now ~2 cm, not 11 cm, and were reading as
+# glowing balls. Edges go soft (a Fresnel falloff on the sphere - no texture)
+# and the glow drops; per-pixel translucency lighting lets headlights and
+# street lights light the flakes, so night snow sparkles in the beams
+# instead of glowing everywhere.
+EMISSIVE_STRENGTH = 0.35
+EDGE_SOFTNESS = 1.5   # Fresnel exponent: lower = softer, fuzzier edge
 
 # Rain streaks (Weather W2): thin, faint, slightly blue-grey - a drop is mostly
 # see-through, it reads by its streak, not its body.
@@ -89,6 +95,7 @@ mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
 mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
 mat.set_editor_property("two_sided", True)
 mat.set_editor_property("used_with_instanced_static_meshes", True)
+mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE_PER_PIXEL_LIGHTING)
 
 # Pre-multiplying in Python and wiring a single Constant3Vector straight to
 # each property (rather than a Constant3Vector*Constant Multiply node)
@@ -110,12 +117,33 @@ kind_node.set_editor_property("const_default_value", 1.0)
 lerps = []
 
 
-def rain_snow(rain_node, snow_node, prop, y):
+# Layer fade (2026-10-16): AODSeasonController's far layer draws at < 1
+# (per instance, index 1; default 1 = the near layer / the old look).
+fade_node = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -800, 450)
+fade_node.set_editor_property("data_index", 1)
+fade_node.set_editor_property("const_default_value", 1.0)
+_fres = MEL.create_material_expression(mat, unreal.MaterialExpressionFresnel, -800, 550)
+_fres.set_editor_property("exponent", EDGE_SOFTNESS)
+_fres.set_editor_property("base_reflect_fraction", 0.0)
+_edge = MEL.create_material_expression(mat, unreal.MaterialExpressionOneMinus, -650, 550)
+req(MEL.connect_material_expressions(_fres, "", _edge, ""), "OneMinus(Fresnel)")
+_fade = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -500, 500)
+req(MEL.connect_material_expressions(fade_node, "", _fade, "A"), "fade x edge A")
+req(MEL.connect_material_expressions(_edge, "", _fade, "B"), "fade x edge B")
+fade_node = _fade   # layer fade x soft edge
+
+
+def rain_snow(rain_node, snow_node, prop, y, fade=False):
     lerp = MEL.create_material_expression(mat, unreal.MaterialExpressionLinearInterpolate, -200, y)
     req(MEL.connect_material_expressions(rain_node, "", lerp, "A"), f"{prop} Lerp.A")
     req(MEL.connect_material_expressions(snow_node, "", lerp, "B"), f"{prop} Lerp.B")
     req(MEL.connect_material_expressions(kind_node, "", lerp, "Alpha"), f"{prop} Lerp.Alpha")
-    req(MEL.connect_material_property(lerp, "", prop), f"Lerp -> {prop}")
+    out = lerp
+    if fade:
+        out = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -100, y)
+        req(MEL.connect_material_expressions(lerp, "", out, "A"), f"{prop} Fade.A")
+        req(MEL.connect_material_expressions(fade_node, "", out, "B"), f"{prop} Fade.B")
+    req(MEL.connect_material_property(out, "", prop), f"Lerp -> {prop}")
     lerps.append((prop, lerp))
 
 
@@ -133,7 +161,7 @@ def scalar(v, y):
 
 rain_snow(vec3(rain_emissive, 0), vec3(final_emissive, 50), unreal.MaterialProperty.MP_EMISSIVE_COLOR, 0)
 rain_snow(vec3(RAIN_COLOR, -150), vec3(SNOW_COLOR, -100), unreal.MaterialProperty.MP_BASE_COLOR, -150)
-rain_snow(scalar(RAIN_OPACITY, 300), scalar(OPACITY, 350), unreal.MaterialProperty.MP_OPACITY, 300)
+rain_snow(scalar(RAIN_OPACITY, 300), scalar(OPACITY, 350), unreal.MaterialProperty.MP_OPACITY, 300, fade=True)
 
 MEL.recompile_material(mat)
 unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
@@ -148,6 +176,11 @@ if node2 is None:
 for prop, _ in lerps:
     n = MEL.get_material_property_input_node(reloaded, prop)
     ins = MEL.get_inputs_for_material_expression(reloaded, n) if n else []
+    if prop == unreal.MaterialProperty.MP_OPACITY and n is not None:   # Lerp x Fade
+        if len([i for i in ins if i is not None]) != 2:
+            raise RuntimeError(f"M_SnowFlake: opacity fade not wired ({ins})")
+        n = next(i for i in ins if isinstance(i, unreal.MaterialExpressionLinearInterpolate))
+        ins = MEL.get_inputs_for_material_expression(reloaded, n)
     if n is None or len([i for i in ins if i is not None]) != 3:
         raise RuntimeError(f"M_SnowFlake: {prop} Lerp not fully wired ({ins})")
     log(f"  {prop}: Lerp inputs={[i.get_class().get_name() for i in ins]}")

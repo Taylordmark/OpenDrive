@@ -1,5 +1,7 @@
 #include "ODForestManager.h"
+#include "ODTileSource.h"
 #include "ODAssetDetail.h"
+#include "ODVisualStyle.h"
 
 #include "Components/CapsuleComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -71,7 +73,10 @@ constexpr int32 NumShrubSpecies = UE_ARRAY_COUNT(ShrubMeshPaths);
  *  nothing outside this module needs them.
  *
  *  SpeciesWeight order: Blob, Olive, Conifer, ScrubOak, Manzanita, Yucca,
- *  CanyonOak. ShrubWeight order: Bush, Sagebrush. Species mix (2026-08-27,
+ *  CanyonOak, Palm, TreeFern, Broadleaf, BroadleafGiant (rows may stop at
+ *  7 - the tropical four zero-fill). Tropical biomes (Savanna, Rainforest, TropicalCoast,
+ *  LavaField) carry no Colorado species - Blob in particular is the only
+ *  LeafDrop slot, and tropical canopy is evergreen. ShrubWeight order: Bush, Sagebrush. Species mix (2026-08-27,
  *  see FBiomeRecipe's comment for why this changed from a fixed 3-mesh
  *  set): DeciduousForest/EvergreenForest/Rainforest/Wetland keep their
  *  original blob/olive/conifer character basically unchanged (a sliver of
@@ -111,13 +116,15 @@ const FBiomeRecipe BiomeRecipeTable[] = {
 	/* AlpineBare       */ {{0.15f, 0.20f, 0.35f, 0.10f, 0.05f, 0.00f, 0.15f}, {0.60f, 0.40f}, 0.05f, 0.1f, 2.00f, 0.3f},
 	/* ArcticTundra     */ {{0.10f, 0.50f, 0.30f, 0.05f, 0.00f, 0.00f, 0.05f}, {0.30f, 0.70f}, 0.02f, 0.3f, 1.30f, 0.4f},
 	/* Farmland         */ {{0.20f, 0.55f, 0.15f, 0.05f, 0.00f, 0.00f, 0.05f}, {0.80f, 0.20f}, 0.10f, 0.5f, 0.05f, 0.2f},
-	/* Savanna          */ {{0.35f, 0.35f, 0.05f, 0.10f, 0.05f, 0.00f, 0.10f}, {0.60f, 0.40f}, 0.20f, 0.9f, 0.30f, 0.6f},
-	/* Rainforest       */ {{0.65f, 0.05f, 0.15f, 0.05f, 0.00f, 0.00f, 0.10f}, {0.95f, 0.05f}, 1.2f, 0.9f, 0.10f, 1.3f},
+	/* Savanna          */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.35f, 0.00f, 0.55f, 0.10f}, {0.60f, 0.40f}, 0.20f, 0.9f, 0.30f, 0.6f},
+	/* Rainforest       */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.20f, 0.30f, 0.45f, 0.05f}, {0.95f, 0.05f}, 1.2f, 0.9f, 0.10f, 1.3f},
 	/* CoastalDune      */ {{0.05f, 0.55f, 0.05f, 0.05f, 0.15f, 0.00f, 0.15f}, {0.30f, 0.70f}, 0.05f, 0.9f, 0.20f, 0.7f},
 	/* CanyonBadlands   */ {{0.02f, 0.03f, 0.03f, 0.35f, 0.05f, 0.03f, 0.49f}, {0.25f, 0.75f}, 0.10f, 0.3f, 2.20f, 0.2f, 0.20f},
 	/* RockyFoothill    */ {{0.10f, 0.35f, 0.35f, 0.10f, 0.00f, 0.00f, 0.10f}, {0.70f, 0.30f}, 0.5f, 0.6f, 1.60f, 0.7f},
+	/* TropicalCoast    */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.75f, 0.00f, 0.20f, 0.05f}, {0.60f, 0.40f}, 0.15f, 0.9f, 0.20f, 0.7f, 0.08f},
+	/* LavaField        */ {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.50f, 0.50f}, {0.80f, 0.20f}, 0.03f, 0.1f, 0.40f, 0.1f, 0.05f},
 };
-static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(BiomeRecipeTable) == (uint8)EODBiome::LavaField + 1,
 	"BiomeRecipeTable must have one entry per EODBiome value, in enum order");
 
 /** Grass ring density per EODBiome (2026-10-07), x GrassPerSqM - open
@@ -126,9 +133,9 @@ const float GrassBiomeScale[] = {
 	/* DeciduousForest */ 0.8f, /* EvergreenForest */ 0.6f, /* Chaparral */ 0.35f, /* DesertScrub */ 0.15f,
 	/* PlainsGrassland */ 1.0f, /* Wetland */ 1.0f, /* AlpineBare */ 0.4f, /* ArcticTundra */ 0.6f,
 	/* Farmland */ 0.9f, /* Savanna */ 0.9f, /* Rainforest */ 0.7f, /* CoastalDune */ 0.3f,
-	/* CanyonBadlands */ 0.1f, /* RockyFoothill */ 0.55f,
+	/* CanyonBadlands */ 0.1f, /* RockyFoothill */ 0.55f, /* TropicalCoast */ 0.35f, /* LavaField */ 0.03f,
 };
-static_assert(UE_ARRAY_COUNT(GrassBiomeScale) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(GrassBiomeScale) == (uint8)EODBiome::LavaField + 1,
 	"GrassBiomeScale must have one entry per EODBiome value, in enum order");
 
 // ---- Terrain variety V2/V5 (2026-09-25, next steps.md sec 7.35) ----
@@ -149,12 +156,16 @@ constexpr float TreelineLowM = 3350.0f, TreelineHighM = 3550.0f; // TREELINE_LOW
 // noise mask agree, inside the montane aspen elevation window.
 constexpr float AspenLowM = 2450.0f, AspenHighM = 3350.0f, AspenFadeM = 150.0f;
 constexpr float AspenNoiseScaleCm = 50000.0f;   // 500 m lattice -> grove-sized patches
+// Realistic flora wind (build_flora_materials.py) is a few cm: past 100 m it
+// can't be seen, so stop evaluating it there (Nanite WPO cost, VSM cache
+// invalidation). No effect on the stylized materials, which have no WPO.
+constexpr int32 WpoDisableCm = 10000;
 constexpr float AspenMaxShare = 0.75f;          // max fraction of the tree mix turned to aspen
 
 FBiomeRecipe LerpRecipe(const FBiomeRecipe& A, const FBiomeRecipe& B, float T)
 {
 	FBiomeRecipe R = A;
-	for (int32 s = 0; s < 7; ++s) { R.SpeciesWeight[s] = FMath::Lerp(A.SpeciesWeight[s], B.SpeciesWeight[s], T); }
+	for (int32 s = 0; s < NumTreeSpecies; ++s) { R.SpeciesWeight[s] = FMath::Lerp(A.SpeciesWeight[s], B.SpeciesWeight[s], T); }
 	for (int32 s = 0; s < 2; ++s) { R.ShrubWeight[s] = FMath::Lerp(A.ShrubWeight[s], B.ShrubWeight[s], T); }
 	R.TreeDensityScale = FMath::Lerp(A.TreeDensityScale, B.TreeDensityScale, T);
 	R.BushDensityScale = FMath::Lerp(A.BushDensityScale, B.BushDensityScale, T);
@@ -196,7 +207,7 @@ FBiomeRecipe VarietyRecipe(EODBiome Biome, float Northness, float Moisture, floa
 	return R;
 }
 
-// PickWeightedIndex (used both for the 7-way tree pick and the 2-way shrub
+// PickWeightedIndex (used both for the tree-species pick and the 2-way shrub
 // pick below) now lives in ODBinSidecarUtil.h - see this file's
 // ExtendedTreeMeshPaths comment above for why it moved.
 }
@@ -222,11 +233,11 @@ void AODForestManager::BeginPlay()
 	// array's own comment for why ODForestManager keeps its own superset.
 	for (const TCHAR* Path : ExtendedTreeMeshPaths)
 	{
-		TreeMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		TreeMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 	for (const TCHAR* Path : ShrubMeshPaths)
 	{
-		ShrubMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		ShrubMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
 
 	// Ground cover (2026-09-03) - see the RockMeshes declaration in
@@ -242,17 +253,17 @@ void AODForestManager::BeginPlay()
 	};
 	for (const TCHAR* Path : RockMeshPaths)
 	{
-		RockMeshes.Add(ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(nullptr, Path)));
+		RockMeshes.Add(ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(nullptr, Path))));
 	}
-	ScrubMesh = ODAssetDetail::Upgrade(LoadObject<UStaticMesh>(
-		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft")));
+	ScrubMesh = ODAssetDetail::Upgrade(ODVisualStyle::Pick(LoadObject<UStaticMesh>(
+		nullptr, TEXT("/Game/OpenDrive/Trees/grass_tuft.grass_tuft"))));
 
 	// Real CC0 rock texture (bonus scope, 2026-09-03) - see RockMat's own
 	// header comment. Missing asset (script not yet run) is not fatal - the
 	// HISM SetMaterial() call in BuildTile() just no-ops, same "optional
 	// dependency" convention every LoadObject in this file already follows.
-	RockMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030"));
+	RockMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_Rock030.M_Rock030")));
 
 	// Seasons feature (2026-09-07): one shared MID for canopy snow, applied
 	// ONLY to the Conifer (evergreen) species batch in BuildTile() below -
@@ -263,8 +274,8 @@ void AODForestManager::BeginPlay()
 	// (added by unreal/build_flora_materials.py), not from anything here -
 	// every HISM using this MID still varies per-instance because
 	// PerInstanceRandom is a per-instance shader input, not a MID parameter.
-	if (UMaterialInterface* FoliageBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage")))
+	if (UMaterialInterface* FoliageBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Foliage.M_Foliage"))))
 	{
 		FoliageSeasonMID = UMaterialInstanceDynamic::Create(FoliageBase, this);
 
@@ -283,8 +294,8 @@ void AODForestManager::BeginPlay()
 	// snow (SnowCover-driven, see build_flora_materials.py's M_Bark_Aspen
 	// wiring) must not affect tree_scrub_oak, which also uses M_Bark_Aspen's
 	// STATIC (non-dynamic) reference and is out of this task's scope.
-	if (UMaterialInterface* BarkBase = LoadObject<UMaterialInterface>(
-			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen")))
+	if (UMaterialInterface* BarkBase = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+			nullptr, TEXT("/Game/OpenDrive/Materials/M_Bark_Aspen.M_Bark_Aspen"))))
 	{
 		DeciduousBarkMID = UMaterialInstanceDynamic::Create(BarkBase, this);
 	}
@@ -307,6 +318,11 @@ void AODForestManager::BeginPlay()
 	if (const UStaticMesh* Mesh = ScrubMesh.Get())
 	{
 		ScrubMeshBaseOffsetCm = Mesh->GetBoundingBox().Min.Z;
+	}
+
+	if (ODVisualStyle::IsRealistic())
+	{
+		GroundCover.Load(this);
 	}
 
 	Pool.Reserve(PoolSize);
@@ -340,6 +356,7 @@ void AODForestManager::BeginPlay()
 	// instance) skips straight to the Landscape-mask path unchanged.
 	bUsePointBiomes = LoadBiomePoints();
 	bReady = bUsePointBiomes || LoadMask();
+	LoadFarForest();   // realism T3 far canopy cards + street trees (ODFarForest.cpp)
 	if (!bReady)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -407,8 +424,8 @@ bool AODForestManager::LoadMask()
 	// staged into the pak via DirectoriesToAlwaysStageAsUFS ('ODM1', uint32 LE
 	// res, res*res forest-weight bytes)
 	TArray<uint8> Bin;
-	const FString BinPath =
-		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/terrain_mask.bin");
+	const FString BinPath = ODTileSource::Fetch(
+		FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/terrain_mask.bin"));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'M' || Bin[3] != '1')
 	{
@@ -440,8 +457,8 @@ bool AODForestManager::LoadBiomePoints()
 	// 'ODB2' (2026-09-25, sec 7.35) appends uint8 Northness255, uint8
 	// Moisture255, uint16 ElevM; ODB1 keeps the neutral FBiomePoint defaults.
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BiomeFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'B' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
@@ -490,8 +507,8 @@ bool AODForestManager::LoadElevationGrid()
 	// 'ODE1', uint32 LE N, N * (float32 X_cm, float32 Y_cm, float32 Z_cm) -
 	// pipeline/build_forest_elevation.py
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'E' || Bin[3] != '1')
 	{
@@ -547,8 +564,8 @@ bool AODForestManager::LoadCenterline()
 	auto LoadPoints = [this](const FString& Prefix) -> bool
 	{
 		TArray<uint8> Bin;
-		const FString BinPath = FPaths::ProjectContentDir()
-			/ TEXT("OpenDrive/Masks") / (Prefix + TEXT(".bin"));
+		const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+			/ TEXT("OpenDrive/Masks") / (Prefix + TEXT(".bin")));
 		if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 		{
@@ -605,8 +622,8 @@ bool AODForestManager::LoadBuildingCentroids()
 	// format as LoadCenterline(), just a different sidecar
 	// (pipeline/export_building_centroids_bin.py)
 	TArray<uint8> Bin;
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (BuildingCentroidFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (BuildingCentroidFilePrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'C' || Bin[3] != '1')
 	{
@@ -650,8 +667,8 @@ bool AODForestManager::LoadRoadStations()
 	// uses (see RoadStationFilePrefix's comment) - lifted to ODBinSidecarUtil.h
 	// so both managers call the exact same code rather than keeping two
 	// copies in sync.
-	const FString BinPath = FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (RoadStationFilePrefix + TEXT(".bin"));
+	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ TEXT("OpenDrive/Masks") / (RoadStationFilePrefix + TEXT(".bin")));
 	TArray<FRoadStation> Loaded;
 	FString GenId;
 	if (!ParseRoadStationSidecarFile(BinPath, Loaded, GenId))
@@ -697,16 +714,27 @@ bool AODForestManager::LoadWaterLakes()
 	const FString Dir = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks");
 	TArray<FString> AllBin;
 	IFileManager::Get().FindFiles(AllBin, *Dir, TEXT(".bin"));
+	if (ODTileSource::IsEnabled())
+	{
+		// streamed area: AODGameMode::PrefetchArea put its water tiles in the cache
+		TArray<FString> CachedBin;
+		IFileManager::Get().FindFiles(CachedBin, *ODTileSource::CachePath(Dir / TEXT("")), TEXT(".bin"));
+		for (const FString& FileName : CachedBin)
+		{
+			AllBin.AddUnique(FileName);
+		}
+	}
 	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
 
 	int32 TileFileCount = 0;
+	int32 FeatureCount = 0;   // FLakeRing::Feature
 	for (const FString& FileName : AllBin)
 	{
 		if (!FileName.StartsWith(TileMatch))
 		{
 			continue;
 		}
-		const FString Path = Dir / FileName;
+		const FString Path = ODTileSource::Fetch(Dir / FileName);
 		TArray<uint8> Bin;
 		if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 4
 			|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'L' || Bin[3] != '1')
@@ -726,6 +754,7 @@ bool AODForestManager::LoadWaterLakes()
 
 		for (uint32 l = 0; l < LakeCount; ++l)
 		{
+			++FeatureCount;
 			if (Remaining() < 8)
 			{
 				break;
@@ -921,6 +950,7 @@ bool AODForestManager::LoadWaterLakes()
 						FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
 						LR.Ring.Reserve(RingIdx.Num());
 						LR.MinX = MinX; LR.MaxX = MaxX; LR.MinY = MinY; LR.MaxY = MaxY;
+						LR.Feature = FeatureCount;
 						for (uint32 Idx : RingIdx)
 						{
 							const float X = ReadF32LE(VertsBase + (int64)Idx * 12 + 0);
@@ -1045,25 +1075,26 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 		}
 	}
 
-	// Interior: even-odd ray cast to +X per ring, using only segments whose
-	// Y-span covers this row (a crossing segment must). Row lists are grouped
-	// by ring, so parity resets whenever the ring id changes.
+	// Interior: even-odd ray cast to +X per feature, using only segments
+	// whose Y-span covers this row (a crossing segment must). Row lists are
+	// grouped by ring and a feature's rings are consecutive, so parity resets
+	// whenever the feature changes - an island ring flips it back to dry.
 	const TArray<FLakeSeg>* Row = LakeSegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
 	if (!Row)
 	{
 		return false;
 	}
-	int32 CurRing = INDEX_NONE;
+	int32 CurFeature = INDEX_NONE;
 	bool bInside = false;
 	for (const FLakeSeg& S : *Row)
 	{
-		if (S.Ring != CurRing)
+		if (LakeRings[S.Ring].Feature != CurFeature)
 		{
 			if (bInside)
 			{
 				return true;
 			}
-			CurRing = S.Ring;
+			CurFeature = LakeRings[S.Ring].Feature;
 		}
 		SegEnds(S, Pi, Pj);
 		if (((Pi->Y > WorldY) != (Pj->Y > WorldY)) &&
@@ -1077,14 +1108,24 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 
 bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) const
 {
+	int32 CurFeature = INDEX_NONE;
+	bool bInside = false;   // parity over the current feature's rings
 	for (const FLakeRing& LR : LakeRings)
 	{
+		if (LR.Feature != CurFeature)
+		{
+			if (bInside)
+			{
+				return true;
+			}
+			CurFeature = LR.Feature;
+			bInside = false;
+		}
 		if (WorldX < LR.MinX - LakeShoreExclusionMarginCm || WorldX > LR.MaxX + LakeShoreExclusionMarginCm ||
 			WorldY < LR.MinY - LakeShoreExclusionMarginCm || WorldY > LR.MaxY + LakeShoreExclusionMarginCm)
 		{
 			continue;
 		}
-		bool bInside = false;
 		const int32 N = LR.Ring.Num();
 		double MinDist = TNumericLimits<double>::Max();
 		for (int32 i = 0, j = N - 1; i < N; j = i++)
@@ -1098,12 +1139,12 @@ bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) cons
 			}
 			MinDist = FMath::Min(MinDist, DistPointToSegment2D(WorldX, WorldY, Pi.X, Pi.Y, Pj.X, Pj.Y));
 		}
-		if (bInside || MinDist <= LakeShoreExclusionMarginCm)
+		if (MinDist <= LakeShoreExclusionMarginCm)
 		{
 			return true;
 		}
 	}
-	return false;
+	return bInside;
 }
 
 bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const
@@ -1434,7 +1475,7 @@ void AODForestManager::BlendAt(double WorldX, double WorldY,
 	// found via BuildTile()'s species-mix verification log showing
 	// scrubOak/manzanita/yucca/sagebrush stuck at 0 in every Chaparral/
 	// DesertScrub tile despite BiomeRecipeTable specifying otherwise.
-	float WeightSum = 0.0f, SpeciesAcc[7] = {};
+	float WeightSum = 0.0f, SpeciesAcc[NumTreeSpecies] = {};
 	float ShrubAcc[2] = {};
 	float TreeScaleAcc = 0.0f, BushScaleAcc = 0.0f, ForestWeightAcc = 0.0f;
 	// ground cover (2026-08-26): accumulated the same inverse-square-distance
@@ -2107,9 +2148,24 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		}
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Hism->SetCullDistances(bLowVeg ? 20000 : 45000, bLowVeg ? 45000 : 60000);
+		// Scrub (grass_tuft, ~1 m) gets its own short cull (2026-10-14, Oahu
+		// 20-25 fps): it's the largest batch in dense biomes (~45% of a
+		// Rainforest tile) and sub-pixel long before the old shared 450 m
+		// low-veg cull - 250 m end draws ~30% of the old area.
+		const bool bScrub = m == ScrubBatchIdx;
+		Hism->SetCullDistances(bScrub ? 15000 : bLowVeg ? 20000 : 45000, bScrub ? 25000 : bLowVeg ? 45000 : 60000);
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(!bLowVeg);
-		Hism->SetAffectDynamicIndirectLighting(false);
+		// Wind WPO is a few cm (see WpoDisableCm): don't let it invalidate
+		// Virtual Shadow Map pages every frame for every tree within 100 m
+		// while driving. Instances never move after AddInstances, so Rigid is
+		// exact apart from the shadow not swaying; Tick() switches swaying
+		// shadows back on when slow (see bSwayShadows).
+		Hism->ShadowCacheInvalidationBehavior = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
+		// Trees stay in Lumen's scene: their canopy bounce and transmission is
+		// most of the light in forest shade (2026-10-16 lighting audit, Gap 1).
+		// Low veg and rocks stay out - small, many, little bounce.
+		Hism->SetAffectDynamicIndirectLighting(bIsTree);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
 		Tile.Hisms.Add(Hism);
@@ -2154,12 +2210,13 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// LogTemp to Verbose to get the per-tile mix back.
 		UE_LOG(LogTemp, Verbose,
 			TEXT("ODForestManager: tile (%d,%d) biome=%s species blob=%d olive=%d "
-			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d | "
+			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d palm=%d fern=%d broadleaf=%d giant=%d | "
 			     "shrub bush=%d sagebrush=%d"),
 			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
 			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
 			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
-			SpeciesInstanceCounts[6], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
+			SpeciesInstanceCounts[6], SpeciesInstanceCounts[7], SpeciesInstanceCounts[8],
+			SpeciesInstanceCounts[9], SpeciesInstanceCounts[10], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
 	}
 
 	// gated stat log (2026-08-26) - same 5 s cadence as UpdateCollision()'s
@@ -2226,6 +2283,8 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 	float Z[N + 1][N + 1];
 	bool bGood[N + 1][N + 1];
 	int32 Misses = 0;
+	int32 Stats[4] = {};
+	TMap<FName, int32> Other;
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	if (Player)
@@ -2243,6 +2302,7 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 					FVector(X, Y, PlayerZHint - GroundTraceMarginCm), ECC_WorldStatic, Params))
 			{
 				++Misses;   // collision not streamed in here yet
+				++Stats[1];
 				continue;
 			}
 			if (FMath::Abs(Hit.ImpactPoint.Z - PlayerZHint) > GroundSanityMaxDeltaCm)
@@ -2250,12 +2310,18 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 				// fell through terrain whose collision is still cooking onto the
 				// floor plane far below - retry, same deferral as BuildTile's trees
 				++Misses;
+				++Stats[1];
 				continue;
 			}
 			const AActor* HitActor = Hit.GetActor();
-			bGood[iy][ix] = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>())
-				&& !(bUseWaterExclusion && IsInsideLake(X, Y));
+			const bool bTerrain = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>());
+			bGood[iy][ix] = bTerrain && !(bUseWaterExclusion && IsInsideLake(X, Y));
 			Z[iy][ix] = Hit.ImpactPoint.Z;
+			++Stats[bGood[iy][ix] ? 0 : bTerrain ? 2 : 3];
+			if (!bTerrain)
+			{
+				++Other.FindOrAdd(HitActor ? HitActor->GetClass()->GetFName() : FName(TEXT("None")));
+			}
 		}
 	}
 	if (Misses > 0)
@@ -2268,6 +2334,14 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		}
 	}
 	GrassFirstTry.Remove(Key);
+	for (int32 s = 0; s < 4; ++s)
+	{
+		GrassCornerStats[s] += Stats[s];
+	}
+	for (const TPair<FName, int32>& O : Other)
+	{
+		GrassOtherHits.FindOrAdd(O.Key) += O.Value;
+	}
 
 	FBiomeRecipe Recipe;
 	float ForestW;
@@ -2299,13 +2373,19 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 			}
 			const float Z00 = Z[sy][sx], Z10 = Z[sy][sx + 1], Z01 = Z[sy + 1][sx], Z11 = Z[sy + 1][sx + 1];
 			const float Slope = FVector2f((Z10 + Z11 - Z00 - Z01) * 0.5f, (Z01 + Z11 - Z00 - Z10) * 0.5f).Size() / Step;
-			const float Expected = PerSquare * FMath::Clamp(1.4f - Slope, 0.0f, 1.0f);   // thins past ~22 deg, none past ~55
+			// Carpet follows the ground cover's grass clumps (terrain survey
+			// 2026-10-16: an even 3/m2 field of one tuft reads as a dot screen
+			// at 15-60 m). Floor 0.5, peak ~1.8, mean ~1 (check_ground_cover.py),
+			// so no bare holes and the same instance count on average.
+			const float Cl = ODGroundCover::Clump(X0 + (sx + 0.5) * Step, Y0 + (sy + 0.5) * Step, 0);
+			const float Expected = PerSquare * FMath::Clamp(1.4f - Slope, 0.0f, 1.0f)   // thins past ~22 deg, none past ~55
+				* (0.5f + 0.8f * Cl);
 			const int32 Count = FMath::FloorToInt(Expected) + (Rng.FRand() < FMath::Frac(Expected) ? 1 : 0);
 			for (int32 c = 0; c < Count; ++c)
 			{
 				const float U = Rng.FRand(), V = Rng.FRand();
 				const float Yaw = Rng.FRand() * 360.0f;
-				const float Scale = 0.7f + Rng.FRand() * 0.9f;
+				const float Scale = (0.7f + Rng.FRand() * 0.9f) * (0.85f + 0.19f * Cl);   // clump cores stand taller
 				const double X = X0 + (sx + U) * Step, Y = Y0 + (sy + V) * Step;
 				bool bOnShoulder = false;
 				for (const int32 i : Stations)
@@ -2338,12 +2418,42 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		UseSeasonFoliage(Hism);
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Hism->SetCullDistances((GrassRadiusCm + GrassLeadCm) * 0.5f, GrassRadiusCm + GrassLeadCm);   // fade band, see M_Foliage PerInstanceFadeAmount
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
 		Hism->AddInstances(Xf, false, /*bWorldSpace*/false);
 	}
 	GrassCells.Add(Key, Hism);
+
+	if (GroundCover.bOn)   // Realistic only
+	{
+		TArray<int32> Near;   // stations out to the road band's far edge
+		if (bUseStationExclusion)
+		{
+			const float Pad = 6000.0f + 1500.0f;
+			RoadStationHash.QueryBox(X0 - Pad, Y0 - Pad, X0 + GrassCellCm + Pad, Y0 + GrassCellCm + Pad, Near);
+		}
+		auto RoadEdge = [&](double X, double Y)
+		{
+			float D = 1e9f;
+			for (const int32 i : Near)
+			{
+				const TArray<FRoadStation>& S = RoadStationHash.Stations;
+				D = FMath::Min(D, SegmentEdgeDistCm(S[i], S[NextRunStation(S, i)], X, Y));
+			}
+			return D;
+		};
+		const ODGroundCover::FCell Cell{Key, X0, Y0, Step, N, &Z[0][0], &bGood[0][0], (uint8)Biome,
+			ODAssetDetail::Level(), (uint32)RandomSeed, GrassShoulderClearCm, RoadEdge};
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Comps;
+		GroundCover.BuildCell(Cell, RootComponent, (GrassRadiusCm + GrassLeadCm) * (0.6f + 0.2f * ODAssetDetail::Level()),
+			WpoDisableCm, [this](UHierarchicalInstancedStaticMeshComponent* H) { UseSeasonFoliage(H); }, Comps);
+		for (UHierarchicalInstancedStaticMeshComponent* C : Comps)
+		{
+			GroundCoverCells.Add(Key, C);
+		}
+	}
 	return true;
 }
 
@@ -2356,7 +2466,9 @@ void AODForestManager::UseSeasonFoliage(UMeshComponent* Comp) const
 	if (!FoliageSeasonMID) return;
 	for (int32 i = 0; i < Comp->GetNumMaterials(); ++i)
 	{
-		if (Comp->GetMaterial(i) == FoliageSeasonMID->Parent)
+		// Pick: a stylized mesh still carries plain M_Foliage when Realistic
+		// made the MID's parent M_Foliage_real (identity in Stylized)
+		if (ODVisualStyle::Pick(Comp->GetMaterial(i)) == FoliageSeasonMID->Parent)
 		{
 			Comp->SetMaterial(i, FoliageSeasonMID);
 		}
@@ -2370,6 +2482,7 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 	const FVector Loc = CarLoc + Vel2D.GetSafeNormal() * GrassLeadCm;
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / GrassCellCm), FMath::FloorToInt(Loc.Y / GrassCellCm));
 	const int32 Reach = FMath::CeilToInt(GrassRadiusCm / GrassCellCm);
+	GroundCover.SyncSeason(FoliageSeasonMID);   // snow / wet on the Realistic ground cover cards
 
 	// missing cells inside the radius, nearest first
 	TArray<TPair<double, FIntPoint>> Want;
@@ -2395,6 +2508,22 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 	{
 		BuildGrassCell(Want[i].Value, Player);
 	}
+	if (const double Now = FPlatformTime::Seconds(); Now - GrassStatsLogAt > 5.0
+		&& GrassCornerStats[0] + GrassCornerStats[1] + GrassCornerStats[2] + GrassCornerStats[3] > 0)
+	{
+		GrassStatsLogAt = Now;
+		GrassOtherHits.ValueSort(TGreater<int32>());
+		FString Top;
+		for (const TPair<FName, int32>& O : GrassOtherHits)
+		{
+			Top += FString::Printf(TEXT(" %s=%d"), *O.Key.ToString(), O.Value);
+			if (Top.Len() > 120) break;
+		}
+		UE_LOG(LogTemp, Display, TEXT("ODForestManager: grass corners last 5s - terrain %d, no hit/off band %d, lake %d, other %d%s"),
+			GrassCornerStats[0], GrassCornerStats[1], GrassCornerStats[2], GrassCornerStats[3], *Top);
+		FMemory::Memzero(GrassCornerStats);
+		GrassOtherHits.Reset();
+	}
 
 	for (auto It = GrassCells.CreateIterator(); It; ++It)
 	{
@@ -2403,6 +2532,11 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 			if (It.Value())
 			{
 				It.Value()->DestroyComponent();
+			}
+			for (auto G = GroundCoverCells.CreateKeyIterator(It.Key()); G; ++G)
+			{
+				G.Value()->DestroyComponent();
+				G.RemoveCurrent();
 			}
 			It.RemoveCurrent();
 		}
@@ -2455,6 +2589,24 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 					if (D2 < R2)
 					{
 						Near.Add({FVector(Rock), (float)Rock.W, (float)Rock.W, D2});
+					}
+				}
+			}
+		}
+	}
+	// far forest cards + street trees (ODFarForest.cpp): the player's chunk and its neighbours
+	const FIntPoint FarC(FMath::FloorToInt(PlayerLoc.X / 100000.0), FMath::FloorToInt(PlayerLoc.Y / 100000.0));
+	for (int32 dy = -1; dy <= 1; ++dy)
+	{
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			if (const FFarChunk* C = FarChunks.Find(FarC + FIntPoint(dx, dy)))
+			{
+				for (const FVector& T : C->Trunks)
+				{
+					if (const float D2 = FVector::DistSquared2D(T, PlayerLoc); D2 < R2)
+					{
+						Near.Add({T + FVector(0, 0, TrunkHalfHeight * 1.2f), TrunkRadius * 1.2f, TrunkHalfHeight * 1.2f, D2});
 					}
 				}
 			}
@@ -2562,6 +2714,33 @@ void AODForestManager::Tick(float DeltaSeconds)
 	// hardcoded absolute Z.
 	PlayerZHint = Loc.Z;
 
+	// Swaying tree shadows only when slow (2026-10-14): at speed nobody sees
+	// them and they re-render VSM pages every frame (the Oahu lag). 10/12 mph
+	// hysteresis so creeping around 10 doesn't flip-flop. A flip re-creates
+	// every forest HISM's render state, so it's spread over frames
+	// (SwayShadowsPerTick per frame) instead of one hitch.
+	const float Mph = Vista.bActive ? 0.0f : Player->GetVelocity().Size() * 0.0223694f;
+	if (bSwayShadows ? Mph > 12.0f : Mph < 10.0f)
+	{
+		bSwayShadows = !bSwayShadows;
+		SwayShadowsPending.Reset();
+		for (const TPair<FIntPoint, FTile>& T : Tiles)
+		{
+			SwayShadowsPending.Append(T.Value.Hisms);
+		}
+	}
+	const EShadowCacheInvalidationBehavior SwayB = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
+	for (int32 n = 0; n < SwayShadowsPerTick && SwayShadowsPending.Num() > 0; )
+	{
+		UHierarchicalInstancedStaticMeshComponent* H = SwayShadowsPending.Pop(EAllowShrinking::No).Get();
+		if (H && H->ShadowCacheInvalidationBehavior != SwayB)   // tile may have been dropped / rebuilt already
+		{
+			H->ShadowCacheInvalidationBehavior = SwayB;
+			H->MarkRenderStateDirty();
+			++n;
+		}
+	}
+
 	// spawn missing tiles nearest-first, a few per tick - capped by BOTH the
 	// TilesPerTick count ceiling and TileBuildMsBudget of actual frame time
 	// (2026-09-07, see TileBuildMsBudget's header comment: 40 unbudgeted
@@ -2623,6 +2802,9 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
+	const int32 FarBefore = FarChunks.Num();
+	UpdateFarForest(Loc);   // vista too: the backdrop's hills are what it shows
+	bSettled = Built == 0 && FarChunks.Num() == FarBefore;
 	if (Vista.bActive)
 	{
 		return;

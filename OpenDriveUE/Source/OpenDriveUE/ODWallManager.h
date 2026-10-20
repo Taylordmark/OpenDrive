@@ -7,6 +7,7 @@
 
 class UDynamicMeshComponent;
 class UMaterialInterface;
+class UPostProcessComponent;
 
 /** One parsed wall chunk - plain data, safe to build off the game thread.
  *  Mirrors the ODS1 sidecar's per-wall payload layout
@@ -88,6 +89,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Walls")
 	int32 MaxNewLoadsPerTick = 1;
 
+	/** Chunk material (tunnel bores reuse this manager with M_Bridge). */
+	UPROPERTY(EditAnywhere, Category = "Walls")
+	FString MaterialPath = TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized");
+
+	/** >= 0: MID with this "Glow" scalar (tunnel light strips). */
+	UPROPERTY(EditAnywhere, Category = "Walls")
+	float Glow = -1.0f;
+
 private:
 	static bool ParseWallTileFile(const FString& Path, FParsedWallTile& Out);
 
@@ -111,6 +120,16 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> WallMat;
+
+	// Tunnel interior (PLAN-REALISM Phase 5, 2026-10-14) - only on the
+	// "tunnel_*" instance: while the camera is under a bore, an unbound
+	// post-process blends in that cuts the sky light Lumen leaks through the
+	// dynamic-mesh shell (it has no distance field to occlude with) and slows
+	// eye adaptation, so the interior reads dark and lamp-lit on entry.
+	void UpdateTunnelInterior(float DeltaSeconds);
+	UPROPERTY()
+	TObjectPtr<UPostProcessComponent> TunnelPP;
+	float TunnelBlend = 0.0f;
 
 	double LastDiagTime = 0.0;
 };

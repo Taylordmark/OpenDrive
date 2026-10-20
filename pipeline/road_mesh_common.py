@@ -13,7 +13,9 @@ meter frame around a shared origin before calling into this module.
 """
 
 import math
+import os
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -35,6 +37,17 @@ SKIRT_DROP = 2.5             # m - no longer shapes the road mesh (the 2.5 m
 # carved terrain (CARVE_DROP 0.15 m below) within ~0.15 m of the edge; on a
 # raised road it reads as a thick asphalt slab.
 WRAP_LIP_OUT_M = 0.5         # lip's lateral reach past the pavement edge
+# At-grade apron (Taylor, 2026-10-13: "too difficult to drive back on"): the
+# terrain sits ~35 cm under the pavement edge, and the 50 deg lip above
+# wedged the car's nose. Where the shipped terrain APRON_LIP_OUT_M out is
+# within APRON_FULL_GAP_M of the edge, the lip widens to a 17 deg ramp that
+# dives into the ground; past APRON_NONE_GAP_M (ledge, cliff, embankment,
+# wall) it keeps WRAP_LIP_OUT_M so raised roads look as before.
+APRON_LIP_OUT_M = 2.0
+APRON_FULL_GAP_M = 0.6
+APRON_NONE_GAP_M = 1.0
+APRON_MAX_CURVE_FRAC = 0.8   # pavement+lip reach under this share of the turn
+                             # radius, so hairpin insides don't fold
 WRAP_LIP_DROP_M = 0.6        # lip bottom below the pavement
 WRAP_DEPTH_M = 1.0           # slab underside below the pavement (bridge decks are 1.25)
 ROAD_PROFILE_COLS = 7        # verts per station row - consumers index by this
@@ -767,8 +780,12 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
                        skirt_drop=SKIRT_DROP, max_bank_rad=MAX_BANK_RAD,
                        bank_gain=BANK_GAIN, is_oneway=None, highway_classes=None,
                        osm_lanes=None, half_width_s=None, junction_suppress=None,
-                       is_unpaved=None, bank_scale=None):
+                       is_unpaved=None, bank_scale=None, ground_cm=None):
     """Build banked, skirted road mesh chunks from station arrays.
+
+    `ground_cm` (optional): f(x_cm, y_cm arrays) -> terrain z cm, NaN off-mesh
+    (shipped_terrain_heights). Widens each side's lip into the at-grade apron
+    (see APRON_LIP_OUT_M); None keeps the plain WRAP_LIP_OUT_M lip.
 
     `s` is the per-station arc-length distance (m, from resample_stations).
     `e`, `n`, `z` are smoothed per-station east/north/elevation in meters
@@ -843,13 +860,32 @@ def build_road_chunks(s, e, n, z, name_prefix="road", spacing=STATION_SPACING,
     # down). The pavement offset is per-station when half_width_s is given
     # (variable width, 2026-09-06). skirt_extra/skirt_drop are unused now
     # (kept in the signature for experimental_junction_pads.py's callers).
+    hw_s = (np.asarray(half_width_s, dtype=np.float64) if half_width_s is not None
+            else np.full(len(s), float(road_half_width)))
+    lip_out = np.full((len(s), 2), WRAP_LIP_OUT_M)   # [left, right] of travel
+    if ground_cm is not None and len(s) > 1:
+        for k, sgn in enumerate((-1.0, 1.0)):
+            off_cm = sgn * (hw_s + APRON_LIP_OUT_M) * 100.0
+            gap_m = (cz + bank * sgn * hw_s * 100.0
+                     - ground_cm(cx + rx * off_cm, cy + ry * off_cm)) / 100.0
+            t = np.clip((APRON_NONE_GAP_M - gap_m) / (APRON_NONE_GAP_M - APRON_FULL_GAP_M), 0.0, 1.0)
+            lip_out[:, k] += np.nan_to_num(t) * (APRON_LIP_OUT_M - WRAP_LIP_OUT_M)
+        turn = np.abs(np.gradient(np.unwrap(np.arctan2(ry, rx)), s))   # 1/m
+        cap = APRON_MAX_CURVE_FRAC / np.maximum(turn, 1e-6) - hw_s
+        lip_out = np.minimum(lip_out, np.maximum(cap, WRAP_LIP_OUT_M)[:, None])
+        # 5-station min then ease: no single-station spikes, no sawtooth
+        pad = np.concatenate([lip_out[:1], lip_out[:1], lip_out, lip_out[-1:], lip_out[-1:]])
+        lip_out = np.min([pad[j:j + len(s)] for j in range(5)], axis=0)
+        lip_out = np.stack([gaussian1d(lip_out[:, k], 1.0) for k in (0, 1)], axis=1)
+
     def station_profile(i):
-        hw = float(half_width_s[i]) if half_width_s is not None else road_half_width
+        hw = float(hw_s[i])
+        lo_l, lo_r = lip_out[i]
         return hw, [(-hw, -WRAP_DEPTH_M),
-                    (-(hw + WRAP_LIP_OUT_M), -WRAP_LIP_DROP_M),
+                    (-(hw + lo_l), -WRAP_LIP_DROP_M),
                     (-hw, 0.0),
                     (hw, 0.0),
-                    (hw + WRAP_LIP_OUT_M, -WRAP_LIP_DROP_M),
+                    (hw + lo_r, -WRAP_LIP_DROP_M),
                     (hw, -WRAP_DEPTH_M),
                     (-hw, -WRAP_DEPTH_M)]
     n_prof = ROAD_PROFILE_COLS
@@ -1051,6 +1087,7 @@ OVERPASS_SEPARATION_M = 6.5   # upper pavement over lower pavement at an OSM
 OVERPASS_RAMP_GRADE = 0.06    # steepest grade the lift's approach ramps add
 OVERPASS_FLAT_M = 12.0        # full lift at least this far either side of the crossing
 OVERPASS_JOIN_M = 40.0        # a same-level crossing this close to a bridge's deck zone joins it
+OVERPASS_SYNTH_HALF_M = 10.0  # synthesized span half-length (over a square crossing) for an untagged layer stack
 OVERPASS_SMOOTH_STATIONS = 5  # moving average over the lift (25 m at 5 m stations)
 
 
@@ -1058,8 +1095,11 @@ def lift_overpasses(segs, passes=3):
     """Raises the upper road at every mid-segment centerline crossing whose
     upper road is an OSM bridge there, until it sits OVERPASS_SEPARATION_M
     over the lower road. Upper = higher OSM layer, else the bridge one. A
-    non-bridge upper is skipped: terrain conforms to it, so lifting it would
-    bury the road below in fill. The road is raised to a floor that is the
+    non-bridge upper over a non-tunnel road (an untagged `layer` stack) gets
+    a synthesized span: its is_struct_s is set IN PLACE over the crossing
+    (OVERPASS_SYNTH_HALF_M / sin(angle)), so downstream it is carved out and
+    decked like a tagged bridge instead of burying the road below in the
+    fill terrain conforms to. The road is raised to a floor that is the
     deck height over the bridge run (and OVERPASS_FLAT_M around the crossing)
     and falls OVERPASS_RAMP_GRADE per metre of road-graph distance beyond -
     through junction nodes too - so the DEM's sag under the span fills in
@@ -1069,7 +1109,7 @@ def lift_overpasses(segs, passes=3):
     segs: [{"e","n","s","h","is_struct_s","is_tunnel_s","layer_s"}].
     Returns (h list, over_road list - each crossing's flat deck zone,
     lifted list - stations the lift moved, report rows
-    (x, y, up_seg, lo_seg, sep_before_m, sep_after_m), n_skipped)."""
+    (x, y, up_seg, lo_seg, sep_before_m, sep_after_m), n_synth - spans synthesized)."""
     from shapely.geometry import LineString
     from shapely.strtree import STRtree
 
@@ -1083,13 +1123,21 @@ def lift_overpasses(segs, passes=3):
     def is_br(i, k):
         return any(segs[i]["is_struct_s"][j] and not segs[i]["is_tunnel_s"][j] for j in win(i, k))
 
+    def heading(i, k):
+        g, k0 = segs[i], max(min(k, len(segs[i]["e"]) - 2), 0)
+        d = np.array([g["e"][k0 + 1] - g["e"][k0], g["n"][k0 + 1] - g["n"][k0]], dtype=np.float64)
+        return d / max(np.hypot(*d), 1e-9)
+
+    def is_tn(i, k):
+        return any(segs[i]["is_tunnel_s"][j] for j in win(i, k))
+
     def layer(i, k):
         return max(segs[i]["layer_s"][j] for j in win(i, k))
 
     def near(i, p):   # by distance - projected length drifts from s over km
         return int(np.argmin(np.hypot(segs[i]["e"] - p.x, segs[i]["n"] - p.y)))
 
-    crossings, level, n_skipped = [], [], 0   # [x, y, up, s_up, flat_lo, flat_hi, lo, s_lo]
+    crossings, level, n_synth = [], [], 0   # [x, y, up, s_up, flat_lo, flat_hi, lo, s_lo]
     for a in ids:
         for b in (ids[j] for j in tree.query(lines[a])):
             if b <= a:
@@ -1113,9 +1161,25 @@ def lift_overpasses(segs, passes=3):
                     continue
                 (ku, su), (lo, sl) = ((ka, da), (b, db)) if up == a else ((kb, db), (a, da))
                 if not is_br(up, ku):
-                    n_skipped += 1
-                    level.append((a, da, b, db))
-                    continue
+                    k_lo = near(lo, p)
+                    if is_tn(up, ku) or (is_tn(lo, k_lo) and segs[up]["h"][ku] - segs[lo]["h"][k_lo]
+                                         >= OVERPASS_SEPARATION_M):
+                        level.append((a, da, b, db))   # a bored tunnel deep under: no span
+                        continue
+                    # an underpass tagged tunnel=yes under a road at its own
+                    # level (Summit: Columbine Dr under I-70) gets the span
+                    # too - else its bore stands up through the road above
+                    # an OSM `layer` stack with no structure tag: terrain
+                    # conforming to the upper road buries the lower one, so
+                    # the upper road gets a synthesized span (is_struct_s)
+                    # over the crossing - carved out and decked like a
+                    # tagged bridge downstream (PLAN-REALISM Phase 5)
+                    ta, tb = heading(a, ka), heading(b, kb)
+                    sin_x = abs(ta[0] * tb[1] - ta[1] * tb[0])
+                    half = max(OVERPASS_FLAT_M, OVERPASS_SYNTH_HALF_M / max(sin_x, 0.34))
+                    s_arr = np.asarray(segs[up]["s"], dtype=np.float64)
+                    segs[up]["is_struct_s"] = np.asarray(segs[up]["is_struct_s"], dtype=bool) | (np.abs(s_arr - su) <= half)
+                    n_synth += 1
                 st = segs[up]["is_struct_s"]
                 ku = next(j for j in win(up, ku) if st[j])
                 r0 = r1 = ku
@@ -1207,7 +1271,7 @@ def lift_overpasses(segs, passes=3):
         sep = [np.interp(su, segs[up]["s"], hh[up]) - np.interp(sl, segs[lo]["s"], hh[lo]) for hh in (h0, h)]
         rows.append((x, y, up, lo, sep[0], sep[1]))
     lifted = [np.abs(v - v0) > 0.01 for v, v0 in zip(h, h0)]
-    return h, over_road, lifted, rows, n_skipped
+    return h, over_road, lifted, rows, n_synth
 
 
 JUNCTION_ZBIAS_PER_CLASS_M = 0.02   # tiny deterministic per-road-class Z
@@ -1483,53 +1547,133 @@ def detect_elevation_conflict_pairs(east_m, north_m, elev_m, seg_idx, station_id
     (deciding what to carve vs. wall) call this SAME function with the SAME
     parameters, so their answers can't independently drift the way the two
     prior separate implementations did."""
+    pairs_i, pairs_j, _d, _dz = _conflict_candidates(
+        east_m, north_m, elev_m, seg_idx, station_idx, radius_m, (max_grade,), min_gap_m,
+        same_chain_gap_stations)
+    return pairs_i, pairs_j
+
+
+# candidate (i, j) pairs expanded per array chunk - bounds the temporaries
+# (~100 B per candidate) on a dense downtown where a 150 m cell holds thousands
+CONFLICT_CHUNK_CANDIDATES = 20_000_000
+_CELL_OFFSETS = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+
+
+def _conflict_candidates(east_m, north_m, elev_m, seg_idx, station_idx, radius_m, max_grades,
+                         min_gap_m, same_chain_gap_stations):
+    """(i, j, d_m, dz) of every pair detect_elevation_conflict_pairs finds at
+    the LOWEST of max_grades, in its order: i ascending, then the 3x3 cell
+    offsets dx-major, then j ascending - the order the old per-station bucket
+    loop produced, which wall_pairs' order still depends on. Array math over
+    radius_m cells (2026-10-15, was a Python loop: ~45 s on summit_county).
+    np.hypot can differ from math.hypot by an ulp, so pairs within 1e-9 of any
+    threshold (any of max_grades) get math.hypot's distance - same answer."""
     n = len(east_m)
-    east_m = np.asarray(east_m, dtype=np.float64)
-    north_m = np.asarray(north_m, dtype=np.float64)
+    x_cm = np.asarray(east_m, dtype=np.float64) * 100.0
+    y_cm = -np.asarray(north_m, dtype=np.float64) * 100.0
     elev_m = np.asarray(elev_m, dtype=np.float64)
     seg_idx = np.asarray(seg_idx)
-    station_idx = np.asarray(station_idx)
-    x_cm = east_m * 100.0
-    y_cm = -north_m * 100.0
+    station_idx = np.asarray(station_idx).astype(np.int64)
+    empty = np.zeros(0, dtype=np.int64)
+    if n == 0:
+        return empty, empty, np.zeros(0), np.zeros(0)
     radius_cm = radius_m * 100.0
-
     cx = np.floor(x_cm / radius_cm).astype(np.int64)
     cy = np.floor(y_cm / radius_cm).astype(np.int64)
-    buckets = defaultdict(list)
-    for i in range(n):
-        buckets[(int(cx[i]), int(cy[i]))].append(i)
+    cx -= cx.min() - 1
+    cy -= cy.min() - 1
+    w = int(cy.max()) + 2
+    key = cx * w + cy
+    order = np.argsort(key, kind="stable")   # stable: j ascending within a cell
+    cells, start, count = np.unique(key[order], return_index=True, return_counts=True)
 
-    pairs_i, pairs_j = [], []
-    for i in range(n):
-        bx, by = int(cx[i]), int(cy[i])
-        neighbor_idxs = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                neighbor_idxs.extend(buckets.get((bx + dx, by + dy), ()))
-        for j in neighbor_idxs:
-            if j <= i:
-                continue
-            if (seg_idx[i] == seg_idx[j]
-                    and abs(int(station_idx[i]) - int(station_idx[j])) <= same_chain_gap_stations):
-                continue
-            d_m = math.hypot(x_cm[j] - x_cm[i], y_cm[j] - y_cm[i]) / 100.0
-            if d_m <= 0.01 or d_m > radius_m:
-                continue
-            dz = abs(elev_m[j] - elev_m[i])
-            if dz > max_grade * d_m + min_gap_m:
-                pairs_i.append(i)
-                pairs_j.append(j)
-    return np.array(pairs_i, dtype=np.int64), np.array(pairs_j, dtype=np.int64)
+    # per offset, each station's neighbour cell (start, count); 0 if empty
+    nb = []
+    for dx, dy in _CELL_OFFSETS:
+        nk = key + dx * w + dy
+        c = np.minimum(np.searchsorted(cells, nk), len(cells) - 1)
+        hit = cells[c] == nk
+        nb.append((np.where(hit, start[c], 0), np.where(hit, count[c], 0)))
+    per_i = np.cumsum(sum(ct for _, ct in nb))
+    bounds = np.searchsorted(per_i, np.arange(0, per_i[-1], CONFLICT_CHUNK_CANDIDATES), "right")
+    bounds = np.unique(np.r_[0, bounds, n])
+
+    lo_grade = min(max_grades)
+    out = []
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        parts = []
+        for st, ct in nb:
+            ct = ct[lo:hi]
+            ii = np.repeat(np.arange(lo, hi), ct)
+            first = np.repeat(np.cumsum(ct) - ct, ct)
+            jj = order[np.repeat(st[lo:hi], ct) + np.arange(len(ii)) - first]
+            keep = jj > ii
+            ii, jj = ii[keep], jj[keep]
+            keep = ~((seg_idx[ii] == seg_idx[jj])
+                     & (np.abs(station_idx[ii] - station_idx[jj]) <= same_chain_gap_stations))
+            ii, jj = ii[keep], jj[keep]
+            d_m = np.hypot(x_cm[jj] - x_cm[ii], y_cm[jj] - y_cm[ii]) / 100.0
+            dz = np.abs(elev_m[jj] - elev_m[ii])
+            near = (np.abs(d_m - 0.01) < 1e-9) | (np.abs(d_m - radius_m) < 1e-9)
+            for g in max_grades:
+                near |= np.abs(dz - (g * d_m + min_gap_m)) < 1e-9
+            for k in np.flatnonzero(near):
+                i, j = ii[k], jj[k]
+                d_m[k] = math.hypot(x_cm[j] - x_cm[i], y_cm[j] - y_cm[i]) / 100.0
+            keep = (d_m > 0.01) & (d_m <= radius_m) & (dz > lo_grade * d_m + min_gap_m)
+            parts.append((ii[keep], jj[keep], d_m[keep], dz[keep]))
+        # parts are offset-major; a stable sort on i gives (i, offset, j)
+        s = np.argsort(np.concatenate([p[0] for p in parts]), kind="stable")
+        out.append([np.concatenate([p[k] for p in parts])[s] for k in range(4)])
+    return tuple(np.concatenate([o[k] for o in out]) for k in range(4))
 
 
-def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
-                            radius_m=CONFLICT_RADIUS_M,
-                            max_grade=CONFLICT_MAX_GRADE,
-                            min_gap_m=CONFLICT_MIN_GAP_M,
-                            same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
-                            wall_min_grade=WALL_MIN_GRADE,
-                            cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE,
-                            half_width_m=None):
+# classify_wall_stations results on disk (2026-10-15): the wall, terrain and
+# verify stages each classify the same road_stations.json - up to ~8 calls a
+# bake. Keyed by a hash of every input, so a changed station set just misses.
+WALL_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache" / "wall_classify"
+WALL_CACHE_MIN_STATIONS = 10_000   # small (test) inputs aren't worth a file
+WALL_CACHE_KEEP = 16               # newest files kept; ~19 MB each on summit
+
+
+def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name, *args,
+                           **kwargs):
+    """Disk-cached _classify_wall_stations - see its docstring."""
+    import hashlib
+    # only the default thresholds are cached, so the key is the station data
+    if len(east_m) < WALL_CACHE_MIN_STATIONS or args or set(kwargs) - {"half_width_m"}:
+        return _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
+                                       *args, **kwargs)
+    h = hashlib.sha1()
+    for a in (east_m, north_m, elev_m, kwargs.get("half_width_m")):
+        h.update(b"-" if a is None else np.ascontiguousarray(a, dtype=np.float64).tobytes())
+    for a in (seg_idx, station_idx):
+        h.update(np.ascontiguousarray(a, dtype=np.int64).tobytes())
+    h.update(repr(list(road_name)).encode())
+    path = WALL_CACHE_DIR / f"{h.hexdigest()}.npz"
+    if path.exists():
+        with np.load(path) as z:
+            return z["exclude"], list(zip(z["wi"].tolist(), z["wj"].tolist()))
+    exclude, wall_pairs = _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx,
+                                                  road_name, *args, **kwargs)
+    w = np.array(wall_pairs, dtype=np.int32).reshape(-1, 2)
+    WALL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp.npz")   # atomic: parallel stages
+    np.savez(tmp, exclude=exclude, wi=w[:, 0], wj=w[:, 1])
+    os.replace(tmp, path)
+    for old in sorted(WALL_CACHE_DIR.glob("*.npz"), key=lambda f: f.stat().st_mtime)[:-WALL_CACHE_KEEP]:
+        old.unlink(missing_ok=True)
+    return exclude, wall_pairs
+
+
+def _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
+                             radius_m=CONFLICT_RADIUS_M,
+                             max_grade=CONFLICT_MAX_GRADE,
+                             min_gap_m=CONFLICT_MIN_GAP_M,
+                             same_chain_gap_stations=CONFLICT_SAME_CHAIN_GAP_STATIONS,
+                             wall_min_grade=WALL_MIN_GRADE,
+                             cross_road_max_grade=CROSS_ROAD_CONFLICT_MAX_GRADE,
+                             half_width_m=None):
     """Classifies every conflicting pair (detect_elevation_conflict_pairs)
     into one of three outcomes:
 
@@ -1578,92 +1722,72 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
     east_m = np.asarray(east_m, dtype=np.float64)
     north_m = np.asarray(north_m, dtype=np.float64)
     elev_m = np.asarray(elev_m, dtype=np.float64)
-    pairs_i, pairs_j = detect_elevation_conflict_pairs(
-        east_m, north_m, elev_m, seg_idx, station_idx,
-        radius_m, max_grade, min_gap_m, same_chain_gap_stations)
+    seg_idx = np.asarray(seg_idx)
+    # One candidate pass serves both grade passes below (2026-10-15): the
+    # cross-road pass's pairs are a superset of the main pass's whenever
+    # cross_road_max_grade <= max_grade, so each main pair is a cross pair
+    # whose dz also clears max_grade.
+    pi, pj, d_m, dz = _conflict_candidates(
+        east_m, north_m, elev_m, seg_idx, station_idx, radius_m,
+        (max_grade, cross_road_max_grade), min_gap_m, same_chain_gap_stations)
+    main = dz > max_grade * d_m + min_gap_m
+    cross = dz > cross_road_max_grade * d_m + min_gap_m
+    names = {}
+    name_id = np.array([names.setdefault(s, len(names)) if s else -1 for s in road_name] or [0],
+                       dtype=np.int64)
+    in_scope = (seg_idx[pi] == seg_idx[pj]) | ((name_id[pi] >= 0) & (name_id[pi] == name_id[pj]))
 
-    exclude = np.zeros(n, dtype=bool)
-    wall_pairs = []
-    wall_pair_set = set()
-
-    def add_wall_pair(i, j):
-        key = (i, j) if i < j else (j, i)
-        if key not in wall_pair_set:
-            wall_pair_set.add(key)
-            wall_pairs.append(key)
-        exclude[i] = True
-        exclude[j] = True
-
-    for i, j in zip(pairs_i.tolist(), pairs_j.tolist()):
-        in_scope = (seg_idx[i] == seg_idx[j]) or (
-            bool(road_name[i]) and road_name[i] == road_name[j])
-        if not in_scope:
-            add_wall_pair(i, j)
-            continue
-        dist_m = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
+    # in-scope main pairs wall only at grade >= wall_min_grade; math.hypot
+    # re-checks the ones within 1e-9 of it, as in _conflict_candidates
+    dist = np.hypot(east_m[pj] - east_m[pi], north_m[pj] - north_m[pi])
+    if half_width_m is not None:
+        hw = np.asarray(half_width_m, dtype=np.float64)
+        dist = np.maximum(dist - hw[pi] - hw[pj], 0.5)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        grade = np.where(dist > 1e-6, dz / dist, np.inf)
+    for k in np.flatnonzero(main & in_scope & (np.abs(grade - wall_min_grade) < 1e-9)):
+        i, j = pi[k], pj[k]
+        dk = math.hypot(east_m[j] - east_m[i], north_m[j] - north_m[i])
         if half_width_m is not None:
-            dist_m = max(dist_m - half_width_m[i] - half_width_m[j], 0.5)
-        grade = abs(elev_m[j] - elev_m[i]) / dist_m if dist_m > 1e-6 else float("inf")
-        if grade >= wall_min_grade:
-            add_wall_pair(i, j)
-        # else: in-scope, below threshold - leave exclude as-is (un-excluded
-        # unless some OTHER pair already required this station excluded)
+            dk = max(dk - half_width_m[i] - half_width_m[j], 0.5)
+        grade[k] = abs(elev_m[j] - elev_m[i]) / dk if dk > 1e-6 else float("inf")
 
-    # Second, tighter pass: catches cross-road disagreements too small for
-    # the main (same-road-switchback-calibrated) threshold above to see, but
-    # still real enough that two DIFFERENT roads shouldn't blend into each
-    # other's carve - see CROSS_ROAD_CONFLICT_MAX_GRADE's docstring. Same
-    # "out of scope always walls" rule as the main pass above.
-    cross_i, cross_j = detect_elevation_conflict_pairs(
-        east_m, north_m, elev_m, seg_idx, station_idx,
-        radius_m, cross_road_max_grade, min_gap_m, same_chain_gap_stations)
-    for i, j in zip(cross_i.tolist(), cross_j.tolist()):
-        in_scope = (seg_idx[i] == seg_idx[j]) or (
-            bool(road_name[i]) and road_name[i] == road_name[j])
-        if not in_scope:
-            add_wall_pair(i, j)
+    # main-pass walls in pair order, then the cross-road pass's out-of-scope
+    # pairs the main pass didn't already take (pairs are unique, i < j)
+    wall_main = main & (~in_scope | (grade >= wall_min_grade))
+    wall_cross = cross & ~main & ~in_scope
+    wi = np.concatenate([pi[wall_main], pi[wall_cross]])
+    wj = np.concatenate([pj[wall_main], pj[wall_cross]])
+    exclude = np.zeros(n, dtype=bool)
+    exclude[wi] = True
+    exclude[wj] = True
 
     # Coherence filter (see WALL_RUN_MAX_ASPECT's comment): drop any wall
     # pair whose transitively-connected run isn't path-like, un-excluding
     # its stations so they fall back to ordinary carve blending instead of
     # feeding build_retaining_walls.py geometry it can't build sanely.
-    if wall_pairs:
-        parent = {}
-
-        def find(x):
-            parent.setdefault(x, x)
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a, b):
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb
-
-        for i, j in wall_pairs:
-            union(i, j)
-
-        components = defaultdict(list)
-        for i, j in wall_pairs:
-            components[find(i)].append(i)
-            components[find(i)].append(j)
-        bad_roots = set()
-        for root, members in components.items():
-            stations = sorted(set(members))
-            if len(stations) < 3:
-                continue   # a lone pair is always path-like (2 points)
-            pts = np.stack([east_m[stations], north_m[stations]], axis=1)
-            centered = pts - pts.mean(axis=0)
-            cov = centered.T @ centered
-            evals = np.linalg.eigvalsh(cov)
-            primary_std = math.sqrt(max(evals[-1], 0.0))
-            secondary_std = math.sqrt(max(evals[0], 0.0))
-            if primary_std > 1e-6 and secondary_std / primary_std > WALL_RUN_MAX_ASPECT:
-                bad_roots.add(root)
-
-        if bad_roots:
+    if len(wi):
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        _, label = connected_components(
+            coo_matrix((np.ones(len(wi)), (wi, wj)), shape=(n, n)), directed=False)
+        # each component's PCA over its distinct stations (2x2 covariance,
+        # eigenvalues in closed form)
+        st = np.flatnonzero(exclude)
+        lab = label[st]
+        cnt = np.bincount(lab)
+        cnt_nz = np.maximum(cnt, 1)
+        ex = east_m[st] - (np.bincount(lab, east_m[st]) / cnt_nz)[lab]
+        ny = north_m[st] - (np.bincount(lab, north_m[st]) / cnt_nz)[lab]
+        sxx, syy, sxy = (np.bincount(lab, v) for v in (ex * ex, ny * ny, ex * ny))
+        half_tr = (sxx + syy) / 2.0
+        disc = np.sqrt(((sxx - syy) / 2.0) ** 2 + sxy ** 2)
+        primary_std = np.sqrt(np.maximum(half_tr + disc, 0.0))
+        secondary_std = np.sqrt(np.maximum(half_tr - disc, 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bad = ((cnt >= 3) & (primary_std > 1e-6)
+                   & (secondary_std / primary_std > WALL_RUN_MAX_ASPECT))
+        if bad.any():
             # An incoherent (blob-shaped) component can't get a clean ruled-surface
             # wall mesh from build_wall_run_mesh()'s single-PCA-axis approach - but
             # its stations are still real, close-in-XY/far-in-Z conflicts (that's
@@ -1677,9 +1801,10 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
             # but leave `exclude` untouched - they keep falling back to raw,
             # un-carved DEM terrain at that spot, same as before this session's
             # wall-extension work, rather than being carved wrong.
-            wall_pairs = [(i, j) for i, j in wall_pairs if find(i) not in bad_roots]
+            keep = ~bad[label[wi]]
+            wi, wj = wi[keep], wj[keep]
 
-    return exclude, wall_pairs
+    return exclude, list(zip(wi.tolist(), wj.tolist()))
 
 
 def reconcile_junction_elevations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
@@ -2250,4 +2375,81 @@ def sample_mesh_heights(positions, triangles, xs_cm, ys_cm, eps=1e-4, chunk=50_0
         z = w_a[ok] * az[tri] + w_b[ok] * bz[tri] + w_c[ok] * cz[tri]
         np.maximum.at(out, lo + pt, z)
     out[np.isinf(out)] = np.nan
+    return out
+
+
+# Process pools for the single-core bake/verify stages (2026-10-15): about
+# 3/4 of the cores, capped so the whole pool's peak stays inside BAKE_RAM_GB -
+# other bakes may be running beside this one. OD_BAKE_WORKERS=N overrides
+# (1 = in-process, no pool: the serial reference).
+BAKE_RAM_GB = 20.0
+
+
+def bake_workers(per_worker_gb):
+    import multiprocessing
+    import os
+    if multiprocessing.parent_process() is not None:
+        return 1   # already a pool worker: no nested pools
+    if os.environ.get("OD_BAKE_WORKERS"):
+        return max(1, int(os.environ["OD_BAKE_WORKERS"]))
+    return max(1, min(os.cpu_count() * 3 // 4, int(BAKE_RAM_GB / per_worker_gb)))
+
+
+def bake_map(fn, items, per_worker_gb, initializer=None, initargs=()):
+    """map(fn, items) in order, over a bake_workers(per_worker_gb) process
+    pool (fn and items must pickle). In-process when that is 1 worker."""
+    from concurrent.futures import ProcessPoolExecutor
+    n = bake_workers(per_worker_gb)
+    if n == 1:
+        if initializer is not None:
+            initializer(*initargs)
+        yield from map(fn, items)
+        return
+    with ProcessPoolExecutor(n, initializer=initializer, initargs=initargs) as pool:
+        yield from pool.map(fn, items)
+
+
+_TERRAIN_GRIDS = {}
+TERRAIN_GRID_M = 2.0   # raster step for shipped_terrain_heights
+
+
+def shipped_terrain_heights(xs_cm, ys_cm):
+    """Height (cm, NaN where no tile/off-mesh) of the near terrain tiles
+    already on disk in Content/OpenDrive/Masks - the collision the car drives
+    on. build_road_chunks' ground_cm. Each tile is rasterized once to a
+    TERRAIN_GRID_M grid (per-call sample_mesh_heights re-bins a whole tile)
+    and sampled bilinearly."""
+    from pathlib import Path
+    from bin_tile_io import parse_terrain_tile_bin
+    from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM as T
+    masks = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+    xs = np.asarray(xs_cm, dtype=np.float64)
+    ys = np.asarray(ys_cm, dtype=np.float64)
+    out = np.full(len(xs), np.nan)
+    step = TERRAIN_GRID_M * 100.0
+    n = int(round(T / step)) + 1
+    tx = np.floor(xs / T).astype(np.int64)
+    ty = np.floor(ys / T).astype(np.int64)
+    for key in set(zip(tx.tolist(), ty.tolist())):
+        if key not in _TERRAIN_GRIDS:
+            t = parse_terrain_tile_bin(masks / f"terrain_{AREA_NAME}_test_tile_{key[0]}_{key[1]}.bin")
+            grid = None
+            if t is not None:
+                pos = np.array(t["verts"], dtype=np.float64).reshape(-1, 3)
+                tri = np.array(t["tris"], dtype=np.int64).reshape(-1, 3)
+                ax = np.arange(n) * step
+                gx, gy = np.meshgrid(key[0] * T + ax, key[1] * T + ax)
+                grid = sample_mesh_heights(pos, tri, gx.ravel(), gy.ravel()).reshape(n, n)
+            _TERRAIN_GRIDS[key] = grid
+        grid = _TERRAIN_GRIDS[key]
+        if grid is None:
+            continue
+        m = (tx == key[0]) & (ty == key[1])
+        fx = (xs[m] - key[0] * T) / step
+        fy = (ys[m] - key[1] * T) / step
+        ix = np.clip(fx.astype(np.int64), 0, n - 2)
+        iy = np.clip(fy.astype(np.int64), 0, n - 2)
+        wx, wy = fx - ix, fy - iy
+        out[m] = (grid[iy, ix] * (1 - wx) * (1 - wy) + grid[iy, ix + 1] * wx * (1 - wy)
+                  + grid[iy + 1, ix] * (1 - wx) * wy + grid[iy + 1, ix + 1] * wx * wy)
     return out

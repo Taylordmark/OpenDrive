@@ -601,8 +601,18 @@ veg_albedo = g.mul(veg_albedo, g.sub(one_c, g.mul(far_t, g.const(FAR_DARKEN))))
 # ground (real alpine tundra is patchy rock/gravel, not solid grass) - same
 # elevation band the steep-layer rock/scree pick below uses, so every
 # elevation-driven signal in this material agrees on where "alpine" starts.
-treeline_t = g.clamp01(
-    g.div(g.sub(world_z, g.const(TREELINE_LOW_CM)), g.const(TREELINE_HIGH_CM - TREELINE_LOW_CM)))
+# Per-area params (realism eval T1, 2026-10-15): AODTerrainManager sets
+# TreelineLowZCm/TreelineHighZCm/SeaLevelZCm and AODSeasonController the snow
+# lines from groundbands_<area>_test.json (pipeline/build_ground_bands.py,
+# climate-derived). Param DEFAULTS are "off" (OFF_Z_CM: no treeline/snow/
+# beach) so anything using the raw asset - ODWallManager's cut walls - stays
+# bare rock in every area instead of inheriting summit_county's bands; the
+# TREELINE_*/SNOW_* constants above are summit's values, kept for reference
+# and pipeline/checks/verify_v3_ground_macro.py.
+OFF_Z_CM = 1.0e7
+tl_low = g.scalar_param("TreelineLowZCm", OFF_Z_CM)
+tl_high = g.scalar_param("TreelineHighZCm", OFF_Z_CM + 30000.0)
+treeline_t = g.clamp01(g.div(g.sub(world_z, tl_low), g.sub(tl_high, tl_low)))
 bare_amount = g.mul(treeline_t, g.const(ALPINE_BARE_MAX_BLEND))
 veg_albedo = g.lerp(veg_albedo, scree_albedo_tinted, bare_amount, b_out="")
 veg_normal = g.lerp(veg_normal, scree["normal"], bare_amount, b_out="RGB")
@@ -667,7 +677,7 @@ base_normal = g.lerp(base_normal, g.sample(TEXTURES["scree"]["normal"], sh_uv, i
 base_rough = g.lerp(base_rough, g.const(0.9), sh_mask)
 
 # ---------------------------------------------------------------- sand/beach blend (kept verbatim, see module docstring)
-sea_level = g.scalar_param("SeaLevelZCm", SEA_LEVEL_Z_CM)
+sea_level = g.scalar_param("SeaLevelZCm", -OFF_Z_CM)
 height_above_sea = g.sub(world_z, sea_level)
 beachiness = g.clamp01(g.div(g.sub(g.const(BEACH_BAND_CM), height_above_sea), g.const(BEACH_BAND_CM)))
 sand_factor = g.mul(beachiness, flat_w)
@@ -684,8 +694,8 @@ base_rough = g.lerp(base_rough, g.binop(unreal.MaterialExpressionMin, base_rough
 
 # ---------------------------------------------------------------- snow (altitude, noise-broken-up, reduced on cliffs)
 snow = sample_layer("snow")
-snow_low = g.scalar_param("SnowLineLowZCm", SNOW_LOW_CM)
-snow_high = g.scalar_param("SnowLineHighZCm", SNOW_HIGH_CM)
+snow_low = g.scalar_param("SnowLineLowZCm", OFF_Z_CM)
+snow_high = g.scalar_param("SnowLineHighZCm", OFF_Z_CM + 45000.0)
 snow_t_raw = g.clamp01(g.div(g.sub(world_z, snow_low), g.sub(snow_high, snow_low)))
 
 snow_noise = value_noise(
@@ -750,6 +760,7 @@ log(f"built + saved {MAT_NAME} for area '{AREA_NAME}' - "
     f"snowline={SNOW_START_M:.0f}-{SNOW_FULL_M:.0f}m ({SNOW_LOW_CM:.0f}-{SNOW_HIGH_CM:.0f}cm), "
     f"layers={list(LAYERS.keys())}, triplanar=rock, "
     f"seasons_params=[SnowLineLowZCm,SnowLineHighZCm,SpringGreen,Wetness], "
+    f"area_params=[TreelineLowZCm,TreelineHighZCm,SeaLevelZCm], "
     f"v3_macro={MACRO_FINE_SCALE_CM / 100:.0f}m/{MACRO_COARSE_SCALE_CM / 100:.0f}m, "
     f"patches={PATCH_FINE_SCALE_CM / 100:.0f}m/{PATCH_COARSE_SCALE_CM / 100:.0f}m, "
     f"shoulder={SHOULDER_MIN_M}-{SHOULDER_MAX_M}m+-{SHOULDER_JITTER_M}, "

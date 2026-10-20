@@ -355,6 +355,11 @@ EMBANK_LOW_THRESHOLD_M = 2.5     # <= this: no treatment
 EMBANK_HIGH_THRESHOLD_M = 7.0    # > this (or water crossing): bridge, not embankment
 EMBANK_HYSTERESIS_M = 0.3        # Schmitt-trigger band half-width at each threshold
 EMBANK_MIN_RUN_M = 10.0          # sustained-condition requirement, matches guardrails
+# ...unless the run drops this deep: a gulch/culvert notch under a smooth
+# highway is short but real (2026-10-14, Farrington Hwy station 200642 -
+# terrain several m below a fill road, 42 m from the nearest run). Matches
+# verify_terrain_fit's TOL_M, past which an uncovered drop fails the gate.
+EMBANK_DEEP_SHORT_M = 2.8
 EMBANK_PROBE_OFFSET_M = ROAD_HALF_WIDTH + 3.0   # same "a few meters beyond the shoulder" probe
 EMBANK_EDGE_OFFSET_M = ROAD_HALF_WIDTH          # skirt top seats AT the pavement edge (no gap
                                                   # vs. the road ribbon's own edge vertex)
@@ -364,6 +369,7 @@ WALL_CHUNK_STATIONS = 80         # matches build_road_guardrails.py's tile-bucke
 BRIDGE_GENUINE_MAX_LEN_M = 300.0     # real spans are short
 BRIDGE_BOTH_SIDED_MIN_FRAC = 0.5     # majority-of-run opposite-side qualifying-drop overlap
 BRIDGE_WATER_MIN_FRAC = 0.03         # any meaningful lake-polygon overlap -> always genuine
+BRIDGE_TAGGED_MIN_FRAC = 0.5         # raw bridge= tag coverage -> genuine at any length (2026-10-13)
 BRIDGE_OSM_TAG_MIN_FRAC = 0.3        # meaningful widened-OSM-structure-tag coverage (proxy, see docstring)
 DEMOTED_BRIDGE_DROP_CAP_M = 12.0     # cap a demoted run's shipped skirt drop (geometry only)
 
@@ -449,19 +455,21 @@ def classify_with_hysteresis(drop_m, in_lake, in_junction):
     return out
 
 
-def demote_short_runs(cls_arr, s_m):
+def demote_short_runs(cls_arr, s_m, drop_m=None):
     """Any contiguous non-NONE run shorter than EMBANK_MIN_RUN_M (arc length)
     is demoted back to NONE_CLS - a momentary DEM blip shouldn't spawn a 3m
     stub of embankment or a one-station bridge flag. Mirrors build_road_
     guardrails.py's GUARDRAIL_MIN_RUN_M filter, generalized to a 3-class
     array (kept per-run rather than per-mask since a run may change class
     mid-run at the hi/lo boundary - it's still one physically-contiguous
-    "above threshold" stretch)."""
+    "above threshold" stretch). A short run of 2+ stations dropping past
+    EMBANK_DEEP_SHORT_M is kept (drop_m given)."""
     out = cls_arr.copy()
     nonzero = cls_arr != NONE_CLS
     for start, end in contiguous_runs(nonzero):
         run_len_m = s_m[end - 1] - s_m[start] if end > start else 0.0
-        if run_len_m < EMBANK_MIN_RUN_M:
+        deep = drop_m is not None and end - start >= 2 and drop_m[start:end].max() > EMBANK_DEEP_SHORT_M
+        if run_len_m < EMBANK_MIN_RUN_M and not deep:
             out[start:end] = NONE_CLS
     return out
 
@@ -783,7 +791,7 @@ def compute_side(seg, side, lakes, junction_touched_seg,
             lake_z_cm[hit_idx] = lake["z_cm"]  # last-match wins on rare overlap - harmless
 
     cls_arr = classify_with_hysteresis(drop_m, in_lake, in_junction_box)
-    cls_arr = demote_short_runs(cls_arr, s)
+    cls_arr = demote_short_runs(cls_arr, s, drop_m)
     drop_cm = np.clip(drop_m, 0.0, None) * 100.0
 
     return {
@@ -902,8 +910,16 @@ def subclassify_bridge_runs(seg_i, side, d, other, report):
         # *some* deck-worthy road to carry it - a dirt road fords or
         # culverts a creek, it doesn't get a concrete span - so the paved
         # gate applies here too, same as the ordinary short-span path below.
+        # 2026-10-13: the RAW bridge= tag (is_struct, not the conflict-widened
+        # is_bridge proxy the NOTE below rejects) is a decision - OSM's, or
+        # build_track.structure_labels() for a drawn road over a gorge. Any
+        # length: the 300 m short-span rule is for untagged drop runs.
+        tagged_frac = float(d["is_struct_raw"][run_start:run_end].mean())
         if genuine:
             pass
+        elif tagged_frac >= BRIDGE_TAGGED_MIN_FRAC and not is_single_station_touch and not is_unpaved:
+            genuine = True
+            reasons.append(f"bridge-tagged ({tagged_frac * 100:.0f}% of run)")
         elif water_frac >= BRIDGE_WATER_MIN_FRAC and not is_single_station_touch and not is_unpaved:
             # Unconditional OR - a water crossing always gets a deck, per the
             # task brief, regardless of the paved/rebound rules below (a
@@ -1049,6 +1065,8 @@ def main():
             sides[side] = compute_side(seg, side, lakes,
                                         junction_touched_seg, is_bridge_osm_seg,
                                         session, dem_cache)
+            sides[side]["is_struct_raw"] = (np.array(seg["is_struct"], dtype=bool)
+                                            & ~np.array(seg["is_tunnel"], dtype=bool))
             n_skipped_junction += int((sides[side]["in_junction_box"] &
                                         (sides[side]["drop_m"] >= EMBANK_LOW_THRESHOLD_M)).sum())
 
@@ -1086,7 +1104,7 @@ def main():
                  both_edges_real_lake & ~d["in_junction_box"]).sum())
             if water_crossing.any():
                 d["cls_arr"] = np.where(water_crossing, BRIDGE_CLS, d["cls_arr"]).astype(np.int8)
-                d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"])
+                d["cls_arr"] = demote_short_runs(d["cls_arr"], d["s"], d["drop_m"])
 
             # Pier/deck termination at the WATER SURFACE (baked lake Z), not the
             # noisy raw-DEM sample - any in_lake station (whichever rule promoted

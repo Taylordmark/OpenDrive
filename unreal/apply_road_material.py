@@ -94,7 +94,14 @@ import unreal
 
 MAT_DIR = "/Game/OpenDrive/Materials"
 SURFACE = globals().get("SURFACE", "paved")   # see "Unpaved variants" above
-MAT_NAME = {"paved": "M_Road", "gravel": "M_Road_Gravel", "dirt": "M_Road_Dirt"}[SURFACE]
+# Realistic twins (PLAN-VISUALS Track C): unreal/apply_road_materials_real.py
+# re-runs this file with REAL=True and MAT_NAME_OVERRIDE="M_Road_real" etc.
+# Every REAL term is layered on top of the stylized graph, so the twin keeps
+# the exact parameter names, UV/vertex-color reads and WPO. REAL=False (the
+# default) builds the stylized graph unchanged.
+REAL = globals().get("REAL", False)
+MAT_NAME = globals().get("MAT_NAME_OVERRIDE") or {
+    "paved": "M_Road", "gravel": "M_Road_Gravel", "dirt": "M_Road_Dirt"}[SURFACE]
 ROAD_TEX_DIR = "/Game/OpenDrive/Textures/Road"
 # unpaved base: (texture dir, asset_id, tile METERS)
 UNPAVED_BASE = {"gravel": (ROAD_TEX_DIR, "Gravel023", 1.4),
@@ -136,12 +143,19 @@ elif SURFACE == "dirt":
     WetDarken, WetRoughness = 0.5, 0.25   # mud: dark, satin sheen
 # Puddles (PLAN-REALISM Phase 6, 2026-10-09): UV3.x = how far the pavement
 # sits below its +-20 m neighbours, cm (ODRoadManager's RoadSagCm; 0 off the
-# ribbon and on non-V3 chunks). Past Wetness 0.6, 2D value noise thresholded
-# by sag x wetness pools water into the sags. "PuddleAmount" (default 1)
-# turns them off where UV3 isn't the sag (the Dragon's OBJ meshes read UV0).
+# ribbon and on non-V3 chunks). 2D value noise thresholded by sag x standing
+# water pools it into the sags. "PuddleAmount" (default 1) turns them off
+# where UV3 isn't the sag (the Dragon's OBJ meshes read UV0).
 # Mirrored by pipeline/check_puddle_sag.py.
-PuddleWetStart = 0.6
-PuddleWetFull = 0.9
+# 2026-10-16: the fill is the "Puddles" param (AODWeatherController::Puddles:
+# fills over minutes of rain, drains slower than the surface dries), not a
+# Wetness threshold - so puddles outlast the shine and a shower doesn't flood.
+# "Rain" (rain rate) drives ripple rings in puddles and wheel ruts: a Custom
+# node of two jittered 0.25 m cells, faded out past RippleFadeCm, off at
+# Low quality (QualitySwitch). Rain 0 = flat water = the old graph.
+RippleCellCm = 25.0
+RippleFadeCm = 3000.0
+RippleStrength = 0.35
 PuddleSagFullCm = 8.0           # sag that reaches PuddleMaxCover
 PuddleMaxCover = 0.7            # noise fraction pooled at full sag + wetness
 PuddleCellM = 2.5               # noise cell, m
@@ -153,11 +167,22 @@ PuddleRoughness = 0.03          # standing water = mirror
 # roadside cm). Both 0 = the exact pre-snow graph output, incl. the WPO.
 SnowSlushFullCm = 2.0           # wet -> grey slush over the first 2 cm
 SnowCoverFullCm = 10.0          # ... -> fully white by 10 cm
-SlushColor = (0.42, 0.43, 0.45)
+SlushColor = (0.38, 0.37, 0.35)  # 2026-10-16: grey-brown with road grime, not clean grey
 SlushOpacity = 0.7
 SnowColor = (0.90, 0.92, 0.95)
-SlushRoughness = 0.25
+SlushRoughness = 0.15           # slush is saturated - glossy
 SnowRoughness = 0.8
+# 2026-10-16: wheel tracks pack the snow - greyer, smoother, polished - and
+# snow on walls/berm faces (not facing up) takes the blue of light that
+# scattered through it (a cheap stand-in for subsurface). Sparkle: 1.5 cm
+# world cells, ~12% get a random facet normal tilted up to ~30 deg and near-
+# mirror roughness, so the sun glints off individual crystals as the view
+# moves. Within SparkleFadeCm only; off at Low quality.
+PackedColor = (0.66, 0.67, 0.69)
+PackedRoughness = 0.45
+SnowShadeBlue = (0.78, 0.86, 0.97)
+SparkleCellCm = 1.5
+SparkleFadeCm = 1500.0
 TrackOffsetM = 0.8              # tire tracks +-0.8 m from each lane's center
 TrackHalfWidthM = 0.3
 TrackCover = 0.45               # white cover kept inside a track (packed/slushy ruts)
@@ -166,6 +191,99 @@ TrackCover = 0.45               # white cover kept inside a track (packed/slushy
 # by BermOutPerCm x depth and up from their 0.6 m drop to the bank top.
 BermOutPerCm = 1.5
 BermLipDropCm = 60.0            # road_mesh_common.WRAP_LIP_DROP_M
+# Realistic-only terms (REAL=True). Macro: two value-noise octaves in road
+# meters break up the 3 m texture tiling (albedo x(1 +- RealMacroAlbedo),
+# roughness +- RealMacroRough). Wheel paths (+-TrackOffsetM from each lane
+# center) are polished: lighter, smoother; the lane center carries an oil
+# drip strip. Tar: crack-sealant "snakes" are the 0.5 isoline of value
+# noise, shown in patches, plus a thin joint at every lane boundary. Paint
+# chips away with the wear noise and where wheels cross it. Fine detail
+# fades out past RealDetailFadeCm so it doesn't shimmer. Wet: ruts hold a
+# water film (scaled by PuddleAmount, so the Dragon's static road is off).
+# Cracks: a photographic CC0 crack set (Asphalt026B, content_src/realistic/
+# road) multiplies its luminance ratio into the base albedo (so each road
+# class keeps its own asphalt tone) and lends its normal and roughness, in
+# noise-picked damaged stretches, strongest in the wheel paths.
+RealCrackSet = ("Asphalt026B", "/Game/OpenDrive/Realistic/Road")
+RealCrackTileM = 4.1            # incommensurate with the 2.6-3.2 m base tiles
+RealCrackLinMean = 0.0532       # the set's mean linear luminance (ratio = 1 there)
+RealCrackContrast = 0.75        # share of that ratio applied
+RealCrackRegionCellM = 31.0
+RealCrackCover = 0.55           # fraction of the road that's cracked
+RealCrackOffTrack = 0.55        # damage between the wheel paths, vs 1 in them
+RealMacroCellM = 23.0
+RealMesoCellM = 5.3
+RealMacroAlbedo = 0.14
+RealMacroRough = 0.06
+RealTrackCoreM = 0.12           # full polish within +-this of the wheel path
+RealTrackFeatherM = 0.35
+RealPolishBright = 1.06
+RealPolishRough = 0.18
+RealOilCoreM = 0.2
+RealOilFeatherM = 0.3
+RealOilDarken = 0.82
+RealUnpavedRutDarken = 0.85     # gravel/dirt: compacted ruts
+RealTarCellM = 1.7
+RealTarHalf = 0.012             # isoline half-width, noise units
+RealTarSharp = 60.0
+RealTarRegionCellM = 40.0
+RealTarCover = 0.35             # fraction of road with tar snakes
+RealJointHalfM = 0.02
+RealTarColor = (0.018, 0.018, 0.02)
+RealTarRough = 0.3
+RealChipCellM = 0.09
+RealChipWear = 0.7
+RealChipTrack = 0.5
+RealDetailFadeCm = 4000.0
+RealDetailFadeLenCm = 3000.0
+RealRutWetStart = 0.35
+RealRutRough = 0.04
+RealRutDarken = 0.85
+RealWetFlatten = 0.35           # normal flattened toward up at Wetness 1
+# Road-edge blend (PLAN-VISUALS join J). The pavement used to stop in a hard
+# line against the terrain's gravel shoulder (M_GroundStylized_real's
+# road_edge_blend, which starts right at the pavement edge). Now the outer
+# decimetres break up into that same shoulder: Gravel030 + Ground037 sampled
+# in WORLD XY at the terrain's tiles, tint and 150 cm dirt-mix noise, so the
+# gravel pattern runs on across the seam. The fringe width wanders along the
+# road (RealEdgeCellM) and crumbles (RealEdgeCrumble*); the wrap lip (no
+# pavement left, d_in 0) is always fringe, so the slab side reads as gravel
+# instead of an asphalt rim. A grime band darkens the outer RealEdgeGrimeM.
+# Junction pads keep |meterPos| <= 2 m, so d_in >= 2.5 m: never touched by
+# that. Their edge comes from UV3.y instead (ODRoadManager.cpp's
+# ComputeEdgeCodes, Realistic only; the stylized graph reads UV3.x only):
+# >= 1 on a pad = 1 + metres to its visible rim (apron 0), <= 0 on a ribbon =
+# metres along the road from a pad-rim crossing minus the cap, negative inside
+# the pad - the ribbon's tucked-in end keeps no fringe inside the junction.
+# Pads sample the fringe noise in world XY (their UVs fold, see
+# experimental_junction_pads._pad_uv). 0 everywhere (Stylized mesh, Dragon OBJ)
+# = no pads, the plain ribbon fringe.
+# pipeline/checks/check_terrain_real.py mirrors this and checks the
+# terrain-matching constants against apply_terrain_real_materials.py;
+# pipeline/checks/check_pad_edge.py checks the pad/junction side on real tiles.
+RealEdgeSet = ("Gravel030", "/Game/OpenDrive/Textures/Ground")     # = terrain LAYERS["shoulder"]
+RealEdgeTileCm = 300.0
+RealEdgeTint = (1.08, 1.02, 0.92)                                  # = terrain SHOULDER_TINT
+RealEdgeDirtSet = ("Ground037", "/Game/OpenDrive/Textures/Ground")  # = terrain LAYERS["dirt"]
+RealEdgeDirtTileCm = 850.0
+RealEdgeDirtSatKeep = 0.37      # = terrain DIRT_SAT_KEEP
+RealEdgeDirtNoiseCm = 150.0     # = road_edge_blend's `fine` noise
+RealEdgeDirtSeed = (5.0, 67.0)
+RealEdgeMinM = 0.1              # fringe width range (m of pavement eaten) ...
+RealEdgeMaxM = 0.3
+RealEdgeCellM = 6.0             # ... wandering over this length
+RealEdgeCrumbleM = 0.06         # +- jagged crumble on top
+RealEdgeCrumbleCellM = 0.25
+RealEdgeSoftM = 0.03            # fringe edge softness up close ...
+RealEdgeFarSoftM = 0.2          # ... and past the detail fade (no shimmer)
+RealEdgeLipM = 0.02             # always fringe within this of the edge (lip)
+RealEdgeGrimeM = 0.7
+RealEdgeDarken = 0.82
+RealEdgeGrimeRough = 0.06
+RealEdgeRough = 0.9             # = road_edge_blend's shoulder roughness
+RealEdgeCodeCapM = 1000.0       # = ODRoadManager.cpp EdgeCodeCapM
+RealPadRibFadeM = 0.3           # ribbon fringe fades out over this at a pad rim
+RealEdgeOffM = 100.0            # d_in that means "no edge here"
 
 
 def log(msg):
@@ -306,6 +424,25 @@ class G:
         n.set_editor_property("default_value", default)
         return n
 
+    def custom(self, code, out_type, **ins):
+        n = self.node(unreal.MaterialExpressionCustom, code=code, output_type=out_type)
+        pins = []
+        for name in ins:
+            i = unreal.CustomInput()
+            i.set_editor_property("input_name", name)
+            pins.append(i)
+        n.set_editor_property("inputs", pins)
+        for name, src in ins.items():
+            self._req(MEL.connect_material_expressions(src, "", n, name), f"Custom.{name}")
+        return n
+
+    def quality(self, default, low):
+        """QualitySwitch: `low` on Low material quality, `default` otherwise."""
+        n = self.node(unreal.MaterialExpressionQualitySwitch)
+        self._req(MEL.connect_material_expressions(default, "", n, "Default"), "QualitySwitch.Default")
+        self._req(MEL.connect_material_expressions(low, "", n, "Low"), "QualitySwitch.Low")
+        return n
+
     def vertex_color(self):
         return self.node(unreal.MaterialExpressionVertexColor)
 
@@ -360,6 +497,27 @@ else:
     mat = tools.create_asset(MAT_NAME, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
 
 g = G(mat)
+
+
+# noise helpers (defs only - nodes are created where they're called)
+def hash1(v):
+    s = g.sinev(g.mul(v, g.const(127.1)))
+    return g.fracv(g.mul(s, g.const(43758.5453)))
+
+
+def smooth01(f):
+    return g.mul(g.mul(f, f), g.sub(g.const(3.0), g.mul(f, g.const(2.0))))
+
+
+def value_noise2(x, y):
+    ix, iy, fx, fy = g.floorv(x), g.floorv(y), smooth01(g.fracv(x)), smooth01(g.fracv(y))
+
+    def h(dx, dy):
+        return hash1(g.add(g.add(ix, g.const(dx)), g.mul(g.add(iy, g.const(dy)), g.const(57.0))))
+
+    return g.lerp(g.lerp(h(0, 0), h(1, 0), fx), g.lerp(h(0, 1), h(1, 1), fx), fy)
+
+
 
 # ---------------------------------------------------------------- decode ODR3 signals
 uv0 = g.tex_coord(0)
@@ -470,6 +628,16 @@ if SURFACE != "paved":   # unpaved: one base texture across pavement + shoulder
                          r=True, gg=True, b=True, a_out="RGB")
     base_rough = g.mask(g.sample(tex_unpaved["rough"], uv_unpaved), r=True)
 
+if REAL:   # macro/meso variation against tiling (see RealMacroCellM)
+    def road_noise(cell_m, seed_mul):
+        return value_noise2(g.mul(meter_pos, g.const(1.0 / cell_m)),
+                            g.add(g.mul(v0, g.const(1.0 / cell_m)), g.mul(wear_seed, g.const(seed_mul))))
+
+    macro = g.add(g.mul(road_noise(RealMacroCellM, 53.0), g.const(0.65)),
+                  g.mul(road_noise(RealMesoCellM, 71.0), g.const(0.35)))
+    base_albedo = g.mul(base_albedo, g.lerp(g.const(1.0 - RealMacroAlbedo), g.const(1.0 + RealMacroAlbedo), macro))
+    base_rough = g.add(base_rough, g.mul(g.sub(macro, g.const(0.5)), g.const(2.0 * RealMacroRough)))
+
 # ---------------------------------------------------------------- lane markings
 abs_meter_pos = g.absv(meter_pos)
 
@@ -514,13 +682,6 @@ wear_scalar_param = g.scalar_param("WearMaxFade", WearMaxFade)
 noise_x = g.add(g.mul(v0, g.const(1.0 / WearNoiseScaleM)), g.mul(wear_seed, g.const(97.0)))
 noise_i = g.floorv(noise_x)
 noise_f = g.fracv(noise_x)
-
-
-def hash1(v):
-    s = g.sinev(g.mul(v, g.const(127.1)))
-    return g.fracv(g.mul(s, g.const(43758.5453)))
-
-
 wear_noise = g.lerp(hash1(noise_i), hash1(g.add(noise_i, g.const(1.0))), noise_f)
 wear_visibility = g.sub(g.const(1.0), g.mul(wear_noise, wear_scalar_param))
 
@@ -529,8 +690,121 @@ if SURFACE != "paved":
     final_paint_mask = g.const(0.0)   # no lane markings on gravel/dirt
 paint_rough = g.const(0.35)   # paint reads smoother/glossier than worn asphalt
 
+if REAL:
+    on_pave = g.mul(g.sub(g.const(1.0), shoulder_t), has_data)
+    d_lc = g.absv(g.mul(g.sub(frac_t, g.const(0.5)), lane_width))   # |m from this lane's center|
+
+    def soft_band(dist_m, core_m, feather_m):
+        return g.sub(g.const(1.0), g.clamp01(g.mul(g.sub(dist_m, g.const(core_m)), g.const(1.0 / feather_m))))
+
+    wheel = g.mul(soft_band(g.absv(g.sub(d_lc, g.const(TrackOffsetM))), RealTrackCoreM, RealTrackFeatherM), on_pave)
+    detail_fade = g.sub(g.const(1.0), g.clamp01(g.mul(
+        g.sub(g.node(unreal.MaterialExpressionPixelDepth), g.const(RealDetailFadeCm)), g.const(1.0 / RealDetailFadeLenCm))))
+    if SURFACE == "paved":
+        oil = g.mul(soft_band(d_lc, RealOilCoreM, RealOilFeatherM), on_pave)
+        base_albedo = g.mul(base_albedo, g.mul(g.lerp(g.const(1.0), g.const(RealPolishBright), wheel),
+                                               g.lerp(g.const(1.0), g.const(RealOilDarken), oil)))
+        base_rough = g.sub(base_rough, g.add(g.mul(wheel, g.const(RealPolishRough)), g.mul(oil, g.const(0.05))))
+        # photographic cracks (see RealCrack*); tar snakes and joints go over them
+        crack_tex = load_asphalt(*RealCrackSet)
+        uv_crack = uv_for(RealCrackTileM)
+        c_alb = g.mask(g.sample(crack_tex["albedo"], uv_crack), r=True, gg=True, b=True, a_out="RGB")
+        c_ratio = g.mul(g.dotp(c_alb, g.const3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)), g.const(1.0 / RealCrackLinMean))
+        c_ratio = g.minv(g.lerp(g.const(1.0), c_ratio, g.const(RealCrackContrast)), g.const(1.2))
+        crack_region = g.clamp01(g.mul(g.sub(road_noise(RealCrackRegionCellM, 41.0), g.const(1.0 - RealCrackCover)), g.const(4.0)))
+        damage = g.mul(g.mul(crack_region, g.lerp(g.const(RealCrackOffTrack), g.const(1.0), wheel)), on_pave)
+        base_albedo = g.mul(base_albedo, g.lerp(g.const(1.0), c_ratio, damage))
+        base_normal = g.lerp(base_normal, g.sample(crack_tex["normal"], uv_crack, is_normal=True), damage, b_out="RGB")
+        base_rough = g.lerp(base_rough, g.mask(g.sample(crack_tex["rough"], uv_crack), r=True), damage)
+        # tar snakes: the 0.5 isoline of value noise, in patches; joints on lane boundaries
+        tar_n = road_noise(RealTarCellM, 17.0)
+        tar_iso = g.sub(g.const(1.0), g.clamp01(g.mul(
+            g.sub(g.absv(g.sub(tar_n, g.const(0.5))), g.const(RealTarHalf)), g.const(RealTarSharp))))
+        tar_region = g.clamp01(g.mul(g.sub(road_noise(RealTarRegionCellM, 29.0), g.const(1.0 - RealTarCover)), g.const(4.0)))
+        tar = g.mul(g.mul(tar_iso, tar_region), g.mul(detail_fade, g.sub(g.const(1.0), shoulder_t)))
+        joint = g.mul(g.mul(g.band(dist_boundary_m, RealJointHalfM), on_pave), g.const(0.6))
+        seam = g.maxv(tar, joint)
+        base_albedo = g.lerp(base_albedo, g.const3(*RealTarColor), g.mul(seam, g.const(0.85)))
+        base_rough = g.lerp(base_rough, g.const(RealTarRough), seam)
+        # paint chips: more where the wear noise is high and where wheels cross
+        chip = value_noise2(g.mul(meter_pos, g.const(1.0 / RealChipCellM)), g.mul(v0, g.const(1.0 / RealChipCellM)))
+        chip_amt = g.clamp01(g.add(g.mul(wear_noise, g.const(RealChipWear)), g.mul(wheel, g.const(RealChipTrack))))
+        chip_keep = g.clamp01(g.mul(g.sub(g.add(chip, g.const(0.15)), chip_amt), g.const(6.0)))
+        chip_far = g.sub(g.const(1.0), g.mul(chip_amt, g.const(0.5)))   # average coverage once it would shimmer
+        final_paint_mask = g.mul(final_paint_mask, g.lerp(chip_far, chip_keep, detail_fade))
+    else:
+        base_albedo = g.mul(base_albedo, g.lerp(g.const(1.0), g.const(RealUnpavedRutDarken), wheel))
+        base_rough = g.sub(base_rough, g.mul(wheel, g.const(0.1)))
+    base_rough = g.clamp01(base_rough)
+
 dry_albedo = g.lerp(base_albedo, paint_color, final_paint_mask)
 dry_rough = g.lerp(base_rough, paint_rough, final_paint_mask)
+
+if REAL:   # road-edge blend into the terrain shoulder (see RealEdge*)
+    wxy = g.mask(g.node(unreal.MaterialExpressionWorldPosition), r=True, gg=True)
+
+    def world_noise(cell_cm, seed):
+        """= apply_terrain_real_materials.G.noise_xy (wrap, then seed, then
+        the dot-hash lattice), so the dirt mix lines up with the terrain's."""
+        uv = g.add(g.mul(g.fracv(g.mul(wxy, g.const(1.0 / (cell_cm * 97.0)))), g.const(97.0)), g.const2(*seed))
+        i, f = g.floorv(uv), g.fracv(uv)
+
+        def h(v):
+            return g.fracv(g.mul(g.sinev(g.dotp(v, g.const2(12.9898, 78.233))), g.const(43758.5453)))
+
+        fx = g.mask(f, r=True)
+        top = g.lerp(h(i), h(g.add(i, g.const2(1.0, 0.0))), fx)
+        bot = g.lerp(h(g.add(i, g.const2(0.0, 1.0))), h(g.add(i, g.const2(1.0, 1.0))), fx)
+        return g.lerp(top, bot, g.mask(f, gg=True))
+
+    edge_code = g.mask(g.tex_coord(3), gg=True)   # junction edge code (see RealEdgeCodeCapM)
+    on_pad = g.clamp01(g.mul(g.sub(edge_code, g.const(0.5)), g.const(1000.0)))
+    rib_keep = g.clamp01(g.add(g.mul(g.add(edge_code, g.const(RealEdgeCodeCapM)), g.const(1.0 / RealPadRibFadeM)),
+                               g.const(0.5)))
+    d_rib = g.add(g.maxv(g.sub(half_width_eff, abs_meter_pos), g.const(0.0)),   # m of pavement left to the edge
+                  g.mul(g.sub(g.const(1.0), rib_keep), g.const(RealEdgeOffM)))
+    d_in = g.minv(d_rib, g.lerp(g.const(RealEdgeOffM), g.sub(edge_code, g.const(1.0)), on_pad))
+
+    def edge_noise(cell_m, seed_mul):
+        """road_noise on a ribbon; on a pad, world XY wrapped like world_noise."""
+        w = g.mul(g.fracv(g.mul(wxy, g.const(1.0 / (cell_m * 100.0 * 97.0)))), g.const(97.0))
+        y = g.mul(v0, g.const(1.0 / cell_m))
+        if seed_mul:
+            y = g.add(y, g.mul(wear_seed, g.const(seed_mul)))
+        return value_noise2(g.lerp(g.mul(meter_pos, g.const(1.0 / cell_m)), g.mask(w, r=True), on_pad),
+                            g.lerp(y, g.mask(w, gg=True), on_pad))
+
+    crumble = edge_noise(RealEdgeCrumbleCellM, 0.0)
+    edge_w = g.add(g.lerp(g.const(RealEdgeMinM), g.const(RealEdgeMaxM), edge_noise(RealEdgeCellM, 83.0)),
+                   g.mul(g.sub(crumble, g.const(0.5)), g.const(2.0 * RealEdgeCrumbleM)))
+    edge_soft = g.lerp(g.const(RealEdgeFarSoftM), g.const(RealEdgeSoftM), detail_fade)
+    fringe = g.maxv(g.clamp01(g.div(g.sub(edge_w, d_in), edge_soft)),
+                    g.clamp01(g.sub(g.const(1.0), g.mul(d_in, g.const(1.0 / RealEdgeLipM)))))
+    grime = g.clamp01(g.sub(g.const(1.0), g.mul(d_in, g.const(1.0 / RealEdgeGrimeM))))
+
+    e_set = load_asphalt(*RealEdgeSet)
+    e_ao_tex = unreal.load_asset(f"{RealEdgeSet[1]}/{RealEdgeSet[0]}/T_{RealEdgeSet[0]}_AO")
+    if e_ao_tex is None:
+        raise RuntimeError(f"T_{RealEdgeSet[0]}_AO missing - run unreal/apply_terrain_real_materials.py first")
+    uv_e = g.mul(wxy, g.const(1.0 / RealEdgeTileCm))
+    e_ao = g.sample(e_ao_tex, uv_e)
+    e_ao.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_MASKS)
+    gravel_e = g.mul(g.mask(g.sample(e_set["albedo"], uv_e), r=True, gg=True, b=True, a_out="RGB"),
+                     g.const3(*RealEdgeTint))
+    dirt_e = g.mask(g.sample(load_asphalt(*RealEdgeDirtSet)["albedo"], g.mul(wxy, g.const(1.0 / RealEdgeDirtTileCm))),
+                    r=True, gg=True, b=True, a_out="RGB")
+    # = the terrain's desat_layer (Desaturation node's default luminance weights)
+    dirt_e = g.lerp(g.dotp(dirt_e, g.const3(0.3, 0.59, 0.11)), dirt_e, g.const(RealEdgeDirtSatKeep))
+    dirt_e = g.mul(dirt_e, g.const(0.9))
+    dirt_mix = g.clamp01(g.mul(g.sub(world_noise(RealEdgeDirtNoiseCm, RealEdgeDirtSeed), g.const(0.3)), g.const(2.5)))
+    edge_albedo = g.mul(g.lerp(gravel_e, dirt_e, dirt_mix),
+                        g.lerp(g.const(0.85), g.const(1.0), g.mask(e_ao, r=True)))   # terrain's cavity darkening
+
+    dry_albedo = g.mul(dry_albedo, g.lerp(g.const(1.0), g.const(RealEdgeDarken), grime))
+    dry_rough = g.clamp01(g.add(dry_rough, g.mul(grime, g.const(RealEdgeGrimeRough))))
+    dry_albedo = g.lerp(dry_albedo, edge_albedo, fringe)
+    dry_rough = g.lerp(dry_rough, g.const(RealEdgeRough), fringe)
+    base_normal = g.lerp(base_normal, g.sample(e_set["normal"], uv_e, is_normal=True), fringe, b_out="RGB")
 
 # ---------------------------------------------------------------- weather wetness (W2)
 wetness = g.scalar_param("Wetness", 0.0)
@@ -539,29 +813,47 @@ wet_rough = g.lerp(dry_rough, g.const(WetRoughness), wetness)
 
 
 # ---------------------------------------------------------------- puddles (Phase 6)
-def smooth01(f):
-    return g.mul(g.mul(f, f), g.sub(g.const(3.0), g.mul(f, g.const(2.0))))
-
-
-def value_noise2(x, y):
-    ix, iy, fx, fy = g.floorv(x), g.floorv(y), smooth01(g.fracv(x)), smooth01(g.fracv(y))
-
-    def h(dx, dy):
-        return hash1(g.add(g.add(ix, g.const(dx)), g.mul(g.add(iy, g.const(dy)), g.const(57.0))))
-
-    return g.lerp(g.lerp(h(0, 0), h(1, 0), fx), g.lerp(h(0, 1), h(1, 1), fx), fy)
-
-
 sag = g.mask(g.tex_coord(3), r=True)
-puddle_fill = g.mul(g.mul(g.clamp01(g.mul(g.sub(wetness, g.const(PuddleWetStart)), g.const(1.0 / (PuddleWetFull - PuddleWetStart)))),
-                          g.clamp01(g.mul(sag, g.const(1.0 / PuddleSagFullCm)))),
+standing = g.scalar_param("Puddles", 0.0)
+puddle_fill = g.mul(g.mul(standing, g.clamp01(g.mul(sag, g.const(1.0 / PuddleSagFullCm)))),
                     g.mul(g.scalar_param("PuddleAmount", 1.0), g.const(PuddleMaxCover)))
 puddle_noise = value_noise2(g.mul(meter_pos, g.const(1.0 / PuddleCellM)),
                             g.add(g.mul(v0, g.const(1.0 / PuddleCellM)), g.mul(wear_seed, g.const(131.0))))
 puddle = g.clamp01(g.mul(g.sub(puddle_noise, g.sub(g.const(1.0), puddle_fill)), g.const(PuddleEdge)))
 wet_albedo = g.mul(wet_albedo, g.lerp(g.const(1.0), g.const(PuddleDarken), puddle))
 wet_rough = g.lerp(wet_rough, g.const(PuddleRoughness), puddle)
-base_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), puddle)
+# rain ripples: expanding rings in jittered cells, tangent-space normal;
+# (0,0,1) when Rain = 0, so the water is flat exactly as before
+ripple_xy = g.mul(g.mask(g.node(unreal.MaterialExpressionWorldPosition), r=True, gg=True), g.const(1.0 / RippleCellCm))
+ripple = g.custom(
+    "float2 n = 0;\n"
+    "for (int k = 0; k < 2; k++) {\n"
+    "  float2 q = P + k * float2(0.37, 0.61);\n"
+    "  float2 c = floor(q);\n"
+    "  float h = frac(sin(dot(c, float2(127.1, 311.7)) + k * 13.0) * 43758.5453);\n"
+    "  if (frac(h * 7.13) > Rain * 1.4) continue;\n"
+    "  float2 d = frac(q) - 0.5 - (frac(h * float2(17.3, 29.1)) - 0.5) * 0.5;\n"
+    "  float t = frac(T * 1.3 + h);\n"
+    "  float r = length(d);\n"
+    "  float env = saturate(1 - abs(r - t * 0.45) * 14) * (1 - t) * (1 - t);\n"
+    "  n += d / max(r, 1e-3) * sin((r - t * 0.45) * 60) * env;\n"
+    "}\n"
+    "n *= S * F;\n"
+    "return normalize(float3(n, 1));",
+    unreal.CustomMaterialOutputType.CMOT_FLOAT3,
+    P=ripple_xy, T=g.node(unreal.MaterialExpressionTime), Rain=g.scalar_param("Rain", 0.0),
+    S=g.const(RippleStrength),
+    F=g.clamp01(g.sub(g.const(1.0), g.mul(g.node(unreal.MaterialExpressionPixelDepth), g.const(1.0 / RippleFadeCm)))))
+ripple = g.quality(ripple, g.const3(0.0, 0.0, 1.0))
+base_normal = g.lerp(base_normal, ripple, puddle)
+if REAL:   # ruts hold a water film (and stay wet while puddles last); a wet film smooths the micro-normal
+    rut = g.mul(g.mul(wheel, g.maxv(g.clamp01(g.mul(g.sub(wetness, g.const(RealRutWetStart)), g.const(1.0 / (1.0 - RealRutWetStart)))),
+                                    standing)),
+                g.scalar_param("PuddleAmount", 1.0))
+    wet_rough = g.lerp(wet_rough, g.const(RealRutRough), g.mul(rut, g.const(0.8)))
+    wet_albedo = g.mul(wet_albedo, g.lerp(g.const(1.0), g.const(RealRutDarken), rut))
+    base_normal = g.lerp(base_normal, ripple,
+                         g.maxv(g.mul(rut, g.const(0.8)), g.mul(wetness, g.const(RealWetFlatten))))
 
 
 # ---------------------------------------------------------------- snow (per-chunk depth, CPD)
@@ -588,9 +880,29 @@ berm_w = g.mul(g.clamp01(g.mul(g.dotp(uv2, uv2), g.const(64.0))),
 snow_white = g.maxv(snow_cover, berm_w)
 
 slushy_albedo = g.lerp(wet_albedo, g.const3(*SlushColor), g.mul(slush_t, g.const(SlushOpacity)))
-final_albedo = g.lerp(slushy_albedo, g.const3(*SnowColor), snow_white)
-final_rough = g.lerp(g.lerp(wet_rough, g.const(SlushRoughness), slush_t), g.const(SnowRoughness), snow_white)
-final_normal = g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), snow_white)
+# packed in the tracks, blue on faces that don't look at the sky
+packed = g.mul(track, cover_raw)
+up = g.clamp01(g.mask(g.node(unreal.MaterialExpressionVertexNormalWS), b=True))
+snow_col = g.lerp(g.lerp(g.const3(*SnowColor), g.const3(*PackedColor), packed),
+                  g.const3(*SnowShadeBlue), g.mul(g.sub(g.const(1.0), up), g.const(0.7)))
+# sparkle: x = glint mask, yzw = facet normal (tangent space)
+sparkle = g.custom(
+    "float3 c = floor(W / Cell);\n"
+    "float h = frac(sin(dot(c, float3(12.9898, 78.233, 37.719))) * 43758.5453);\n"
+    "float3 r = frac(h * float3(31.7, 57.3, 91.1)) * 2 - 1;\n"
+    "float g = (h < 0.12) * F;\n"
+    "return float4(g, normalize(float3(r.xy * 0.6, 1)));",
+    unreal.CustomMaterialOutputType.CMOT_FLOAT4,
+    W=g.node(unreal.MaterialExpressionWorldPosition), Cell=g.const(SparkleCellCm),
+    F=g.clamp01(g.sub(g.const(1.0), g.mul(g.node(unreal.MaterialExpressionPixelDepth), g.const(1.0 / SparkleFadeCm)))))
+sparkle = g.quality(sparkle, g.node(unreal.MaterialExpressionConstant4Vector, constant=unreal.LinearColor(0.0, 0.0, 0.0, 1.0)))
+glint = g.mul(g.mask(sparkle, r=True), g.mul(snow_white, g.sub(g.const(1.0), packed)))
+final_albedo = g.lerp(slushy_albedo, snow_col, snow_white)
+final_rough = g.lerp(g.lerp(g.lerp(wet_rough, g.const(SlushRoughness), slush_t),
+                            g.lerp(g.const(SnowRoughness), g.const(PackedRoughness), packed), snow_white),
+                     g.const(0.06), glint)
+final_normal = g.lerp(g.lerp(base_normal, g.const3(0.0, 0.0, 1.0), snow_white),
+                      g.mask(sparkle, gg=True, b=True, alpha=True), glint)
 
 # berm WPO: lip out by depth*BermOutPerCm, up from -BermLipDropCm to +depth
 # (eased in over the first 10 cm so a dusting doesn't yank the lip up)
@@ -607,7 +919,8 @@ MEL.connect_material_property(final_rough, "", unreal.MaterialProperty.MP_ROUGHN
 MEL.connect_material_property(berm_wpo, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
 
 MEL.recompile_material(mat)
-unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False)
+if not unreal.EditorAssetLibrary.save_asset(mat_path, only_if_is_dirty=False):
+    raise RuntimeError(f"save failed (file in use?): {mat_path}")
 
 # ---- VERIFY (2026-08-27+ convention, see apply_ground_material.py's
 # identical block) - reload the just-saved asset fresh and confirm every

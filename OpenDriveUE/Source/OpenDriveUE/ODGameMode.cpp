@@ -1,8 +1,11 @@
 #include "ODGameMode.h"
+#include "ODTileSource.h"
+#include "Async/Async.h"
 
 #include "Dom/JsonObject.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ODAmbientSoundManager.h"
@@ -15,9 +18,11 @@
 #include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
+#include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
 #include "ODTerrainManager.h"
+#include "ODTrafficManager.h"
 #include "ODVehiclePawn.h"
 #include "ODWallManager.h"
 #include "ODWeatherController.h"
@@ -68,6 +73,11 @@ void AODGameMode::BeginPlay()
 	if (!HomeArea.IsEmpty())
 	{
 		SpawnAreaSet(HomeArea);
+		// 3c ambient traffic: follows the nearest open-world area itself, off in races
+		if (GetWorld() && !TActorIterator<AODTrafficManager>(GetWorld()))
+		{
+			GetWorld()->SpawnActor<AODTrafficManager>();
+		}
 	}
 	EnsureAtmosphereController();
 	EnsureSeasonController();
@@ -77,6 +87,23 @@ void AODGameMode::BeginPlay()
 	// per set (and crossfade) if the neighbouring areas sound wrong.
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
+
+	// custom track (pipeline/build_track.py): the race manager reads
+	// -odtrack itself; open-world levels just don't place one
+	FString Track;
+	if (FParse::Value(FCommandLine::Get(), TEXT("odtrack="), Track) && GetWorld())
+	{
+		bool bHave = false;
+		for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
+		{
+			bHave = true;
+			break;
+		}
+		if (!bHave)
+		{
+			GetWorld()->SpawnActor<AODRaceManager>();
+		}
+	}
 }
 
 TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region)
@@ -289,6 +316,23 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 		Bridge->BridgeTilePrefix = FString::Printf(TEXT("bridge_%s_test"), *Area);
 		Finish(Bridge);
 	}
+	// Tunnel bores + light strips (pipeline/build_tunnels.py) and sidewalks +
+	// driveway stubs (pipeline/build_sidewalks.py): more wall-manager
+	// instances, spawned directly since the home level already places one
+	// AODWallManager (Begin() would skip the class).
+	if (!Vista)
+	{
+		for (const TCHAR* Kind : {TEXT("tunnel"), TEXT("tunnellights"), TEXT("sidewalk")})
+		{
+			AODWallManager* T = World->SpawnActorDeferred<AODWallManager>(AODWallManager::StaticClass(), Xf);
+			T->WallTilePrefix = FString::Printf(TEXT("%s_%s_test"), Kind, *Area);
+			const bool bLights = FCString::Strcmp(Kind, TEXT("tunnellights")) == 0;
+			T->MaterialPath = bLights ? TEXT("/Game/OpenDrive/Materials/MI_Furn_lamp.MI_Furn_lamp")
+				: TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge");
+			T->Glow = bLights ? 20.0f : -1.0f;
+			Finish(T);
+		}
+	}
 	return Out;
 }
 
@@ -302,7 +346,7 @@ void AODGameMode::LoadWorldManifest()
 	{
 		return;
 	}
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json");
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json"));
 	FString Text;
 	if (!FFileHelper::LoadFileToString(Text, *Path))
 	{
@@ -340,6 +384,7 @@ void AODGameMode::LoadWorldManifest()
 			}
 			FODStreamArea& A = Found.AddDefaulted_GetRef();
 			A.Name = Name;
+			(*Obj)->TryGetStringArrayField(TEXT("files"), A.Files);
 			A.Rect = FBox2D(FVector2D((*R)[0]->AsNumber(), (*R)[1]->AsNumber()),
 				FVector2D((*R)[2]->AsNumber(), (*R)[3]->AsNumber()));
 		}
@@ -351,6 +396,55 @@ void AODGameMode::LoadWorldManifest()
 			return;
 		}
 	}
+}
+
+void AODGameMode::PrefetchArea(FODStreamArea& A)
+{
+	if (A.bPrefetching)
+	{
+		return;
+	}
+	A.bPrefetching = true;
+	TArray<FString> Paths;
+	for (const FString& F : A.Files)
+	{
+		Paths.Add(FPaths::ProjectContentDir() / TEXT("OpenDrive") / F);
+	}
+	TWeakObjectPtr<AODGameMode> WeakThis(this);
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Name = A.Name, Paths]()
+	{
+		// ponytail: one worker, files in order, a file still pending after ~1 min
+		// is skipped (the area spawns without it) - parallelize if areas get big.
+		constexpr int32 MaxTries = 30;
+		int32 NumGaveUp = 0;
+		for (const FString& P : Paths)
+		{
+			FString Unused;
+			int32 Tries = 0;
+			while (ODTileSource::Resolve(P, Unused) == EODTileSource::Pending && ++Tries < MaxTries)
+			{
+				FPlatformProcess::Sleep(ODTileSource::RetryDelaySeconds);
+			}
+			NumGaveUp += (Tries == MaxTries);
+		}
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Name, NumFiles = Paths.Num(), NumGaveUp]()
+		{
+			if (!WeakThis.IsValid())
+			{
+				return;
+			}
+			for (FODStreamArea& A : WeakThis->StreamAreas)
+			{
+				if (A.Name == Name)
+				{
+					A.bPrefetching = false;
+					A.bPrefetched = true;
+				}
+			}
+			UE_LOG(LogTemp, Display, TEXT("ODGameMode: area '%s' prefetched %d file(s), %d still pending (skipped)"),
+				*Name, NumFiles, NumGaveUp);
+		});
+	});
 }
 
 void AODGameMode::Tick(float DeltaSeconds)
@@ -380,6 +474,11 @@ void AODGameMode::Tick(float DeltaSeconds)
 		const double D = FMath::Sqrt(A.Rect.ComputeSquaredDistanceToPoint(P));
 		if (!A.bLive && D < 800000.0)
 		{
+			if (ODTileSource::IsEnabled() && !A.bPrefetched)
+			{
+				PrefetchArea(A);   // spawns on a later check, once its files are cached
+				continue;
+			}
 			A.Actors.Reset();
 			for (AActor* Actor : SpawnAreaSet(A.Name))
 			{

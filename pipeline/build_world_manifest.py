@@ -2,7 +2,8 @@
 Content/OpenDrive/Masks/worlds.json, the list of baked areas per world that
 the runtime streams in and out as whole manager sets:
 
-    {"california": [{"name": "gv_west", "rect_cm": [xmin, ymin, xmax, ymax]}, ...]}
+    {"california": [{"name": "far_gasquet", "rect_cm": [xmin, ymin, xmax, ymax],
+                     "files": ["Masks/biome_far_gasquet_test.bin", ...]}, ...]}
 
 An area is listed when it has a `world` in test_areas.AREAS and terrain
 tiles on disk. rect_cm is the UE X/Y extent of those tiles: keys are
@@ -10,6 +11,12 @@ floor(X/T), floor(Y/T) with X = east cm and Y = -north cm
 (build_terrain_mesh_tiles.py), so the rect is
 [min_kx*T, min_ky*T, (max_kx+1)*T, (max_ky+1)*T]. Covers every area on
 disk, not just the active one; rebuild_area.py runs it last.
+
+files (2026-10-13, live tile streaming): the area's whole-area sidecars
+plus its water tiles (ODForestManager reads all of them up front), as paths
+under Content/OpenDrive/. With -ODTileServer the runtime fetches these before
+it spawns the area (AODGameMode::PrefetchArea); per-tile files stream on
+their own.
 
 Usage:  python pipeline/build_world_manifest.py
 """
@@ -34,12 +41,22 @@ def tile_keys(area):
             if (m := pat.fullmatch(p.name))]
 
 
+def area_files(area):
+    """Content/OpenDrive-relative whole-area files for area: names ending in
+    _<area>[_test].<ext> (so one area never claims a same-prefix neighbour's), plus water tiles."""
+    own = re.compile(rf".*_{re.escape(area)}(_test)?\.(bin|json|png)")
+    out = [f"Masks/{p.name}" for p in MASKS.iterdir() if own.fullmatch(p.name)]
+    out += [f"Masks/{p.name}" for p in MASKS.glob(f"water_{area}_test_tile_*.bin")]
+    return sorted(out)
+
+
 def build_manifest():
     worlds = {}
     for name, cfg in AREAS.items():
         keys = cfg.get("world") and tile_keys(name)
         if keys:
-            worlds.setdefault(cfg["world"], []).append({"name": name, "rect_cm": rect_cm(keys)})
+            worlds.setdefault(cfg["world"], []).append({"name": name, "rect_cm": rect_cm(keys),
+                                                     "files": area_files(name)})
     return worlds
 
 

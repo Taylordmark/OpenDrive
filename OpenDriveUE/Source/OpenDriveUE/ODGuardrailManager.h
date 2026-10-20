@@ -165,5 +165,12 @@ private:
 	UPROPERTY()
 	TObjectPtr<UStaticMesh> PostMesh;
 
+	/** Visual Style was Realistic at BeginPlay (rail normals on). */
+	bool bRealistic = false;
+
+	/** PostMesh is SM_GuardrailPost_real (Realistic + asset imported):
+	 *  yawed and placed at the seat instead of the scaled cylinder. */
+	bool bRealPosts = false;
+
 	double LastDiagTime = 0.0;
 };

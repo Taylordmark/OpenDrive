@@ -2,19 +2,17 @@
 
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
-#include "Engine/Font.h"
 #include "GlobalRenderResources.h"
+#include "ODHudStyle.h"
+
+using namespace ODHud;
+using namespace ODHudDraw;
 
 // Canvas triangles have no anti-aliasing, so every shape here carries its
-// own ~1 px feather: an outer strip whose alpha fades to 0. Shading is
-// per-vertex color (face/bezel/needle gradients, glare, inner shadow).
+// own ~1 px feather: an outer strip whose alpha fades to 0.
 namespace
 {
 constexpr float Feather = 1.2f;   // px
-
-const FLinearColor InkCol(0.95f, 0.95f, 0.91f, 1.0f);
-const FLinearColor RedCol(0.88f, 0.08f, 0.04f, 1.0f);
-const FLinearColor LcdCol(1.0f, 0.62f, 0.16f, 1.0f);   // amber segment glow
 
 FLinearColor WithA(FLinearColor C, float A)
 {
@@ -22,7 +20,7 @@ FLinearColor WithA(FLinearColor C, float A)
 	return C;
 }
 
-// Dial angle: Frac 0 = lower-left (7:30), clockwise 270 deg to lower-right.
+// Arc angle: Frac 0 = lower-left (7:30), clockwise 270 deg to lower-right.
 float DialAngle(float Frac)
 {
 	return FMath::DegreesToRadians(-135.0f + 270.0f * FMath::Clamp(Frac, 0.0f, 1.0f));
@@ -53,10 +51,49 @@ void Flush(UCanvas* C, const TArray<FCanvasUVTri>& Tris)
 	}
 }
 
-// Annulus R0..R1 over angles A0..A1 (R0 = 0 -> disc), colored by
-// Col(angle, t) with t 0 at R0 .. 1 at R1; both curved edges feathered.
-// ponytail: the straight ends of a partial arc are not feathered - only the
-// red band has visible ends; add an end strip if it ever reads as jagged.
+// Bar from radius Ra to Rb along D, Width wide.
+void Spoke(UCanvas* C, FVector2D M, FVector2D D, float Ra, float Rb, float Width, const FLinearColor& Col)
+{
+	const FVector2D W = FVector2D(-D.Y, D.X) * Width * 0.5f;
+	const FVector2D P[4] = {M + D * Ra - W, M + D * Rb - W, M + D * Rb + W, M + D * Ra + W};
+	Poly(C, P, Col);
+}
+
+// Rounded-rect pill.
+void Pill(UCanvas* C, FVector2D Mid, FVector2D Size, const FLinearColor& Col)
+{
+	const float Rad = Size.Y * 0.5f;
+	const float H = FMath::Max(0.0f, Size.X * 0.5f - Rad);
+	TArray<FVector2D> P;
+	for (int32 k = 0; k <= 12; ++k)
+	{
+		P.Add(Mid + FVector2D(H, 0.0f) + Dir(PI * k / 12) * Rad);         // right cap, up -> down
+	}
+	for (int32 k = 0; k <= 12; ++k)
+	{
+		P.Add(Mid - FVector2D(H, 0.0f) + Dir(PI + PI * k / 12) * Rad);    // left cap, down -> up
+	}
+	Poly(C, P, Col);
+}
+
+// Centered Rajdhani text, PxSize tall, with a soft offset shadow.
+void Text(UCanvas* C, FVector2D Mid, const FString& S, float PxSize, const FLinearColor& Col,
+	EMenuWeight W = EMenuWeight::Bold)
+{
+	FCanvasTextItem T(Mid, FText::FromString(S), MenuFont(W, FMath::Max(6.0f, PxSize * 0.75f)), Col);
+	T.bCentreX = true;
+	T.bCentreY = true;
+	const float Off = FMath::Max(1.0f, PxSize * 0.04f);
+	T.EnableShadow(FLinearColor(0, 0, 0, 0.6f * Col.A), FVector2D(Off, Off));
+	// HasValidText() wants a UFont even when the Slate font info draws: the
+	// file-loaded Rajdhani has none, so without this no cluster text drew
+	T.Font = GEngine->GetLargeFont();
+	C->DrawItem(T);
+}
+}
+
+namespace ODHudDraw
+{
 void Ring(UCanvas* C, FVector2D M, float R0, float R1, float A0, float A1,
 	TFunctionRef<FLinearColor(float, float)> Col)
 {
@@ -83,23 +120,19 @@ void Ring(UCanvas* C, FVector2D M, float R0, float R1, float A0, float A1,
 	Flush(C, Tris);
 }
 
-void Disc(UCanvas* C, FVector2D M, float R, const FLinearColor& Center, const FLinearColor& Rim)
+void Disc(UCanvas* C, FVector2D M, float R, const FLinearColor& Col)
 {
-	Ring(C, M, 0.0f, R, 0.0f, 2.0f * PI, [&](float, float T) { return FMath::Lerp(Center, Rim, T); });
+	Ring(C, M, 0.0f, R, 0.0f, 2.0f * PI, [&](float, float) { return Col; });
 }
 
-// Convex polygon, per-vertex colors, edges feathered outward by F px
-// (a large F makes a soft glow / drop shadow).
-void Poly(UCanvas* C, TArrayView<const FVector2D> P, TArrayView<const FLinearColor> Col, float F = Feather)
+void Poly(UCanvas* C, TArrayView<const FVector2D> P, const FLinearColor& Col, float F)
 {
 	const int32 N = P.Num();
 	FVector2D Mid = FVector2D::ZeroVector;
-	FLinearColor MidCol(0, 0, 0, 0);
 	float Area = 0.0f;
 	for (int32 i = 0; i < N; ++i)
 	{
 		Mid += P[i] / (float)N;
-		MidCol += Col[i] / (float)N;
 		Area += FVector2D::CrossProduct(P[i], P[(i + 1) % N]);
 	}
 	const float S = Area > 0.0f ? 1.0f : -1.0f;
@@ -117,250 +150,118 @@ void Poly(UCanvas* C, TArrayView<const FVector2D> P, TArrayView<const FLinearCol
 		Miter = Miter.GetClampedToMaxSize(3.0f);
 		Out[i] = P[i] + Miter * F;
 	}
+	const FLinearColor Clear = WithA(Col, 0);
 	TArray<FCanvasUVTri> Tris;
 	Tris.Reserve(N * 3);
 	for (int32 i = 0; i < N; ++i)
 	{
 		const int32 j = (i + 1) % N;
-		AddTri(Tris, Mid, MidCol, P[i], Col[i], P[j], Col[j]);
-		AddTri(Tris, P[i], Col[i], Out[i], WithA(Col[i], 0), Out[j], WithA(Col[j], 0));
-		AddTri(Tris, P[i], Col[i], Out[j], WithA(Col[j], 0), P[j], Col[j]);
+		AddTri(Tris, Mid, Col, P[i], Col, P[j], Col);
+		AddTri(Tris, P[i], Col, Out[i], Clear, Out[j], Clear);
+		AddTri(Tris, P[i], Col, Out[j], Clear, P[j], Col);
 	}
 	Flush(C, Tris);
 }
-
-// Rounded rect, vertical gradient Top -> Bot.
-void RoundRect(UCanvas* C, FVector2D Mid, FVector2D Size, float Rad, const FLinearColor& Top,
-	const FLinearColor& Bot, float F = Feather)
-{
-	Rad = FMath::Min(Rad, FMath::Min(Size.X, Size.Y) * 0.5f);
-	const FVector2D H = Size * 0.5f - FVector2D(Rad, Rad);
-	const FVector2D Corners[4] = {{H.X, -H.Y}, {H.X, H.Y}, {-H.X, H.Y}, {-H.X, -H.Y}};
-	TArray<FVector2D> P;
-	TArray<FLinearColor> Col;
-	for (int32 c = 0; c < 4; ++c)
-	{
-		for (int32 k = 0; k <= 5; ++k)
-		{
-			const FVector2D Pt = Mid + Corners[c] + Dir(FMath::DegreesToRadians(90.0f * c + 18.0f * k)) * Rad;
-			P.Add(Pt);
-			Col.Add(FMath::Lerp(Top, Bot, FMath::Clamp((Pt.Y - (Mid.Y - Size.Y * 0.5f)) / Size.Y, 0.0f, 1.0f)));
-		}
-	}
-	Poly(C, P, Col, F);
 }
 
-// Bar from radius Ra to Rb along D, Width wide.
-void Spoke(UCanvas* C, FVector2D M, FVector2D D, float Ra, float Rb, float Width, const FLinearColor& Col)
+void ODGaugeCluster::Draw(UCanvas* Canvas, const FODGaugeData& D, double Now)
 {
-	const FVector2D W = FVector2D(-D.Y, D.X) * Width * 0.5f;
-	const FVector2D P[4] = {M + D * Ra - W, M + D * Rb - W, M + D * Rb + W, M + D * Ra + W};
-	const FLinearColor Cs[4] = {Col, Col, Col, Col};
-	Poly(C, P, Cs);
-}
-
-// Centered text, roughly PxSize tall (Slate sizes are points at 96 dpi).
-void Text(UCanvas* C, const UFont* Font, FVector2D Mid, const FString& S, float PxSize, const FLinearColor& Col,
-	bool bBold = false)
-{
-	FCanvasTextItem T(Mid, FText::FromString(S),
-		FSlateFontInfo(Font, FMath::Max(6.0f, PxSize * 0.75f), bBold ? FName(TEXT("Bold")) : NAME_None), Col);
-	T.bCentreX = true;
-	T.bCentreY = true;
-	C->DrawItem(T);
-}
-
-// Bezel, recessed face, red band, ticks every Minor (long + numbered every
-// Major, number = value / LabelDiv), caption.
-void DialFace(UCanvas* C, const UFont* Font, FVector2D M, float R, float MaxVal, float Major, float Minor,
-	float RedFrom, float LabelDiv, const FString& Caption)
-{
-	// bezel: lit from above; inner lip lit from below so the face reads recessed
-	Ring(C, M, R * 0.985f, R * 1.08f, 0.0f, 2.0f * PI, [](float A, float T)
-	{
-		const float K = 0.5f + 0.5f * FMath::Cos(A);
-		return WithA(FMath::Lerp(FLinearColor(0.07f, 0.075f, 0.08f), FLinearColor(0.6f, 0.62f, 0.66f), K)
-			* FMath::Lerp(1.0f, 0.55f, T), 1.0f);
-	});
-	Ring(C, M, R * 0.962f, R * 0.985f, 0.0f, 2.0f * PI, [](float A, float)
-	{
-		const float K = 0.5f - 0.5f * FMath::Cos(A);
-		return FMath::Lerp(FLinearColor(0.1f, 0.1f, 0.11f), FLinearColor(0.7f, 0.72f, 0.75f), K);
-	});
-	Disc(C, M, R * 0.962f, FLinearColor(0.085f, 0.09f, 0.1f, 0.96f), FLinearColor(0.012f, 0.012f, 0.016f, 0.96f));
-	Ring(C, M, R * 0.8f, R * 0.962f, 0.0f, 2.0f * PI, [](float A, float T)
-	{
-		return FLinearColor(0, 0, 0, T * (0.35f + 0.25f * FMath::Cos(A)));
-	});
-
-	if (RedFrom < MaxVal)
-	{
-		Ring(C, M, R * 0.82f, R * 0.91f, DialAngle(RedFrom / MaxVal), DialAngle(1.0f),
-			[](float, float T) { return FMath::Lerp(FLinearColor(0.6f, 0.03f, 0.02f), RedCol, T); });
-	}
-
-	const int32 PerMajor = FMath::RoundToInt(Major / Minor);
-	const int32 NumTicks = FMath::RoundToInt(MaxVal / Minor);
-	for (int32 i = 0; i <= NumTicks; ++i)
-	{
-		const float V = i * Minor;
-		const bool bMajor = i % PerMajor == 0;
-		const FVector2D D = Dir(DialAngle(V / MaxVal));
-		const FLinearColor& Col = V >= RedFrom ? RedCol : InkCol;
-		Spoke(C, M, D, R * (bMajor ? 0.77f : 0.85f), R * 0.92f, bMajor ? R * 0.028f : R * 0.012f, Col);
-		if (bMajor)
-		{
-			Text(C, Font, M + D * R * 0.63f, FString::FromInt(FMath::RoundToInt(V / LabelDiv)), R * 0.16f, Col, true);
-		}
-	}
-	Text(C, Font, M + FVector2D(0.0f, -R * 0.32f), Caption, R * 0.09f, WithA(InkCol, 0.7f));
-}
-
-// Needle (soft shadow, tip-bright gradient), hub cap, then glass glare on top.
-void DialNeedle(UCanvas* C, FVector2D M, float R, float Frac)
-{
-	const FVector2D D = Dir(DialAngle(Frac)), W(-D.Y, D.X);
-	auto Shape = [&](FVector2D Off, FVector2D* P)
-	{
-		P[0] = M + Off + D * R * 0.9f + W * R * 0.005f;
-		P[1] = M + Off - D * R * 0.17f + W * R * 0.032f;
-		P[2] = M + Off - D * R * 0.17f - W * R * 0.032f;
-		P[3] = M + Off + D * R * 0.9f - W * R * 0.005f;
-	};
-	FVector2D P[4];
-	Shape(FVector2D(R * 0.025f, R * 0.035f), P);
-	const FLinearColor Sh(0, 0, 0, 0.45f), Shs[4] = {Sh, Sh, Sh, Sh};
-	Poly(C, P, Shs, R * 0.03f);
-	Shape(FVector2D::ZeroVector, P);
-	const FLinearColor Tip(1.0f, 0.55f, 0.15f), Base(0.7f, 0.2f, 0.02f);
-	const FLinearColor Cs[4] = {Tip, Base, Base, Tip};
-	Poly(C, P, Cs);
-
-	Disc(C, M + FVector2D(R * 0.015f, R * 0.025f), R * 0.1f, FLinearColor(0, 0, 0, 0.4f), FLinearColor(0, 0, 0, 0));
-	Ring(C, M, 0.0f, R * 0.09f, 0.0f, 2.0f * PI, [](float A, float)
-	{
-		return FMath::Lerp(FLinearColor(0.15f, 0.15f, 0.17f), FLinearColor(0.75f, 0.77f, 0.8f), 0.5f + 0.5f * FMath::Cos(A));
-	});
-	Disc(C, M, R * 0.055f, FLinearColor(0.12f, 0.12f, 0.13f), FLinearColor(0.05f, 0.05f, 0.06f));
-
-	// glare: faint sheen across the upper glass, fading toward the center and the sides
-	Ring(C, M, R * 0.35f, R * 0.95f, -1.2f, 1.2f, [](float A, float T)
-	{
-		return FLinearColor(1, 1, 1, 0.07f * T * FMath::Square(FMath::Cos(A * 1.25f)));
-	});
-}
-
-// Inset amber LCD, one or two centered lines over unlit "8" ghost segments.
-void Lcd(UCanvas* C, const UFont* Font, FVector2D Mid, FVector2D Size, const FString& A, const FString& B, float PxSize)
-{
-	RoundRect(C, Mid, Size + FVector2D(5.0f, 5.0f), PxSize * 0.35f,
-		FLinearColor(0.04f, 0.04f, 0.045f), FLinearColor(0.35f, 0.36f, 0.38f));
-	RoundRect(C, Mid, Size, PxSize * 0.25f, FLinearColor(0.025f, 0.018f, 0.005f), FLinearColor(0.07f, 0.05f, 0.015f));
-	auto Line = [&](FVector2D At, const FString& S)
-	{
-		FString Ghost = S;
-		for (TCHAR& Ch : Ghost)
-		{
-			Ch = FChar::IsDigit(Ch) ? TEXT('8') : Ch;   // Roboto digits are tabular, so this overlays exactly
-		}
-		Text(C, Font, At, Ghost, PxSize, WithA(LcdCol, 0.07f));
-		Text(C, Font, At, S, PxSize, LcdCol);
-	};
-	if (B.IsEmpty())
-	{
-		Line(Mid, A);
-		return;
-	}
-	Line(Mid - FVector2D(0.0f, Size.Y * 0.24f), A);
-	Line(Mid + FVector2D(0.0f, Size.Y * 0.24f), B);
-}
-
-// Telltale: dark when off; lit fill, soft glow and dark legend when on.
-void Lamp(UCanvas* C, const UFont* Font, FVector2D Mid, FVector2D Size, const TCHAR* Label, bool bOn,
-	const FLinearColor& OnCol)
-{
-	const float Rad = Size.Y * 0.3f;
-	RoundRect(C, Mid, Size + FVector2D(4.0f, 4.0f), Rad + 2.0f, FLinearColor(0.02f, 0.02f, 0.025f),
-		FLinearColor(0.2f, 0.21f, 0.22f));
-	if (bOn)
-	{
-		RoundRect(C, Mid, Size, Rad, WithA(OnCol, 0.35f), WithA(OnCol, 0.35f), Size.Y * 0.6f);
-		RoundRect(C, Mid, Size, Rad, WithA(OnCol * 1.15f, 1.0f), WithA(OnCol * 0.75f, 1.0f));
-	}
-	else
-	{
-		RoundRect(C, Mid, Size, Rad, FLinearColor(0.06f, 0.06f, 0.065f), FLinearColor(0.03f, 0.03f, 0.035f));
-	}
-	Text(C, Font, Mid, Label, Size.Y * 0.62f,
-		bOn ? FLinearColor(0.05f, 0.03f, 0.0f, 1.0f) : FLinearColor(0.2f, 0.2f, 0.21f, 1.0f), true);
-}
-
-// One housing behind both dials and the lamps: a stadium hull with a soft
-// drop shadow, lighter along the top edge.
-void Housing(UCanvas* C, FVector2D L, FVector2D Rt, float Rad)
-{
-	TArray<FVector2D> P;
-	for (int32 k = 0; k <= 24; ++k)
-	{
-		P.Add(L + Dir(PI + PI * k / 24) * Rad);    // down -> left -> up
-	}
-	for (int32 k = 0; k <= 24; ++k)
-	{
-		P.Add(Rt + Dir(PI * k / 24) * Rad);        // up -> right -> down
-	}
-	TArray<FLinearColor> Shadow, Body;
-	for (const FVector2D& Pt : P)
-	{
-		const float T = FMath::Clamp((Pt.Y - (L.Y - Rad)) / (2.0f * Rad), 0.0f, 1.0f);
-		Shadow.Add(FLinearColor(0, 0, 0, 0.5f));
-		Body.Add(FMath::Lerp(FLinearColor(0.11f, 0.115f, 0.125f, 0.97f), FLinearColor(0.02f, 0.02f, 0.025f, 0.97f), T));
-	}
-	Poly(C, P, Shadow, Rad * 0.12f);
-	Poly(C, P, Body);
-}
-}
-
-void ODGaugeCluster::Draw(UCanvas* Canvas, const UFont* Font, const FODGaugeData& D, double Now)
-{
-	if (!Canvas || !Font)
+	if (!Canvas)
 	{
 		return;
 	}
-	const float R = FMath::Clamp(Canvas->SizeY * 0.12f, 70.0f, 180.0f);
-	const float Y = Canvas->SizeY - R * 1.08f - 14.0f;
-	const float MidX = Canvas->SizeX * 0.5f;
-	const FVector2D TachM(MidX - R * 1.3f, Y), SpeedM(MidX + R * 1.3f, Y);
+	const float S = Canvas->SizeY / 1080.0f;
+	const float R = 150.0f * S;   // rpm arc outer radius
+	const FVector2D M(Canvas->SizeX - R * 1.3f - 40.0f * S, Canvas->SizeY - R * 1.12f - 28.0f * S);
+	const FLinearColor White(1, 1, 1, 1);
 
-	Housing(Canvas, TachM, SpeedM, R * 1.17f);
+	// soft shadow pool, not a housing: keeps white on bright sky/road legible
+	Ring(Canvas, M, 0.0f, R * 1.35f, 0.0f, 2.0f * PI, [](float, float T)
+	{
+		return FLinearColor(0, 0, 0, 0.6f * (1.0f - T * T));
+	});
 
-	// ---- tach: x1000, red band from the round 500 below the limiter
+	// ---- rpm arc: track, red zone, fill (white, red past the red line)
 	const float TachMax = FMath::CeilToFloat(D.MaxRpm / 1000.0f) * 1000.0f;
-	const float RedFrom = FMath::FloorToFloat(D.RedlineRpm / 500.0f) * 500.0f;
-	DialFace(Canvas, Font, TachM, R, TachMax, 1000.0f, 500.0f, RedFrom, 1000.0f, TEXT("x1000 r/min"));
-	Lcd(Canvas, Font, TachM + FVector2D(0.0f, R * 0.56f), FVector2D(R * 0.3f, R * 0.26f),
-		D.Gear < 0 ? TEXT("R") : FString::FromInt(D.Gear), FString(), R * 0.2f);
-	DialNeedle(Canvas, TachM, R, D.Rpm / TachMax);
+	const float RedFrac = FMath::FloorToFloat(D.RedlineRpm / 500.0f) * 500.0f / TachMax;
+	const float Frac = FMath::Clamp(D.Rpm / TachMax, 0.0f, 1.0f);
+	const float R0 = R * 0.9f;
+	auto Arc = [&](float F0, float F1, const FLinearColor& Col)
+	{
+		if (F1 > F0)
+		{
+			Ring(Canvas, M, R0, R, DialAngle(F0), DialAngle(F1), [&](float, float) { return Col; });
+		}
+	};
+	Arc(0.0f, RedFrac, WithA(White, 0.16f));
+	Arc(RedFrac, 1.0f, WithA(Danger, 0.4f));
+	Arc(0.0f, FMath::Min(Frac, RedFrac), White);
+	Arc(RedFrac, Frac, Danger);
 
-	// ---- speedo
-	const float SpeedMax = D.bMetric ? 280.0f : 160.0f;
+	// ticks + x1000 numbers outside the arc
+	for (int32 k = 0; k * 1000.0f <= TachMax + 1.0f; ++k)
+	{
+		const float F = k * 1000.0f / TachMax;
+		const FVector2D Dk = Dir(DialAngle(F));
+		const FLinearColor Col = F >= RedFrac ? Danger : WithA(White, 0.8f);
+		Spoke(Canvas, M, Dk, R * 1.03f, R * 1.09f, 2.5f * S, Col);
+		Text(Canvas, M + Dk * R * 1.22f, FString::FromInt(k), R * 0.14f, Col, EMenuWeight::SemiBold);
+	}
+	for (int32 k = 0; k * 500.0f < TachMax; ++k)   // half-thousand minors
+	{
+		if (k % 2)
+		{
+			Spoke(Canvas, M, Dir(DialAngle(k * 500.0f / TachMax)), R * 1.03f, R * 1.06f, 1.5f * S, WithA(White, 0.5f));
+		}
+	}
+
+	// needle tip riding the arc
+	const FVector2D Dn = Dir(DialAngle(Frac));
+	Spoke(Canvas, M + FVector2D(1.5f, 2.0f) * S, Dn, R * 0.74f, R * 1.1f, 9.0f * S, FLinearColor(0, 0, 0, 0.5f));
+	Spoke(Canvas, M, Dn, R * 0.74f, R * 1.1f, 7.0f * S, Accent);
+
+	// ---- speed: the hero number
 	const float Speed = D.SpeedCmS * (D.bMetric ? 0.036f : 0.0223694f);
-	DialFace(Canvas, Font, SpeedM, R, SpeedMax, D.bMetric ? 40.0f : 20.0f, 10.0f,
-		1.0e9f, 1.0f, D.bMetric ? TEXT("km/h") : TEXT("MPH"));
+	Text(Canvas, M + FVector2D(0.0f, -R * 0.08f), FString::FromInt(FMath::RoundToInt(Speed)), R * 0.6f, White);
+	Text(Canvas, M + FVector2D(0.0f, R * 0.3f), D.bMetric ? TEXT("KM/H") : TEXT("MPH"), R * 0.16f, WithA(White, 0.7f),
+		EMenuWeight::SemiBold);
+
+	// ---- gear ring in the arc's bottom gap; fills and flashes at the shift point
+	const FVector2D G = M + FVector2D(0.0f, R * 0.72f);
+	const bool bShift = Frac >= RedFrac - 0.03f && D.Gear > 0;
+	const bool bFlash = bShift && FMath::Frac(Now * 8.0) < 0.5;
+	if (bFlash)
+	{
+		Disc(Canvas, G, R * 0.16f, Accent);
+	}
+	Ring(Canvas, G, R * 0.145f, R * 0.16f, 0.0f, 2.0f * PI, [&](float, float)
+	{
+		return bShift ? Accent : WithA(White, 0.75f);
+	});
+	const FString GearS = D.Gear < 0 ? TEXT("R") : D.Gear == 0 ? TEXT("N") : FString::FromInt(D.Gear);
+	Text(Canvas, G, GearS, R * 0.2f, bFlash ? Ink : White);
+
+	// ---- trip / outside temp under the gear
 	const FString Trip = D.bMetric
 		? FString::Printf(TEXT("%.1f km"), D.TripCm / 100000.0)
 		: FString::Printf(TEXT("%.1f mi"), D.TripCm / 160934.4);
-	const FString Temp = !D.bHasAirTemp ? FString(TEXT("--\u00B0"))
-		: D.bMetric ? FString::Printf(TEXT("%.0f\u00B0C"), D.AirTempC)
-		: FString::Printf(TEXT("%.0f\u00B0F"), D.AirTempC * 1.8f + 32.0f);
-	Lcd(Canvas, Font, SpeedM + FVector2D(0.0f, R * 0.58f), FVector2D(R * 0.56f, R * 0.3f), Trip, Temp, R * 0.11f);
-	DialNeedle(Canvas, SpeedM, R, Speed / SpeedMax);
+	const FString Temp = !D.bHasAirTemp ? FString()
+		: D.bMetric ? FString::Printf(TEXT("    %.0f°C"), D.AirTempC)
+		: FString::Printf(TEXT("    %.0f°F"), D.AirTempC * 1.8f + 32.0f);
+	Text(Canvas, G + FVector2D(0.0f, R * 0.3f), Trip + Temp, R * 0.14f, WithA(White, 0.7f), EMenuWeight::SemiBold);
 
-	// ---- telltales between the dials
-	const FVector2D LampSize(R * 0.4f, R * 0.17f);
-	const float Step = LampSize.Y + 7.0f;
-	const FLinearColor Amber(1.0f, 0.6f, 0.05f, 1.0f);
-	const bool bTcLit = D.bTcOff || (D.bTcActive && FMath::Frac(Now * 4.0) < 0.5);
-	Lamp(Canvas, Font, FVector2D(MidX, Y - Step), LampSize, TEXT("ABS"), D.bAbsOff, Amber);
-	Lamp(Canvas, Font, FVector2D(MidX, Y), LampSize, TEXT("TC"), bTcLit, Amber);
-	Lamp(Canvas, Font, FVector2D(MidX, Y + Step), LampSize, TEXT("BRAKE"), D.bBrake, RedCol);
+	// ---- warning tags, only while on, stacked up from the arc's lower-left end
+	struct FTag { const TCHAR* Label; FLinearColor Col; };
+	TArray<FTag, TInlineAllocator<4>> Tags;
+	if (D.bBrake) { Tags.Add({TEXT("BRAKE"), Danger}); }
+	if (D.bAbsOff) { Tags.Add({TEXT("ABS OFF"), Warn}); }
+	if (D.bTcOff) { Tags.Add({TEXT("TC OFF"), Warn}); }
+	else if (D.bTcActive && FMath::Frac(Now * 4.0) < 0.5) { Tags.Add({TEXT("TC"), Warn}); }
+	const FVector2D TagSize(R * 0.46f, R * 0.14f);
+	for (int32 i = 0; i < Tags.Num(); ++i)
+	{
+		const FVector2D At = M + FVector2D(-R * 1.0f - TagSize.X * 0.5f, R * 0.85f - i * TagSize.Y * 1.3f);
+		Pill(Canvas, At, TagSize, Tags[i].Col);
+		Text(Canvas, At, Tags[i].Label, TagSize.Y * 0.72f, Ink);
+	}
 }

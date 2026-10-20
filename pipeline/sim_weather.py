@@ -69,6 +69,8 @@ BIOME_MULT = [
     (1.0, 1.8, 0.3),   # CoastalDune
     (0.6, 0.3, 1.3),   # CanyonBadlands
     (1.0, 0.8, 0.3),   # RockyFoothill
+    (1.2, 1.2, 0.2),   # TropicalCoast
+    (0.9, 0.8, 0.6),   # LavaField
 ]
 NEUTRAL_MULT = (1.0, 1.0, 1.0)
 

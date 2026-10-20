@@ -61,6 +61,8 @@ for entry in MANIFEST["textures"]:
 
     for suffix, (name_suffix, srgb, compression) in MAP_KINDS.items():
         png_path = local_dir / f"{asset_id}_2K-PNG_{suffix}.png"
+        if not png_path.exists():   # Poly Haven sets download as JPG
+            png_path = local_dir / f"{asset_id}_2K-JPG_{suffix}.jpg"
         if not png_path.exists():
             log(f"  WARN {asset_id}: missing {png_path.name}, skipping this map")
             continue

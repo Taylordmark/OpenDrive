@@ -11,6 +11,7 @@ class UPrimitiveComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
+class UODRoadDecals;
 
 /** One parsed road-mesh chunk, plain data only - safe to build off the game
  *  thread (no UObject/component touched). Mirrors the per-chunk payload
@@ -49,6 +50,11 @@ struct FParsedChunk
 	                            // CreateChunkMeshComponent so an ODR2 fallback
 	                            // chunk doesn't fabricate class/lane data it
 	                            // doesn't have.
+
+	// Realistic only (PLAN-VISUALS J): UV3.y road-edge code per triangle
+	// corner (Tris order) - junction pad edge distance / ribbon-in-pad, see
+	// ComputeEdgeCodes in the .cpp. Empty = all 0 (Stylized, no pads near).
+	TArray<float> EdgeCode;
 };
 
 /** One parsed tile file's worth of chunks - the off-thread output of
@@ -95,12 +101,11 @@ struct FPlaceLabel
 	FString CityLabel;
 };
 
-/** One clickable spawn destination on the map (2026-07-25): a real named
- *  town/place, deduplicated from the place-label points and positioned at its
- *  label-point centroid snapped to the nearest road-centerline point, so
- *  picking it spawns the car on the road at that town. Empty on levels without
- *  place-label data (Tail of the Dragon), where the map-select just falls back
- *  to the level's PlayerStart. */
+/** One clickable spawn destination on the map: a Turnout (2026-10-14) -
+ *  a named place snapped to a parkable road point, read from menu_spots.json
+ *  "starts" (pipeline/build_menu_spots.py turnouts), the menu's own list.
+ *  Empty on levels without a menu spot (Tail of the Dragon), where the
+ *  map-select just falls back to the level's PlayerStart. */
 struct FTownNode
 {
 	FString Name;
@@ -135,8 +140,9 @@ public:
 	/** Garage-menu vista copy (2026-10-05), see AODGameMode::SpawnVistaSet. */
 	FODVistaRegion Vista;
 
-	/** Weather W2: push "Wetness" to the shared road MIDs (paved, gravel, dirt). */
-	void SetWetness(float Wetness);
+	/** Weather W2: push "Wetness" to the shared road MIDs (paved, gravel, dirt);
+	 *  2026-10-16 also "Rain" (ripple rate) and "Puddles" (standing water). */
+	void SetWetness(float Wetness, float Rain = 0.0f, float Puddles = 0.0f);
 
 	/** Road snow depth (cm) on Comp if it's one of this class's chunks
 	 *  (Custom Primitive Data 0, see TickSnow), else Fallback. */
@@ -317,8 +323,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Road")
 	float MapTextureSpanCm = 0.0f;
 
-	/** Clickable town destinations for the main-menu map (built once at
-	 *  BeginPlay from PlaceLabels). Empty on levels without place data. */
+	/** The area's Turnouts for the map (built once at BeginPlay from
+	 *  menu_spots.json). Empty on levels without a menu spot. */
 	const TArray<FTownNode>& GetTownNodes() const { return TownNodes; }
 
 	/** Nearest road-centerline point to a world-XY query, plus the road
@@ -369,6 +375,14 @@ public:
 	/** World time of the last arrival (route auto-clears on arrival), <0 = never. */
 	double GetArrivedTime() const { return ArrivedTime; }
 	const FString& GetArrivedName() const { return ArrivedName; }
+	/** Track editor (2026-10-13): the road route through Waypoints in order
+	 *  (back to the first when bLoop) as XY + Z cm - pipeline/build_track.py's
+	 *  build_route. Each snap faces the next waypoint; false with OutFailLeg
+	 *  = the waypoint whose leg has no road, or INDEX_NONE (no graph / Z). */
+	bool RouteThrough(const TArray<FVector2D>& Waypoints, bool bLoop,
+		TArray<FVector2D>& OutXY, TArray<float>& OutZ, int32& OutFailLeg) const;
+	/** "<area>" from CenterlineFilePrefix (centerline_<area>_test), as in tracks.json */
+	FString GetAreaKey() const { return CenterlineFilePrefix.Mid(11).LeftChop(5); }
 
 private:
 	void LoadCenterline();
@@ -386,6 +400,7 @@ private:
 
 	// CSR adjacency (both directions per undirected ODG1 edge)
 	TArray<FVector2D> RouteNodes;
+	TArray<float> RouteNodeZ;      // lane block node Z, cm; empty on older files
 	TArray<int32> RouteAdjStart;   // RouteNodes.Num()+1
 	TArray<int32> RouteAdjNode;
 	TArray<float> RouteAdjLen;     // A* cost, cm (wrong-way arcs x WrongWayCostMult)
@@ -506,6 +521,10 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> RoadMatDirt;
+
+	// Realistic-only wear decals (PLAN-VISUALS Track C), null in Stylized
+	UPROPERTY()
+	TObjectPtr<UODRoadDecals> Decals;
 
 	// skirt-bottom world positions sampled every 10th station as tiles
 	// load, for -odseam

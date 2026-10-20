@@ -30,10 +30,15 @@ public:
 	AODPauseMenu();
 	virtual void BeginPlay() override;
 
-	enum : int32 { RowWorldMap, RowGarage, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
+	enum : int32 { RowWorldMap, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
 
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
+	const TCHAR* GetTitle() const { return bWheelLost ? TEXT("Wheel disconnected") : TEXT("Paused"); }
+
+	/** The driving wheel stopped answering: pause with that as the title.
+	 *  Opening rescans devices, so a replugged wheel works on Resume. */
+	void OpenForWheelLost();
 	int32 GetSelected() const { return Selected; }
 	int32 NumRows() const { return NumPauseRows; }
 	int32 GetFooterRow() const { return RowResume; }
@@ -81,6 +86,7 @@ private:
 	AODSettingsMenu* EnsureSettingsMenu();
 
 	bool bOpen = false;
+	bool bWheelLost = false;
 	int32 Selected = RowResume;
 	int32 GearboxIdx = 1;    // Sport (stage-1 shift defaults) - init only
 

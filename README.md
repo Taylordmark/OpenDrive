@@ -1,7 +1,7 @@
 # OpenDrive
 
 Procedurally generated racing across real-world places at 1:1 scale, built
-entirely from open data. Stylized "real places, storybook look" art direction.
+entirely from open data. Realistic art direction: it should look like the real place.
 UE 5.8, C++ + Python. Target: free public release (itch/GitHub).
 
 **Current stage:** Tail of the Dragon — the real US-129 (Deals Gap → Tabcat
@@ -285,8 +285,14 @@ then read `OpenDriveUE/Saved/Logs/OpenDriveUE.log` (manager heartbeats:
 ## Data credits (release requirement)
 
 - Road geometry: © OpenStreetMap contributors, ODbL.
+- Building heights: Microsoft Global ML Building Footprints, ODbL.
 - Elevation: USGS 3DEP via AWS Terrain Tiles; imagery: USGS — public domain,
   credit courtesy.
 - Climate normals: NASA POWER.
-- Planned (Arc 7): ESA WorldCover (CC-BY 4.0), PRISM/WorldClim — credit when
-  integrated.
+- Traffic volumes: FHWA HPMS (geo.dot.gov), state lookup via the US Census
+  geocoder — public domain.
+- Land cover: ESA WorldCover 10 m 2021 (© ESA WorldCover project, CC-BY 4.0) —
+  biomes, paved ground, far forest.
+- Ground colour (Realistic): contains modified Copernicus Sentinel data
+  2023-2025 (Sentinel-2 L2A via Element84 Earth Search on AWS).
+- Planned: PRISM/WorldClim — credit when integrated.

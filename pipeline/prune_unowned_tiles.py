@@ -22,7 +22,7 @@ DIRS = (ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks",
         ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "MasksV2")
 # every tiled family; road/roadv3 are 500 m tiles, the rest 2 km
 TILE_RE = re.compile(r"^(terrain|terrain_coarse|road|roadv3|buildings|walls|barrier|water|parking|"
-                     rf"guardrail|embankment|bridge|furniture)_{re.escape(AREA_NAME)}_test_tile_(-?\d+)_(-?\d+)\.bin$")
+                     rf"guardrail|embankment|bridge|furniture|tunnel|tunnellights|sidewalk)_{re.escape(AREA_NAME)}_test_tile_(-?\d+)_(-?\d+)\.bin$")
 
 
 def main():

@@ -42,11 +42,35 @@ class OPENDRIVEUE_API AODRaceManager : public AActor
 public:
 	AODRaceManager();
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Gate transforms in order, start first, finish last (set by pipeline). */
 	UPROPERTY(EditAnywhere, Category = "Race")
 	TArray<FTransform> Checkpoints;
+
+	/** Custom track (2026-10-13, pipeline/build_track.py): -odtrack=<name>
+	 *  loads Masks/track_<name>.bin into Checkpoints/TrackLine instead of
+	 *  the level's own gates. Empty = the level's race, as before. */
+	FString TrackName;
+
+	/** Track editor (2026-10-13): writes a road route (XY + Z cm, from
+	 *  AODRoadManager::RouteThrough) as Masks/track_custom_<n>.bin with
+	 *  build_track.py's gates and adds it to Masks/tracks.json, so the
+	 *  menu's Track row lists it. Returns the new track name, empty on failure. */
+	static FString SaveTrack(const FString& Area, const TArray<FVector2D>& XY,
+		const TArray<float>& Z, bool bLoop);
+
+	/** Masks/track_<Name>.bin -> gates + line (the menu's Track Select reads
+	 *  lines without spawning a race). False if missing or corrupt. */
+	static bool ReadTrack(const FString& Name, TArray<FTransform>& OutGates,
+		TArray<FVector2D>& OutLine, bool& bOutLoop);
+
+	/** Track line (world XY cm), spawn at [0]. Empty without a track. */
+	TArray<FVector2D> TrackLine;
+
+	/** Circuit: the finish is the start line, laps run back to back. */
+	bool bLoop = false;
 
 	/** Pass radius (cm). */
 	UPROPERTY(EditAnywhere, Category = "Race")
@@ -77,6 +101,8 @@ private:
 	FString SaveSlot() const;
 	void SaveBest();
 	void LoadCenterline();
+	bool LoadTrack();
+	void StartRun(double CrossTime);
 
 	/** Recording of the current run (becomes the ghost on a PB). */
 	static constexpr float SampleInterval = 0.1f;

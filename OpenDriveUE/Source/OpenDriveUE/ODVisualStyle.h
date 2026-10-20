@@ -8,7 +8,7 @@
 /**
  * Graphics menu "Visual Style" (AODSettingsMenu row; persisted as
  * OpenDrive.Graphics / VisualStyle in GameUserSettings.ini): 0 Stylized,
- * 1 Realistic - the PLAN-VISUALS.md trial. Same shape as ODAssetDetail.h and
+ * 1 Realistic (the default since realism B3, 2026-10-15). Same shape as ODAssetDetail.h and
  * independent of it: Asset Detail picks polygon count, this picks the look.
  *
  * Realistic assets sit beside their stylized twin with a "_real" suffix
@@ -26,7 +26,7 @@ namespace ODVisualStyle
 
 	inline int32 Level()
 	{
-		int32 L = 0;
+		int32 L = 1;   // Realistic unless the player picked Stylized (realism B3)
 		GConfig->GetInt(ConfigSection, ConfigKey, L, GGameUserSettingsIni);
 		return FMath::Clamp(L, 0, 1);
 	}
@@ -59,6 +59,24 @@ namespace ODVisualStyle
 		T* Result = Variant ? Variant : Base;
 		Cache.Add(Base, Result);
 		return Result;
+	}
+
+	/** Realistic only: Base's "<Base>_<Kind>" sibling (the garage-setup tyres
+	 *  next to SM_CarWheel_real: "/Game/X/SM_CarWheel_real_Knobby..."), or Base
+	 *  when Stylized, for a null Kind, or when that sibling isn't imported.
+	 *  Uncached: call on a setup / car change, not per frame. */
+	template <typename T>
+	T* PickKind(T* Base, const TCHAR* Kind)
+	{
+		if (!Base || !Kind || !IsRealistic())
+		{
+			return Base;
+		}
+		const FString Suffix = FString(TEXT("_")) + Kind;
+		T* Variant = LoadObject<T>(nullptr,
+			*(Base->GetOutermost()->GetName() + Suffix + TEXT(".") + Base->GetName() + Suffix),
+			nullptr, LOAD_NoWarn | LOAD_Quiet);
+		return Variant ? Variant : Base;
 	}
 
 	/** Pick() on every material slot of a mesh whose materials come from the

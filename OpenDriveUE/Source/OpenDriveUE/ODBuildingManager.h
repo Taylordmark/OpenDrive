@@ -9,15 +9,24 @@ class UDynamicMeshComponent;
 class UMaterialInterface;
 
 /** One parsed building - plain data, safe to build off the game thread.
- *  Mirrors the ODU2 sidecar's per-building payload layout
+ *  Mirrors the ODU4 sidecar's per-building payload layout
  *  (pipeline/build_building_mesh.py / export_building_mesh_bin.py). */
 struct FParsedBuilding
 {
 	TArray<float> Verts;    // flat x,y,z (cm, UE world frame)
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
-	uint8 WallSet = 0;      // index into apply_building_material.py WALL_LAYERS
-	uint8 FlatRoof = 0;     // 1 = concrete flat roof, 0 = shingle
+	uint8 WallSet = 0;      // index into apply_building_material*.py WALL_LAYERS
+	uint8 FlatRoof = 0;     // 1 = flat roof cap, 0 = pitched (baked by the pipeline)
+	uint8 RoofSet = 3;      // apply_building_material_real.py ROOF_LAYERS: tile, asphalt, metal, flat
+	uint8 RoofRgb[3] = {87, 87, 85};   // roof albedo, linear 0..255
+	uint8 Facade = 0;       // apply_building_material_real.py FACADE_FLOORS archetype (realism B2)
+	// pitched roofs (building_roofs.py): vertices from here on are the gable
+	// end walls, which get vertex alpha 0 (no windows)
+	int32 NumSolidVerts = MAX_int32;
+	// landmarks (pipeline/build_landmarks.py): the material seed byte (vertex
+	// G, picks the paint) chosen by the pipeline; -1 = hashed from the centroid
+	int16 SeedByte = -1;
 };
 
 /** One parsed tile file's worth of buildings - the off-thread output of
@@ -27,7 +36,7 @@ struct FParsedBuildingTile
 {
 	TArray<FParsedBuilding> Buildings;
 
-	// pipeline/generation_id.py's per-run id, read from the ODU2 header
+	// pipeline/generation_id.py's per-run id, read from the ODU4 header
 	// (2026-08-21) - see AODBuildingManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
@@ -73,6 +82,36 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** 2026-10-16: "Wetness" / "SnowCover" on the shared facade + roof MIDs
+	 *  (AODSeasonController pushes them with the ground's). */
+	void SetWeather(float Wetness, float SnowCover);
+
+	/** Loading-gate readiness (2026-10-14, AODMainMenu's loading screen): every
+	 *  tile within SpawnRadius of AroundPos is built or known-missing and no
+	 *  building is still waiting on ground (those give up after
+	 *  PendingGiveUpAfterSec, so this can't hold forever). */
+	bool IsInitialStreamingSettled(const FVector& AroundPos) const
+	{
+		if (PendingBuildings.Num() > 0)
+		{
+			return false;
+		}
+		const FIntPoint Center(FMath::FloorToInt(AroundPos.X / TileSizeCm), FMath::FloorToInt(AroundPos.Y / TileSizeCm));
+		const int32 Reach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
+		for (int32 dy = -Reach; dy <= Reach; ++dy)
+		{
+			for (int32 dx = -Reach; dx <= Reach; ++dx)
+			{
+				const FIntPoint Key = Center + FIntPoint(dx, dy);
+				if (!Tiles.Contains(Key) && !MissingTiles.Contains(Key))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
 
 	/** Sidecar filename prefix under Content/OpenDrive/Masks/; tile files
 	 *  are "<prefix>_tile_<tx>_<ty>.bin". */
@@ -273,6 +312,8 @@ private:
 	// collide (see this class's own top comment), so a few cm of embed is
 	// invisible but a few cm of float over a rounding error is not.
 	static constexpr float EmbedMarginCm = 5.0f;
+	// ComputeBuildingZOffset ignores corner hits this far below the highest one.
+	static constexpr float CornerPitMaxDropCm = 5000.0f;   // 50 m
 
 	// Throttled visibility into the ground-snap gate (Tick()) and the
 	// per-building placement outcome - temporary QA instrumentation for the
@@ -297,6 +338,13 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> FacadeMat;
+
+	/** Realistic only (PLAN-VISUALS Track G): M_BuildingRoof_real. When set,
+	 *  roof triangles go in mesh section 1 with this material and walls keep
+	 *  section 0, so neither material samples the other's textures. Null in
+	 *  Stylized (or if the asset is missing): one section, FacadeMat, as before. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RoofMat;
 
 	double LastDiagTime = 0.0;
 };

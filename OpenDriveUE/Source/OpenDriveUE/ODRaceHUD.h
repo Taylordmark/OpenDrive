@@ -101,12 +101,25 @@ private:
 	float WorldMapDragPx = 0.0f;
 	uint64 WorldMapOpenFrame = 0;   // ignore the key press that opened it
 	double NoRouteMsgTime = -100.0;
+	// Track editor (2026-10-13): T on the world map. Clicks drop waypoints,
+	// routed over the roads like build_track.py; F saves + drives it.
+	void RebuildEditTrack(const AODRoadManager* RoadMgr);
+	bool bTrackEdit = false;
+	bool bEditLoop = false;
+	TArray<FVector2D> EditWaypoints;   // world XY cm, as clicked
+	TArray<FVector2D> EditXY;          // routed line
+	TArray<float> EditZ;
+	int32 EditFailLeg = INDEX_NONE;    // waypoint whose leg has no road
+	bool bEditSaveFailed = false;
 	void ToggleMiniMap() { bShowMiniMap = !bShowMiniMap; }
 	void ZoomIn() { MiniMapZoomM = FMath::Max(20.0f, MiniMapZoomM * 0.8f); }
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
 
 	TArray<FKey> LastODManagedKeys;
-	bool bMiniMapHeadingUp = false;
+	// heading-up by default: a turn on the map is then a turn the same way
+	// on the road (saved choice still wins)
+	bool bMiniMapHeadingUp = true;
+	float MiniMapSpeedZoom = 1.0f;   // smoothed speed multiplier on MiniMapZoomM
 	bool bMetric = false;
 	double TripCm = 0.0;   // gauge trip odometer, this level
 
@@ -136,16 +149,22 @@ private:
 
 	/** Front-end menu (AODMainMenu): the current screen's panel, the loading
 	 *  overlay, or the QA town map. Takes over the whole screen when the menu is active - drawn
-	 *  instead of the in-game HUD, not on top of it. */
+	 *  instead of the in-game HUD, not on top of it. DrawAreaMap is the AreaMap
+	 *  screen's roads + start dots over the globe drape, DrawGlobePins the World screen's overlay (2026-10-14). */
+	void DrawAreaMap(const AODMainMenu* Menu) const;
+	void DrawGlobePins(const AODMainMenu* Menu) const;
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
 
 	// ---- menus (2026-10-09 redesign, see the comment above DrawMenuPanel in the .cpp)
 	/** One menu column: title, tab strip (when >1 tab), the active tab's rows
 	 *  (value between clickable arrows, % values as sliders) and the footer
-	 *  button. bRight mirrors it to the right edge (Scene vista). */
-	void DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
-		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight) const;
+	 *  button. bRight mirrors it to the right edge (Scene vista). Sub: a dim
+	 *  line under the title. Rows past the screen height scroll (MenuScrollTop)
+	 *  to keep Selected in view (2026-10-14). Returns the Y under the footer. */
+	float DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+		int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight,
+		const FString& Sub = FString()) const;
 	/** Settings, or its Key Bindings / Credits sub-screen - drawn INSTEAD of
 	 *  the parent menu's panel, never stacked on it. */
 	void DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const;
@@ -153,18 +172,39 @@ private:
 	void DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const;
 	/** The one dim layer plus the dark edge gradient the column sits on. */
 	void DrawMenuBackdrop(float Dim, bool bRight) const;
-	/** Title + tab strip; returns the Y the rows start at. */
-	float DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X) const;
+	/** Title (+ Sub line) + tab strip; returns the Y the rows start at. */
+	float DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X,
+		const FString& Sub = FString()) const;
 	void DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float X, float Y, float W) const;
 	void AddMenuHit(FODMenuHit::EKind Kind, int32 Id, int32 Col, float X, float Y, float W, float H) const;
 	float MenuScale() const;                  // Canvas height / 1080
 	float MenuX(bool bRight, float W) const;  // column left edge
 	/** Hover selects, click activates / changes / switches tab, right-click
-	 *  backs out, wheel moves - against this frame's MenuHits. */
+	 *  backs out, wheel moves - against this frame's MenuHits. World screen:
+	 *  pin hover/pick, drag spins and wheel zooms the globe instead. */
 	void HandleMenuMouse(AODMainMenu* Menu);
 	void HandleMenuMouse(AODPauseMenu* Menu);
 
 	mutable TArray<FODMenuHit> MenuHits;
 	FVector2D LastMenuMouse = FVector2D::ZeroVector;
 	uint64 LastMenuMouseFrame = 0;
+	mutable int32 MenuScrollTop = 0;   // DrawMenuPanel: first visible row of a list too tall for the screen (2026-10-14)
+	mutable int32 RebindScrollTop = 0; // DrawRebindPanel's own (2026-10-14)
+
+	/** Loading screen (2026-10-14): opaque backdrop at once, its text fades in,
+	 *  the bar eases monotonically; once AODMainMenu releases, the whole screen
+	 *  fades out over the first frames of play (Veil < 1, drawn last). Real time. */
+	void DrawLoadingScreen(const AODMainMenu* Menu, float Veil) const;
+	mutable double LoadingShownAt = -1.0;   // real seconds the screen came up, -1 = not up
+	mutable double LoadingEndedAt = -1.0;   // real seconds it was released, -1 = no fade running
+	mutable float LoadingBarFrac = 0.0f;
+	mutable int32 LoadingLastPhase = 0;
+	bool bGlobeDrag = false;   // World screen: a mouse drag is spinning the globe
+
+	/** Paint screen (4.3): saturation/brightness square + hue strip beside the
+	 *  panel; click or drag sets the player car's colour, saved on release. */
+	void DrawColorPicker(float X, float Y) const;
+	void HandlePickerMouse();
+	mutable FBox2D PickerSV = FBox2D(ForceInit), PickerHue = FBox2D(ForceInit);   // this frame's, invalid = not drawn
+	uint8 PickerDrag = 0;   // 1 square, 2 hue strip
 };

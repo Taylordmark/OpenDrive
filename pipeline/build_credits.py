@@ -141,6 +141,9 @@ def build_lines():
     add("Licensed under the Open Database License (ODbL) v1.0.")
     add("https://www.openstreetmap.org/copyright")
     add("https://opendatacommons.org/licenses/odbl/1-0/")
+    add("Building heights: Microsoft Global ML Building Footprints, (C) Microsoft.")
+    add("Licensed under the Open Database License (ODbL) v1.0.")
+    add("https://github.com/microsoft/GlobalMLBuildingFootprints")
     add()
     # DEM/imagery source - as documented by pipeline/terrain_common.py and
     # README.md's "Data & licensing" section (public domain; no attribution
@@ -150,6 +153,12 @@ def build_lines():
     add("Elevation data: USGS 3DEP, via AWS Terrain Tiles (Terrarium format).")
     add("Imagery: USGS.")
     add("U.S. Geological Survey data - public domain.")
+    add("Ground colour (Realistic style): Contains modified Copernicus Sentinel data")
+    add("2023-2025. Sentinel-2 L2A via Element84 Earth Search on AWS.")
+    add("Land cover (biomes, paved ground, far forest): ESA WorldCover 10 m 2021 v200,")
+    add("(C) ESA WorldCover project / Contains modified Copernicus Sentinel data")
+    add("(2021) processed by ESA WorldCover consortium. Licensed CC-BY 4.0.")
+    add("Traffic volumes: FHWA Highway Performance Monitoring System (HPMS) - public domain.")
     add()
 
     # ---- content_src/**/manifest.json walk ----

@@ -13,7 +13,7 @@ It prints the step sizes; step 3's two-pass bake drives them to ~0. A
 measurement, not a gate (exit 0). The cut is west's own_rect_cm xmax, which
 must be east's xmin (test_areas.AREAS).
 
-Usage:  python verify_area_seam.py [west east]     (default gv_west gv_east)
+Usage:  python verify_area_seam.py west east
 """
 import json
 import re
@@ -93,7 +93,7 @@ def stats(label, d):
           f"max {d.max():.3f} m")
 
 
-def main(west="gv_west", east="gv_east"):
+def main(west, east):
     cut = AREAS[west]["own_rect_cm"][2]
     assert cut is not None and cut == AREAS[east]["own_rect_cm"][0], "areas don't share an X cut"
     print(f"{west} | {east} at X = {cut:.0f} cm")

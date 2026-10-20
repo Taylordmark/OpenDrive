@@ -54,3 +54,26 @@ def cell_pixel_box(name):
     left = col * CELL_PX
     top = row * CELL_PX
     return left, top, left + CELL_PX, top + CELL_PX
+
+
+# Whole-tree wind (PLAN-VISUALS.md Track F 4) for the _real flora meshes:
+# import_biome_flora.py bakes these into UV channel 1 (the stylized meshes
+# have one UV set and their materials never read UV1); build_flora_materials.py
+# turns them into world position offset. Both are smooth functions of the
+# rest position, so a leaf card and the branch under it get the same offset
+# and never come apart.
+SWAY_REF_H = 1500.0   # cm: U = 1 at the crown of a 15 m tree
+SWAY_REF_R = 400.0    # cm: V = 1 at the outer edge of a crown 4 m in radius
+SWAY_U_MAX = 1.5      # the material's WPO bound assumes these (22 m tree, 6 m crown radius)
+SWAY_V_MAX = 1.5
+
+
+def sway_uv(x, y, z, height, reach):
+    """(U, V) for a vertex of a mesh `height` cm tall reaching `reach` cm
+    from the trunk axis (trunk base at the origin). U: trunk bend, 0 at the
+    base, (z/height)^2 scaled by tree height. V: extra for branch tips,
+    (r/reach)^2 scaled by crown radius - capped at the material's bounds, so
+    a wider/taller tree (the monkeypod giant) sways like a 6 m / 22 m one."""
+    u = (max(z, 0.0) / height) ** 2 * min(height / SWAY_REF_H, SWAY_U_MAX)
+    v = min(1.0, (x * x + y * y) ** 0.5 / reach) ** 2 * min(reach / SWAY_REF_R, SWAY_V_MAX)
+    return u, v

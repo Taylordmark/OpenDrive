@@ -20,6 +20,9 @@ public class OpenDriveUE : ModuleRules
 			"AudioMixer",
 			"GeometryFramework",
 			"GeometryCore",
+			// ODFarForest.cpp's runtime-built canopy card mesh (BuildFromMeshDescriptions)
+			"MeshDescription",
+			"StaticMeshDescription",
 			"AssetRegistry",
 			// FDisplayMetrics (Settings menu's "Native" resolution row, Arc 4.4) -
 			// lives in ApplicationCore, not Engine/Core.
@@ -28,8 +31,18 @@ public class OpenDriveUE : ModuleRules
 			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
 			"SlateCore",
 			"RenderCore",
+			// GNumDrawCallsRHI / RHIGetGPUFrameCycles (OpenDriveUE.cpp perf log).
+			"RHI",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
-			"Json"
+			"Json",
+			// ODTileSource: -ODTileServer live tile fetch.
+			"HTTP"
 		});
+
+		// ODWheelDevice: racing wheel input + force feedback (Arc 6)
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib" });
+		}
 	}
 }

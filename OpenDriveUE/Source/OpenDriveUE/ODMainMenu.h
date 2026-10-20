@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ODMenuTabs.h"
+#include "ODMenuVista.h"
 #include "ODWeatherController.h"
 #include "ODMainMenu.generated.h"
 
@@ -22,10 +23,29 @@ struct FODMenuSpot
 	float ViewYawDeg = 0.0f;               // camera looks this way, from behind the car
 	bool bHasSea = false;                  // optional "sea_z_cm": the view looks over sea-level water
 	double SeaZCm = 0.0;                   // area-local sea level (= -ORIGIN_HEIGHT_M * 100)
-	// per-vista weather (2026-10-05), set by SpawnVistas: the area's
+	// per-vista weather (2026-10-05), set by ShowStartVista: the area's
 	// climate_<area>_test.json and its vista forest copy (biome/elevation at the spot)
 	FODClimate Climate;
 	TWeakObjectPtr<AODForestManager> Forest;
+};
+
+/** One row of the Area screen (2026-10-13): a start (Open Drive) or a track
+ *  (Track Select), with its dot on the area map. */
+struct FODMenuPick
+{
+	FString Label;
+	FString Town;                            // Open Drive: turnout name, empty = the Default Turnout
+	FString Track;                           // Track Select: track name
+	bool bHasPos = false;
+	FVector2D Pos = FVector2D::ZeroVector;   // area-local cm
+	TArray<FVector2D> Line;                  // track line, drawn while selected
+	float Km = 0.0f;
+	bool bLoop = false;
+	float BestTime = 0.0f;                   // personal best (s), 0 = no time set
+	// road-snapped start (2026-10-14): area-local cm (Z = road surface), yaw along
+	// the road - the Drive spawn (StartAtTown); the vista is the area's one spot (2026-10-16)
+	bool bHasStart = false;
+	FTransform Start;
 };
 
 /** Which stage of the front-end the player is on. */
@@ -41,29 +61,45 @@ enum class EODMenuStage : uint8
 /** Screen within EODMenuStage::Menu. Settings is an overlay (AODSettingsMenu; Credits live inside it). */
 enum class EODMenuScreen : uint8
 {
-	Main,     // Drive, Garage, Settings, Quit - garage-room backdrop
-	Garage,   // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
-	Sound,    // exhaust sliders, opened from the Garage's "Customize Sound" row - garage room
-	Scene,    // Area, Time of Day, Season, Weather, Start Driving - always the picked area's vista
+	Main,         // Open Drive, Track Select, Garage, Settings, Quit - garage-room backdrop
+	Garage,       // car/engine/drivetrain/tuning/exhaust, applied live - always the garage room
+	Sound,        // exhaust sliders, opened from the Garage's "Customize Sound" row - garage room
+	Paint,        // paint, finish, pattern, rims (ODCarPaint.h), from the Garage's "Paint & Wheels" row - garage room
+	World,        // the in-engine globe (AODMenuGlobe) is the view target, pins drawn by the HUD
+	AreaMap,      // top-down on the globe, the area's relief draped; rows = starts or tracks, one tab per nearby area
+	Start,        // the picked start's live vista: Time of Day, Season, Weather, Drive
 };
 
 /**
  * Front-end menu, drawn on canvas by AODRaceHUD (no UMG). Sequential screens:
- * Main -> Garage (-> Sound) / Scene Select (Drive) / Settings / Quit; Esc or
- * Back returns to Main. The backdrop follows the SCREEN, never the row: Main
- * and Garage show the car in the garage room (ShowroomLocationCm), Scene
- * shows the selected area's preloaded vista (Spots, AODGameMode::SpawnVistaSet).
+ * Main -> Open Drive / Track Select -> World -> AreaMap -> Start -> Drive,
+ * Main -> Garage (-> Sound / Paint) / Settings / Quit; Esc or Back steps back one.
+ * Open Drive's globe lists every area, Track Select's only areas with tracks;
+ * the AreaMap screen lists its towns (or tracks, best time and line on the map).
+ * The backdrop follows the SCREEN, never the row: Main and Garage show the car
+ * in the garage room (ShowroomLocationCm), Start the picked start's vista
+ * (AODGameMode::SpawnVistaSet), one set per area at its menu spot (ShowStartVista).
+ *
+ * World (2026-10-14, was a globe.gl page in an SWebBrowser): AODMenuGlobe,
+ * a 3D globe far from every area, fed Masks/worldmap.json
+ * (pipeline/bake_world_map.py), one pin per area cluster. It is the view
+ * target on World and AreaMap (2026-10-14: a picked pin flies down onto the
+ * area's relief drape, top-down); picking a start (Start) fades through black
+ * to its vista camera once that vista has streamed (or StartVistaWaitSec).
+ * Nothing spawns on hover (2026-10-14). 2026-10-16: the area's vista spawns
+ * when its pin is picked (or its tab chosen), streaming while the player
+ * picks a turnout; every turnout shows that one vista. Auto weather rolls
+ * once per area visit and Drive carries that state into the drive.
  *
  * Drive opens AreaLevels[AreaIdx] (OpenArea) carrying the car picks as URL
  * options; that level's menu sees odengine= and skips straight to Loading ->
- * Playing at its default spawn. Driving to the current level skips the reload.
- * Picks (car, engine, drivetrain, tuning, area, exhaust, season, time,
- * weather) persist in GameUserSettings.ini.
+ * Playing at the saved town (or track start). Driving to the current level
+ * skips the reload. Picks (car, engine, drivetrain, tuning, area, town, track,
+ * exhaust, season, time, weather) persist in GameUserSettings.ini.
  *
  * Fresh boot (OpenMenu()) does not pause: APlayerCameraManager doesn't tick
  * while paused and the showroom camera would freeze. The pause menu's
- * "Garage" row calls OpenGarage(): the Garage screen only, paused, Back
- * resumes in place. Its "Main Menu" row calls OpenMenu().
+ * "Main Menu" row calls OpenMenu().
  *
  * StartAt() teleports, unpauses (streaming only runs unpaused) and enters
  * Loading; Tick() releases to Playing once the pawn is ground-snapped and
@@ -96,13 +132,32 @@ public:
 	// --- HUD-facing state ---
 	bool IsActive() const { return Stage != EODMenuStage::Playing; }
 	EODMenuStage GetStage() const { return Stage; }
-	bool IsGarageMode() const { return bGarageMode; }
 	/** Loading overlay: the Loading stage, or a Drive-launched level about to start. */
 	bool IsLoading() const { return Stage == EODMenuStage::Loading || bAutoStart; }
 	EODMenuScreen GetScreen() const { return Screen; }
 	/** True while the outdoor area vista (not the garage room) is on screen -
-	 *  the HUD moves the panel right and drops its dim. Scene Select only. */
+	 *  the HUD moves the panel right and drops its dim. Start only. */
 	bool IsVistaShown() const { return ShownVista != INDEX_NONE; }
+	/** HUD mouse drag in the garage room: turn the car on the spot (2026-10-16). */
+	void SpinShowroomCar(float DeltaDeg);
+	/** Start screen still on the globe, waiting for the vista to stream. */
+	bool IsStartLoading() const { return Screen == EODMenuScreen::Start && bGlobeView; }
+	FString GetScreenTitle() const;
+	/** AreaMap screen: the area's road map (area-local cm, NaN breaks), its rows, the selected one (or INDEX_NONE). */
+	const TArray<FVector2D>& GetAreaMap() const { return AreaMap; }
+	const TArray<FODMenuPick>& GetPicks() const { return Picks; }
+	int32 GetSelectedPick() const;
+	/** World screen (2026-10-14): the in-engine globe, null until first shown;
+	 *  the focused pin (index into GetGlobe()->GetPins()). */
+	const class AODMenuGlobe* GetGlobe() const { return Globe.Get(); }
+	class AODMenuGlobe* GetGlobe() { return Globe.Get(); }
+	int32 GetFocusedPin() const { return FocusedPin; }
+	void SetFocusedPin(int32 Pin);   // HUD hover
+	void PickPin(int32 Pin);         // HUD click
+	/** AreaMap (2026-10-14): area-local cm -> screen through the relief drape's
+	 *  corners (relief_<area>.json, bilinear) and the globe camera; false if hidden / off screen. */
+	bool AreaCmToScreen(const APlayerController* PC, const FVector2D& Cm, FVector2D& OutScreen) const;
+	FString GetAreaBlurb() const { return AreaBlurb; }   // "42 km of road · 6 starts"
 	int32 GetSelected() const { return Selected; }
 	/** The current screen's tabs (global row ids, see GetRow()) and its footer row. */
 	TArrayView<const FODMenuTab> GetTabs() const;
@@ -120,6 +175,9 @@ public:
 	 *  convention elsewhere in this project). */
 	void GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTotal,
 		int32& OutRoadReady, int32& OutRoadTotal) const;
+	/** Which loading gate Tick() is waiting on: 0 ground/terrain/roads,
+	 *  1 buildings, 2 renderer (textures/shaders) - the loading screen's label. */
+	int32 GetLoadingPhase() const { return LoadingPhase; }
 
 	/** The HUD computes the town nearest the mouse each frame (it owns the
 	 *  world->screen transform) and reports it here for the click handler. */
@@ -130,16 +188,24 @@ public:
 	 *  menu's "Main Menu" row. */
 	void OpenMenu();
 
-	/** The Garage screen from the PAUSE menu's "Garage" row: the car is
-	 *  already on real road, so Back / Esc resumes driving in place. */
-	void OpenGarage();
-
 	/** World-map fast travel (SS7.37): the same teleport + Loading-screen path
 	 *  as picking a town on the front-end map. */
 	void TravelToTown(int32 TownIdx, const class AODRoadManager* InRoad = nullptr) { StartAt(TownIdx, InRoad); }
+	/** Track editor (2026-10-13): pick a just-saved track (Track row) and drive it now. */
+	void DriveTrack(const FString& Name, const class AODRoadManager* InRoad);
 
 	/** Cursor + input mode for a menu/map (also used by AODRaceHUD's world map). */
 	void SetCursorVisible(bool bVisible);
+
+	/** Area vista (2026-10-16, was one per picked start): ONE vista set
+	 *  (AODGameMode::SpawnVistaSet) at Spots[Area], the car parked there; any
+	 *  other set is destroyed, the same area's is reused. Spawned on entering
+	 *  the area so it has streamed by the time a turnout is picked; rolls Auto
+	 *  weather once in the area's climate (held for the visit). */
+	void ShowStartVista(int32 Area);
+	void ClearStartVista();
+	/** The set's terrain, road, forest and water copies have settled around the car (the caller caps the wait). */
+	bool IsStartVistaReady() const;
 
 	// keyboard handlers, also the HUD's mouse entry points
 	void Up();
@@ -154,6 +220,7 @@ private:
 	void Left();
 	void Right();
 	void OnClick();      // left mouse (map select)
+	bool BrowsePin(int32 Dir);       // World screen: arrows step the focused pin; false elsewhere
 	void PrevTab() { SwitchTab(-1); }   // Q / left shoulder
 	void NextTab() { SwitchTab(+1); }   // E / right shoulder
 	void SwitchTab(int32 Dir);
@@ -162,23 +229,78 @@ private:
 	// stage transitions
 	void EnterCarConfig();       // showroom + first live apply (once pawn ready)
 	void GoToMap();
-	void StartAt(int32 TownIdx, const class AODRoadManager* InRoad = nullptr); // teleport + enter Loading (-1 = level's default spawn); null road = first found
-	void ResumeFromGarage();     // pause-menu garage's Back/Escape: no teleport, just unpause
+	// teleport + enter Loading (-1 = level's default spawn); null road = first found;
+	// Pose (area-local, a pick's Start) overrides the town
+	void StartAt(int32 TownIdx, const class AODRoadManager* InRoad = nullptr, const FTransform* Pose = nullptr);
 
-	// Area row: the /Game/Areas/OpenWorld_<area> levels (AssetRegistry) that
-	// also have a menu_spots.json entry (BeginPlay drops the rest). The row
-	// only picks; Drive with AreaIdx != CurrentAreaIdx calls OpenArea().
+	// Open Drive / Track Select (2026-10-13): World -> AreaMap -> Start -> Drive
+	void ShowWorld();                   // spawn the globe once, one pin per cluster, fly to AreaIdx's
+	void LoadWorldMap();                // Masks/worldmap.json -> WorldLines, AreaLL, AreaHidden
+	void ViewFrom(AActor* Target, float BlendSec);   // the player's camera view target
+	bool AreaListed(int32 Area) const;  // Track Select: only areas with tracks
+	TArray<int32> ClusterOf(int32 Area) const;   // listed areas overlapping Area: one globe pin, one tab each
+	void EnterArea(int32 Area);
+	void FocusArea(int32 Area);         // AreaIdx = Area, its map and rows
+	void FlyToArea(float Seconds);      // drape AreaIdx's relief, fly to frame it (AreaFitAlt, AreaViewBox)
+	void ClampAreaView();               // AreaMap: keep the dragged / zoomed globe camera on the area
+	void CutTo(AActor* Target);         // view target now, fading in from black
+	void DriveNow();                    // Start's Drive: camera ease (here) or fade (OpenArea), then DriveGo
+	void DriveGo();                     // OpenArea, or ApplyTrack + StartAtTown here
+	void StartAtTown(const FString& Town);
+	bool bTrackMode = false;
+	TArray<TArray<float>> WorldLines[3];   // coast, borders, states: [lat, lng, ...] (AODMenuGlobe::SetLines)
+	TArray<FVector2D> AreaLL;           // lon, lat per area, parallel to AreaKeys
+	TArray<bool> AreaHidden;           // worldmap.json "hidden": no pin, no tab (bake_world_map.py)
+	TArray<int32> Siblings;             // the AreaMap screen's areas, one tab each
+	TArray<FODMenuTab> AreaTabs;
+	TArray<FODMenuPick> Picks;          // AreaIdx's rows
+	TArray<FVector2D> AreaMap;
+	FString TownPick;                   // Open Drive start, empty = the level's default spawn
+	TWeakObjectPtr<class AODMenuGlobe> Globe;
+	int32 FocusedPin = INDEX_NONE;
+	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
+	bool bGlobeView = false;            // the globe camera is (or is blending to) the view target
+	double AreaEnterTime = 0.0;         // real seconds, for the vista-stream wait cap
+	double FadeSwapAt = -1.0;           // real seconds: faded out, CutTo the vista then (Tick)
+	double AreaFitAlt = 0.06;           // FlyToArea's framing altitude (globe radii) ...
+	FBox2D AreaViewBox = FBox2D(ForceInit);   // ... and the (lat, lng) box the camera centre may pan in
+	FString AreaBlurb;                  // FocusArea's card line
+	// Masks/relief_<area>.png + .json (pipeline/bake_area_relief.py), loaded by FocusArea; null = not baked
+	UPROPERTY()
+	TMap<FString, TObjectPtr<class UTexture2D>> ReliefTex;
+	TMap<FString, FBox2D> ReliefBox;    // area-local cm, Min = image top-left
+	TMap<FString, TArray<FVector2D>> ReliefCorners;   // "corners_ll": (lat, lng) NW, NE, SE, SW
+	// Drive (2026-10-14): DriveNow eases the camera to the chase spot (this
+	// level) or fades out (OpenArea) for this long, then DriveGo
+	double DriveStart = -1.0;
+	bool bDriveHere = false;
+	FTransform DriveFrom;
+
+	// the /Game/Areas/OpenWorld_<area> levels (AssetRegistry) that also have a
+	// menu_spots.json entry (BeginPlay drops the rest). Drive with AreaIdx !=
+	// CurrentAreaIdx calls OpenArea().
 	void FindAreaLevels();
 	void OpenArea();             // OpenLevel(AreaLevels[AreaIdx]) carrying the car picks as URL options
-	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_gv_west"
+	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_oahu"
 	TArray<FString> AreaNames;   // readable, parallel to AreaLevels
 	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
 	int32 AreaIdx = 0;
 	int32 CurrentAreaIdx = INDEX_NONE;   // this level's index in AreaLevels, if listed
+	// tracks (2026-10-13) from Masks/tracks.json (pipeline/build_track.py).
+	// TrackPick is saved like Area, so a Drive into another level picks it back up there.
+	struct FTrackInfo { FString Name, Title, Area; bool bLoop = false; float Km = 0.0f; };
+	void LoadTracks();
+	void ApplyTrack();           // (re)spawn the track's AODRaceManager before StartAt, or clear it
+	const FTrackInfo* PickedTrack() const;
+	TArray<FTrackInfo> Tracks;
+	FString TrackPick;           // track name, empty = Free Roam
 	// saved / odtunepreset= tuning preset, applied once by EnterCarConfig() (needs the pawn)
 	int32 CarriedTuneIdx = INDEX_NONE;
+	// odweather=: the Auto weather state the start vista showed (EODWeatherState),
+	// StartAtTown resumes Auto from it instead of rolling (2026-10-16)
+	int32 CarriedWeather = INDEX_NONE;
 	// this level was opened by Drive (travel URL has odengine=): skip the menu,
-	// straight to Loading -> Playing at the default spawn
+	// straight to Loading -> Playing at TownPick / the track start
 	bool bAutoStart = false;
 
 	// live application of the current selection
@@ -220,7 +342,6 @@ private:
 
 	EODMenuStage Stage = EODMenuStage::Menu;
 	EODMenuScreen Screen = EODMenuScreen::Main;
-	bool bGarageMode = false;   // opened via OpenGarage(), not OpenMenu()
 	int32 Selected = 0;
 	int32 TabIdx = 0;
 	int32 EngineIdx = 0;     // index into the Engines[] table (ODMainMenu.cpp), 0 = Stock
@@ -248,20 +369,27 @@ private:
 	int32 TimeIdx = 1;
 	int32 WeatherIdx = 0;
 
-	// Scene Select vistas: the car parked on a real road per area, live
-	// terrain behind it. Spots parallel AreaLevels; every area gets an offset
-	// copy of its terrain/road/forest/water/guardrail managers
-	// (AODGameMode::SpawnVistaSet), all preloaded at menu entry so the Area row
-	// switches instantly.
+	// Start vista: the car parked on a real road, live terrain behind it.
+	// Spots parallel AreaLevels (the area's menu spot = its Default Turnout);
+	// StartPoses too (menu_spots.json "starts", pipeline/build_menu_spots.py
+	// turnouts: name -> road-snapped pose, "" = the Default Turnout). One offset copy of the area's
+	// terrain/road/forest/water/guardrail managers (AODGameMode::SpawnVistaSet)
+	// at a time (2026-10-14, was one per focused pin, an LRU of 3 that
+	// respawned while hovering a cluster), centred on the shown start.
 	void LoadMenuSpots();
-	void SpawnVistas();
-	void DestroyVistas();
-	void UpdateScene();          // per Tick in Menu: garage room, or AreaIdx's vista on the Scene screen
-	FVector VistaCarWorld(int32 Area) const;
+	void DestroyVistas();        // ClearStartVista + un-freeze the real streaming (StartAt)
+	void UpdateScene();          // per Tick in Menu: garage room, or the start vista on Start
+	FODVistaRegion VistaRegion() const;   // around VistaSpot, wedge along its view
+	FTransform VistaCamGoal() const;      // VistaSpot's car framing
+	FVector VistaCarWorld() const;        // road surface under the vista car, world cm
 	TArray<FODMenuSpot> Spots;
+	TArray<TMap<FString, FTransform>> StartPoses;
 	UPROPERTY()
 	TArray<TObjectPtr<AActor>> VistaActors;
-	bool bVistasSpawned = false;
+	int32 VistaArea = INDEX_NONE;   // the live set's area
+	FODMenuSpot VistaSpot;       // its car pose/view (area-local) + climate, forest copy
+	bool bVistaDirty = false;    // a new set: UpdateScene re-places the car
+	bool bVistasSpawned = false; // real-world streaming is frozen (FreezeStreaming)
 	int32 ShownVista = INDEX_NONE;
 	FTransform GarageCamXf;      // EnterCarConfig's garage framing, restored on the way back
 
@@ -290,8 +418,14 @@ private:
 	// player on a black screen forever.
 	double LoadingStartTime = 0.0;
 	double LoadingSettledSinceTime = 0.0;
-	static constexpr double LoadingSettleDebounceSec = 0.5;
+	int32 LoadingPhase = 0;   // GetLoadingPhase()
+	// 0.5 -> 1.0 (2026-10-14, "hold back until everything is ready"): a tile's
+	// mesh lands a frame or two after its manager stops counting it pending
+	static constexpr double LoadingSettleDebounceSec = 1.0;
 	static constexpr double LoadingMinDisplaySec = 1.0;
+	// max extra wait, once the world is settled, for texture streaming and
+	// shader compiles to go idle (2026-10-14)
+	static constexpr double LoadingRenderWaitSec = 4.0;
 	// 25 -> 60 (2026-09-07, Taylor's cold-boot "screen is blank, game
 	// doesn't appear to be loading" report): a genuinely cold first load
 	// (disk cache empty) was still at road tiles=0 well past the old 25s

@@ -77,6 +77,7 @@ import json
 import math
 import struct
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -88,12 +89,13 @@ import prune_unowned_tiles
 import build_terrain_mesh_tiles as btmt
 from export_road_mesh_bin import write_tile
 from export_road_mesh_bin_v2 import write_tile as write_tile_v3
-from build_road_network import split_excluding_tunnels, write_station_sidecar
+from build_road_network import write_station_sidecar
 from generation_id import compute_generation_id, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks,
                                half_width_for_stations, road_ue_z_m,
-                               sample_mesh_height, sample_mesh_heights, unpaved_stations)
+                               sample_mesh_height, sample_mesh_heights,
+                               shipped_terrain_heights, unpaved_stations)
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -220,28 +222,41 @@ def ribbon_top_triangles(chunks):
         tris.append(t + base)
         base += len(v)
     if not base:
-        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64)
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64), None
     pos, tris = np.concatenate(pos), np.concatenate(tris)
     a, b, c = pos[tris[:, 0]], pos[tris[:, 1]], pos[tris[:, 2]]
     n = np.cross(b - a, c - a)
     flat = np.abs(n[:, 2]) > 1e-9
     grade = np.hypot(n[:, 0], n[:, 1]) / np.where(flat, np.abs(n[:, 2]), 1.0)
-    return pos, tris[flat & (grade < 0.6)]
+    tris = tris[flat & (grade < 0.6)]
+    if not len(tris):
+        return pos, tris, None
+    # per-pad bbox scans of every island triangle were ~35k x millions
+    # (2026-10-14, Oahu stage 13 > 1 h): index the bboxes once instead
+    tb = pos[tris][:, :, :2]
+    lo, hi = tb.min(1), tb.max(1)
+    from scipy.spatial import cKDTree
+    return pos, tris, (lo, hi, cKDTree((lo + hi) / 2), float(np.hypot(*(hi - lo).T).max() / 2))
 
 
-def conform_pad_to_ribbons(pad, rib_pos, rib_tris):
+def conform_pad_to_ribbons(pad, rib_pos, rib_tris, rib_idx):
     """See PAD_ROAD_GAP_M's comment. Moves pad (a _build_pad_fan chunk)
     vertices in place, apron ring following its top ring; returns how many
-    vertices sit on a ribbon."""
+    vertices sit on a ribbon. rib_* is ribbon_top_triangles' result."""
     V = np.asarray(pad["vertices"], dtype=np.float64).reshape(-1, 3)
     rs = pad["ring_start"]
     sides = len(V) - rs
     top = V[:rs]
     lo, hi = top[:, :2].min(0), top[:, :2].max(0)
-    tb = rib_pos[rib_tris]
-    near = ((tb[:, :, 0].max(1) >= lo[0]) & (tb[:, :, 0].min(1) <= hi[0])
-            & (tb[:, :, 1].max(1) >= lo[1]) & (tb[:, :, 1].min(1) <= hi[1]))
-    if not near.any():
+    near = np.zeros(0, dtype=np.int64)
+    if rib_idx is not None:
+        tlo, thi, tree, tr = rib_idx
+        # boxes that overlap have centers within the sum of half-diagonals
+        near = np.sort(np.array(tree.query_ball_point((lo + hi) / 2, np.hypot(*(hi - lo)) / 2 + tr + 1.0),
+                                dtype=np.int64))
+        near = near[(thi[near, 0] >= lo[0]) & (tlo[near, 0] <= hi[0])
+                    & (thi[near, 1] >= lo[1]) & (tlo[near, 1] <= hi[1])]
+    if not len(near):
         _lower_pad(pad, V)
         return 0
     res = sample_mesh_heights(rib_pos, rib_tris[near], top[:, 0], top[:, 1])         + PAD_ROAD_GAP_M * 100.0 - top[:, 2]
@@ -348,14 +363,13 @@ def bridge_pad_to_host(host, guest_base, guest_vcount, ring_start=1):
     host_vcount = guest_base
     if host_vcount == 0 or guest_vcount < 3:
         return 0
-    hv = host["vertices"]
-    hx = [hv[i * 3] for i in range(host_vcount)]
-    hy = [hv[i * 3 + 1] for i in range(host_vcount)]
+    hv = np.asarray(host["vertices"], dtype=np.float64).reshape(-1, 3)
     # the outermost ring only (its edges have one use; inner ring edges
     # already have two). ring_start=1 is the whole ring of a plain fan.
     ring_local = list(range(ring_start, guest_vcount))
-    gx = [hv[(guest_base + i) * 3] for i in ring_local]
-    gy = [hv[(guest_base + i) * 3 + 1] for i in ring_local]
+    g = hv[guest_base + ring_start:guest_base + guest_vcount, :2]
+    h = hv[:host_vcount, :2]
+    d2m = (h[:, None, 0] - g[None, :, 0]) ** 2 + (h[:, None, 1] - g[None, :, 1]) ** 2
 
     # 2026-08-26: an earlier version added one bridge triangle per nearby
     # host vertex, keyed only by that host vertex's own nearest ring edge -
@@ -372,29 +386,21 @@ def bridge_pad_to_host(host, guest_base, guest_vcount, ring_start=1):
     # islands.
     BRIDGE_MAX_D2 = (300.0) ** 2   # only bridge host verts within ~3m (cm^2) of the ring
     best_by_edge = {}   # ring edge j -> (dist2, host vertex index)
-    for hi in range(host_vcount):
-        best_j, best_d2 = -1, BRIDGE_MAX_D2
-        for j in range(len(ring_local)):
-            d2 = (hx[hi] - gx[j]) ** 2 + (hy[hi] - gy[j]) ** 2
-            if d2 < best_d2:
-                best_d2, best_j = d2, j
-        if best_j >= 0:
-            cur = best_by_edge.get(best_j)
-            if cur is None or best_d2 < cur[0]:
-                best_by_edge[best_j] = (best_d2, hi)
+    row_j = d2m.argmin(1)   # first minimum per host vertex, as a strict-< scan
+    row_d2 = d2m[np.arange(host_vcount), row_j]
+    for hi in np.flatnonzero(row_d2 < BRIDGE_MAX_D2).tolist():
+        best_j, best_d2 = int(row_j[hi]), float(row_d2[hi])
+        cur = best_by_edge.get(best_j)
+        if cur is None or best_d2 < cur[0]:
+            best_by_edge[best_j] = (best_d2, hi)
 
     if not best_by_edge:
         # Fallback: guarantee at least one connection even if nothing on
         # this host chunk landed within BRIDGE_MAX_D2 of the ring (e.g. a
         # host whose own vertex density near the pad is sparse) - wider
         # search, no distance cap, single bridge triangle.
-        best_hi, best_j, best_d2 = 0, 0, float("inf")
-        for hi in range(host_vcount):
-            for j in range(len(ring_local)):
-                d2 = (hx[hi] - gx[j]) ** 2 + (hy[hi] - gy[j]) ** 2
-                if d2 < best_d2:
-                    best_d2, best_hi, best_j = d2, hi, j
-        best_by_edge = {best_j: (best_d2, best_hi)}
+        best_hi, best_j = np.unravel_index(int(d2m.argmin()), d2m.shape)
+        best_by_edge = {int(best_j): (float(d2m[best_hi, best_j]), int(best_hi))}
 
     for j, (_d2, hi) in best_by_edge.items():
         ra = guest_base + ring_local[j]
@@ -432,8 +438,25 @@ def merge_chunk_into(host, guest):
     bridge_pad_to_host(host, base, guest_vcount, guest.get("ring_start", 1))
 
 
-def nearest_chunk(chunks, xy_m):
-    """The chunk whose centroid is closest to xy_m - used to pick which
+def fuse_into_nearest(chunks, cents, pad, xy_m):
+    """merge_chunk_into the chunk nearest_chunk picks, else append pad.
+    cents is chunk_centroids(chunks), kept in step (recomputing every centroid
+    per pad was ~35k pads x every chunk's vertices). Returns (cents, merged)."""
+    if not chunks:
+        chunks.append(pad)
+        return chunk_centroids(chunks), False
+    k = nearest_chunk(cents, xy_m)
+    merge_chunk_into(chunks[k], pad)
+    cents[k] = chunk_centroid(chunks[k])
+    return cents, True
+
+
+def chunk_centroids(chunks):
+    return np.array([chunk_centroid(c) for c in chunks], dtype=np.float64).reshape(-1, 2)
+
+
+def nearest_chunk(cents, xy_m):
+    """Index of the chunk whose centroid (cents, chunk_centroids) is closest to xy_m - used to pick which
     already-built ribbon chunk a pad should be fused into via
     merge_chunk_into. xy_m is (east_m, north_m), the same PIPELINE-frame
     meters every caller already has on hand (junction/fill-pad centers,
@@ -446,13 +469,7 @@ def nearest_chunk(chunks, xy_m):
     pad's own geometry landing in a tile file nowhere near the junction
     (2026-08-26 headless verification)."""
     bx, by = xy_m[0] * 100.0, -xy_m[1] * 100.0
-    best, best_d2 = None, float("inf")
-    for c in chunks:
-        cx, cy = chunk_centroid(c)
-        d2 = (cx - bx) ** 2 + (cy - by) ** 2
-        if d2 < best_d2:
-            best_d2, best = d2, c
-    return best
+    return int(((cents[:, 0] - bx) ** 2 + (cents[:, 1] - by) ** 2).argmin())
 
 
 # ------------------------------------------------------------------ geometry
@@ -2727,11 +2744,10 @@ def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_e
     500m tile)."""
     if not junctions:
         return 0
-    near = np.zeros(len(east), dtype=bool)
-    for j in junctions:
-        jx, jy = j["xy"]
-        near |= ((np.abs(east - jx) <= GATE_COVER_SEARCH_M)
-                 & (np.abs(north - jy) <= GATE_COVER_SEARCH_M))
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree([j["xy"] for j in junctions]).query(
+        np.c_[east, north], p=np.inf, distance_upper_bound=GATE_COVER_SEARCH_M + 1.0)
+    near = d <= GATE_COVER_SEARCH_M   # Chebyshev: both axes within the box
     cand = np.where(near & ~gate_exclude)[0]
 
     tile_chunks = defaultdict(list)
@@ -2752,32 +2768,24 @@ def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_e
         if pos:
             flat[key] = (np.concatenate(pos), np.concatenate(tris))
 
-    misses = []
-    for i in cand:
-        x_cm, y_cm = east[i] * 100.0, -north[i] * 100.0
-        tx0, ty0 = int(x_cm // ROAD_TILE_SIZE_CM), int(y_cm // ROAD_TILE_SIZE_CM)
-        covered = False
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
-                geo = flat.get((tx0 + dx, ty0 + dy))
-                if geo is not None and sample_mesh_height(geo[0], geo[1], x_cm, y_cm) is not None:
-                    covered = True
-                    break
-            if covered:
-                break
-        if not covered:
-            misses.append(int(i))
+    # one batched sample per tile over the candidates in its 2-ring
+    # neighborhood (was one sample_mesh_height per station per tile)
+    x_cm, y_cm = east[cand] * 100.0, -north[cand] * 100.0
+    tx0, ty0 = (x_cm // ROAD_TILE_SIZE_CM).astype(np.int64), (y_cm // ROAD_TILE_SIZE_CM).astype(np.int64)
+    covered = np.zeros(len(cand), dtype=bool)
+    for (tx, ty), (pos, tris) in flat.items():
+        m = ~covered & (np.abs(tx0 - tx) <= 2) & (np.abs(ty0 - ty) <= 2)
+        if m.any():
+            covered[m] = np.isfinite(sample_mesh_heights(pos, tris, x_cm[m], y_cm[m]))
+    misses = cand[~covered].tolist()
 
+    cents = chunk_centroids(all_chunks)
     for k, i in enumerate(misses):
         xy = (float(east[i]), float(north[i]))
         pad = build_fill_disc(f"gatecover_{k:04d}", xy, float(regraded[i]),
                               ROAD_HALF_WIDTH + PAD_OVERLAP_MARGIN_M,
                               i, seg_ids, east, north, regraded)
-        host = nearest_chunk(all_chunks, xy)
-        if host is not None:
-            merge_chunk_into(host, pad)
-        else:
-            all_chunks.append(pad)
+        cents, _ = fuse_into_nearest(all_chunks, cents, pad, xy)
     print(f"gate-coverage pass: {len(cand)} near-junction station(s) sampled, "
           f"{len(misses)} uncovered original coordinate(s) capped with a fill disc")
     return len(misses)
@@ -3260,13 +3268,21 @@ def _blend_approaches_to_junction(reps, flat_seg, junction_elev, snap_xy, bounds
             continue   # the flattest road keeps its own profile untouched
         lo, hi = bounds[seg]
         k0, k1 = max(lo, e["edge"] - half), min(hi, e["edge"] + half)
+        # a bridge/tunnel inside the transition pins its own grade: the blend
+        # must reach 0 at it, not stop dead beside it (2026-10-15, Oahu
+        # (16152,-20771): approach lifted 2.45 m right up to a tunnel portal
+        # whose station kept its grade - a 2.5 m pavement step at the bore)
+        st = [s_m[k] - e["s"] for k in range(k0, k1 + 1) if structural[k]]
+        span_lo = -max((v for v in st if v <= 0), default=-TRANSITION_LEN_M)
+        span_hi = min((v for v in st if v >= 0), default=TRANSITION_LEN_M)
         for k in range(k0, k1 + 1):
             if structural[k]:
                 continue
             d = abs(s_m[k] - e["s"])
-            if d > TRANSITION_LEN_M:
+            span = min(TRANSITION_LEN_M, span_lo if s_m[k] < e["s"] else span_hi)
+            if d >= span and d > 0:
                 continue
-            t = d / TRANSITION_LEN_M
+            t = d / span if span > 0 else 0.0
             weight = 1.0 - (3.0 * t * t - 2.0 * t * t * t)   # 1 at crossing, 0 at edge
             regraded[k] = elev[k] * (1.0 - weight) + junction_elev * weight
             regraded_east[k] = east[k] * (1.0 - weight) + snap_xy[0] * weight
@@ -3896,6 +3912,7 @@ def main():
     pad_bound = np.array([(j["ellipse"][0], j["ellipse"][1], max(j["ellipse"][2], j["ellipse"][3]))
                           if j.get("shape") == "ellipse" else (j["xy"][0], j["xy"][1], j["radius_m"])
                           for j in junctions]).reshape(-1, 3)
+    t0 = time.perf_counter()
     for si, seg in enumerate(raw["segments"]):
         s_full = np.array(seg["s_m"])
         e_full = np.array(seg["east_m"])
@@ -3914,7 +3931,7 @@ def main():
         # the pad (2026-10-02): a full 8 deg bank met a pad's plane with a
         # ~1.3 m outer-edge lip; real roads drop the bank into an intersection
         bank_full = bank[goff:goff + len(s_full)]
-        runs = list(split_excluding_tunnels(is_tunnel))
+        runs = [(0, len(s_full))]   # tunnels included: build_tunnels.py bores them
         for run_idx, (lo, hi) in enumerate(runs):
             if hi - lo < 2:
                 continue
@@ -4084,13 +4101,16 @@ def main():
                             osm_lanes=ln_r,
                             half_width_s=hw_r,
                             junction_suppress=js_r,
-                            is_unpaved=up_r, bank_scale=bk_r)
+                            is_unpaved=up_r, bank_scale=bk_r,
+                            ground_cm=shipped_terrain_heights)
                         all_chunks.extend(chunks)
                         total_km += float(s_r[-1] - s_r[0]) / 1000.0
                         sub_idx += 1
                     p0 = p1
         goff += len(seg["east_m"])
 
+    print(f"ribbons: {len(all_chunks)} chunk(s) in {time.perf_counter() - t0:.0f}s")
+    t0 = time.perf_counter()
     # Small overlapping discs (radius > half the 5m station spacing) patch
     # every proximity-only overlap station not already under a real
     # junction's pad - together they form a continuous strip covering
@@ -4102,7 +4122,8 @@ def main():
     # (merge_chunk_into) instead of appending it as its own standalone chunk -
     # see that function's docstring. Was: all_chunks.append(build_pad_chunk(...)).
     n_merged, n_standalone = 0, 0
-    rib_pos, rib_tris = ribbon_top_triangles(all_chunks)   # before any pad merges in
+    rib = ribbon_top_triangles(all_chunks)   # before any pad merges in
+    cents = chunk_centroids(all_chunks)
     n_conformed = 0
     from scipy.spatial import cKDTree
     rg_tree = cKDTree(np.c_[regraded_east, regraded_north])
@@ -4110,14 +4131,10 @@ def main():
         pad = build_fill_disc(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M, gi, seg_ids,
                               regraded_east, regraded_north, regraded)
         conform_disc_to_roads(pad, rg_tree, regraded_east, regraded_north, regraded, seg_ids, gi)
-        n_conformed += conform_pad_to_ribbons(pad, rib_pos, rib_tris)
-        host = nearest_chunk(all_chunks, xy)
-        if host is not None:
-            merge_chunk_into(host, pad)
-            n_merged += 1
-        else:
-            all_chunks.append(pad)
-            n_standalone += 1
+        n_conformed += conform_pad_to_ribbons(pad, *rib)
+        cents, merged = fuse_into_nearest(all_chunks, cents, pad, xy)
+        n_merged += merged
+        n_standalone += not merged
 
     for k, j in enumerate(junctions):
         # every pad gets rings (not just molded ones) so conform_pad_to_ribbons
@@ -4134,20 +4151,19 @@ def main():
                                            j["elev"], PAD_OVERLAP_MARGIN_M,
                                            plane=j.get("plane", (0.0, 0.0)), z_fn=z_fn,
                                            profile=j.get("profile"))
-        n_conformed += conform_pad_to_ribbons(pad, rib_pos, rib_tris)
-        host = nearest_chunk(all_chunks, j["xy"])
-        if host is not None:
-            merge_chunk_into(host, pad)
-            n_merged += 1
-        else:
-            all_chunks.append(pad)
-            n_standalone += 1
+        n_conformed += conform_pad_to_ribbons(pad, *rib)
+        cents, merged = fuse_into_nearest(all_chunks, cents, pad, j["xy"])
+        n_merged += merged
+        n_standalone += not merged
 
+    print(f"pads: {len(fill_pads)} fill + {len(junctions)} junction fused in {time.perf_counter() - t0:.0f}s")
+    t0 = time.perf_counter()
     # only real structures skip the cap: terrain_exclude also holds every
     # wall-conflict station and left 246 Summit centerlines unpaved (2026-10-08)
     n_gate_fills = add_gate_coverage_fills(all_chunks, junctions, east, north,
                                             regraded, structural, seg_ids)
 
+    print(f"gate-coverage in {time.perf_counter() - t0:.0f}s")
     buckets = defaultdict(list)
     for chunk in all_chunks:
         cx, cy = chunk_centroid(chunk)

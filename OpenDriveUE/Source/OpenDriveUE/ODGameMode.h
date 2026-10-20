@@ -14,6 +14,11 @@ struct FODStreamArea
 	FString Name;
 	FBox2D Rect = FBox2D(ForceInit);   // UE cm, from worlds.json
 	bool bLive = false;
+	// -ODTileServer (live tile streaming): worlds.json "files", fetched into
+	// the tile cache before the area's first spawn - see PrefetchArea
+	TArray<FString> Files;
+	bool bPrefetching = false;
+	bool bPrefetched = false;
 	// UPROPERTY so GC sees the spawned set (ULevel::Actors roots it anyway)
 	UPROPERTY()
 	TArray<TObjectPtr<AActor>> Actors;
@@ -60,6 +65,10 @@ private:
 	 *  other members of the world HomeArea belongs to. Absent file or home
 	 *  not listed = StreamAreas stays empty and Tick() does nothing. */
 	void LoadWorldManifest();
+
+	/** -ODTileServer only: fetches A.Files on a worker, then flags A
+	 *  bPrefetched so Tick spawns it - managers read those at BeginPlay. */
+	void PrefetchArea(FODStreamArea& A);
 
 	/** Art-direction Phase 1 (2026-09-01): same "find or spawn" shape as
 	 *  SpawnAreaSet above, guarding on

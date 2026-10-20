@@ -14,6 +14,7 @@
 #include "ODRaceHUD.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
+#include "ODWheelDevice.h"
 
 namespace
 {
@@ -172,13 +173,27 @@ void AODPauseMenu::SetOpen(bool bInOpen)
 {
 	bOpen = bInOpen;
 	bSettingsOpen = false;
+	bWheelLost = false;
 	Selected = RowResume;
+	if (bOpen)
+	{
+		FODWheelDevice::Rescan();   // the only device search besides startup and the input-type row
+	}
 	UGameplayStatics::SetGamePaused(this, bOpen);
 	// before 2026-10-09 the cursor was never shown here, so the mouse did
 	// nothing on this menu - same capture switch the front-end uses
 	if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
 	{
 		Main->SetCursorVisible(bOpen);
+	}
+}
+
+void AODPauseMenu::OpenForWheelLost()
+{
+	if (!bOpen)
+	{
+		SetOpen(true);
+		bWheelLost = true;
 	}
 }
 
@@ -298,13 +313,6 @@ void AODPauseMenu::Activate()
 			}
 		}
 		break;
-	case RowGarage:     // car/engine/drivetrain/tuning, in place
-		if (AODMainMenu* Main = FindManager<AODMainMenu>(GetWorld()))
-		{
-			bOpen = false;                // hand the screen to the garage
-			Main->OpenGarage();           // keeps the game paused; Back/esc resumes here
-		}
-		break;
 	case RowSettings:
 		bSettingsOpen = EnsureSettingsMenu() != nullptr;
 		break;
@@ -357,7 +365,7 @@ void AODPauseMenu::ApplyGearbox()
 void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
 	static const TCHAR* const Labels[NumPauseRows] = {
-		TEXT("World Map"), TEXT("Garage"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
+		TEXT("World Map"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
 	OutLabel = (Row >= 0 && Row < NumPauseRows) ? Labels[Row] : TEXT("");
 	OutValue.Empty();
 }

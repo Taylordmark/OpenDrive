@@ -65,12 +65,12 @@ from pymartini import Martini
 
 import test_areas
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
-from build_road_network import split_excluding_tunnels
+from build_tunnels import cut_holes, load_tunnels
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
                               half_width_for_stations, road_ue_z_m,
                                classify_wall_stations, sample_mesh_heights)
 from terrain_common import fetch_terrarium_tile, terrarium_to_elevation
-from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, local_rect, to_lonlat
+from test_areas import AREA_NAME, ELEV_PLAUSIBLE_MIN_M, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, local_rect, to_lonlat
 
 # Optional per-area wider bbox for background-visuals-only far tiles (raw
 # DEM, no road carving, no collision) - see test_areas.py's own comment.
@@ -114,7 +114,17 @@ SEAM_SKIRT_DROP_M = 10.0    # see build_seam_skirt()'s docstring - hides the
                              # crack an adaptive mesh can produce at a tile
                              # boundary, the same "gap hidden under geometry"
                              # pattern road_mesh_common.py's road skirt uses.
-FAR_GRID_N = 21              # 100 m spacing (2026-07-28, was 9/~250m) - Taylor:
+FAR_GRID_N = 257             # near's 7.8 m grid, RTIN-simplified to MAX_ERROR_FAR_M
+# (realism eval T4, 2026-10-15: the uniform 100 m grid sat 13 m RMS off the
+# near mesh on Oahu and kept 0.8% of its area steeper than 45 deg vs the near
+# mesh's 5.9% - cliffs and ridgelines flattened at distance; now 1.9 m RMS,
+# 5.1%, ~16k tris/tile vs 800). Far tiles take the near path's martini + seam
+# skirt; the note below is history.
+MAX_ERROR_FAR_M = 5.0        # martini tolerance off the road zone
+FAR_ROAD_ERROR_GAIN = MAX_ERROR_FAR_M / MAX_ERROR_NEAR_M   # martini sees z x this within
+                             # FAR_MIN_INFLUENCE_M of a carving station -> near's
+                             # 0.3 m there, so a distant road is never buried
+# (was) FAR_GRID_N = 21 - 100 m spacing (2026-07-28, was 9/~250m) - Taylor:
 # hillsides visible off to the side of the road read as hard-faceted,
 # obviously low-poly ("looks like Windows XP") at the old spacing. Far tiles
 # stay on the old uniform-grid path (no adaptive triangulation - they're
@@ -291,7 +301,7 @@ TERRAIN_CARVE_CUT_OUTER_M = 75.0
 # several fine samples across it instead of being averaged/skipped entirely,
 # matching the same "several grid cells across the feature" reasoning
 # TERRAIN_CARVE_CUT_INNER_M's own comment already used for near tiles.
-FAR_SUPERSAMPLE = 10
+FAR_SUPERSAMPLE = 1   # T4: FAR_GRID_N is already the 7.8 m carve grid (was 10 under 100 m)
 
 # Background-hillside facet-noise bug (2026-09-04, §7.15 follow-up to the
 # FAR-tile-burying fix above): downsample_min_grid's per-footprint MIN was
@@ -543,10 +553,24 @@ def load_lake_beds():
         m = _TILE_XY_RE.search(path.name)
         tile_flags = ribbon_flags.get(f"{m.group(1)},{m.group(2)}", []) if m else []
         for feature_idx, (verts, tris) in enumerate(_read_lake_bin_tile(path)):
-            is_ribbon = feature_idx < len(tile_flags) and bool(tile_flags[feature_idx])
-            if len(tris) == 0:
-                continue
-            for ring_idx in _extract_boundary_rings(tris):
+            kind = int(tile_flags[feature_idx]) if feature_idx < len(tile_flags) else 0
+            if len(tris) == 0 or kind == 2:
+                continue   # Phase 4: the sea (kind 2) is datum water - no bed, no crossing
+            is_ribbon = kind == 1
+            rings = _extract_boundary_rings(tris)
+            holes = []
+            if len(rings) > 1:
+                # Phase 4: an island cut out of the lake is a boundary ring
+                # inside the largest one - a hole, not a second lake
+                xy = [verts[r][:, :2].astype(np.float64) for r in rings]
+                area = [abs(float(np.sum(a[:, 0] * np.roll(a[:, 1], -1) - np.roll(a[:, 0], -1) * a[:, 1])))
+                        for a in xy]
+                big = int(np.argmax(area))
+                inner = [k for k in range(len(rings)) if k != big and
+                         _point_in_polygon(xy[k][:1, 0], xy[k][:1, 1], xy[big][:, 0], xy[big][:, 1])[0]]
+                holes = [(xy[k][:, 0], xy[k][:, 1]) for k in inner]
+                rings = [r for k, r in enumerate(rings) if k not in inner]
+            for ring_idx in rings:
                 ring_xy = verts[ring_idx][:, :2]
                 bbox = (float(ring_xy[:, 0].min()), float(ring_xy[:, 0].max()),
                         float(ring_xy[:, 1].min()), float(ring_xy[:, 1].max()))
@@ -585,6 +609,7 @@ def load_lake_beds():
                     "z_cm": z_cm,
                     "bbox": bbox,
                     "is_ribbon": is_ribbon,
+                    "holes": holes if len(rings) == 1 else [],
                 })
     if lakes:
         print(f"  loaded {len(lakes)} lake bed(s) from {len(paths)} water tile(s) for "
@@ -715,12 +740,20 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
                 by1 + blend_cm < tile_y0 or by0 - blend_cm > tile_y1):
             continue
         inside = _point_in_polygon(flat_x, flat_y, lake["ring_x"], lake["ring_y"])
+        for hx, hy in lake.get("holes", ()):
+            inside &= ~_point_in_polygon(flat_x, flat_y, hx, hy)   # Phase 4: islands stay land
+
+        def ring_dist_m(ix):
+            d = _dist_to_ring(flat_x[ix], flat_y[ix], lake["ring_x"], lake["ring_y"])
+            for hx, hy in lake.get("holes", ()):
+                d = np.minimum(d, _dist_to_ring(flat_x[ix], flat_y[ix], hx, hy))
+            return d / 100.0
         shore_z_cm = lake["z_cm"] + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
 
         if inside.any():
             touched = True
             idx = np.nonzero(inside)[0]
-            dist_m = _dist_to_ring(flat_x[idx], flat_y[idx], lake["ring_x"], lake["ring_y"]) / 100.0
+            dist_m = ring_dist_m(idx)
             depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
                 np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
             bed_z = lake["z_cm"] - depth_m * 100.0
@@ -742,7 +775,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
         if not near.any():
             continue
         out_idx = out_idx[near]
-        dist_m = _dist_to_ring(flat_x[out_idx], flat_y[out_idx], lake["ring_x"], lake["ring_y"]) / 100.0
+        dist_m = ring_dist_m(out_idx)
         lin_t = np.clip(1.0 - dist_m / WATER_SHORE_BLEND_M, 0.0, 1.0)  # 1 at ring, 0 at blend edge
         # Smoothstep, not linear (2026-09-03 shore-cliff fix - see
         # WATER_SHORE_BLEND_M's comment): zero slope at both dist_m==0 (the
@@ -795,7 +828,27 @@ def _get_struct_mask(n):
     return _STRUCT_MASK_CACHE if n == m else np.concatenate([_STRUCT_MASK_CACHE, np.zeros(n - m, bool)])
 
 
+_TUNNELS_CACHE = None
+
+
+def _get_tunnels():
+    """build_tunnels.load_tunnels() for this area, cached per worker."""
+    global _TUNNELS_CACHE
+    if _TUNNELS_CACHE is None:
+        _TUNNELS_CACHE = load_tunnels(STATIONS_PATH)
+    return _TUNNELS_CACHE
+
+
 _PAVEMENT_CACHE = None
+
+
+def pavement_grade(z, run_cm):
+    """Grade (m per cm) along a pavement probe row, the run floored at the
+    probe spacing (2026-10-14): junction pads XY-snap a road's last stations
+    onto one node ~10 cm apart, and dz over that read as a 64% grade that
+    pavement_ceiling extrapolated a cell out - a 6.7 m notch under Oahu's
+    Farrington Hwy pad (stations 200642-200644)."""
+    return np.gradient(z) / np.maximum(run_cm, PAVEMENT_SAMPLE_M * 100.0)
 
 
 def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank):
@@ -839,7 +892,7 @@ def _get_pavement_points(st_x_cm, st_y_cm, st_elev, st_clamp_r, st_bank):
             tx, ty = np.ones(1), np.zeros(1)
         tn = np.maximum(np.hypot(tx, ty), 1e-9)
         tx, ty = tx / tn, ty / tn
-        grade = np.gradient(z) / tn if len(x) >= 2 else np.zeros(1)   # m per cm
+        grade = pavement_grade(z, tn) if len(x) >= 2 else np.zeros(1)   # m per cm
         rep = lambda a: np.repeat(a, k)
         for c, a in zip(cols, ((x[:, None] - ty[:, None] * h[:, None] * fan).ravel(),
                                (y[:, None] + tx[:, None] * h[:, None] * fan).ravel(),
@@ -898,6 +951,58 @@ def pavement_ceiling(n, x0_cm, x1_cm, y0_cm, y1_cm, buckets, tx, ty, margin_m):
     return cap.reshape(n, n)
 
 
+# a pavement-ceiling cut deeper than this under a carved road is handed to a
+# wall (build_road_embankments' own "terrain meets the road" drop, 2.5 m)
+CEILING_CLIFF_WALL_M = 2.5
+
+
+def ceiling_cliff_pairs(east, north, elev, exclude, clamp_r, seg_ids):
+    """(i, j) wall pairs where pavement_ceiling's cap from a lower road j's
+    cells cuts the ground more than CEILING_CLIFF_WALL_M under carved station
+    i (2026-10-15, Green Valley Valencia Blvd: carriageways 8.5 m apart edge
+    to edge, 4.1 m apart vertically - edge grade 0.48, under WALL_MIN_GRADE,
+    so no wall, but the lower road's capped corners reach one 7.8 m cell
+    over and left the upper 3.5 m above its ground). Evaluates the real cap
+    grid only at candidates: another road's non-structure pavement within a
+    cell diagonal, >= CEILING_CLIFF_WALL_M lower."""
+    from scipy.spatial import cKDTree
+    hw = clamp_r - SKIRT_EXTRA
+    struct = _get_struct_mask(len(east))
+    cell = TERRAIN_TILE_SIZE_CM / (NEAR_GRID_N - 1)
+    reach = cell / 100.0 * math.sqrt(2.0)
+    ok = np.nonzero(~exclude & ~struct)[0]
+    tree = cKDTree(np.c_[east, north])
+    cand = {}
+    for i, js in zip(ok, tree.query_ball_point(np.c_[east[ok], north[ok]], hw[ok] + hw.max() + reach)):
+        js = np.asarray(js, dtype=np.int64)
+        js = js[(seg_ids[js] != seg_ids[i]) & ~struct[js] & (elev[js] <= elev[i] - CEILING_CLIFF_WALL_M)
+                & (np.hypot(east[js] - east[i], north[js] - north[i]) - hw[i] - hw[js] < reach)]
+        if len(js):
+            cand[int(i)] = int(js[np.argmin(elev[js])])
+    if not cand:
+        return []
+    sx, sy = east * 100.0, -north * 100.0
+    buckets = _get_pavement_points(sx, sy, elev, clamp_r, station_bank(east, north))
+    by_tile = defaultdict(list)
+    for i in cand:
+        by_tile[(int(sx[i] // TERRAIN_TILE_SIZE_CM), int(sy[i] // TERRAIN_TILE_SIZE_CM))].append(i)
+    pairs = []
+    for (tx, ty), idx in by_tile.items():
+        x0, y0 = tx * TERRAIN_TILE_SIZE_CM, ty * TERRAIN_TILE_SIZE_CM
+        cap = pavement_ceiling(NEAR_GRID_N, x0, x0 + TERRAIN_TILE_SIZE_CM, y0, y0 + TERRAIN_TILE_SIZE_CM,
+                               buckets, tx, ty, PAVEMENT_CEIL_MARGIN_NEAR_M)
+        for i in idx:
+            fi, fj = (sx[i] - x0) / cell, (sy[i] - y0) / cell
+            a, b = min(int(fi), NEAR_GRID_N - 2), min(int(fj), NEAR_GRID_N - 2)
+            u, v = fi - a, fj - b
+            c = np.where(np.isfinite(cap[b:b + 2, a:a + 2]), cap[b:b + 2, a:a + 2], elev[i])
+            h = (c[0, 0] * (1 - u) * (1 - v) + c[0, 1] * u * (1 - v)
+                 + c[1, 0] * (1 - u) * v + c[1, 1] * u * v)
+            if elev[i] - TERRAIN_CARVE_DROP_M - h > CEILING_CLIFF_WALL_M:
+                pairs.append((min(i, cand[i]), max(i, cand[i])))
+    return pairs
+
+
 def load_stations():
     """Returns (east, north, elev, exclude, clamp_r, wall_pairs).
     `exclude` is True for any station the terrain carve must skip (real
@@ -946,24 +1051,31 @@ def load_stations():
               f"excluded from the terrain carve the same way is_bridge "
               f"stations are ({len(wall_pairs)} pair(s) wall-eligible)")
     exclude = is_bridge | conflict
+    have = set(wall_pairs)
+    cliff = [p for p in ceiling_cliff_pairs(east, north, elev, exclude, clamp_r, seg_ids) if p not in have]
+    if cliff:
+        print(f"ceiling_cliff_pairs: {len(cliff)} pavement-ceiling cliff(s) > "
+              f"{CEILING_CLIFF_WALL_M} m handed to walls")
+        wall_pairs = list(wall_pairs) + cliff
+        exclude[np.array(cliff).ravel()] = True
     return east, north, elev, exclude, clamp_r, wall_pairs
 
 
 def station_bank(east, north, bank_scale=None):
     """(n, 3) per-station (bank slope, UE right-normal x, y) for load_stations()'
     east/north (or experimental_junction_pads' regraded copy, with its pad
-    bank fade as `bank_scale`), computed per tunnel-split run exactly as the
-    road ribbons are - see road_mesh_common.bank_slopes. Extra trailing
-    entries (pad-rim anchors) and runs too short to bank stay 0."""
+    bank fade as `bank_scale`), computed per segment exactly as the road
+    ribbons are (tunnels included since the bore landed) - see
+    road_mesh_common.bank_slopes. Extra trailing entries (pad-rim anchors)
+    and segments too short to bank stay 0."""
     out = np.zeros((len(east), 3))
     off = 0
     for seg in json.loads(STATIONS_PATH.read_text())["segments"]:
         k = len(seg["east_m"])
-        for lo, hi in split_excluding_tunnels(np.array(seg.get("is_tunnel", [False] * k), dtype=bool)):
-            if hi - lo >= 2:
-                sl = slice(off + lo, off + hi)
-                out[sl] = np.column_stack(bank_slopes(
-                    east[sl], north[sl], bank_scale=None if bank_scale is None else bank_scale[sl]))
+        if k >= 2:
+            sl = slice(off, off + k)
+            out[sl] = np.column_stack(bank_slopes(
+                east[sl], north[sl], bank_scale=None if bank_scale is None else bank_scale[sl]))
         off += k
     return out
 
@@ -1006,7 +1118,13 @@ def sample_dem(lat_arr, lon_arr, zoom, session, cache):
                 f"silent sea-level patch (AUDIT-RELIABILITY.md SS5.3). Rerun "
                 f"once the network/S3 issue clears."
             ) from exc
-        cache[key] = terrarium_to_elevation(img)
+        # Void floor (2026-10-14): Terrarium voids decode to -32768 m (raw
+        # (0,0,0) pixel - see DEM_SPIKE_THRESHOLD_M in road_mesh_common.py)
+        # and bilinear smears them into -1..-33 km spikes; Oahu's offshore
+        # tiles had thousands. Clamped per PIXEL, before interpolation, to
+        # the area's plausible floor (never above sea level, so inland areas
+        # only lose impossible sub-sea-level reads).
+        cache[key] = np.maximum(terrarium_to_elevation(img), min(ELEV_PLAUSIBLE_MIN_M, 0.0))
 
     # vectorized (2026-10-01; was a per-point Python loop) - same float64
     # expression in the same order, so bit-identical to the old loop
@@ -1042,9 +1160,27 @@ def tile_min_dist_m(station_x_cm, station_y_cm, tx, ty, tile_cm):
     return float(d_cm.min()) / 100.0
 
 
-CARVE_STATION_CHUNK = 1000   # see carve_grid_m's docstring - bounds the
-                             # (grid_points x stations) distance matrix; ~1.5 GB
-                             # peak per BAKE_WORKERS process on a near tile
+CARVE_STATION_CHUNK = 1000   # bounds the (points x stations) distance matrix
+                             # in road_protect_w's nearest loop
+
+CARVE_NEAREST_K = 8   # KD candidates re-measured exactly, see _nearest_station
+
+
+def _nearest_station(gx, gy, st_east, st_north):
+    """(index, distance) of each grid point's nearest station. The tree's K
+    nearest are re-measured with np.hypot and exact ties go to the lowest
+    station index - the old brute-force argmin's rule, so coincident stations
+    at different heights (chain joins) resolve the same way. A tie group
+    larger than CARVE_NEAREST_K could resolve differently."""
+    from scipy.spatial import cKDTree
+    k = min(CARVE_NEAREST_K, len(st_east))
+    _, cand = cKDTree(np.c_[st_east, st_north]).query(np.c_[gx, gy], k=k)
+    cand = cand.reshape(len(gx), k)
+    cd = np.hypot(gx[:, None] - st_east[cand], gy[:, None] - st_north[cand])
+    pick = np.argmin(np.where(cd == cd.min(axis=1, keepdims=True), cand, len(st_east)), axis=1)
+    rows = np.arange(len(gx))
+    return cand[rows, pick], cd[rows, pick]
+
 
 def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
                   inner=TERRAIN_CARVE_INNER_M, outer=TERRAIN_CARVE_OUTER_M,
@@ -1067,19 +1203,11 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     Fill pixels (raw terrain below road) are unaffected - they keep the
     original wide taper.
 
-    Chunked over stations (2026-07-28) - the naive one-shot version built a
-    dense (grid_points x stations) distance matrix (up to 257x257=66,049
-    grid points), which is fine for a handful of nearby stations but not
-    bounded: a dense mountain switchback area can hand build_tile() several
-    thousand "keep" stations for one tile (prefiltered by distance, not
-    count), and 66,049 x thousands x 8 bytes is multiple GB for a SINGLE
-    tile - found live during the full-Oahu rebake (2026-07-28): process RSS
-    swung 5.6->20 GB tile to tile, not a steady climb, which is the
-    signature of one-off huge transient allocations on specific dense
-    tiles rather than an actual leak. Processing stations in fixed-size
-    chunks and keeping a running nearest-distance/elevation bounds peak
-    memory to grid_points x CARVE_STATION_CHUNK regardless of how many
-    stations a tile has nearby.
+    Nearest station by cKDTree (2026-10-15, was a chunked brute-force
+    (grid_points x stations) hypot: ~4 s on a 13k-station summit tile, now
+    ~0.06 s, same answer - see _nearest_station). Memory is grid_points x
+    CARVE_NEAREST_K, however many stations a tile has nearby (the 2026-07-28
+    full-Oahu RSS swings came from that dense matrix).
 
     `st_bank` (station_bank rows, UE frame) tilts the nearest station's
     target height across the road onto its banked pavement plane, held at
@@ -1091,30 +1219,17 @@ def carve_grid_m(elev_grid, east_grid, north_grid, st_east, st_north, st_elev,
     gx = east_grid.reshape(-1)
     gy = north_grid.reshape(-1)
     P = gx.shape[0]
-    best_d = np.full(P, np.inf, dtype=np.float64)
-    best_elev = np.zeros(P, dtype=np.float64)
+    nearest, best_d = _nearest_station(gx, gy, st_east, st_north)
+    best_elev = st_elev[nearest]
     # per-station hard-clamp footprint radius (variable road width,
     # 2026-09-06) - carried alongside best_elev from the same nearest
     # station; the old constant everywhere when the caller has no widths.
-    best_clamp = np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64)
+    best_clamp = (np.full(P, HARD_CLAMP_RADIUS_M, dtype=np.float64) if st_clamp_r is None
+                  else st_clamp_r[nearest])
     best_bank = np.zeros((P, 5))   # nearest station's east, north, slope, right-normal east/north
-    for c0 in range(0, len(st_east), CARVE_STATION_CHUNK):
-        sx = st_east[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
-        sy = st_north[c0:c0 + CARVE_STATION_CHUNK].reshape(1, -1)
-        se = st_elev[c0:c0 + CARVE_STATION_CHUNK]
-        d = np.hypot(gx.reshape(-1, 1) - sx, gy.reshape(-1, 1) - sy)   # (P, chunk)
-        nearest = np.argmin(d, axis=1)
-        nearest_d = d[np.arange(P), nearest]
-        better = nearest_d < best_d
-        best_d = np.where(better, nearest_d, best_d)
-        best_elev = np.where(better, se[nearest], best_elev)
-        if st_clamp_r is not None:
-            sc = st_clamp_r[c0:c0 + CARVE_STATION_CHUNK]
-            best_clamp = np.where(better, sc[nearest], best_clamp)
-        if st_bank is not None:
-            sb = st_bank[c0:c0 + CARVE_STATION_CHUNK][nearest]
-            best_bank = np.where(better[:, None], np.column_stack(
-                [sx[0, nearest], sy[0, nearest], sb[:, 0], sb[:, 1], -sb[:, 2]]), best_bank)
+    if st_bank is not None:
+        sb = st_bank[nearest]
+        best_bank = np.column_stack([st_east[nearest], st_north[nearest], sb[:, 0], sb[:, 1], -sb[:, 2]])
     hw = best_clamp - SKIRT_EXTRA
     o = (gx - best_bank[:, 0]) * best_bank[:, 3] + (gy - best_bank[:, 1]) * best_bank[:, 4]
     best_elev = best_elev + best_bank[:, 2] * np.clip(o, -hw, hw)
@@ -1325,6 +1440,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
                              st_x_cm[keep] / 100.0, -st_y_cm[keep] / 100.0, st_elev[keep],
                              st_clamp_r=st_clamp_r[keep], st_bank=st_bank[keep])
 
+    road_zone = None   # far tiles: output vertices the carve can still reach
     if is_near:
         gx_cm, gy_cm = gx_cm_fine, gy_cm_fine
     else:
@@ -1346,6 +1462,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
                 dist_m = np.minimum(dist_m, np.hypot(out_east_m - sx, out_north_m - sy))
             near_carve = dist_m <= FAR_MIN_INFLUENCE_M
             elev = np.where(near_carve, min_grid, mean_grid)
+            road_zone = near_carve
         else:
             elev = downsample_mean_grid(elev, n, FAR_SUPERSAMPLE)
 
@@ -1376,55 +1493,39 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # the lake rim blend can pull toward a shore above a lakeside road
     z_cm = np.minimum(z_cm, road_ue_z_m(cap, 0.0, ORIGIN_HEIGHT_M) * 100.0)
 
+    # AUDIT.md item 1: adaptive martini triangulation instead of a
+    # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. Martini
+    # simplifies the FINAL z (2026-10-09, Deals Gap station 4107: it used
+    # to read `elev`, from before the lake-bed depression and cap, so a
+    # triangle it judged flat kept one corner on a lake bed 20 m down and
+    # sank the lakeside road's edge 3.6 m). Meters; the UE-Z shift is
+    # additive, so the tolerance is unchanged.
+    # Far tiles (T4): z x FAR_ROAD_ERROR_GAIN in the road zone so martini's
+    # error there is judged 10x stricter; vertices still take the real z.
+    z_err = z_cm / 100.0 if road_zone is None else z_cm / 100.0 * np.where(road_zone, FAR_ROAD_ERROR_GAIN, 1.0)
+    tile = _martini_for(n).create_tile(z_err.astype(np.float32))
+    grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M if is_near else MAX_ERROR_FAR_M)
+    grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
+    gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]
+
+    verts = np.stack([gx_cm[gyi, gxi], gy_cm[gyi, gxi], z_cm[gyi, gxi]],
+                      axis=-1).astype(np.float32)
+    uvs = np.stack([gxi / (n - 1), gyi / (n - 1)], axis=-1).astype(np.float32)
+    tris = fix_up_winding(verts, martini_tris.reshape(-1, 3).astype(np.uint32))
+
+    skirt_verts, skirt_uvs, skirt_tris = build_seam_skirt(gx_cm, gy_cm, z_cm, n)
+    base = len(verts)
+    verts = np.concatenate([verts, skirt_verts], axis=0)
+    uvs = np.concatenate([uvs, skirt_uvs], axis=0)
+    tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
+    # Tunnel portals (build_tunnels.py): cut every triangle (seam skirt
+    # included) that reaches into a bore's shell out at ~1 m, so the
+    # ground opens at each portal and never cuts through a bore; over the middle of a
+    # tunnel the mountain is far above it and stays. ponytail: near tiles
+    # only - coarse/far cells keep covering the portal from afar,
+    # cut them too if that reads badly at distance.
     if is_near:
-        # AUDIT.md item 1: adaptive martini triangulation instead of a
-        # uniform grid - see NEAR_GRID_N/MAX_ERROR_NEAR_M's comments. Martini
-        # simplifies the FINAL z (2026-10-09, Deals Gap station 4107: it used
-        # to read `elev`, from before the lake-bed depression and cap, so a
-        # triangle it judged flat kept one corner on a lake bed 20 m down and
-        # sank the lakeside road's edge 3.6 m). Meters; the UE-Z shift is
-        # additive, so the tolerance is unchanged.
-        tile = _martini_for(n).create_tile((z_cm / 100.0).astype(np.float32))
-        grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M)
-        grid_verts = grid_verts.reshape(-1, 2).astype(np.int64)  # (x_idx, y_idx)
-        gxi, gyi = grid_verts[:, 0], grid_verts[:, 1]
-
-        verts = np.stack([gx_cm[gyi, gxi], gy_cm[gyi, gxi], z_cm[gyi, gxi]],
-                          axis=-1).astype(np.float32)
-        uvs = np.stack([gxi / (n - 1), gyi / (n - 1)], axis=-1).astype(np.float32)
-        tris = fix_up_winding(verts, martini_tris.reshape(-1, 3).astype(np.uint32))
-
-        skirt_verts, skirt_uvs, skirt_tris = build_seam_skirt(gx_cm, gy_cm, z_cm, n)
-        base = len(verts)
-        verts = np.concatenate([verts, skirt_verts], axis=0)
-        uvs = np.concatenate([uvs, skirt_uvs], axis=0)
-        tris = np.concatenate([tris, skirt_tris + base], axis=0).astype(np.uint32)
-    else:
-        # Uniform grid, unchanged - far tiles are already coarse/cheap and
-        # have no collision, so adaptive triangulation isn't worth it here.
-        verts = np.stack([gx_cm, gy_cm, z_cm], axis=-1).reshape(-1, 3).astype(np.float32)
-        ii, jj = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
-        uvs = np.stack([ii, jj], axis=-1).reshape(-1, 2).astype(np.float32)
-
-        # Winding must put the front face / computed vertex normal UP (+Z). UE's
-        # triangle-normal convention (VectorUtil::Normal) is
-        # normalize(cross(V2-V0, V1-V0)) - reversed vs. the usual right-handed
-        # cross for its left-handed coordinate system - so a grid quad emitted as
-        # (p, p+1, q) actually faces DOWN (fixed 2026-07-24: that inverted winding
-        # made FMeshNormals::ComputeVertexNormals fill AODTerrainManager's normal
-        # overlay pointing down, so the ground material's sun lighting hit the terrain
-        # as a back-face and every tile read as flat blue sky-ambient - the "no
-        # terrain / no grass" bug). Emitting (p, q, p+1) / (p+1, q, q+1) faces the
-        # top up, matching the road pipeline's own convention (road tiles verify
-        # 100% up-normals, terrain now does too).
-        tris = []
-        for j in range(n - 1):
-            b = j * n
-            for i in range(n - 1):
-                p, q = b + i, b + i + n
-                tris.append((p, q, p + 1))
-                tris.append((p + 1, q, q + 1))
-        tris = np.array(tris, dtype=np.uint32)
+        verts, uvs, tris = cut_holes(verts, uvs, tris, _get_tunnels())
 
     return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
 
@@ -1516,9 +1617,11 @@ def _bake_one_tile(item):
     worker. Returns (path, coarse path or None, verts, tris)."""
     (tx, ty), is_near = item
     station_data, gen_id_bytes, session, caches = _BAKE_WORKER
-    tile = build_tile(tx, ty, is_near, station_data, session, caches)
     out_path = OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-    write_tile_bin(out_path, tile, gen_id_bytes)
+    # --far-only (T4): far tiles + near tiles' coarse twins; near files untouched
+    tile = None if is_near and "--far-only" in sys.argv else build_tile(tx, ty, is_near, station_data, session, caches)
+    if tile is not None:
+        write_tile_bin(out_path, tile, gen_id_bytes)
     # Runtime dynamic-LOD streaming (2026-08-25, Arc 7 rescope): near
     # tiles are the only ones with full-res+collision geometry, but
     # AODTerrainManager needs something cheap to show *before* the
@@ -1529,8 +1632,9 @@ def _bake_one_tile(item):
     coarse_path = None
     if is_near:
         coarse_path = OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
-        write_tile_bin(coarse_path, build_tile(tx, ty, False, station_data, session, caches),
-                       gen_id_bytes)
+        coarse = build_tile(tx, ty, False, station_data, session, caches)
+        write_tile_bin(coarse_path, coarse, gen_id_bytes)
+        tile = tile or coarse
     return out_path, coarse_path, len(tile["verts"]), len(tile["tris"])
 
 
@@ -1633,7 +1737,7 @@ def main():
                 print(f"  {i + 1}/{len(tiles)} tile(s) built")
     n_coarse_fallback = len(written_coarse_paths)
 
-    if lakes_only or bbox_cm is not None:
+    if lakes_only or bbox_cm is not None or "--far-only" in sys.argv:
         print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "
               f"rebuilt, the rest are intentionally left as-is)")
     else:

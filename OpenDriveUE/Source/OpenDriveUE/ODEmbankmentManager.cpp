@@ -1,10 +1,13 @@
 #include "ODEmbankmentManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -23,8 +26,8 @@ void AODEmbankmentManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	EmbankMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Embankment.M_Embankment"));
+	EmbankMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Embankment.M_Embankment")));
 
 	UE_LOG(LogTemp, Display, TEXT("ODEmbankmentManager: EmbankMat=%s"),
 		EmbankMat ? TEXT("OK") : TEXT("FAILED"));
@@ -107,12 +110,20 @@ void AODEmbankmentManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedEmbankmentTile Parsed;
-		const bool bOk = ParseEmbankmentTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseEmbankmentTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
@@ -237,6 +248,9 @@ void AODEmbankmentManager::BuildSkirtMesh(UDynamicMeshComponent* Comp, const FPa
 				AddQuad(A, B, C, D, Au, Bu, Cu, Du);
 			}
 		}
+		// No normal overlay = every vert renders with a default (0,1,0) normal:
+		// lit by sun azimuth, and headlights cut off along the lamp plane.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 }
 
@@ -253,6 +267,7 @@ void AODEmbankmentManager::FinalizeTile(const FIntPoint& Key, FParsedEmbankmentT
 		}
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();

@@ -15,6 +15,21 @@ class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UTexture2D;
 
+/** Per-area ground elevation bands (realism eval T1), area-local UE Z cm from
+ *  Masks/groundbands_<area>_test.json (pipeline/build_ground_bands.py,
+ *  climate-derived). Defaults (file missing) = "off": no treeline, snow or
+ *  beach anywhere, same as the ground material's own param defaults. */
+struct FODGroundBands
+{
+	static constexpr float Off = 1.0e7f;
+	float SeaZCm = -Off;
+	float TreelineLowCm = Off, TreelineHighCm = Off + 30000.0f;
+	float ElevLowCm = Off, ElevHighCm = Off + 76500.0f;               // ApplyBiomeTint grey ramp
+	float SnowSummerLowCm = Off, SnowSummerHighCm = Off + 45000.0f;   // AODSeasonController, SnowCover 0
+	float SnowWinterLowCm = Off, SnowWinterHighCm = Off + 45000.0f;   // ... and SnowCover 1
+	float LowGreenBias = 0.45f;   // ApplyBiomeTint's pull toward ElevLowBias (0 = summer-dry, T5)
+};
+
 /** One parsed terrain tile - plain data, safe to build off the game thread
  *  (no UObject/component touched). Mirrors the ODT1 sidecar payload layout
  *  (pipeline/build_terrain_mesh_tiles.py). */
@@ -391,6 +406,10 @@ public:
 	 *  load) - callers must null-check. */
 	UMaterialInstanceDynamic* GetGroundMID() const { return TerrainMID; }
 
+	/** This area's ground bands in WORLD Z (actor offset applied) - what
+	 *  AODSeasonController sweeps the snow line between. */
+	const FODGroundBands& GetGroundBandsWorld() const { return GroundBandsWorld; }
+
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);
 	// ParseRoadStationSidecarFile moved to ODBinSidecarUtil.h (2026-08-26) -
@@ -466,11 +485,43 @@ private:
 	 *  variation - see RequestTileLoad's call site. */
 	static void ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
 		const FBiomeSpatialHash& BiomeHash, const FStationSpatialHash& StationHash,
-		float TintStrength, int32& OutVertsTinted, int32& OutDistinctBiomes,
+		float TintStrength, const FODGroundBands& Bands, int32& OutVertsTinted, int32& OutDistinctBiomes,
 		float& OutMinLuma, float& OutMaxLuma);
 
 	void LoadRoadStationSidecar();
 	void LoadBiomeSidecar();
+
+	/** horizon_<area>_test.bin (pipeline/build_horizon.py, realism eval T4):
+	 *  one low-res mesh from the baked tile extent out to +80 km, sunk under
+	 *  every streamed tile - the world past VisualRadius. No collision/shadow. */
+	void LoadHorizon();
+	UPROPERTY()
+	TObjectPtr<UDynamicMeshComponent> HorizonComp;
+
+	/** groundbands_<area>_test.json -> GroundBands (tile-local, for the tint)
+	 *  + GroundBandsWorld, and the TreelineLow/HighZCm + SeaLevelZCm params on TerrainMID. */
+	void LoadGroundBands();
+	FODGroundBands GroundBands;
+	FODGroundBands GroundBandsWorld;
+
+	/** PLAN-VISUALS Track L (Realistic only): Sentinel-2 ground albedo for the
+	 *  whole area, sat_<area>_test.png + .json in Masks/ (pipeline/
+	 *  build_sat_albedo.py), bound once on TerrainMID as SatTex/SatOrigin/
+	 *  SatSizeCm and SatAmount = 1. One texture over the baked extent, so
+	 *  tile borders are seamless; missing files leave SatAmount at its 0
+	 *  default = the old look.
+	 *  Realism eval T6: same contract for pave_<area>_test.* (pipeline/
+	 *  build_pave_mask.py) -> PaveTex/PaveOrigin/PaveSizeCm/PaveAmount, the
+	 *  material's paved-ground layer; dem_<area>_test.* (pipeline/
+	 *  build_terrain_relief.py) -> DemTex/..., slope detail + gully/ridge.
+	 *  Returns the bound texture or null. */
+	UTexture2D* BindAreaTexture(const TCHAR* Kind, const TCHAR* Param);
+	UPROPERTY()
+	TObjectPtr<UTexture2D> SatTex;
+	UPROPERTY()
+	TObjectPtr<UTexture2D> PaveTex;
+	UPROPERTY()
+	TObjectPtr<UTexture2D> DemTex;
 
 	void RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity);
 	void OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed);

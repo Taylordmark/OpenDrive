@@ -1,11 +1,14 @@
 #include "ODBridgeManager.h"
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -24,8 +27,8 @@ void AODBridgeManager::BeginPlay()
 {
 	Super::BeginPlay();
 
-	BridgeMat = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge"));
+	BridgeMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Game/OpenDrive/Materials/M_Bridge.M_Bridge")));
 	PierMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
 
 	UE_LOG(LogTemp, Display, TEXT("ODBridgeManager: BridgeMat=%s PierMesh=%s"),
@@ -127,12 +130,20 @@ void AODBridgeManager::RequestTileLoad(const FIntPoint& Key)
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Path]()
 	{
 		FParsedBridgeTile Parsed;
-		const bool bOk = ParseBridgeTileFile(Path, Parsed);
+		FString ReadPath;
+		const EODTileSource Src = ODTileSource::Resolve(Path, ReadPath);
+		const bool bOk = Src == EODTileSource::Ready && ParseBridgeTileFile(ReadPath, Parsed);
+		const bool bPending = Src == EODTileSource::Pending;
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(), WeakThis->PendingTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, bOk, MoveTemp(Parsed));
@@ -252,6 +263,9 @@ void AODBridgeManager::BuildDeckMesh(UDynamicMeshComponent* Comp, const FParsedB
 				AddQuad(A, B, C, D, Au, Bu, Cu, Du);
 			}
 		}
+		// No normal overlay = every vert renders with a default (0,1,0) normal:
+		// lit by sun azimuth, and headlights cut off along the lamp plane.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 }
 
@@ -268,6 +282,7 @@ void AODBridgeManager::FinalizeTile(const FIntPoint& Key, FParsedBridgeTile&& Pa
 		}
 
 		auto* Comp = NewObject<UDynamicMeshComponent>(this);
+		Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		Comp->SetupAttachment(RootComponent);
 		Comp->SetRelativeLocation(FVector(Run.Stations[0].X, Run.Stations[0].Y, 0.0));   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
 		Comp->RegisterComponent();

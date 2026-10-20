@@ -12,9 +12,15 @@ committed, so re-fetching the exact same bytes is a one-command,
 deterministic step for anyone who needs the actual texture files rather
 than just their provenance.
 
-Usage:  python download_ground_textures.py [--force]
+Usage:  python download_ground_textures.py [--force] [MANIFEST]
     --force   re-download+re-extract even if the asset's folder already
               has files (default: skip an asset whose folder is non-empty)
+    MANIFEST  another manifest.json in the same schema (default: the one
+              next to this script); sets land in <its folder>/<asset_id>/.
+              The Realistic sets use this: content_src/realistic/road/ and
+              content_src/realistic/terrain/ (PLAN-VISUALS Tracks C/D).
+              Entries without a download_url (generated textures) are
+              skipped.
 """
 
 import io
@@ -28,13 +34,15 @@ HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "manifest.json"
 
 
-def download_one(entry, force):
-    out_dir = HERE / Path(entry["local_dir"]).name
+def download_one(entry, force, root=HERE):
+    out_dir = root / entry["asset_id"]
     if out_dir.exists() and any(out_dir.iterdir()) and not force:
         print(f"  {entry['asset_id']}: already present at {out_dir}, skipping (--force to redo)")
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     url = entry["download_url"]
+    if not url.startswith("https://ambientcg.com/get?file="):
+        raise ValueError(f"{entry['asset_id']}: not an ambientCG download URL: {url}")
     print(f"  {entry['asset_id']}: downloading {url}")
     req = Request(url, headers={"User-Agent": "OpenDrive-pipeline/1.0"})
     with urlopen(req, timeout=120) as resp:
@@ -42,9 +50,9 @@ def download_one(entry, force):
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         # Only extract the texture maps this project actually uses - skip
         # the .blend/.mtlx/.tres/.usdc/preview-png ambientCG also bundles.
-        wanted_suffixes = (
-            "_Color.png", "_NormalGL.png", "_Roughness.png", "_AmbientOcclusion.png",
-        )
+        # The entry's "maps" list picks which (Track D adds Displacement).
+        maps = entry.get("maps") or ("Color", "NormalGL", "Roughness", "AmbientOcclusion")
+        wanted_suffixes = tuple(f"_{m}.{ext}" for ext in ("png", "jpg") for m in maps)
         extracted = 0
         for name in zf.namelist():
             if name.endswith(wanted_suffixes):
@@ -56,11 +64,13 @@ def download_one(entry, force):
 
 def main():
     force = "--force" in sys.argv
-    manifest = json.loads(MANIFEST.read_text())
-    print(f"Fetching {len(manifest['textures'])} texture set(s) from ambientCG "
-          f"(CC0, see manifest.json for per-asset source URLs)")
-    for entry in manifest["textures"]:
-        download_one(entry, force)
+    paths = [Path(a).resolve() for a in sys.argv[1:] if a != "--force"]
+    manifest_path = paths[0] if paths else MANIFEST
+    entries = [e for e in json.loads(manifest_path.read_text())["textures"] if e.get("download_url")]
+    print(f"Fetching {len(entries)} texture set(s) from ambientCG "
+          f"(CC0, see {manifest_path} for per-asset source URLs)")
+    for entry in entries:
+        download_one(entry, force, manifest_path.parent)
     print("Done.")
 
 

@@ -75,7 +75,14 @@ SETUPS = {
     "Drift":   setup(fg=1.05, rg=0.80, off=0.5, slmin=0.95, mode="low", allow=25, lock=1.3,
                      rbrake=1.2, tq=1.3, com=40, ride=-1, dfs=0.6),
     "Drag":    setup(rg=1.25, off=0.45, lock=0.85, rbrake=0.8, tq=1.6, com=38, ride=-1, dfs=0.9),
+    # Street, stiffer and lower on semi-slicks (2026-10-13): the 1.06 axle
+    # trims are the compound, the lower COM + ride the stance
+    "Track":   setup(fg=1.06, rg=1.06, on=1.0, off=0.45, com=38, ride=-3, dfs=1.6),
 }
+# what the physics geometry sees of each setup (apply_tuning_presets.py):
+# SpringRateScale, RideHeightDelta cm, TireDiameterScale
+GEO = {"Street": (1.0, 0.0, 1.0), "Rally": (0.75, 4.0, 1.04), "Offroad": (0.60, 8.0, 1.12),
+       "Drift": (1.15, -1.0, 0.97), "Drag": (1.20, -1.0, 1.0), "Track": (1.40, -3.0, 0.98)}
 STREET = SETUPS["Street"]
 
 
@@ -174,7 +181,7 @@ def run(mode, v0, steer_fn, brake_fn, thr_fn, r0=0.0, vy0=0.0, t_end=4.0, st=STR
             for i, (px, py) in enumerate(POS):
                 fa = dfz * (car["bal"] if px > 0 else 1 - car["bal"]) / 2
                 f = fst[i] + fa - (M * ax * h / (A + B)) / 2 * (1 if px > 0 else -1) \
-                    - (M * ay * H_LAT / (2 * T)) / 2 * (1 if py > 0 else -1)
+                    - (M * ay * car.get("HL", H_LAT) / (2 * T)) / 2 * (1 if py > 0 else -1)
                 fzs.append(min(max(f, 0), 2.5 * fst[i] + fa))
 
             FX = FY = MZ = 0.0
@@ -437,6 +444,69 @@ for cn, car in CARS.items():
             row.append(f"{v0}/{amt}: {res['high']:4.1f} ({res['off']:4.1f})")
             assert res["high"] < 15.0, (cn, "brake+steer spin on High", v0, amt, res["high"])
     print(f"{cn:8s} brake+steer rear slip High (Off): " + "  ".join(row))
+
+# ---- ride height (2026-10-13). Before: strut tops fixed at body z = 0, so the
+# wheel centre rested RestLength + RideHeightDelta - sag below the authored axle
+# (body 9-16 cm high). Now ODVehicleMovement::UpdateMounts puts the strut top at
+# RestLength - sag (mass share x g / rate x SpringRateScale): the wheel rests at
+# -RideHeightDelta. InitBody adds the old drop (RestLength - sag, the preset's
+# springs) back to the COM, so the COM keeps its height over the ground. Steady corner below:
+# lateral load transfer from the real lever (COM height - LateralForceLiftCm)
+# instead of the fixed H_LAT, roll from the four springs, both at 20 m/s on a
+# slow steer ramp (lat_g). Bump stop: tyre top <= authored + BUMP, body-fixed.
+REST, KS, BUMP, LIFT = 20.0, 61000.0, 8.0, 35.0   # RestLengthCm, SpringRate, BumpTravelCm, LateralForceLiftCm
+
+def sag(car, front, ks):                           # cm, as StaticSagCm
+    return car["M"] * 980.0 * 0.5 * (car["fs"] if front else 1 - car["fs"]) / (KS * ks)
+
+def sag_com(car, ks):
+    return sag(car, False, ks) + car["fs"] * (sag(car, True, ks) - sag(car, False, ks))
+
+def steady(car, st, h_cm, ks):
+    """lat g, roll deg, outer-wheel compression cm with the COM h_cm over the ground."""
+    tr = []
+    run("off", 20, lambda t, b: min(t / 4.0, 1.0), lambda t: 0.0, lambda t: 0.1, t_end=4.0,
+        st=st, car=dict(car, HL=(h_cm - LIFT) / 100.0), pin=True, trace=tr)
+    n, ays = int(0.25 / DT), [abs(x[2]) for x in tr]
+    ay = max(sum(ays[i:i + n]) / n for i in range(len(ays) - n))
+    moment = car["M"] * ay * (h_cm - LIFT) / 100.0                     # N m about the Fy line
+    roll = math.degrees(moment / (4 * KS * ks * car["T"] ** 2))
+    comp = moment / (2 * car["T"]) / 2 / (KS * ks) * 100.0             # cm, outer wheel
+    return ay / G, roll, comp
+
+print()
+print("car      setup   | rest wheel z F/R cm: before -> now (authored 0) | COM over ground cm: "
+      "before / now / no-comp | lat g before/now/no-comp | roll deg before/now/no-comp | bump: outer comp / travel cm")
+for cn, car in CARS.items():
+    if cn in ("Coupe", "GT"):
+        continue                                    # placeholder defs, not in the garage
+    comz = (car["H"] - 0.45) * 100.0 + 10.0
+    for sn, st in SETUPS.items():
+        ks, rhd, tds = GEO[sn]
+        rest_len = max(REST + rhd, 5.0)
+        old = [-(rest_len - sag(car, fr, ks)) for fr in (True, False)]
+        new = []
+        for fr in (True, False):                    # UpdateMounts, literally
+            static_len = rest_len - min(sag(car, fr, ks), rest_len - 1.0)
+            new.append((static_len - rhd) - static_len)
+        assert all(abs(z + rhd) < 1e-9 for z in new), (cn, sn, new)
+        com = comz + st["com"] - 42.0
+        R = car["R"] * 100.0 * tds
+        h_old = com + rest_len - sag_com(car, ks) + R
+        h_new = com + REST - sag_com(car, ks) + rhd + R
+        h_raw = com + rhd + R
+        g0, roll0, _ = steady(car, st, h_old, ks)
+        g1, roll1, comp = steady(car, st, h_new, ks)
+        g2, roll2, _ = steady(car, st, h_raw, ks)
+        travel = BUMP - (tds - 1.0) * car["R"] * 100.0 + rhd
+        print(f"{cn:8s} {sn:7s} | {old[0]:6.1f}/{old[1]:6.1f} -> {new[0]:5.1f}/{new[1]:5.1f}"
+              f"                     | {h_old:5.1f} / {h_new:5.1f} / {h_raw:5.1f}"
+              f"            | {g0:.2f}/{g1:.2f}/{g2:.2f}         | {roll0:4.1f}/{roll1:4.1f}/{roll2:4.1f}"
+              f"            | {comp:4.1f} / {travel:4.1f}")
+        # feel holds: same COM height over the ground, so the same grip and roll
+        assert abs(h_new - h_old) < 1e-6 and g1 == g0 and roll1 == roll0, (cn, sn, h_old, h_new)
+        # a steady limit corner never reaches the bump stop
+        assert comp < travel, (cn, sn, comp, travel)
 
 # fixed 120 Hz step: the render rate must not change a single sample
 ref = None

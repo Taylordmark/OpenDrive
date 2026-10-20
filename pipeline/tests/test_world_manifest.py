@@ -1,18 +1,15 @@
 """World manifest (2026-10-05, step 2): rect maths incl. the Y flip, a mirror
 of the runtime spawn/destroy rule the C++ streams areas with, and every
-manifest area's whole-area sidecars on disk; (d) the step-3 gv cut and halo.
+manifest area's whole-area sidecars on disk.
 
 Run:  python pipeline/tests/test_world_manifest.py"""
 import math
 import sys
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_world_manifest import MASKS, build_manifest, rect_cm
-from test_areas import AREAS, TERRAIN_TILE_SIZE_CM as T
-from world_frame import WORLDS, lcc_forward
+from build_world_manifest import MASKS, area_files, build_manifest, rect_cm
+from test_areas import TERRAIN_TILE_SIZE_CM as T
 
 # Runtime rule (C++ mirrors these exact numbers): every 0.5 s, each manifest
 # area other than home spawns when the pawn's 2D distance to its rect drops
@@ -37,7 +34,7 @@ def tick(x, y, manifest, home, live):
     return events
 
 
-def drive(path, manifest, home="gv_west"):
+def drive(path, manifest, home="west"):
     live, events = set(), []
     for x, y in path:
         events += tick(x, y, manifest, home, live)
@@ -60,30 +57,30 @@ if __name__ == "__main__":
 
     # (b) two adjacent halves sharing a 1-tile overlap, far_gasquet ~940 km away
     # (north is -Y). Rects in cm, shaped like the real ones.
-    m = [{"name": "gv_west", "rect_cm": [0.0, 0.0, 3000000.0, 4000000.0]},
-         {"name": "gv_east", "rect_cm": [2800000.0, 0.0, 5800000.0, 4000000.0]},
+    m = [{"name": "west", "rect_cm": [0.0, 0.0, 3000000.0, 4000000.0]},
+         {"name": "east", "rect_cm": [2800000.0, 0.0, 5800000.0, 4000000.0]},
          {"name": "far_gasquet", "rect_cm": [-46000000.0, -84000000.0, -45400000.0, -83400000.0]}]
     y = 2000000.0
-    # deep in gv_west -> gv_east spawns at < 8 km (X > 2.0e6), not before
+    # deep in west -> east spawns at < 8 km (X > 2.0e6), not before
     out = line(500000.0, 4500000.0, y)
     ev = drive(out, m)
-    assert ev == [("spawn", "gv_east")], ev
+    assert ev == [("spawn", "east")], ev
     first = next(i for i, p in enumerate(out) if rect_dist(*p, m[1]["rect_cm"]) < SPAWN_CM)
     assert out[first][0] > 2000000.0 and drive(out[:first], m) == []
     # ... and back: destroyed only past 16 km (X < 1.2e6)
     ev = drive(out + out[::-1], m)
-    assert ev == [("spawn", "gv_east"), ("destroy", "gv_east")], ev
+    assert ev == [("spawn", "east"), ("destroy", "east")], ev
     # lingering at 8 km and 16 km: one event each, no thrash
     wobble = [(x + dx, y) for x in (2000000.0, 1200000.0) for _ in range(200) for dx in (-1000.0, 1000.0)]
     ev = drive(wobble, m)
-    assert ev == [("spawn", "gv_east"), ("destroy", "gv_east")], ev
-    # teleport to far_gasquet: it spawns, gv_east goes, home gv_west stays
+    assert ev == [("spawn", "east"), ("destroy", "east")], ev
+    # teleport to far_gasquet: it spawns, east goes, home west stays
     ev = drive(out + [(-45700000.0, -83700000.0)] * 5 + [(500000.0, y)] * 5, m)
-    assert ev == [("spawn", "gv_east"), ("destroy", "gv_east"), ("spawn", "far_gasquet"),
+    assert ev == [("spawn", "east"), ("destroy", "east"), ("spawn", "far_gasquet"),
                   ("destroy", "far_gasquet")], ev
-    assert all(name != "gv_west" for _, name in ev)
-    # home pinned from the other side too: gv_east as home never destroys itself
-    ev = drive([(-45700000.0, -83700000.0)], m, home="gv_east")
+    assert all(name != "west" for _, name in ev)
+    # home pinned from the other side too: east as home never destroys itself
+    ev = drive([(-45700000.0, -83700000.0)], m, home="east")
     assert ev == [("spawn", "far_gasquet")], ev
 
     # (c) whole-area sidecars each manager loads at BeginPlay
@@ -99,16 +96,18 @@ if __name__ == "__main__":
             assert any(MASKS.glob(f"road_{a}_test_tile_*.bin")), a
             assert any((MASKS.parent / "MasksV2").glob(f"roadv3_{a}_test_tile_*.bin")), a
 
-    # (d) step 3 (2026-10-05): the gv halves own the tiles either side of the
-    #     2 km tile edge nearest -118.45 at the bbox centre latitude, bake a
-    #     >= 3 km halo past it, and ship rects that abut there exactly
-    w, e = AREAS["gv_west"], AREAS["gv_east"]
-    cut = w["own_rect_cm"][2]
-    lats = np.linspace(w["bbox_snwe"][0], w["bbox_snwe"][2], 9)
-    x_cm = lambda lon, lat: lcc_forward(lon, lat, *WORLDS["california"])[0] * 100.0
-    assert cut == round(x_cm(-118.45, lats[4]) / T) * T == e["own_rect_cm"][0]
-    assert (x_cm(w["bbox_snwe"][3], lats) - cut >= 300000.0).all()
-    assert (cut - x_cm(e["bbox_snwe"][1], lats) >= 300000.0).all()
-    rects = {a["name"]: a["rect_cm"] for a in manifest["california"]}
-    assert rects["gv_west"][2] == cut == rects["gv_east"][0], rects
+    # (e) live streaming: each area's prefetch list holds those sidecars,
+    #     its water tiles, nothing per-tile otherwise, nothing of another area
+    for areas in manifest.values():
+        for a in areas:
+            files = a["files"]
+            assert files == area_files(a["name"])
+            assert f"Masks/roadstations_{a['name']}.bin" in files
+            assert f"Masks/biome_{a['name']}_test.bin" in files
+            assert {f"Masks/{p.name}" for p in MASKS.glob(f"water_{a['name']}_test_tile_*.bin")} <= set(files)
+            assert all("_tile_" not in f or f.startswith(f"Masks/water_{a['name']}_test_tile_") for f in files)
+            assert all((MASKS.parent / f).is_file() for f in files)
+            others = [o["name"] for o in areas if o["name"] != a["name"]]
+            assert not any(f.endswith((f"_{o}.bin", f"_{o}_test.bin")) for f in files for o in others), files
+
     print("ok")

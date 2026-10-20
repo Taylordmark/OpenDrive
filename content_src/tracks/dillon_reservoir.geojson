@@ -1,0 +1,29 @@
+{
+  "type": "Feature",
+  "properties": {
+    "name": "Dillon Reservoir Loop",
+    "area": "summit_county",
+    "loop": true
+  },
+  "geometry": {
+    "type": "LineString",
+    "coordinates": [
+      [
+        -106.0852667,
+        39.5732947
+      ],
+      [
+        -106.0293374,
+        39.6211309
+      ],
+      [
+        -106.0383204,
+        39.5923316
+      ],
+      [
+        -106.056009,
+        39.5683327
+      ]
+    ]
+  }
+}

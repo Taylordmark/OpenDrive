@@ -15,11 +15,14 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "ODCreditsMenu.h"
+#include "ODDayNightController.h"
 #include "ODGaugeCluster.h"
 #include "ODGhost.h"
 #include "ODInputConfig.h"
 #include "ODMainMenu.h"
+#include "ODMenuGlobe.h"
 #include "ODPauseMenu.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
@@ -28,15 +31,10 @@
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
 #include "ODWeatherController.h"
+#include "ODHudStyle.h"
 #include "Rendering/SlateRenderer.h"
 
-// Canvas text at Scale > 1 stretches a glyph bitmap rasterized at the font's
-// base size - blocky/blurry. Asking for the scaled point size instead makes
-// the runtime font cache rasterize glyphs at that size, so text stays crisp.
-static FSlateFontInfo CrispFont(const UFont* Font, float Scale)
-{
-	return FSlateFontInfo(Font, Font->LegacyFontSize * Scale);
-}
+using namespace ODHud;
 
 static FString FormatTime(float T)
 {
@@ -164,6 +162,20 @@ struct FMapFit
 	FVector2D ToMap(const FVector2D& W) const { return PanelMid + (W - Center) * Scale; }
 };
 
+// any world rect (Lo..Hi cm) fit the same way - the Area panel fits its
+// relief image's rect so image, roads and dots share one transform
+FMapFit ComputeBoxMapFit(const FVector2D& Lo, const FVector2D& Hi,
+	float PanelX, float PanelY, float PanelSize)
+{
+	const float Pad = 14.0f;
+	const float Span = FMath::Max(FMath::Max(Hi.X - Lo.X, Hi.Y - Lo.Y), 1.0f);
+	FMapFit F;
+	F.Scale = (PanelSize - 2.0f * Pad) / Span;
+	F.Center = (Lo + Hi) * 0.5f;
+	F.PanelMid = FVector2D(PanelX + PanelSize * 0.5f, PanelY + PanelSize * 0.5f);
+	return F;
+}
+
 FMapFit ComputeFullMapFit(const TArray<FVector2D>& C,
 	float PanelX, float PanelY, float PanelSize)
 {
@@ -174,13 +186,7 @@ FMapFit ComputeFullMapFit(const TArray<FVector2D>& C,
 		Lo.X = FMath::Min(Lo.X, P.X); Lo.Y = FMath::Min(Lo.Y, P.Y);
 		Hi.X = FMath::Max(Hi.X, P.X); Hi.Y = FMath::Max(Hi.Y, P.Y);
 	}
-	const float Pad = 14.0f;
-	const float Span = FMath::Max(FMath::Max(Hi.X - Lo.X, Hi.Y - Lo.Y), 1.0f);
-	FMapFit F;
-	F.Scale = (PanelSize - 2.0f * Pad) / Span;
-	F.Center = (Lo + Hi) * 0.5f;
-	F.PanelMid = FVector2D(PanelX + PanelSize * 0.5f, PanelY + PanelSize * 0.5f);
-	return F;
+	return ComputeBoxMapFit(Lo, Hi, PanelX, PanelY, PanelSize);
 }
 }
 
@@ -218,7 +224,7 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 			// angle Yaw on screen; rotate by -90-Yaw to point it up
 			const float Yaw = FMath::DegreesToRadians(Pawn->GetActorRotation().Yaw);
 			Rot = FVector2D(FMath::Cos(-HALF_PI - Yaw), FMath::Sin(-HALF_PI - Yaw));
-			Center += FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * (ZoomRadiusM * 100.0f * 0.35f);
+			Center += FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * (ZoomRadiusM * 100.0f * 0.45f);
 		}
 	}
 	else
@@ -253,17 +259,10 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		const FVector2D D = (FVector2D(W) - Center) * Scale;
 		return PanelMid + FVector2D(D.X * Rot.X - D.Y * Rot.Y, D.X * Rot.Y + D.Y * Rot.X);
 	};
-	// inverse of ToMap (screen offset from PanelMid -> world), for texture UVs
-	auto ScreenToWorld = [&](const FVector2D& S)
-	{
-		const FVector2D D = (S - PanelMid) / Scale;
-		return Center + FVector2D(D.X * Rot.X + D.Y * Rot.Y, -D.X * Rot.Y + D.Y * Rot.X);
-	};
+	const float UiS = MenuScale();
 	auto Dot = [&](const FVector2D& M, float R, const FLinearColor& C)
 	{
-		FCanvasTileItem T(M - FVector2D(R, R), FVector2D(2 * R, 2 * R), C);
-		T.BlendMode = SE_BLEND_Translucent;
-		Canvas->DrawItem(T);
+		ODHudDraw::Disc(Canvas, M, R * UiS, C);
 	};
 	auto InPanel = [&](const FVector2D& M)
 	{
@@ -291,39 +290,25 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 
 	if (bCircular)
 	{
-		// filled disc via triangle fan - corners stay untouched/transparent,
-		// so the 3D scene shows through instead of a square black tile
-		const int32 Segs = 40;
 		const float R = PanelSize * 0.5f;
-		const FTexture* WhiteTex =
-			Canvas->DefaultTexture ? Canvas->DefaultTexture->GetResource() : nullptr;
-		if (bHaveMapTexture)
+		// No terrain on the minimap (it's for reading the road ahead): a plain
+		// neutral lens, light by day and deep by night. Radial (centre clearer,
+		// rim heavier) and lit from the top so it doesn't read as a flat sticker.
+		float Night = 0.0f;
+		for (TActorIterator<AODDayNightController> It(GetWorld()); It; ++It)
 		{
-			const FTexture* TexRes = MapTex->GetResource();
-			const FVector2D CenterUV = WorldToUV(Center);
-			for (int32 i = 0; i < Segs && TexRes; ++i)
-			{
-				const float A0 = 2.0f * PI * i / Segs, A1 = 2.0f * PI * (i + 1) / Segs;
-				const FVector2D P0 = PanelMid + R * FVector2D(FMath::Cos(A0), FMath::Sin(A0));
-				const FVector2D P1 = PanelMid + R * FVector2D(FMath::Cos(A1), FMath::Sin(A1));
-				FCanvasTriangleItem TriItem(PanelMid, P0, P1,
-					CenterUV, WorldToUV(ScreenToWorld(P0)),
-					WorldToUV(ScreenToWorld(P1)), TexRes);
-				TriItem.BlendMode = SE_BLEND_Translucent;
-				Canvas->DrawItem(TriItem);
-			}
+			Night = It->GetNight();
+			break;
 		}
-		for (int32 i = 0; i < Segs && WhiteTex; ++i)
+		const FLinearColor Wash = FMath::Lerp(FLinearColor(0.5f, 0.51f, 0.53f, 0.78f),
+			FLinearColor(0.012f, 0.015f, 0.024f, 0.82f), Night);
+		ODHudDraw::Ring(Canvas, PanelMid, 0.0f, R, 0.0f, 2.0f * PI, [&](float A, float T)
 		{
-			const float A0 = 2.0f * PI * i / Segs, A1 = 2.0f * PI * (i + 1) / Segs;
-			FCanvasTriangleItem TriItem(PanelMid,
-				PanelMid + R * FVector2D(FMath::Cos(A0), FMath::Sin(A0)),
-				PanelMid + R * FVector2D(FMath::Cos(A1), FMath::Sin(A1)),
-				WhiteTex);
-			TriItem.BlendMode = SE_BLEND_Translucent;
-			TriItem.SetColor(FLinearColor(0, 0, 0, bHaveMapTexture ? TexDimAlpha : BgAlpha));
-			Canvas->DrawItem(TriItem);
-		}
+			const float Lit = FMath::Cos(A) * T;   // +1 at the top rim .. -1 at the bottom
+			FLinearColor C = Wash * (1.0f + 0.2f * Lit - 0.15f * T);
+			C.A = FMath::Clamp(Wash.A + 0.1f * T, 0.0f, 1.0f);
+			return C;
+		});
 	}
 	else
 	{
@@ -392,7 +377,7 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	const TArray<FVector2D> FallbackSmooth =
 		(!bHaveCenterline && bHaveGates) ? SmoothPolyline(*Gates) : TArray<FVector2D>();
 	const TArray<FVector2D>& Smooth = bHaveCenterline ? *Centerline : FallbackSmooth;
-	auto DrawRoads = [&](const TArray<FVector2D>& Line)
+	auto DrawRoads = [&](const TArray<FVector2D>& Line, const FLinearColor& Col, float Thick)
 	{
 		for (int32 i = 1; i < Line.Num(); ++i)
 		{
@@ -411,47 +396,54 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 				continue;
 			}
 			FCanvasLineItem Seg(A, B);
-			Seg.SetColor(FLinearColor(0.55f, 0.65f, 0.8f, 0.9f));
-			Seg.LineThickness = 3.0f;
+			Seg.SetColor(Col);
+			Seg.LineThickness = Thick;
 			Canvas->DrawItem(Seg);
 		}
 	};
-	DrawRoads(Smooth);
-	// every other streamed area's map centerline too (2026-10-05, large
+	// Google-style cased roads: every dark casing first, then every light
+	// fill, so junctions merge instead of each road cutting across the next
+	// plus every other streamed area's map centerline (2026-10-05, large
 	// world); the bbox fit above and the map texture stay home-only
+	TArray<const TArray<FVector2D>*, TInlineAllocator<8>> RoadLines{&Smooth};
 	if (RoadMgr)
 	{
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
 			if (*It != RoadMgr && &It->MapCenterline != Centerline)
 			{
-				DrawRoads(It->MapCenterline);
+				RoadLines.Add(&It->MapCenterline);
 			}
 		}
 	}
+	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.02f, 0.025f, 0.035f, 0.6f), 5.5f * UiS); }
+	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.96f, 0.97f, 0.98f, 0.95f), 3.0f * UiS); }
 
 	// navigation route (SS7.37) - on every map panel (mini, pause, world);
 	// from the nav (nearest) road manager (2026-10-05, large world)
 	if (const AODRoadManager* NavMgr = FindNavRoadMgr(); NavMgr && NavMgr->HasRoute())
 	{
 		const TArray<FVector2D>& R = NavMgr->GetRoutePoints();
-		for (int32 i = 1; i < R.Num(); ++i)
+		for (int32 Pass = 0; Pass < 2; ++Pass)
 		{
-			FVector2D A = ToMap(FVector(R[i - 1], 0));
-			FVector2D B = ToMap(FVector(R[i], 0));
-			if (!ClipToPanel(A, B))
+			for (int32 i = 1; i < R.Num(); ++i)
 			{
-				continue;
+				FVector2D A = ToMap(FVector(R[i - 1], 0));
+				FVector2D B = ToMap(FVector(R[i], 0));
+				if (!ClipToPanel(A, B))
+				{
+					continue;
+				}
+				FCanvasLineItem Seg(A, B);
+				Seg.SetColor(Pass == 0 ? FLinearColor(0.02f, 0.025f, 0.035f, 0.6f) : Accent.CopyWithNewOpacity(0.95f));
+				Seg.LineThickness = (Pass == 0 ? 7.5f : 5.0f) * UiS;
+				Canvas->DrawItem(Seg);
 			}
-			FCanvasLineItem Seg(A, B);
-			Seg.SetColor(FLinearColor(1.0f, 0.3f, 0.85f, 0.95f));
-			Seg.LineThickness = 5.0f;
-			Canvas->DrawItem(Seg);
 		}
 		const FVector2D DestM = ToMap(FVector(R.Last(), 0));
 		if (!bCircular || InPanel(DestM))
 		{
-			Dot(DestM, 6.0f, FLinearColor(1.0f, 0.3f, 0.85f));
+			Dot(DestM, 6.0f, Accent);
 			Dot(DestM, 2.5f, FLinearColor::White);
 		}
 	}
@@ -500,34 +492,30 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		const FVector2D W(FMath::Cos(Yaw), FMath::Sin(Yaw));
 		const FVector2D Fwd(W.X * Rot.X - W.Y * Rot.Y, W.X * Rot.Y + W.Y * Rot.X);
 		const FVector2D Side(-Fwd.Y, Fwd.X);
-		const FVector2D Tri2[3] = {P + Fwd * 9.0f,
-			P - Fwd * 5.0f + Side * 5.0f, P - Fwd * 5.0f - Side * 5.0f};
-		for (int32 i = 0; i < 3; ++i)
-		{
-			FCanvasLineItem L(Tri2[i], Tri2[(i + 1) % 3]);
-			L.SetColor(FLinearColor::White);
-			L.LineThickness = 2.0f;
-			Canvas->DrawItem(L);
-		}
+		const float A = 10.5f * UiS;
+		const FVector2D Tri2[3] = {P + Fwd * A * 1.6f, P - Fwd * A + Side * A, P - Fwd * A - Side * A};
+		ODHudDraw::Poly(Canvas, Tri2, FLinearColor(0, 0, 0, 0.55f), 3.0f * UiS);
+		ODHudDraw::Poly(Canvas, Tri2, FLinearColor::White);
+		// dark core, white edge: reads on the light day lens and the dark night
+		// one alike. 0.7 about the centroid leaves a ~2 px edge (inradius 0.69 A)
+		const FVector2D Mid3 = (Tri2[0] + Tri2[1] + Tri2[2]) / 3.0f;
+		const FVector2D Core[3] = {Mid3 + (Tri2[0] - Mid3) * 0.7f, Mid3 + (Tri2[1] - Mid3) * 0.7f,
+			Mid3 + (Tri2[2] - Mid3) * 0.7f};
+		ODHudDraw::Poly(Canvas, Core, FLinearColor(0.02f, 0.025f, 0.035f));
 	}
 
 	if (bCircular)
 	{
-		// bezel: a colored ring on top of everything, segment-drawn (Canvas
-		// has no native circle primitive)
-		const int32 Segs = 48;
-		const float R = PanelSize * 0.5f - 1.5f;
-		FVector2D Prev = PanelMid + R * FVector2D(1, 0);
-		for (int32 i = 1; i <= Segs; ++i)
+		// thin ring bezel over a soft outer shadow
+		const float R = PanelSize * 0.5f;
+		ODHudDraw::Ring(Canvas, PanelMid, R, R + 10.0f * UiS, 0.0f, 2.0f * PI, [](float, float T)
 		{
-			const float A = 2.0f * PI * i / Segs;
-			const FVector2D Cur = PanelMid + R * FVector2D(FMath::Cos(A), FMath::Sin(A));
-			FCanvasLineItem L(Prev, Cur);
-			L.SetColor(FLinearColor(1.0f, 0.8f, 0.3f, 0.9f));
-			L.LineThickness = 3.0f;
-			Canvas->DrawItem(L);
-			Prev = Cur;
-		}
+			return FLinearColor(0, 0, 0, 0.35f * (1.0f - T));
+		});
+		ODHudDraw::Ring(Canvas, PanelMid, R - 2.0f * UiS, R, 0.0f, 2.0f * PI, [](float, float)
+		{
+			return FLinearColor(1, 1, 1, 0.85f);
+		});
 		// north tick on the bezel when the map rotates (world north = -Y)
 		if (bHeadingUp)
 		{
@@ -548,11 +536,6 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 
 namespace
 {
-const FLinearColor Accent(1.0f, 0.68f, 0.25f);
-const FLinearColor TextCol(0.88f, 0.91f, 0.95f);
-const FLinearColor DimCol(0.52f, 0.58f, 0.65f);
-const FLinearColor Ink(0.012f, 0.016f, 0.028f);   // backdrop, and text on an accent fill
-
 // 1080p layout units (multiplied by MenuScale())
 constexpr float ColX = 96.0f;      // column inset from the screen edge
 constexpr float ColW = 640.0f;
@@ -571,38 +554,22 @@ float ParsePercent(const FString& V)
 	return FMath::Clamp(FCString::Atof(*V.LeftChop(1)) / 100.0f, 0.0f, 1.0f);
 }
 
-enum class EMenuWeight : uint8 { Medium, SemiBold, Bold };
-
-// Rajdhani (SIL OFL, Content/Slate/Fonts) straight from its TTF - no UFont
-// asset (editor-agnostic); DefaultGame.ini stages the folder. One composite
-// font per weight, built once: the Slate font cache keys on it, so a fresh
-// one per call would re-rasterize glyphs every frame.
-FSlateFontInfo MenuFont(EMenuWeight Weight, float Size)
+// First visible row of a Count-row list showing Shown rows: moves only as far
+// as needed to keep Sel in view (Sel outside 0..Count-1 = nothing to follow),
+// so a hover-select never scrolls the row out from under the mouse.
+constexpr int32 ScrollTop(int32 Top, int32 Sel, int32 Count, int32 Shown)
 {
-	static TSharedPtr<const FCompositeFont> Fonts[3];
-	static bool bTried[3] = {};
-	const int32 I = static_cast<int32>(Weight);
-	if (!bTried[I])
+	if (Sel >= 0 && Sel < Count)
 	{
-		bTried[I] = true;
-		static const TCHAR* const Files[] = {
-			TEXT("Rajdhani-Medium.ttf"), TEXT("Rajdhani-SemiBold.ttf"), TEXT("Rajdhani-Bold.ttf")};
-		const FString Path = FPaths::ProjectContentDir() / TEXT("Slate/Fonts") / Files[I];
-		if (FPaths::FileExists(Path))
-		{
-			Fonts[I] = MakeShared<FCompositeFont>(NAME_None, Path, EFontHinting::Default, EFontLoadingPolicy::LazyLoad);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ODRaceHUD: menu font missing (%s) - using the engine font"), *Path);
-		}
+		Top = FMath::Clamp(Top, Sel - Shown + 1, Sel);
 	}
-	if (Fonts[I])
-	{
-		return FSlateFontInfo(Fonts[I], Size);
-	}
-	return FSlateFontInfo(GEngine->GetLargeFont(), Size, Weight == EMenuWeight::Medium ? FName("Regular") : FName("Bold"));
+	return FMath::Clamp(Top, 0, FMath::Max(0, Count - Shown));
 }
+static_assert(ScrollTop(0, 20, 30, 10) == 11, "down just enough");
+static_assert(ScrollTop(11, 5, 30, 10) == 5, "up just enough");
+static_assert(ScrollTop(7, 12, 30, 10) == 7, "already visible: stays");
+static_assert(ScrollTop(25, -1, 30, 10) == 20, "clamped to the end");
+static_assert(ScrollTop(3, 2, 5, 10) == 0, "fits: no scroll");
 
 /** Canvas painter at menu scale S - sizes are 1080p units, positions pixels. */
 struct FMenuPaint
@@ -631,7 +598,7 @@ struct FMenuPaint
 		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), Font(Size * S, W, Spacing), Col);
 		T.bCentreX = bCenterX;
 		T.bCentreY = true;
-		T.EnableShadow(FLinearColor(0, 0, 0, 0.45f), FVector2D(S, S));
+		T.EnableShadow(FLinearColor(0, 0, 0, 0.45f * Col.A), FVector2D(S, S));   // fades with the text
 		// HasValidText() needs a UFont even when SlateFontInfo is used; the
 		// file-loaded Rajdhani has no FontObject, so without this nothing drew
 		T.Font = GEngine->GetLargeFont();
@@ -658,17 +625,37 @@ struct FMenuPaint
 		C->DrawItem(T);
 	}
 
-	// horizontal fade, alpha A0 at X0 -> A1 at X1 (either direction), in strips
+	// small up (-1) / down (+1) chevron centred on X,Y (2026-10-14: list scroll cue)
+	void Chevron(float X, float Y, float Dir, const FLinearColor& Col) const
+	{
+		FCanvasTriangleItem T(FVector2D(X, Y + 5.0f * S * Dir), FVector2D(X - 8.0f * S, Y - 4.0f * S * Dir),
+			FVector2D(X + 8.0f * S, Y - 4.0f * S * Dir), GWhiteTexture);
+		T.SetColor(Col);
+		T.BlendMode = SE_BLEND_Translucent;
+		C->DrawItem(T);
+	}
+
+	// horizontal fade, alpha A0 at X0 -> A1 at X1 (either direction): ONE quad
+	// with per-vertex alpha. (2026-10-14) It used to be ~6 px translucent
+	// strips overlapping by 0.5 px - every overlap column blended twice, so the
+	// full-height menu backdrop showed a comb of dark vertical bars across the
+	// whole left side, through the text (the pause menu report).
 	void Fade(float X0, float X1, float Y, float H, FLinearColor Col, float A0, float A1) const
 	{
-		const int32 N = FMath::Clamp(FMath::RoundToInt(FMath::Abs(X1 - X0) / (6.0f * S)), 1, 256);
-		const float Step = (X1 - X0) / N;
-		for (int32 i = 0; i < N; ++i)
-		{
-			Col.A = FMath::Lerp(A0, A1, (i + 0.5f) / N);
-			const float SX = X0 + Step * i;
-			Rect(FMath::Min(SX, SX + Step), Y, FMath::Abs(Step) + 0.5f, H, Col);
-		}
+		FLinearColor C0 = Col, C1 = Col;
+		C0.A = A0;
+		C1.A = A1;
+		TArray<FCanvasUVTri> Tris;
+		Tris.SetNum(2);
+		Tris[0].V0_Pos = FVector2D(X0, Y);     Tris[0].V0_Color = C0;
+		Tris[0].V1_Pos = FVector2D(X1, Y);     Tris[0].V1_Color = C1;
+		Tris[0].V2_Pos = FVector2D(X1, Y + H); Tris[0].V2_Color = C1;
+		Tris[1].V0_Pos = FVector2D(X0, Y);     Tris[1].V0_Color = C0;
+		Tris[1].V1_Pos = FVector2D(X1, Y + H); Tris[1].V1_Color = C1;
+		Tris[1].V2_Pos = FVector2D(X0, Y + H); Tris[1].V2_Color = C0;
+		FCanvasTriangleItem T(Tris, GWhiteTexture);
+		T.BlendMode = SE_BLEND_Translucent;
+		C->DrawItem(T);
 	}
 
 	// a key cap; returns its width
@@ -687,6 +674,13 @@ struct FMenuHint
 	const TCHAR* Label;
 };
 
+// Top-left-anchored text at Sc x the old Roboto-large size: the world map and
+// QA map lines (2026-10-14, moved off the engine font onto Rajdhani)
+void HudText(UCanvas* C, const FString& Str, float X, float Y, float Sc, const FLinearColor& Col)
+{
+	FMenuPaint{C, 1.0f}.Text(Str, X, Y + 13.0f * Sc, 22.0f * Sc, EMenuWeight::SemiBold, Col);
+}
+
 // bottom-of-screen key hints, starting at the column's X
 void DrawHints(const FMenuPaint& P, float X, std::initializer_list<FMenuHint> Hints)
 {
@@ -702,7 +696,7 @@ void DrawHints(const FMenuPaint& P, float X, std::initializer_list<FMenuHint> Hi
 // mouse -> menu, shared by AODMainMenu and AODPauseMenu (same public API)
 template <typename TMenu>
 void DispatchMenuMouse(TMenu* Menu, APlayerController* PC, const TArray<FODMenuHit>& Hits,
-	FVector2D& LastMouse, uint64& LastFrame)
+	FVector2D& LastMouse, uint64& LastFrame, bool bWheel = true)   // bWheel false: the caller owns the wheel
 {
 	float Mx = 0.0f, My = 0.0f;
 	if (!Menu || !PC || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
@@ -752,11 +746,11 @@ void DispatchMenuMouse(TMenu* Menu, APlayerController* PC, const TArray<FODMenuH
 	{
 		Menu->Back();
 	}
-	if (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+	if (bWheel && PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
 	{
 		Menu->Up();
 	}
-	else if (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+	else if (bWheel && PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
 	{
 		Menu->Down();
 	}
@@ -781,7 +775,244 @@ void AODRaceHUD::AddMenuHit(FODMenuHit::EKind Kind, int32 Id, int32 Col, float X
 
 void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 {
-	DispatchMenuMouse(Menu, GetOwningPlayerController(), MenuHits, LastMenuMouse, LastMenuMouseFrame);
+	// World (2026-10-14): no rows - hover focuses the nearest pin, click picks
+	// it, a drag (left on empty space, or right) spins the globe, wheel zooms
+	APlayerController* PC = GetOwningPlayerController();
+	AODMenuGlobe* Globe = Menu ? Menu->GetGlobe() : nullptr;
+	if (Globe && Menu->GetScreen() == EODMenuScreen::World && !Menu->IsSettingsOpen())
+	{
+		float Mx = 0.0f, My = 0.0f;
+		if (!PC || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
+		{
+			bGlobeDrag = false;
+			return;
+		}
+		const FVector2D Mouse(Mx, My), Prev = LastMenuMouse;
+		const bool bFresh = GFrameCounter - LastMenuMouseFrame <= 1;
+		const bool bMoved = bFresh && !Mouse.Equals(Prev, 0.5);
+		LastMenuMouse = Mouse;
+		LastMenuMouseFrame = GFrameCounter;
+
+		int32 Hover = INDEX_NONE;
+		float Best = FMath::Square(18.0f * MenuScale());
+		for (int32 i = 0; i < Globe->GetPins().Num(); ++i)
+		{
+			FVector2D Pt;
+			if (Globe->ProjectPin(PC, i, Pt) && FVector2D::DistSquared(Pt, Mouse) < Best)
+			{
+				Best = FVector2D::DistSquared(Pt, Mouse);
+				Hover = i;
+			}
+		}
+		if (Hover != INDEX_NONE && bMoved && !bGlobeDrag)
+		{
+			Menu->SetFocusedPin(Hover);
+		}
+		const bool bLeft = PC->WasInputKeyJustPressed(EKeys::LeftMouseButton);
+		if (bLeft && Hover != INDEX_NONE)
+		{
+			Menu->PickPin(Hover);
+			return;
+		}
+		if (bLeft || PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = true;
+		}
+		else if (!PC->IsInputKeyDown(EKeys::LeftMouseButton) && !PC->IsInputKeyDown(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = false;
+		}
+		else if (bGlobeDrag && bMoved)
+		{
+			Globe->Orbit(Mouse - Prev);
+		}
+		if (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+		{
+			Globe->Zoom(+1.0f);
+		}
+		else if (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+		{
+			Globe->Zoom(-1.0f);
+		}
+		return;
+	}
+	// AreaMap (2026-10-14): a left drag on the map (off the dots and the panel)
+	// pans the globe camera and the wheel there zooms it; AODMainMenu::
+	// ClampAreaView keeps it on the area. Over the panel the wheel selects.
+	float Mx = 0.0f, My = 0.0f;
+	if (Globe && Menu->GetScreen() == EODMenuScreen::AreaMap && !Menu->IsSettingsOpen()
+		&& PC && PC->bShowMouseCursor && PC->GetMousePosition(Mx, My))
+	{
+		const bool bOverMap = Mx < MenuX(true, ColW * MenuScale()) && !MenuHits.ContainsByPredicate(
+			[&](const FODMenuHit& H) { return Mx >= H.X0 && Mx < H.X1 && My >= H.Y0 && My < H.Y1; });
+		if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+		{
+			bGlobeDrag = bOverMap;
+		}
+		else if (!PC->IsInputKeyDown(EKeys::LeftMouseButton))
+		{
+			bGlobeDrag = false;
+		}
+		else if (bGlobeDrag && GFrameCounter - LastMenuMouseFrame <= 1)
+		{
+			Globe->Orbit(FVector2D(Mx, My) - LastMenuMouse);
+		}
+		if (bOverMap && PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+		{
+			Globe->Zoom(+1.0f);
+		}
+		else if (bOverMap && PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+		{
+			Globe->Zoom(-1.0f);
+		}
+		DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame, !bOverMap);
+		return;
+	}
+	if (Menu && Menu->GetScreen() == EODMenuScreen::Paint && !Menu->IsSettingsOpen())
+	{
+		HandlePickerMouse();
+	}
+	else
+	{
+		PickerDrag = 0;
+	}
+	// garage room (2026-10-16): a drag off the menu (left on empty space, or
+	// right anywhere) turns the car; bGlobeDrag doubles as the drag latch
+	if (Menu && !Menu->IsVistaShown() && Menu->GetScreen() != EODMenuScreen::Start && !Menu->IsSettingsOpen()
+		&& PC && PC->bShowMouseCursor && PC->GetMousePosition(Mx, My))
+	{
+		const bool bOverUi = PickerDrag != 0 || (PickerSV.bIsValid && Menu->GetScreen() == EODMenuScreen::Paint
+			&& (PickerSV.IsInside(FVector2D(Mx, My)) || PickerHue.IsInside(FVector2D(Mx, My))))
+			|| MenuHits.ContainsByPredicate([&](const FODMenuHit& H) { return Mx >= H.X0 && Mx < H.X1 && My >= H.Y0 && My < H.Y1; });
+		if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+		{
+			bGlobeDrag = !bOverUi;
+		}
+		else if (PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = true;
+		}
+		else if (!PC->IsInputKeyDown(EKeys::LeftMouseButton) && !PC->IsInputKeyDown(EKeys::RightMouseButton))
+		{
+			bGlobeDrag = false;
+		}
+		else if (bGlobeDrag && GFrameCounter - LastMenuMouseFrame <= 1)
+		{
+			Menu->SpinShowroomCar((Mx - LastMenuMouse.X) * 0.4f);
+		}
+	}
+	else
+	{
+		bGlobeDrag = false;
+	}
+	DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame);
+}
+
+void AODRaceHUD::HandlePickerMouse()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	AODVehiclePawn* Pawn = PC ? Cast<AODVehiclePawn>(PC->GetPawn()) : nullptr;
+	float Mx = 0.0f, My = 0.0f;
+	if (!Pawn || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
+	{
+		PickerDrag = 0;
+		return;
+	}
+	const FVector2D M(Mx, My);
+	if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+	{
+		PickerDrag = PickerSV.bIsValid && PickerSV.IsInside(M) ? 1 : PickerHue.bIsValid && PickerHue.IsInside(M) ? 2 : 0;
+	}
+	if (PickerDrag == 0 || !PickerSV.bIsValid)
+	{
+		return;
+	}
+	const bool bDown = PC->IsInputKeyDown(EKeys::LeftMouseButton);
+	FODCarPaint Paint = Pawn->GetPaint();
+	const FBox2D& Box = PickerDrag == 1 ? PickerSV : PickerHue;
+	const FVector2D T = ((M - Box.Min) / Box.GetSize()).ClampAxes(0.0, 1.0);
+	if (PickerDrag == 1)
+	{
+		Paint.S = T.X;
+		Paint.V = 1.0f - T.Y;
+	}
+	else
+	{
+		Paint.H = FMath::Min(T.Y, 0.9999) * 360.0f;
+	}
+	Paint.bFactory = false;
+	Pawn->SetPaint(Paint, !bDown);   // live while dragging, saved once on release
+	if (!bDown)
+	{
+		PickerDrag = 0;
+	}
+}
+
+void AODRaceHUD::DrawColorPicker(float X, float Y) const
+{
+	const AODVehiclePawn* Pawn = Cast<AODVehiclePawn>(GetOwningPawn());
+	if (!Pawn)
+	{
+		return;
+	}
+	const FODCarPaint& Paint = Pawn->GetPaint();
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S, Sz = 280.0f * S, HW = 28.0f * S, HX = X + Sz + 14.0f * S;
+	// sRGB HSV -> the canvas's linear colour (same conversion as FODCarPaint::BodySrgb)
+	auto Col = [](float H, float Sa, float V) { return FLinearColor(FLinearColor(H, Sa, V).HSVToLinearRGB().ToFColor(false)); };
+
+	P.Rect(X - 10.0f * S, Y - 10.0f * S, HX + HW - X + 20.0f * S, Sz + 20.0f * S, FLinearColor(0, 0, 0, 0.45f));
+	TArray<FCanvasUVTri> Tris;
+	auto Quad = [&](float X0, float Y0, float X1, float Y1, FLinearColor C00, FLinearColor C10, FLinearColor C01, FLinearColor C11)
+	{
+		FCanvasUVTri& A = Tris.AddDefaulted_GetRef();
+		A.V0_Pos = FVector2D(X0, Y0); A.V0_Color = C00;
+		A.V1_Pos = FVector2D(X1, Y0); A.V1_Color = C10;
+		A.V2_Pos = FVector2D(X1, Y1); A.V2_Color = C11;
+		FCanvasUVTri& B = Tris.AddDefaulted_GetRef();
+		B.V0_Pos = FVector2D(X0, Y0); B.V0_Color = C00;
+		B.V1_Pos = FVector2D(X1, Y1); B.V1_Color = C11;
+		B.V2_Pos = FVector2D(X0, Y1); B.V2_Color = C01;
+	};
+	// the square as a 16x16 grid: per-vertex colours interpolate linearly, so
+	// one quad would grey out its middle; 16 cells keep it close to true HSV
+	constexpr int32 N = 16;
+	for (int32 j = 0; j < N; ++j)
+	{
+		for (int32 i = 0; i < N; ++i)
+		{
+			const float S0 = float(i) / N, S1 = float(i + 1) / N, V0 = 1.0f - float(j) / N, V1 = 1.0f - float(j + 1) / N;
+			Quad(X + S0 * Sz, Y + (1.0f - V0) * Sz, X + S1 * Sz, Y + (1.0f - V1) * Sz,
+				Col(Paint.H, S0, V0), Col(Paint.H, S1, V0), Col(Paint.H, S0, V1), Col(Paint.H, S1, V1));
+		}
+	}
+	constexpr int32 HN = 24;
+	for (int32 j = 0; j < HN; ++j)
+	{
+		const FLinearColor C0 = Col(360.0f * j / HN, 1.0f, 1.0f), C1 = Col(360.0f * (j + 1) / HN, 1.0f, 1.0f);
+		Quad(HX, Y + Sz * j / HN, HX + HW, Y + Sz * (j + 1) / HN, C0, C0, C1, C1);
+	}
+	FCanvasTriangleItem T(Tris, GWhiteTexture);
+	Canvas->DrawItem(T);
+
+	// markers: ringed square on the square, a bar across the strip (dimmed while Factory)
+	const float A = Paint.bFactory ? 0.4f : 1.0f;
+	auto Ring = [&](float CX, float CY, float W, float H)
+	{
+		for (const auto& [Pad, RingCol] : {TPair<float, FLinearColor>(3.0f * S, FLinearColor(0, 0, 0, A)), TPair<float, FLinearColor>(1.5f * S, FLinearColor(1, 1, 1, A))})
+		{
+			const float L = CX - W * 0.5f - Pad, R = CX + W * 0.5f + Pad, U = CY - H * 0.5f - Pad, D = CY + H * 0.5f + Pad;
+			const float B = 1.5f * S;
+			P.Rect(L, U, R - L, B, RingCol); P.Rect(L, D - B, R - L, B, RingCol);
+			P.Rect(L, U, B, D - U, RingCol); P.Rect(R - B, U, B, D - U, RingCol);
+		}
+	};
+	Ring(X + Paint.S * Sz, Y + (1.0f - Paint.V) * Sz, 8.0f * S, 8.0f * S);
+	Ring(HX + HW * 0.5f, Y + Paint.H / 360.0f * Sz, HW, 2.0f * S);
+	P.Text(TEXT("Click or drag to pick a colour"), X, Y + Sz + 26.0f * S, 16.0f, EMenuWeight::Medium, DimCol);
+
+	PickerSV = FBox2D(FVector2D(X, Y), FVector2D(X + Sz, Y + Sz));
+	PickerHue = FBox2D(FVector2D(HX, Y), FVector2D(HX + HW, Y + Sz));
 }
 
 void AODRaceHUD::HandleMenuMouse(AODPauseMenu* Menu)
@@ -807,20 +1038,26 @@ void AODRaceHUD::DrawMenuBackdrop(float Dim, bool bRight) const
 	}
 }
 
-float AODRaceHUD::DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X) const
+float AODRaceHUD::DrawMenuHeader(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab, float X,
+	const FString& Sub) const
 {
 	const FMenuPaint P{Canvas, MenuScale()};
 	const float S = P.S;
 	const float TitleY = 150.0f * S;
 	P.Text(Title.ToUpper(), X, TitleY, 44.0f, EMenuWeight::Bold, FLinearColor::White, false, 60);
 	P.Rect(X, TitleY + 30.0f * S, 56.0f * S, 4.0f * S, Accent);
+	const float SubH = Sub.IsEmpty() ? 0.0f : 40.0f * S;   // (2026-10-14) area blurb line
+	if (!Sub.IsEmpty())
+	{
+		P.Text(Sub, X, TitleY + 62.0f * S, 20.0f, EMenuWeight::Medium, DimCol);
+	}
 	if (Tabs.Num() <= 1)
 	{
-		return 215.0f * S;
+		return 215.0f * S + SubH;
 	}
 
 	// tab strip: Q [TAB] [TAB] ... E, each tab clickable
-	const float TabY = 226.0f * S;
+	const float TabY = 226.0f * S + SubH;
 	float TX = X + P.Key(TEXT("Q"), X, TabY) + 18.0f * S;
 	for (int32 i = 0; i < Tabs.Num(); ++i)
 	{
@@ -835,7 +1072,7 @@ float AODRaceHUD::DrawMenuHeader(const FString& Title, TArrayView<const FODMenuT
 		TX += TW + 30.0f * S;
 	}
 	P.Key(TEXT("E"), TX - 12.0f * S, TabY);
-	return 275.0f * S;
+	return 275.0f * S + SubH;
 }
 
 void AODRaceHUD::DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float X, float Y, float W) const
@@ -848,19 +1085,35 @@ void AODRaceHUD::DrawMenuFooter(const FString& Label, int32 Id, bool bSel, float
 	AddMenuHit(FODMenuHit::Row, Id, -1, X, Y, W, H);
 }
 
-void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
-	int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight) const
+float AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab> Tabs, int32 ActiveTab,
+	int32 Footer, int32 Selected, TFunctionRef<void(int32, FString&, FString&)> GetRow, bool bRight,
+	const FString& Sub) const
 {
 	const FMenuPaint P{Canvas, MenuScale()};
 	const float S = P.S;
 	const float W = ColW * S;
 	const float X = MenuX(bRight, W);
-	float Y = DrawMenuHeader(Title, Tabs, ActiveTab, X);
+	float Y = DrawMenuHeader(Title, Tabs, ActiveTab, X, Sub);
 
 	const float H = RowH * S;
 	const float VX0 = X + W - 300.0f * S, VX1 = X + W - 16.0f * S;   // value column
 	const FODMenuTab& Tab = Tabs[FMath::Clamp(ActiveTab, 0, Tabs.Num() - 1)];
-	for (int32 Row = Tab.First; Row < Tab.First + Tab.Count; ++Row, Y += H)
+	// scrolling (2026-10-14): as many rows as fit above the footer + key hints;
+	// MenuScrollTop moves only as far as needed to keep Selected visible, so a
+	// hover-select never scrolls the row out from under the mouse. Hits are
+	// added for the drawn rows only, with their global row ids.
+	const int32 MaxRows = FMath::Max(3, FMath::FloorToInt((Canvas->SizeY - Y - (22.0f + FooterH + 110.0f) * S) / H));
+	const int32 Shown = FMath::Min(Tab.Count, MaxRows);
+	MenuScrollTop = ScrollTop(MenuScrollTop, Selected - Tab.First, Tab.Count, Shown);
+	if (MenuScrollTop > 0)
+	{
+		P.Chevron(X + W * 0.5f, Y - 8.0f * S, -1.0f, DimCol);
+	}
+	if (MenuScrollTop + Shown < Tab.Count)
+	{
+		P.Chevron(X + W * 0.5f, Y + Shown * H + 8.0f * S, +1.0f, DimCol);
+	}
+	for (int32 Row = Tab.First + MenuScrollTop; Row < Tab.First + MenuScrollTop + Shown; ++Row, Y += H)
 	{
 		FString Label, Value;
 		GetRow(Row, Label, Value);
@@ -896,6 +1149,14 @@ void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab
 			P.Rect(IX0 + (TX1 - IX0) * Pct - 2.0f * S, CY - 8.0f * S, 4.0f * S, 16.0f * S, bSel ? FLinearColor::White : TextCol);
 			P.Text(Value, IX1 - 26.0f * S, CY, 20.0f, EMenuWeight::SemiBold, ValCol, true);
 		}
+		else if (Value.Len() > 8 && Value[0] == TEXT('#') && Value[7] == TEXT(' '))
+		{
+			// "#RRGGBB Name" (garage Paint screen): a colour chip, then the name
+			const FLinearColor Chip = FLinearColor(FColor::FromHex(Value.Mid(1, 6)));
+			P.Rect(IX0, CY - 9.0f * S, 18.0f * S, 18.0f * S, bSel ? FLinearColor::White : TextCol);
+			P.Rect(IX0 + 2.0f * S, CY - 7.0f * S, 14.0f * S, 14.0f * S, Chip);
+			P.Text(Value.Mid(8), (IX0 + 18.0f * S + IX1) * 0.5f, CY, 22.0f, EMenuWeight::SemiBold, ValCol, true);
+		}
 		else
 		{
 			P.Text(Value, (IX0 + IX1) * 0.5f, CY, 22.0f, EMenuWeight::SemiBold, ValCol, true);
@@ -905,6 +1166,7 @@ void AODRaceHUD::DrawMenuPanel(const FString& Title, TArrayView<const FODMenuTab
 	FString FootLabel, FootValue;
 	GetRow(Footer, FootLabel, FootValue);
 	DrawMenuFooter(FootLabel, Footer, Selected == Footer, X, Y + 22.0f * S, W);
+	return Y + (22.0f + FooterH) * S;
 }
 
 void AODRaceHUD::DrawSettingsPanel(AODSettingsMenu* Menu, bool bRight) const
@@ -943,15 +1205,37 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 	float Y = DrawMenuHeader(TEXT("Key Bindings"), {}, 0, X);
 
 	const float H = 42.0f * S;
-	const float KX0 = X + W * 0.40f;
-	const float CellW = (X + W - KX0) * 0.5f;
-	P.Text(TEXT("KEYBOARD"), KX0 + CellW * 0.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
-	P.Text(TEXT("GAMEPAD"), KX0 + CellW * 1.5f, Y + 10.0f * S, 15.0f, EMenuWeight::SemiBold, DimCol, true, 120);
+	const int32 NumCols = AODRebindMenu::NumCols;
+	const float KX0 = X + W * 0.32f;
+	const float CellW = (X + W - KX0) / NumCols;
+	for (int32 Col = 0; Col < NumCols; ++Col)
+	{
+		P.Text(AODRebindMenu::ColumnHeader(Col), KX0 + CellW * (Col + 0.5f), Y + 10.0f * S, 15.0f,
+			EMenuWeight::SemiBold, DimCol, true, 120);
+	}
 	Y += 34.0f * S;
+
+	// scrolling (2026-10-14): the binding rows + Reset scroll as one list
+	// above the fixed Back footer, following the selection like DrawMenuPanel
+	// (arrows / d-pad move it; the wheel arrives as Up/Down via DispatchMenuMouse)
+	const int32 Count = Menu->ResetRow() + 1;
+	const int32 Shown = FMath::Min(Count,
+		FMath::Max(3, FMath::FloorToInt((Canvas->SizeY - Y - (22.0f + FooterH + 110.0f) * S) / H)));
+	RebindScrollTop = ScrollTop(RebindScrollTop, Menu->GetSelected(), Count, Shown);
+	if (RebindScrollTop > 0)
+	{
+		P.Chevron(X + W * 0.5f, Y - 8.0f * S, -1.0f, DimCol);
+	}
+	if (RebindScrollTop + Shown < Count)
+	{
+		P.Chevron(X + W * 0.5f, Y + Shown * H + 8.0f * S, +1.0f, DimCol);
+	}
+	const int32 Reset = Menu->ResetRow();
+	const int32 End = RebindScrollTop + Shown;
 
 	// capture pulse on real time - the game is paused, world time stands still
 	const float Pulse = 0.55f + 0.35f * FMath::Sin(FPlatformTime::Seconds() * 6.0);
-	for (int32 Row = 0; Row < Menu->ResetRow(); ++Row, Y += H)
+	for (int32 Row = RebindScrollTop; Row < FMath::Min(End, Reset); ++Row, Y += H)
 	{
 		const bool bRowSel = Row == Menu->GetSelected();
 		const float CY = Y + H * 0.5f;
@@ -961,8 +1245,12 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 		}
 		P.Text(Menu->GetLabel(Row), X + 22.0f * S, CY, 21.0f, bRowSel ? EMenuWeight::SemiBold : EMenuWeight::Medium,
 			bRowSel ? FLinearColor::White : TextCol);
-		for (int32 Col = 0; Col < 2; ++Col)
+		for (int32 Col = 0; Col < NumCols; ++Col)
 		{
+			if (!Menu->HasCell(Row, Col))
+			{
+				continue;
+			}
 			const float CX = KX0 + CellW * Col;
 			const bool bCap = Menu->IsCapturingCell(Row, Col);
 			const bool bCellSel = bRowSel && Col == Menu->GetColumn();
@@ -971,33 +1259,35 @@ void AODRaceHUD::DrawRebindPanel(AODRebindMenu* Menu, bool bRight) const
 				: bCellSel ? FLinearColor(Accent.R, Accent.G, Accent.B, 0.25f) : FLinearColor(1, 1, 1, 0.05f));
 			FString Bind = Menu->GetBinding(Row, Col);
 			Bind.RemoveFromStart(TEXT("Gamepad "));
-			P.Text(Bind, CX + CellW * 0.5f, CY, 19.0f, EMenuWeight::SemiBold,
+			P.Text(Bind, CX + CellW * 0.5f, CY, 17.0f, EMenuWeight::SemiBold,
 				bCap || bCellSel ? FLinearColor::White : TextCol, true);
 			AddMenuHit(FODMenuHit::Cell, Row, Col, CX, Y, CellW, H);
 		}
 	}
 
-	// Reset row, then the Back footer
-	const int32 Reset = Menu->ResetRow();
-	const bool bResetSel = Menu->GetSelected() == Reset;
-	if (bResetSel)
+	// Reset row (the list's last, when scrolled into view), then the Back footer
+	if (End > Reset)
 	{
-		P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
-		P.Rect(X, Y, 4.0f * S, H, Accent);
+		const bool bResetSel = Menu->GetSelected() == Reset;
+		if (bResetSel)
+		{
+			P.Fade(X, X + W, Y, H, Accent, 0.2f, 0.03f);
+			P.Rect(X, Y, 4.0f * S, H, Accent);
+		}
+		P.Text(Menu->GetLabel(Reset), X + 22.0f * S, Y + H * 0.5f, 21.0f,
+			bResetSel ? EMenuWeight::SemiBold : EMenuWeight::Medium, bResetSel ? FLinearColor::White : TextCol);
+		AddMenuHit(FODMenuHit::Row, Reset, -1, X, Y, W, H);
+		Y += H;
 	}
-	P.Text(Menu->GetLabel(Reset), X + 22.0f * S, Y + H * 0.5f, 21.0f,
-		bResetSel ? EMenuWeight::SemiBold : EMenuWeight::Medium, bResetSel ? FLinearColor::White : TextCol);
-	AddMenuHit(FODMenuHit::Row, Reset, -1, X, Y, W, H);
-	Y += H;
 	DrawMenuFooter(Menu->GetLabel(Menu->BackRow()), Menu->BackRow(), Menu->GetSelected() == Menu->BackRow(), X, Y + 22.0f * S, W);
 
 	if (Menu->IsCapturing())
 	{
-		DrawHints(P, X, {{TEXT("Any key"), TEXT("Assign")}, {TEXT("Esc"), TEXT("Cancel")}});
+		DrawHints(P, X, {{TEXT("Any key / wheel"), TEXT("Assign")}, {TEXT("Esc"), TEXT("Cancel")}});
 	}
 	else
 	{
-		DrawHints(P, X, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Rebind")}, {TEXT("Esc"), TEXT("Back")}});
+		DrawHints(P, X, {{TEXT("Arrows / Wheel"), TEXT("Select")}, {TEXT("Enter"), TEXT("Rebind")}, {TEXT("Esc"), TEXT("Back")}});
 	}
 }
 
@@ -1035,6 +1325,211 @@ void AODRaceHUD::DrawCreditsPanel(AODCreditsMenu* Menu, bool bRight) const
 	DrawHints(P, X, {{TEXT("Arrows / Wheel"), TEXT("Scroll")}, {TEXT("Esc"), TEXT("Back")}});
 }
 
+// AreaMap screen (2026-10-14, was the Area/Conditions slide-in left panel):
+// full-screen top-down over the globe camera, which shows the area's relief
+// draped on the globe. Roads and a dot per pick (starts / track starts) go
+// through AODMainMenu::AreaCmToScreen (cm -> lat/lng -> globe). Each dot is a
+// row hit, so hover selects that row and click confirms it (DispatchMenuMouse);
+// drawn before the rows panel so the panel stays on top. The selected track's
+// line, length and best time too.
+void AODRaceHUD::DrawAreaMap(const AODMainMenu* Menu) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const APlayerController* PC = GetOwningPlayerController();
+	if (!PC)
+	{
+		return;
+	}
+	auto Line = [&](const TArray<FVector2D>& L, bool bLoop, const FLinearColor& Col, float Thick)
+	{
+		if (L.Num() < 2)
+		{
+			return;
+		}
+		FVector2D A, B = FVector2D::ZeroVector;
+		bool bA = false;
+		for (int32 i = 0; i < L.Num() + (bLoop ? 1 : 0); ++i)
+		{
+			const FVector2D& Cm = L[i % L.Num()];
+			const bool bB = !FMath::IsNaN(Cm.X) && Menu->AreaCmToScreen(PC, Cm, B);   // NaN = polyline break
+			if (bA && bB)
+			{
+				FCanvasLineItem Seg(A, B);
+				Seg.SetColor(Col);
+				Seg.LineThickness = Thick;
+				Canvas->DrawItem(Seg);
+			}
+			A = B;
+			bA = bB;
+		}
+	};
+	Line(Menu->GetAreaMap(), false, FLinearColor(1, 1, 1, 0.55f), 1.5f * S);
+
+	const TArray<FODMenuPick>& Picks = Menu->GetPicks();
+	const int32 Sel = Menu->GetSelectedPick();
+	const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
+	const int32 First = Tabs.IsValidIndex(Menu->GetTab()) ? Tabs[Menu->GetTab()].First : 0;   // row of Picks[0]
+	if (Picks.IsValidIndex(Sel) && Picks[Sel].Line.Num() > 1)
+	{
+		Line(Picks[Sel].Line, Picks[Sel].bLoop, Accent, 4.0f * S);
+	}
+	auto Disc = [&](const FVector2D& C, float R, const FLinearColor& Col)
+	{
+		FCanvasNGonItem D(C, FVector2D(R, R), 16, GWhiteTexture, Col);
+		D.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(D);
+	};
+	for (int32 i = 0; i < Picks.Num(); ++i)
+	{
+		FVector2D D;
+		if (!Picks[i].bHasPos || !Menu->AreaCmToScreen(PC, Picks[i].Pos, D))
+		{
+			continue;
+		}
+		AddMenuHit(FODMenuHit::Row, First + i, -1, D.X - 14.0f * S, D.Y - 14.0f * S, 28.0f * S, 28.0f * S);
+		if (i != Sel)
+		{
+			Disc(D, 6.0f * S, FLinearColor(0, 0, 0, 0.5f));
+			Disc(D, 4.0f * S, TextCol);
+		}
+	}
+	FVector2D D;
+	if (Picks.IsValidIndex(Sel) && Picks[Sel].bHasPos && Menu->AreaCmToScreen(PC, Picks[Sel].Pos, D))   // selected last, on top
+	{
+		const FODMenuPick& K = Picks[Sel];
+		Disc(D, 10.0f * S, FLinearColor(0, 0, 0, 0.5f));
+		Disc(D, 8.0f * S, Accent);
+		const bool bTrack = !K.Track.IsEmpty();
+		P.Text(K.Label, D.X + 16.0f * S, D.Y - (bTrack ? 9.0f : 0.0f) * S, 20.0f, EMenuWeight::Bold, FLinearColor::White);
+		if (bTrack)
+		{
+			P.Text(FString::Printf(TEXT("%.1f km %s  ·  %s"), K.Km, K.bLoop ? TEXT("loop") : TEXT("point to point"),
+					K.BestTime > 0.0f ? *(TEXT("Best ") + FormatTime(K.BestTime)) : TEXT("No time set")),
+				D.X + 16.0f * S, D.Y + 12.0f * S, 15.0f, EMenuWeight::Medium, TextCol);
+		}
+	}
+}
+
+// World screen (2026-10-14): the globe is 3D (AODMenuGlobe, the view target);
+// this is the old globe.gl page's overlay in its layout (vh -> 1080p units):
+// title, a small gold dot per area cluster at ProjectPin(); only the focused
+// (hovered / arrowed) one gets a white dot and its name + sub label
+// (2026-10-14 play-test: labels on every pin were too big). Mouse: HandleMenuMouse.
+void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float X = Canvas->SizeX * 0.05f, TitleY = Canvas->SizeY * 0.13f + 24.0f * S;
+	P.Text(Menu->GetScreenTitle().ToUpper(), X, TitleY, 44.0f, EMenuWeight::Bold, FLinearColor::White, false, 60);
+	P.Rect(X, TitleY + 30.0f * S, 56.0f * S, 4.0f * S, Accent);
+
+	const AODMenuGlobe* Globe = Menu->GetGlobe();
+	const APlayerController* PC = GetOwningPlayerController();
+	if (Globe && PC)
+	{
+		auto Disc = [&](const FVector2D& C, float R, const FLinearColor& Col)
+		{
+			FCanvasNGonItem D(C, FVector2D(R, R), 24, GWhiteTexture, Col);
+			D.BlendMode = SE_BLEND_Translucent;
+			Canvas->DrawItem(D);
+		};
+		const TArray<FODGlobePin>& Pins = Globe->GetPins();
+		const int32 Focus = Menu->GetFocusedPin();
+		auto DrawPin = [&](int32 i)
+		{
+			FVector2D Pt;
+			if (!Globe->ProjectPin(PC, i, Pt))
+			{
+				return;
+			}
+			const bool bOn = i == Focus;
+			const float R = (bOn ? 5.5f : 3.5f) * S;
+			Disc(Pt, R + 2.5f * S, FLinearColor(Accent.R, Accent.G, Accent.B, bOn ? 0.3f : 0.18f));
+			Disc(Pt, R, bOn ? FLinearColor::White : Accent);
+			if (!bOn)
+			{
+				return;
+			}
+			const float LX = Pt.X + 12.0f * S;
+			const bool bSub = !Pins[i].Sub.IsEmpty();
+			P.Text(Pins[i].Name, LX, Pt.Y - (bSub ? 7.0f : 0.0f) * S, 16.0f, EMenuWeight::Bold, Accent, false, 40);
+			if (bSub)
+			{
+				P.Text(Pins[i].Sub, LX, Pt.Y + 9.0f * S, 12.0f, EMenuWeight::SemiBold, DimCol);
+			}
+		};
+		for (int32 i = 0; i < Pins.Num(); ++i)
+		{
+			if (i != Focus)
+			{
+				DrawPin(i);
+			}
+		}
+		if (Pins.IsValidIndex(Focus))   // focused last, on top
+		{
+			DrawPin(Focus);
+		}
+	}
+	DrawHints(P, X, {{TEXT("Click"), TEXT("Pick")}, {TEXT("Drag"), TEXT("Spin")}, {TEXT("Wheel"), TEXT("Zoom")},
+		{TEXT("Arrows"), TEXT("Browse")}, {TEXT("Esc"), TEXT("Back")}});
+}
+
+// Loading screen (2026-10-14, "hold back until everything is up, no half-
+// loaded screens"): AODMainMenu::Tick gates the release on ground + terrain +
+// roads + buildings + an idle renderer; this keeps the screen itself calm -
+// opaque at once (the teleport stays hidden), its text eases in rather than
+// popping, the bar only ever eases forward (tiles 0-80 %, buildings 85,
+// renderer 95), and after release DrawHUD calls it again with Veil < 1 so the
+// whole thing fades off the finished world instead of cutting. Real time
+// throughout - world time may be paused or hitch while streaming.
+void AODRaceHUD::DrawLoadingScreen(const AODMainMenu* Menu, float Veil) const
+{
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const double Now = FPlatformTime::Seconds();
+	if (Veil >= 1.0f && LoadingShownAt < 0.0)
+	{
+		LoadingShownAt = Now;
+		LoadingEndedAt = -1.0;
+		LoadingBarFrac = 0.0f;
+		LoadingLastPhase = 0;
+	}
+	P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(Ink.R, Ink.G, Ink.B, Veil));
+
+	float Target = 1.0f;
+	FString Status = TEXT("Ready");
+	if (Veil >= 1.0f && Menu && Menu->IsStartLoading())
+	{
+		Target = 0.9f;   // the start vista streaming behind the screen (no tile counts for it)
+		Status = TEXT("Preparing start");
+	}
+	else if (Veil >= 1.0f && Menu)
+	{
+		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
+		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
+		LoadingLastPhase = Menu->GetLoadingPhase();
+		const int32 Total = TerrainTotal + RoadTotal;
+		Target = LoadingLastPhase == 0 ? 0.8f * (Total > 0 ? float(TerrainReady + RoadReady) / Total : 0.0f)
+			: LoadingLastPhase == 1 ? 0.85f : 0.95f;
+		Status = LoadingLastPhase == 0 ? TEXT("Building terrain and roads")
+			: LoadingLastPhase == 1 ? TEXT("Placing buildings") : TEXT("Streaming textures");
+	}
+	const float Dt = FMath::Min((float)FApp::GetDeltaTime(), 0.1f);
+	LoadingBarFrac = FMath::Max(LoadingBarFrac, FMath::Lerp(LoadingBarFrac, Target, 1.0f - FMath::Exp(-Dt / 0.3f)));
+
+	const float In = Veil < 1.0f ? 1.0f : FMath::SmoothStep(0.0f, 0.4f, float(Now - LoadingShownAt));
+	const float A = In * Veil * Veil;   // text leaves a little ahead of the backdrop
+	const float CX = Canvas->SizeX * 0.5f;
+	const float CY = Canvas->SizeY * 0.5f;
+	P.Text(TEXT("LOADING WORLD"), CX, CY - 24.0f * S, 40.0f, EMenuWeight::Bold, FLinearColor(1, 1, 1, A), true, 200);
+	const float BarW = 360.0f * S;
+	P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW, 3.0f * S, FLinearColor(1, 1, 1, 0.12f * A));
+	P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW * LoadingBarFrac, 3.0f * S, FLinearColor(Accent.R, Accent.G, Accent.B, A));
+	P.Text(Status.ToUpper(), CX, CY + 46.0f * S, 16.0f, EMenuWeight::SemiBold,
+		FLinearColor(DimCol.R, DimCol.G, DimCol.B, A), true, 120);
+}
+
 void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 	const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const
 {
@@ -1050,69 +1545,79 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	// (2026-08-27, spawn-loading-screen task) - fully opaque so the player
 	// never sees the car airborne/popping in, or the world visibly filling in
 	// around it, while a fresh area's road/terrain tiles are still streaming.
-	if (Menu->IsLoading())
+	// ...and the Start screen's vista (Taylor, 2026-10-16): the globe used to sit
+	// there half-interactive while the vista streamed, then cut; now the screen
+	// holds until AODMainMenu's fade-cut, whose camera fade-in reveals the vista
+	if (Menu->IsLoading() || Menu->IsStartLoading())
 	{
-		P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(Ink.R, Ink.G, Ink.B, 1.0f));
-		const float CX = Canvas->SizeX * 0.5f;
-		const float CY = Canvas->SizeY * 0.5f;
-		P.Text(TEXT("LOADING WORLD"), CX, CY - 24.0f * S, 40.0f, EMenuWeight::Bold, FLinearColor::White, true, 200);
-
-		int32 TerrainReady = 0, TerrainTotal = 0, RoadReady = 0, RoadTotal = 0;
-		Menu->GetLoadingProgress(TerrainReady, TerrainTotal, RoadReady, RoadTotal);
-		const float BarW = 360.0f * S;
-		P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW, 3.0f * S, FLinearColor(1, 1, 1, 0.12f));
-		if (TerrainTotal + RoadTotal > 0)
-		{
-			const float Frac = float(TerrainReady + RoadReady) / float(TerrainTotal + RoadTotal);
-			P.Rect(CX - BarW * 0.5f, CY + 16.0f * S, BarW * FMath::Clamp(Frac, 0.0f, 1.0f), 3.0f * S, Accent);
-			P.Text(FString::Printf(TEXT("Terrain %d/%d  ·  Roads %d/%d"), TerrainReady, TerrainTotal, RoadReady, RoadTotal),
-				CX, CY + 46.0f * S, 18.0f, EMenuWeight::Medium, DimCol, true);
-		}
+		DrawLoadingScreen(Menu, 1.0f);
 		return;
 	}
 
 	// ---- menu screens: left column (right over the Scene vista, so the car stays clear)
 	if (Menu->GetStage() == EODMenuStage::Menu)
 	{
-		const bool bVista = Menu->IsVistaShown();
+		const EODMenuScreen Screen = Menu->GetScreen();
+		if (Screen == EODMenuScreen::World && !Menu->IsSettingsOpen())
+		{
+			DrawGlobePins(Menu);   // no backdrop: the globe is the screen
+			return;
+		}
+		// AreaMap / Start (2026-10-14): rows right, no dim - the globe drape
+		// (AreaMap: roads + start dots drawn over it first) or the live vista at
+		// the confirmed start shows to the left
+		const bool bAreaMap = Screen == EODMenuScreen::AreaMap;
+		const bool bVista = Menu->IsVistaShown() || bAreaMap || Screen == EODMenuScreen::Start;
 		DrawMenuBackdrop(bVista ? 0.0f : 0.2f, bVista);
 		if (Menu->IsSettingsOpen())
 		{
 			DrawSettingsPanel(Menu->GetSettingsMenu(), bVista);
 			return;
 		}
-		const EODMenuScreen Screen = Menu->GetScreen();
-		DrawMenuPanel(Screen == EODMenuScreen::Garage ? TEXT("Garage")
-				: Screen == EODMenuScreen::Sound ? TEXT("Exhaust Sound")
-				: Screen == EODMenuScreen::Scene ? TEXT("Select Scene") : TEXT("OpenDrive"),
-			Menu->GetTabs(), Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
-			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista);
+		// AreaMap: the active tab is the area (one tab per clustered area), its blurb under it
+		const TArrayView<const FODMenuTab> Tabs = Menu->GetTabs();
+		const FString Title = bAreaMap && Tabs.IsValidIndex(Menu->GetTab()) ? FString(Tabs[Menu->GetTab()].Name) : Menu->GetScreenTitle();
+		if (bAreaMap)
+		{
+			DrawAreaMap(Menu);
+		}
+		const float PanelBottom = DrawMenuPanel(Title, Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
+			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista,
+			bAreaMap ? Menu->GetAreaBlurb() : FString());
 		const float HX = MenuX(bVista, ColW * S);
+		if (Screen == EODMenuScreen::Paint)
+		{
+			// under the rows in the menu column, clear of the car (Taylor 2026-10-16)
+			DrawColorPicker(HX + 10.0f * S, PanelBottom + 34.0f * S);
+		}
 		if (Screen == EODMenuScreen::Main)
 		{
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}});
 		}
+		else if (bAreaMap)
+		{
+			DrawHints(P, HX, {{TEXT("Q/E"), TEXT("Area")}, {TEXT("Arrows"), TEXT("Select")}, {TEXT("Drag / Wheel"), TEXT("Pan / Zoom")},
+				{TEXT("Enter"), TEXT("Pick")}, {TEXT("Esc"), TEXT("World Map")}});
+		}
 		else
 		{
-			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")}, {TEXT("Enter"), TEXT("Confirm")},
-				{TEXT("Esc"), Screen == EODMenuScreen::Garage && Menu->IsGarageMode() ? TEXT("Resume") : TEXT("Back")}});
+			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select / Change")},
+				{TEXT("Enter"), Screen == EODMenuScreen::Start ? TEXT("Drive") : TEXT("Confirm")},
+				{TEXT("Esc"), TEXT("Back")}});
 		}
 		return;
 	}
 
 	// ---- map select (QA hook only): full route + clickable town nodes ----
-	UFont* Font = GEngine->GetLargeFont();
 	P.Rect(0, 0, Canvas->SizeX, Canvas->SizeY, FLinearColor(0, 0, 0, 0.55f));
 	auto Text = [&](const FString& Str, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(Str), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
+		HudText(Canvas, Str, X, Y, Sc, C);
 	};
 	const float FullSize = FMath::Min(Canvas->SizeY - 170.0f, Canvas->SizeX * 0.6f);
 	const float PanelX = (Canvas->SizeX - FullSize) * 0.5f;
 	const float PanelY = (Canvas->SizeY - FullSize) * 0.5f + 12.0f;
-	Text(TEXT("CHOOSE A START"), PanelX, PanelY - 48.0f, 1.8f, FLinearColor::White);
+	Text(TEXT("CHOOSE A TURNOUT"), PanelX, PanelY - 48.0f, 1.8f, FLinearColor::White);
 
 	// route polyline + player arrow (no gate markers - bRunning=false)
 	DrawStageMap(Centerline, Gates, false, INDEX_NONE, PanelX, PanelY, FullSize,
@@ -1167,7 +1672,7 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 	const FString Foot = (Hover != INDEX_NONE && RoadMgr)
 		? FString::Printf(TEXT("click to start near %s"),
 			*RoadMgr->GetTownNodes()[Hover].Name)
-		: TEXT("hover a town, or press enter to start here");
+		: TEXT("hover a turnout, or press enter to start here");
 	Text(Foot, PanelX, PanelY + FullSize + 16.0f, 1.1f, FLinearColor(0.85f, 0.9f, 0.85f));
 	Text(TEXT("esc  back"), PanelX, PanelY + FullSize + 42.0f, 1.0f,
 		FLinearColor(0.6f, 0.6f, 0.6f));
@@ -1282,9 +1787,30 @@ void AODRaceHUD::CloseWorldMap()
 
 void AODRaceHUD::ClearRouteKey()
 {
+	if (bWorldMapOpen && bTrackEdit)
+	{
+		if (EditWaypoints.Num() > 0)
+		{
+			EditWaypoints.Pop();   // undo the last point
+			RebuildEditTrack(FindNavRoadMgr());
+		}
+		return;
+	}
 	if (AODRoadManager* RoadMgr = FindNavRoadMgr())
 	{
 		RoadMgr->ClearRoute();
+	}
+}
+
+void AODRaceHUD::RebuildEditTrack(const AODRoadManager* RoadMgr)
+{
+	bEditSaveFailed = false;
+	EditFailLeg = INDEX_NONE;
+	EditXY.Reset();
+	EditZ.Reset();
+	if (RoadMgr && EditWaypoints.Num() >= 2)
+	{
+		RoadMgr->RouteThrough(EditWaypoints, bEditLoop, EditXY, EditZ, EditFailLeg);
 	}
 }
 
@@ -1299,12 +1825,9 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		CloseWorldMap();
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
 	auto Text = [&](const FString& S, float X, float Y, float Sc, const FLinearColor& C)
 	{
-		FCanvasTextItem T(FVector2D(X, Y), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
+		HudText(Canvas, S, X, Y, Sc, C);
 	};
 
 	// square panel covering the whole screen, centered - DrawStageMap's
@@ -1343,6 +1866,12 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 	const double RealNow = GetWorld()->GetRealTimeSeconds();
 	auto Pick = [&](const FVector2D& S)
 	{
+		if (bTrackEdit)
+		{
+			EditWaypoints.Add(ToWorld(S));
+			RebuildEditTrack(RoadMgr);
+			return;
+		}
 		const int32 T = TownNear(S, 18.0f);
 		FVector2D Snap;
 		const bool bOk = T != INDEX_NONE
@@ -1427,9 +1956,40 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		}
 		if (Pressed(EKeys::RightMouseButton) || Pressed(EKeys::Gamepad_FaceButton_Left))
 		{
-			RoadMgr->ClearRoute();
+			if (bTrackEdit)
+			{
+				ClearRouteKey();   // undo the last point
+			}
+			else
+			{
+				RoadMgr->ClearRoute();
+			}
 		}
-		if ((Pressed(EKeys::F) || Pressed(EKeys::Gamepad_FaceButton_Top)) && Hover != INDEX_NONE)
+		if (Pressed(EKeys::T) || Pressed(EKeys::Gamepad_LeftThumbstick))
+		{
+			bTrackEdit = !bTrackEdit;   // points are kept until saved
+		}
+		if (bTrackEdit && (Pressed(EKeys::L) || Pressed(EKeys::Gamepad_RightThumbstick)))
+		{
+			bEditLoop = !bEditLoop;
+			RebuildEditTrack(RoadMgr);
+		}
+		const bool bF = Pressed(EKeys::F) || Pressed(EKeys::Gamepad_FaceButton_Top);
+		if (bF && bTrackEdit && EditXY.Num() >= 2)
+		{
+			const FString Name = AODRaceManager::SaveTrack(RoadMgr->GetAreaKey(), EditXY, EditZ, bEditLoop);
+			bEditSaveFailed = Name.IsEmpty();
+			for (TActorIterator<AODMainMenu> It(GetWorld()); It && !bEditSaveFailed; ++It)
+			{
+				CloseWorldMap();
+				bTrackEdit = false;
+				EditWaypoints.Reset();
+				RebuildEditTrack(nullptr);
+				It->DriveTrack(Name, RoadMgr);
+				return;
+			}
+		}
+		if (bF && !bTrackEdit && Hover != INDEX_NONE)
 		{
 			// fast travel: the front-end map's own teleport + loading path
 			for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
@@ -1465,6 +2025,34 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 			bH ? FLinearColor(1.0f, 0.9f, 0.5f) : FLinearColor(0.92f, 0.92f, 0.88f));
 	}
 
+	if (bTrackEdit)
+	{
+		auto Line = [&](const FVector2D& A, const FVector2D& B, const FLinearColor& C, float W)
+		{
+			FCanvasLineItem L(ToScreen(A), ToScreen(B));
+			L.SetColor(C);
+			L.LineThickness = W;
+			Canvas->DrawItem(L);
+		};
+		for (int32 i = 1; i < EditXY.Num(); ++i)
+		{
+			Line(EditXY[i - 1], EditXY[i], FLinearColor(1.0f, 0.55f, 0.1f), 4.0f);
+		}
+		const int32 K = EditWaypoints.Num();
+		if (EditFailLeg != INDEX_NONE)
+		{
+			Line(EditWaypoints[EditFailLeg], EditWaypoints[(EditFailLeg + 1) % K], FLinearColor(1.0f, 0.2f, 0.15f), 2.0f);
+		}
+		for (int32 i = 0; i < K; ++i)
+		{
+			const FVector2D S = ToScreen(EditWaypoints[i]);
+			FCanvasTileItem Dot(S - FVector2D(6, 6), FVector2D(12, 12),
+				i == 0 ? FLinearColor(0.3f, 1.0f, 0.4f) : FLinearColor(1.0f, 0.85f, 0.4f));
+			Canvas->DrawItem(Dot);
+			Text(FString::FromInt(i + 1), S.X + 8.0f, S.Y - 20.0f, 1.0f, FLinearColor::White);
+		}
+	}
+
 	// center crosshair (gamepad / Enter pick point)
 	for (const FVector2D& D : {FVector2D(1, 0), FVector2D(0, 1)})
 	{
@@ -1477,6 +2065,28 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 	FCanvasTileItem Bar(FVector2D(0, 0), FVector2D(Canvas->SizeX, 64.0f), FLinearColor(0.02f, 0.03f, 0.05f, 0.8f));
 	Bar.BlendMode = SE_BLEND_Translucent;
 	Canvas->DrawItem(Bar);
+	if (bTrackEdit)
+	{
+		double LenCm = 0.0;
+		for (int32 i = 1; i < EditXY.Num(); ++i)
+		{
+			LenCm += FVector2D::Distance(EditXY[i - 1], EditXY[i]);
+		}
+		const int32 K = EditWaypoints.Num();
+		const FString EditStatus = bEditSaveFailed ? FString(TEXT("couldn't save - under 100 m, or no road height data here"))
+			: EditFailLeg != INDEX_NONE ? FString::Printf(TEXT("no road from point %d to %d"), EditFailLeg + 1, (EditFailLeg + 1) % K + 1)
+			: EditXY.Num() >= 2 ? FString::Printf(TEXT("%d points  ·  %s  ·  %s"), K, *FormatNavDist(LenCm, bMetric),
+				bEditLoop ? TEXT("loop") : TEXT("point to point"))
+			: FString::Printf(TEXT("click roads to add points  ·  %s"), bEditLoop ? TEXT("loop") : TEXT("point to point"));
+		Text(TEXT("TRACK EDITOR"), 24.0f, 14.0f, 1.8f, FLinearColor(1.0f, 0.75f, 0.4f));
+		Text(EditStatus, 300.0f, 22.0f, 1.2f, bEditSaveFailed || EditFailLeg != INDEX_NONE
+			? FLinearColor(1.0f, 0.45f, 0.35f) : FLinearColor(1.0f, 0.8f, 0.5f));
+		Text(TEXT("click: add point    right-click / backspace: undo    L: loop    F: save + drive    T: world map    drag / wheel: pan / zoom    esc: close"),
+			24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
+		Text(TEXT("pad: A add at crosshair    X undo    R3 loop    Y save + drive    L3 world map    B / back: close"),
+			24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
+		return;
+	}
 	Text(TEXT("WORLD MAP"), 24.0f, 14.0f, 1.8f, FLinearColor(0.75f, 0.9f, 1.0f));
 	const FString Status = RealNow - NoRouteMsgTime < 3.0
 		? FString(TEXT("no road route to there"))
@@ -1491,9 +2101,9 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		Text(FString::Printf(TEXT("%s  -  click/enter: route here    F / Y: fast travel"), *Towns[Hover].Name),
 			24.0f, Canvas->SizeY - 84.0f, 1.1f, FLinearColor(1.0f, 0.9f, 0.5f));
 	}
-	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: town or road waypoint    right-click / backspace: clear route    tab / esc: close"),
+	Text(TEXT("drag / arrows pan    wheel / [ ] zoom    click: turnout or road waypoint    right-click / backspace: clear route    T: track editor    tab / esc: close"),
 		24.0f, Canvas->SizeY - 56.0f, 1.0f, FLinearColor(0.7f, 0.75f, 0.8f));
-	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    B / back: close"),
+	Text(TEXT("pad: stick pan    LB/RB zoom    A route to crosshair    X clear    Y fast travel    L3 track editor    B / back: close"),
 		24.0f, Canvas->SizeY - 32.0f, 1.0f, FLinearColor(0.55f, 0.6f, 0.65f));
 }
 
@@ -1505,54 +2115,53 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	{
 		return;
 	}
-	UFont* Font = GEngine->GetLargeFont();
-	const float W = 380.0f, H = 76.0f;
-	const float X = Canvas->SizeX * 0.5f - W * 0.5f, Y = 18.0f;
-	FCanvasTileItem Bg(FVector2D(X, Y), FVector2D(W, H), FLinearColor(0.02f, 0.03f, 0.05f, 0.72f));
-	Bg.BlendMode = SE_BLEND_Translucent;
-	Canvas->DrawItem(Bg);
-	auto Text = [&](const FString& S, float TX, float TY, float Sc, const FLinearColor& C)
-	{
-		FCanvasTextItem T(FVector2D(TX, TY), FText::FromString(S), CrispFont(Font, Sc), C);
-		T.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(T);
-	};
+	// (2026-10-14) restyled to the gauge cluster's look: Rajdhani, ink panel
+	// with a route-coloured edge bar, scaled from 1080p like the menus
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const float W = 440.0f * S, H = 80.0f * S;
+	const float X = Canvas->SizeX * 0.5f - W * 0.5f, Y = 22.0f * S;
+	const FLinearColor RouteCol(1.0f, 0.55f, 0.9f);   // the map's route line
+	P.Fade(X, X + W, Y, H, Ink, 0.78f, 0.5f);
 	if (!RoadMgr->HasRoute())
 	{
-		Text(FString::Printf(TEXT("ARRIVED  ·  %s"), *RoadMgr->GetArrivedName()), X + 20.0f, Y + 22.0f, 1.5f,
-			FLinearColor(0.4f, 1.0f, 0.5f));
+		const FLinearColor Ok(0.4f, 1.0f, 0.5f);
+		P.Rect(X, Y, 4.0f * S, H, Ok);
+		P.Text(TEXT("ARRIVED"), X + 24.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, Ok, false, 80);
+		P.Text(RoadMgr->GetArrivedName(), X + 24.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, TextCol);
 		return;
 	}
+	P.Rect(X, Y, 4.0f * S, H, RouteCol);
 
 	// turn arrow: stem up from the bottom, then bent by the turn angle
 	// (+ = right = clockwise on screen); straight when no turn is coming
 	float TurnCm = 0.0f, TurnDeg = 0.0f;
 	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg);
 	const float A = FMath::DegreesToRadians(bTurn ? FMath::Clamp(TurnDeg, -135.0f, 135.0f) : 0.0f);
-	const FVector2D Knee(X + 38.0f, Y + 36.0f);
+	const FVector2D Knee(X + 48.0f * S, Y + 40.0f * S);
 	const FVector2D Dir(FMath::Sin(A), -FMath::Cos(A));
-	const FVector2D Tip = Knee + Dir * 20.0f;
+	const FVector2D Tip = Knee + Dir * 14.0f * S;
 	const FVector2D Side(-Dir.Y, Dir.X);
-	const FLinearColor ArrowCol(1.0f, 0.55f, 0.9f);
-	const FVector2D Lines[4][2] = {
-		{Knee + FVector2D(0, 26.0f), Knee}, {Knee, Tip},
-		{Tip, Tip - Dir * 9.0f + Side * 7.0f}, {Tip, Tip - Dir * 9.0f - Side * 7.0f}};
-	for (const auto& L : Lines)
+	auto Stroke = [&](const FVector2D& From, const FVector2D& To)
 	{
-		FCanvasLineItem Item(L[0], L[1]);
-		Item.SetColor(ArrowCol);
-		Item.LineThickness = 4.0f;
+		FCanvasLineItem Item(From, To);
+		Item.SetColor(RouteCol);
+		Item.LineThickness = 5.0f * S;
 		Canvas->DrawItem(Item);
-	}
+	};
+	Stroke(Knee + FVector2D(0, 26.0f * S), Knee);
+	Stroke(Knee, Tip);
+	const FVector2D Head[3] = {Tip + Dir * 12.0f * S, Tip + Side * 10.0f * S, Tip - Side * 10.0f * S};
+	ODHudDraw::Poly(Canvas, Head, RouteCol);
 
 	const float Abs = FMath::Abs(TurnDeg);
 	const TCHAR* Side2 = TurnDeg > 0.0f ? TEXT("right") : TEXT("left");
 	const FString Line1 = !bTurn ? FString(TEXT("Continue"))
 		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
 			Side2, *FormatNavDist(TurnCm, bMetric));
-	Text(Line1, X + 80.0f, Y + 10.0f, 1.5f, FLinearColor::White);
-	Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
-		X + 80.0f, Y + 44.0f, 1.05f, FLinearColor(1.0f, 0.7f, 0.92f));
+	P.Text(Line1.ToUpper(), X + 92.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
+	P.Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
+		X + 92.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol);
 }
 
 void AODRaceHUD::DrawHUD()
@@ -1563,6 +2172,42 @@ void AODRaceHUD::DrawHUD()
 		return;
 	}
 	MenuHits.Reset();   // refilled by whichever menu draws this frame
+	PickerSV = PickerHue = FBox2D(ForceInit);
+
+	// loading-screen fade-out (2026-10-14): once AODMainMenu releases to
+	// Playing, a fading copy of the loading screen draws over everything else
+	// this frame (scope exit = last), over LoadingFadeSec of real time
+	if (LoadingShownAt >= 0.0)
+	{
+		const AODMainMenu* LoadMenu = nullptr;
+		for (TActorIterator<AODMainMenu> It(GetWorld()); It; ++It)
+		{
+			LoadMenu = *It;
+			break;
+		}
+		if (!LoadMenu || !LoadMenu->IsActive())
+		{
+			LoadingShownAt = -1.0;
+			LoadingEndedAt = FPlatformTime::Seconds();
+		}
+		else if (!LoadMenu->IsLoading() && !LoadMenu->IsStartLoading())
+		{
+			LoadingShownAt = -1.0;   // back to a menu screen: no fade over it
+		}
+	}
+	ON_SCOPE_EXIT
+	{
+		constexpr float LoadingFadeSec = 0.7f;
+		const float T = LoadingEndedAt < 0.0 ? 1.0f : float(FPlatformTime::Seconds() - LoadingEndedAt) / LoadingFadeSec;
+		if (T < 1.0f)
+		{
+			DrawLoadingScreen(nullptr, 1.0f - FMath::SmoothStep(0.0f, 1.0f, T));
+		}
+		else
+		{
+			LoadingEndedAt = -1.0;
+		}
+	};
 
 	// AODRaceManager only exists on stages with a race/checkpoint framework
 	// (Tail of the Dragon) - nullptr on free-roam/open-world levels. Used to
@@ -1577,7 +2222,10 @@ void AODRaceHUD::DrawHUD()
 	for (TActorIterator<AODRaceManager> It(GetWorld()); It; ++It)
 	{
 		Race = *It;
-		break;
+		if (!Race->TrackName.IsEmpty())
+		{
+			break;   // a picked custom track over a level-placed race
+		}
 	}
 
 	// AODRoadManager exists on any level with a road, race or not
@@ -1588,7 +2236,8 @@ void AODRaceHUD::DrawHUD()
 	// carrying the (home-only) map texture - actor iteration order isn't a
 	// promise that the level-placed home manager comes first.
 	AODRoadManager* RoadMgr = nullptr;
-	if (!Race)
+	const bool bRaceMap = Race && Race->RoadCenterline.Num() > 0;   // a custom track has none
+	if (!bRaceMap)
 	{
 		for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
 		{
@@ -1607,7 +2256,7 @@ void AODRaceHUD::DrawHUD()
 	// what actually fixes the Oahu "connects unrelated streets + ~780,000
 	// line draws a frame" map lag. Race (Tail of the Dragon) has no such
 	// distinction - a single small loop was never in trouble either way.
-	const TArray<FVector2D>* MapCenterline = Race ? &Race->RoadCenterline
+	const TArray<FVector2D>* MapCenterline = bRaceMap ? &Race->RoadCenterline
 		: (RoadMgr && RoadMgr->MapCenterline.Num() > 0) ? &RoadMgr->MapCenterline
 		: (RoadMgr ? &RoadMgr->RoadCenterline : nullptr);
 	const TArray<FTransform>* MapGates = Race ? &Race->Checkpoints : nullptr;
@@ -1656,8 +2305,6 @@ void AODRaceHUD::DrawHUD()
 		return R.IsEmpty() ? C : R;
 	}();
 
-	UFont* Font = GEngine->GetLargeFont();
-
 	// draws PlaceLabelText just above the mini-map's top edge (the pause
 	// map draws its own in the menu font); no-ops on an empty
 	// label (RoadMgr missing, prefix unset, or no nearby label point yet).
@@ -1667,10 +2314,10 @@ void AODRaceHUD::DrawHUD()
 		{
 			return;
 		}
-		FCanvasTextItem LabelItem(FVector2D(PanelX, PanelTopY - 26.0f),
-			FText::FromString(PlaceLabelText), Font, FLinearColor(0.9f, 0.9f, 0.85f));
-		LabelItem.EnableShadow(FLinearColor::Black);
-		Canvas->DrawItem(LabelItem);
+		// via FMenuPaint (2026-10-14): a bare MenuFont text item has no UFont,
+		// fails HasValidText() and silently never drew
+		const FMenuPaint P{Canvas, MenuScale()};
+		P.Text(PlaceLabelText.ToUpper(), PanelX, PanelTopY - 22.0f * P.S, 17.0f, EMenuWeight::SemiBold, TextCol, false, 60);
 	};
 
 	// ---- pause menu (AODPauseMenu owns state): the shared left column, the
@@ -1690,7 +2337,7 @@ void AODRaceHUD::DrawHUD()
 		}
 		else
 		{
-			DrawMenuPanel(TEXT("Paused"), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+			DrawMenuPanel(Menu->GetTitle(), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
 				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
 			const float S = MenuScale();
 			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),
@@ -1715,53 +2362,60 @@ void AODRaceHUD::DrawHUD()
 
 	const float Now = GetWorld()->GetTimeSeconds();
 
+	// race timer, warnings (2026-10-14): Rajdhani + the cluster palette,
+	// centred and scaled from 1080p like the menus
+	const FMenuPaint HP{Canvas, MenuScale()};
+	const FLinearColor Go(0.3f, 1.0f, 0.4f);
+
 	// ---- race timer / gate progress (needs an actual race)
 	if (Race)
 	{
-		const float X = Canvas->SizeX * 0.5f - 90.0f;
-		float Y = 30.0f;
-
-		auto Line = [&](const FString& Text, const FLinearColor& Color, float Scale)
+		const float X = Canvas->SizeX * 0.5f;
+		float Y = 30.0f * HP.S;
+		auto Line = [&](const FString& Text, const FLinearColor& Color, float Size, EMenuWeight W, int32 Spacing)
 		{
-			FCanvasTextItem Item(FVector2D(X, Y), FText::FromString(Text), CrispFont(Font, Scale), Color);
-			Item.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Item);
-			Y += 26.0f * Scale;
+			HP.Text(Text, X, Y + Size * 0.6f * HP.S, Size, W, Color, true, Spacing);
+			Y += Size * 1.2f * HP.S;
 		};
 
 		if (Race->bRunning)
 		{
-			Line(FormatTime(Race->ElapsedTime()), FLinearColor::White, 2.0f);
-			Line(FString::Printf(TEXT("gate %d / %d"), Race->NextGate,
-				Race->Checkpoints.Num()), FLinearColor(1, 1, 0.3f), 1.2f);
+			Line(FormatTime(Race->ElapsedTime()), FLinearColor::White, 46.0f, EMenuWeight::Bold, 40);
+			Line(FString::Printf(TEXT("GATE %d / %d"), Race->NextGate, Race->Checkpoints.Num()),
+				Accent, 18.0f, EMenuWeight::SemiBold, 120);
 			if (Race->ElapsedTime() < 1.5f)
 			{
-				Line(TEXT("GO!"), FLinearColor(0.3f, 1, 0.3f), 2.4f);
+				Line(TEXT("GO!"), Go, 52.0f, EMenuWeight::Bold, 80);
 			}
 			else if (Now - Race->SplitShownAt < 3.0f)
 			{
 				// sector split vs best run: green = ahead, red = behind
-				const bool bAhead = Race->SplitDelta <= 0.0f;
-				Line(FString::Printf(TEXT("%+.2f"), Race->SplitDelta),
-					bAhead ? FLinearColor(0.3f, 1, 0.3f) : FLinearColor(1, 0.35f, 0.3f),
-					1.6f);
+				Line(FString::Printf(TEXT("%+.2f"), Race->SplitDelta), Race->SplitDelta <= 0.0f ? Go : Danger,
+					30.0f, EMenuWeight::Bold, 40);
 			}
 		}
 		else
 		{
-			Line(TEXT("cross the green gate to start"), FLinearColor(0.4f, 1, 0.4f), 1.2f);
+			Line(TEXT("CROSS THE GREEN GATE TO START"), Go, 20.0f, EMenuWeight::SemiBold, 80);
 			if (Race->LastTime > 0.0f)
 			{
-				Line(FString::Printf(TEXT("last  %s"), *FormatTime(Race->LastTime)),
-					FLinearColor::White, 1.2f);
+				Line(FString::Printf(TEXT("LAST  %s"), *FormatTime(Race->LastTime)), TextCol, 20.0f, EMenuWeight::SemiBold, 60);
 			}
 		}
 		if (Race->BestTime > 0.0f)
 		{
-			Line(FString::Printf(TEXT("best  %s"), *FormatTime(Race->BestTime)),
-				FLinearColor(0.5f, 0.8f, 1), 1.2f);
+			Line(FString::Printf(TEXT("BEST  %s"), *FormatTime(Race->BestTime)), Accent, 20.0f, EMenuWeight::SemiBold, 60);
 		}
 	}
+
+	// centred warning line on a soft ink band that fades out to both sides
+	auto Banner = [&](const FString& Text, float CY, const FLinearColor& Col)
+	{
+		const float CX = Canvas->SizeX * 0.5f, HW = 460.0f * HP.S, BH = 64.0f * HP.S;
+		HP.Fade(CX - HW, CX, CY - BH * 0.5f, BH, Ink, 0.0f, 0.6f);
+		HP.Fade(CX, CX + HW, CY - BH * 0.5f, BH, Ink, 0.6f, 0.0f);
+		HP.Text(Text.ToUpper(), CX, CY, 36.0f, EMenuWeight::Bold, Col, true, 80);
+	};
 
 	// ---- out-of-bounds countdown (2026-09-06) - warns while the car is past
 	// AODVehiclePawn::OobDistCm, before the reset teleports it back. Centered
@@ -1771,15 +2425,8 @@ void AODRaceHUD::DrawHUD()
 		const float Cd = Veh->GetOobCountdownSec();
 		if (Cd >= 0.0f)
 		{
-			FCanvasTextItem Warn(
-				FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.28f),
-				FText::FromString(FString::Printf(
-					TEXT("%s - RETURNING IN %.0f"),
-					Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
-					FMath::CeilToFloat(Cd))),
-				CrispFont(Font, 2.2f), FLinearColor(1.0f, 0.35f, 0.2f));
-			Warn.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Warn);
+			Banner(FString::Printf(TEXT("%s  ·  RETURNING IN %.0f"), Veh->IsOobStuckReset() ? TEXT("STUCK") : TEXT("OFF ROAD"),
+				FMath::CeilToFloat(Cd)), Canvas->SizeY * 0.28f, Danger);
 		}
 	}
 
@@ -1790,10 +2437,7 @@ void AODRaceHUD::DrawHUD()
 	{
 		if (Now - It->WarningShownAt < 6.0f)
 		{
-			FCanvasTextItem Warn(FVector2D(Canvas->SizeX * 0.5f - 220.0f, Canvas->SizeY * 0.18f),
-				FText::FromString(It->WarningText), CrispFont(Font, 2.0f), FLinearColor(1.0f, 0.8f, 0.2f));
-			Warn.EnableShadow(FLinearColor::Black);
-			Canvas->DrawItem(Warn);
+			Banner(It->WarningText, Canvas->SizeY * 0.18f, Warn);
 		}
 		break;
 	}
@@ -1823,7 +2467,7 @@ void AODRaceHUD::DrawHUD()
 				G.AirTempC = It->AirTempC;
 				break;
 			}
-			ODGaugeCluster::Draw(Canvas, Font, G, Now);
+			ODGaugeCluster::Draw(Canvas, G, Now);
 		}
 	}
 
@@ -1835,11 +2479,19 @@ void AODRaceHUD::DrawHUD()
 	// as-is.
 	if (bShowMiniMap)
 	{
-		DrawPlaceLabel(24.0f, Canvas->SizeY - MiniMapSize - 24.0f);
+		const float MapS = MenuScale();
+		const float MapSize = MiniMapSize * MapS, MapX = 40.0f * MapS, MapY = Canvas->SizeY - MapSize - 28.0f * MapS;
+		DrawPlaceLabel(MapX, MapY);
+		// zoom out with speed so the road ahead covers a similar look-ahead
+		// time (x2 by ~65 mph, x3 by ~130); eased so it breathes, not jumps
+		const APawn* MapPawn = GetOwningPawn();
+		const float SpeedMs = MapPawn ? MapPawn->GetVelocity().Size() * 0.01f : 0.0f;
+		const float Target = 1.0f + SpeedMs / 29.0f;
+		MiniMapSpeedZoom = FMath::Lerp(Target, MiniMapSpeedZoom,
+			FMath::Exp(-GetWorld()->GetDeltaSeconds() / 0.8f));
 		DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
-			Race ? Race->NextGate : INDEX_NONE, 24.0f,
-			Canvas->SizeY - MiniMapSize - 24.0f, MiniMapSize, 0.55f,
-			MiniMapZoomM, true, RoadMgr);
+			Race ? Race->NextGate : INDEX_NONE, MapX, MapY, MapSize, 0.55f,
+			MiniMapZoomM * MiniMapSpeedZoom, true, RoadMgr);
 	}
 
 	// ---- navigation next-turn / distance panel (SS7.37)

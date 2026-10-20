@@ -115,6 +115,11 @@ inline const TCHAR* ExtendedTreeMeshPaths[] = {
 	TEXT("/Game/OpenDrive/Trees/tree_manzanita.tree_manzanita"),
 	TEXT("/Game/OpenDrive/Trees/tree_yucca.tree_yucca"),
 	TEXT("/Game/OpenDrive/Trees/tree_canyon_oak.tree_canyon_oak"),
+	// tropical (2026-10-14): Savanna/Rainforest/TropicalCoast/LavaField
+	TEXT("/Game/OpenDrive/Trees/tree_palm.tree_palm"),
+	TEXT("/Game/OpenDrive/Trees/tree_fern.tree_fern"),
+	TEXT("/Game/OpenDrive/Trees/tree_broadleaf.tree_broadleaf"),
+	TEXT("/Game/OpenDrive/Trees/tree_broadleaf_giant.tree_broadleaf_giant"),
 };
 inline constexpr int32 NumExtendedTreeSpecies = UE_ARRAY_COUNT(ExtendedTreeMeshPaths);
 

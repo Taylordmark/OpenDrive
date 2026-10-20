@@ -1,4 +1,5 @@
 #include "ODAmbientSoundManager.h"
+#include "ODTileSource.h"
 
 #include "Components/AudioComponent.h"
 #include "EngineUtils.h"
@@ -82,8 +83,8 @@ bool AODAmbientSoundManager::LoadZoneGrid()
 		UE_LOG(LogTemp, Display, TEXT("ODAmbientSoundManager: no AmbientZoneFile - zone layers silent, weather layers only"));
 		return false;
 	}
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ (AmbientZoneFile + TEXT(".bin"));
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (AmbientZoneFile + TEXT(".bin")));
 
 	TArray<uint8> Bin;
 	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 20
@@ -245,8 +246,8 @@ void AODAmbientSoundManager::SampleAndRetarget()
 		for (TActorIterator<AODWeatherController> It(GetWorld()); It; ++It) { WeatherCtl = *It; break; }
 	}
 	const AODWeatherController* Weather = WeatherCtl.Get();
-	LayerRain.TargetVolume = Weather ? Weather->PrecipIntensity * (1.0f - Weather->PrecipType) : 0.0f;
-	LayerWind.TargetVolume = Weather
+	LayerRain.TargetVolume = Weather && !Weather->IsSheltered() ? Weather->PrecipIntensity * (1.0f - Weather->PrecipType) : 0.0f;
+	LayerWind.TargetVolume = Weather && !Weather->IsSheltered()
 		? FMath::Max(FMath::Clamp((Weather->WindSpeedMs - 5.0f) / 15.0f, 0.0f, 1.0f), Weather->DustAmount) : 0.0f;
 
 	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);

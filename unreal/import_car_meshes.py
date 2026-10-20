@@ -437,6 +437,10 @@ make_def("DA_Vehicle_LMP", {
     # Le Mans prototype: mid-engine, aero nose keeps it 45% front, lowest COM
     "front_weight_frac": 0.45, "yaw_dynamic_index": 0.85, "com_local_z": 3.0,
     "drive_layout": unreal.ODDriveLayout.RWD, "peak_torque_nm": 600.0,
+    # 6-speed, geometric 4.25 -> 0.82 (x1.39 steps): same 1st and same ~381
+    # km/h 6th-gear limiter, but 5th/6th arrive at ~198/~274 km/h instead of
+    # ~256/~312 (Taylor, 2026-10-14: never saw past 4th on real roads)
+    "gear_ratios": [4.25, 3.06, 2.20, 1.58, 1.14, 0.82],
     "front_brake_nm": 2850.0, "rear_brake_nm": 2300.0, "handbrake_nm": 4600.0,
     # racing slicks (low load sensitivity); 1.5x weight at 150 mph (ClA ~5.5)
     "mu_peak": 1.60, "tire_load_sensitivity": 0.15, "rear_grip_ratio": 1.06,
@@ -446,3 +450,7 @@ make_def("DA_Vehicle_LMP", {
 unreal.EditorAssetLibrary.save_directory(CAR_DIR, only_if_is_dirty=False)
 unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
 log("DONE - saved 8 meshes, 7 category materials, and 7 vehicle defs")
+
+# per-car camera mounts live in their own script so they can be re-applied
+# alone; the defs above were just recreated without them
+exec((Path(__file__).resolve().parent / "apply_vehicle_cameras.py").read_text())

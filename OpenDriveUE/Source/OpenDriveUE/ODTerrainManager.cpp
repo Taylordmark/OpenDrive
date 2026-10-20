@@ -1,6 +1,9 @@
 #include "ODTerrainManager.h"
+#include "UObject/Package.h" // ODVisualStyle.h uses UPackage (non-unity builds)
+#include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
+#include "ODTileSource.h"
 #include "ODForestManager.h" // EODBiome only, for BiomeGroundTintTable below - no calls into AODForestManager itself
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -9,6 +12,11 @@
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
+#include "ImageUtils.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -120,7 +128,11 @@ static constexpr float ConflictMinGapCm = 100.0f;   // CONFLICT_MIN_GAP_M (1 m)
 // material's own below-treeline look: full "rich/dark low green" bias now
 // holds everywhere below real treeline, only starting to greigh out right
 // where the material itself starts blending toward scree.
-static constexpr float ElevLowCm = -8530.0f;   // ~3350 m (=TREELINE_LOW_M) - at/below: full "rich/dark low green" bias
+// 2026-10-15 (realism eval T1): ElevLowCm/ElevHighCm are now per area -
+// FODGroundBands::ElevLowCm/ElevHighCm from groundbands_<area>_test.json
+// (pipeline/build_ground_bands.py: treeline low .. +765 m, climate-derived),
+// passed into ApplyBiomeTint (summit_county's file reproduces the values the
+// comments here describe, give or take the climate fit).
 // 2026-09-04 RETUNE #1 (§7.15 background-slope follow-up): was 40000 (~3835 m),
 // which put FULL grey bias well BELOW unreal/apply_ground_material.py's own
 // TREELINE_HIGH_M=3650 - i.e. this vertex-tint elevation gradient was already
@@ -129,7 +141,6 @@ static constexpr float ElevLowCm = -8530.0f;   // ~3350 m (=TREELINE_LOW_M) - at
 // logic had even started blending toward scree. Raised so full grey doesn't
 // land until just above the real treeline instead of a third of the way up
 // the valley wall.
-static constexpr float ElevHighCm = 68000.0f;   // ~4115 m - at/above: full "grey/rocky" bias
 static const FLinearColor ElevLowBias(0.02f, 0.10f, 0.02f);
 static const FLinearColor ElevHighBias(0.40f, 0.40f, 0.40f);
 
@@ -218,8 +229,10 @@ const FBiomeGroundTint BiomeGroundTintTable[] = {
 	/* CoastalDune      */ { FLinearColor(0.50f, 0.46f, 0.32f) },
 	/* CanyonBadlands   */ { FLinearColor(0.48f, 0.34f, 0.22f) },
 	/* RockyFoothill    */ { FLinearColor(0.28f, 0.30f, 0.24f) }, // grey-green transition
+	/* TropicalCoast    */ { FLinearColor(0.55f, 0.50f, 0.36f) }, // pale coral sand
+	/* LavaField        */ { FLinearColor(0.05f, 0.05f, 0.055f) }, // fresh basalt, near black
 };
-static_assert(UE_ARRAY_COUNT(BiomeGroundTintTable) == (uint8)EODBiome::RockyFoothill + 1,
+static_assert(UE_ARRAY_COUNT(BiomeGroundTintTable) == (uint8)EODBiome::LavaField + 1,
 	"BiomeGroundTintTable must have one entry per EODBiome value, in enum order");
 
 // HashLattice/ValueNoise2D moved to ODBinSidecarUtil.h (2026-09-25) -
@@ -242,8 +255,8 @@ void AODTerrainManager::BeginPlay()
 	// which is correct (this is the ground beside the road, not the
 	// driving surface). LoadObject failing is a silent no-op, same
 	// null-safety convention as AODRoadManager::RoadMat.
-	TerrainMat = LoadObject<UMaterialInterface>(
-		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized"));
+	TerrainMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_GroundStylized.M_GroundStylized")));
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: TerrainMat load %s"),
 		TerrainMat ? TEXT("OK") : TEXT("FAILED (terrain will use engine default material)"));
 
@@ -252,6 +265,13 @@ void AODTerrainManager::BeginPlay()
 	if (TerrainMat)
 	{
 		TerrainMID = UMaterialInstanceDynamic::Create(TerrainMat, this);
+		LoadGroundBands();
+		if (ODVisualStyle::IsRealistic())
+		{
+			SatTex = BindAreaTexture(TEXT("sat"), TEXT("Sat"));
+			PaveTex = BindAreaTexture(TEXT("pave"), TEXT("Pave"));
+			DemTex = BindAreaTexture(TEXT("dem"), TEXT("Dem"));
+		}
 	}
 
 	// Runtime terrain carve (2026-08-26): load the road-station sidecar once
@@ -263,6 +283,7 @@ void AODTerrainManager::BeginPlay()
 	// point-classified biome sidecar AODForestManager's BlendAt() reads, into
 	// this manager's OWN spatial hash - see LoadBiomeSidecar/ApplyBiomeTint.
 	LoadBiomeSidecar();
+	LoadHorizon();
 
 	// Diagnostic-only override (2026-08-25): lets a headless test bisect
 	// how many resident near-fidelity (collision-enabled) tiles trigger the
@@ -429,8 +450,8 @@ void AODTerrainManager::LoadRoadStationSidecar()
 	FString Area = TerrainTilePrefix.Mid(8);
 	Area.RemoveFromEnd(TEXT("_test"));
 
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("roadstations_%s.bin"), *Area);
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("roadstations_%s.bin"), *Area));
 
 	TArray<FRoadStation> Loaded;
 	FString GenId;
@@ -465,6 +486,92 @@ void AODTerrainManager::LoadRoadStationSidecar()
 		NumStations, *Path, *GenId);
 }
 
+UTexture2D* AODTerrainManager::BindAreaTexture(const TCHAR* Kind, const TCHAR* Param)
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return nullptr;
+	}
+	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/") + Kind + TEXT("_") + TerrainTilePrefix.Mid(8);
+	FString Json;
+	TSharedPtr<FJsonObject> Meta;
+	if (!FFileHelper::LoadFileToString(Json, *ODTileSource::Fetch(Base + TEXT(".json")))
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no %s.json - %sAmount stays 0"), *Base, Param);
+		return nullptr;
+	}
+	UTexture2D* Tex = FImageUtils::ImportFileAsTexture2D(ODTileSource::Fetch(Base + TEXT(".png")));
+	if (!Tex)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - %sAmount stays 0"), *Base, Param);
+		return nullptr;
+	}
+	Tex->SRGB = true;              // linear values, sRGB-encoded (matches the Color sampler)
+	Tex->AddressX = TA_Clamp;      // border texels = no data / no pave outside the extent
+	Tex->AddressY = TA_Clamp;
+	Tex->UpdateResource();
+	const FString P(Param);
+	const FVector Off = GetActorLocation();   // tiles sit at actor-relative positions
+	TerrainMID->SetTextureParameterValue(*(P + TEXT("Tex")), Tex);
+	TerrainMID->SetDoubleVectorParameterValue(*(P + TEXT("Origin")),
+		FVector4(Meta->GetNumberField(TEXT("x_min_cm")) + Off.X, Meta->GetNumberField(TEXT("y_min_cm")) + Off.Y, 0.0, 0.0));
+	TerrainMID->SetVectorParameterValue(*(P + TEXT("SizeCm")),
+		FLinearColor(Meta->GetNumberField(TEXT("size_x_cm")), Meta->GetNumberField(TEXT("size_y_cm")), 0.0f, 0.0f));
+	TerrainMID->SetScalarParameterValue(*(P + TEXT("Amount")), 1.0f);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: %s %dx%d bound (%s)"),
+		*Base, Tex->GetSizeX(), Tex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
+	return Tex;
+}
+
+void AODTerrainManager::LoadGroundBands()
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return;
+	}
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/groundbands_")
+		+ TerrainTilePrefix.Mid(8) + TEXT(".json"));
+	FString Json;
+	TSharedPtr<FJsonObject> O;
+	if (!FFileHelper::LoadFileToString(Json, *Path)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), O) || !O.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s missing - no treeline/snow/beach bands (run pipeline/build_ground_bands.py)"), *Path);
+	}
+	else
+	{
+		FODGroundBands& B = GroundBands;
+		const auto Read = [&O](const TCHAR* Key, float& Out) { double V; if (O->TryGetNumberField(Key, V)) { Out = (float)V; } };
+		Read(TEXT("sea_z_cm"), B.SeaZCm);
+		Read(TEXT("treeline_low_cm"), B.TreelineLowCm);
+		Read(TEXT("treeline_high_cm"), B.TreelineHighCm);
+		Read(TEXT("elev_low_cm"), B.ElevLowCm);
+		Read(TEXT("elev_high_cm"), B.ElevHighCm);
+		Read(TEXT("snow_summer_low_cm"), B.SnowSummerLowCm);
+		Read(TEXT("snow_summer_high_cm"), B.SnowSummerHighCm);
+		Read(TEXT("snow_winter_low_cm"), B.SnowWinterLowCm);
+		Read(TEXT("snow_winter_high_cm"), B.SnowWinterHighCm);
+		Read(TEXT("low_green_bias"), B.LowGreenBias);
+	}
+	// tiles sit at actor-relative positions; the material reads world Z
+	const float Dz = (float)GetActorLocation().Z;
+	FODGroundBands& W = GroundBandsWorld;
+	W = GroundBands;
+	for (float* F : { &W.SeaZCm, &W.TreelineLowCm, &W.TreelineHighCm, &W.ElevLowCm, &W.ElevHighCm,
+		&W.SnowSummerLowCm, &W.SnowSummerHighCm, &W.SnowWinterLowCm, &W.SnowWinterHighCm })
+	{
+		*F += Dz;
+	}
+	TerrainMID->SetScalarParameterValue(TEXT("SeaLevelZCm"), W.SeaZCm);
+	TerrainMID->SetScalarParameterValue(TEXT("TreelineLowZCm"), W.TreelineLowCm);
+	TerrainMID->SetScalarParameterValue(TEXT("TreelineHighZCm"), W.TreelineHighCm);
+	TerrainMID->SetScalarParameterValue(TEXT("SnowLineLowZCm"), W.SnowSummerLowCm);
+	TerrainMID->SetScalarParameterValue(TEXT("SnowLineHighZCm"), W.SnowSummerHighCm);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: ground bands sea=%.0f treeline=%.0f..%.0f snow summer=%.0f..%.0f winter=%.0f..%.0f (world cm)"),
+		W.SeaZCm, W.TreelineLowCm, W.TreelineHighCm, W.SnowSummerLowCm, W.SnowSummerHighCm, W.SnowWinterLowCm, W.SnowWinterHighCm);
+}
+
 void AODTerrainManager::LoadBiomeSidecar()
 {
 	// Same "<AREA_NAME>" derivation LoadRoadStationSidecar uses above, but
@@ -480,8 +587,8 @@ void AODTerrainManager::LoadBiomeSidecar()
 	FString Area = TerrainTilePrefix.Mid(8);
 	Area.RemoveFromEnd(TEXT("_test"));
 
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ FString::Printf(TEXT("biome_%s_test.bin"), *Area);
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ FString::Printf(TEXT("biome_%s_test.bin"), *Area));
 
 	TArray<FBiomeSample> Loaded;
 	if (!ParseBiomeSidecarFile(Path, Loaded))
@@ -544,6 +651,19 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 		}
 	}
 
+	// Raw Z snapshot (2026-10-14): repairing in place used to let an
+	// already-repaired (or still-bad) neighbor feed the next vertex's mean -
+	// Oahu's offshore Terrarium voids (-32768 m clusters) produced "repaired"
+	// Zs of -3 km. Detect and repair against the raw values, median not
+	// mean, so one bad neighbor can't drag the result.
+	TArray<float> RawZ;
+	RawZ.SetNumUninitialized(VCount);
+	for (uint32 v = 0; v < VCount; ++v)
+	{
+		RawZ[v] = Tile.Verts[v * 3 + 2];
+	}
+
+	TArray<float> NbrZ;
 	for (uint32 v = 0; v < VCount; ++v)
 	{
 		const TArray<uint32>& Nbrs = Neighbors[v];
@@ -552,14 +672,13 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 			continue; // isolated vertex (shouldn't happen for a real tile) - nothing to compare against
 		}
 
-		const float Z = Tile.Verts[v * 3 + 2];
+		const float Z = RawZ[v];
 		float MinAbsDelta = TNumericLimits<float>::Max();
-		float SumNeighborZ = 0.0f;
+		NbrZ.Reset();
 		for (uint32 N : Nbrs)
 		{
-			const float NZ = Tile.Verts[N * 3 + 2];
-			MinAbsDelta = FMath::Min(MinAbsDelta, FMath::Abs(Z - NZ));
-			SumNeighborZ += NZ;
+			NbrZ.Add(RawZ[N]);
+			MinAbsDelta = FMath::Min(MinAbsDelta, FMath::Abs(Z - RawZ[N]));
 		}
 
 		if (MinAbsDelta <= ThresholdCm)
@@ -567,17 +686,23 @@ void AODTerrainManager::RepairOutlierVertices(FParsedTerrainTile& Tile, const FI
 			continue; // agrees with at least one neighbor within threshold - not an outlier
 		}
 
-		const float RepairedZ = SumNeighborZ / Nbrs.Num();
-		FString NeighborZList;
-		for (uint32 N : Nbrs)
+		NbrZ.Sort();
+		const float RepairedZ = NbrZ[NbrZ.Num() / 2];
+		// Verbose (2026-10-14): one line per vertex was 3,666 Warnings on
+		// one Oahu load; the per-tile summary in the caller stays a Warning.
+		if (UE_LOG_ACTIVE(LogTemp, Verbose))
 		{
-			NeighborZList += FString::Printf(TEXT("%.1f,"), Tile.Verts[N * 3 + 2] / 100.0f);
+			FString NeighborZList;
+			for (float NZ : NbrZ)
+			{
+				NeighborZList += FString::Printf(TEXT("%.1f,"), NZ / 100.0f);
+			}
+			UE_LOG(LogTemp, Verbose,
+				TEXT("ODTerrainManager: outlier vertex repaired - tile (%d,%d) vert=%u rawZ=%.1fm ")
+				TEXT("neighborZs_m=[%s] repairedZ=%.1fm (min neighbor delta %.1fm > threshold %.1fm)"),
+				Key.X, Key.Y, v, Z / 100.0f, *NeighborZList, RepairedZ / 100.0f,
+				MinAbsDelta / 100.0f, ThresholdCm / 100.0f);
 		}
-		UE_LOG(LogTemp, Warning,
-			TEXT("ODTerrainManager: outlier vertex repaired - tile (%d,%d) vert=%u rawZ=%.1fm ")
-			TEXT("neighborZs_m=[%s] repairedZ=%.1fm (min neighbor delta %.1fm > threshold %.1fm)"),
-			Key.X, Key.Y, v, Z / 100.0f, *NeighborZList, RepairedZ / 100.0f,
-			MinAbsDelta / 100.0f, ThresholdCm / 100.0f);
 
 		Tile.Verts[v * 3 + 2] = RepairedZ;
 		++OutNumRepaired;
@@ -1017,7 +1142,7 @@ void AODTerrainManager::VerifyCarveGuarantee(const FParsedTerrainTile& Tile, con
 
 void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint& Key, float TileSizeCm,
 	const FBiomeSpatialHash& BiomeHash, const FStationSpatialHash& StationHash,
-	float TintStrength, int32& OutVertsTinted, int32& OutDistinctBiomes,
+	float TintStrength, const FODGroundBands& Bands, int32& OutVertsTinted, int32& OutDistinctBiomes,
 	float& OutMinLuma, float& OutMaxLuma)
 {
 	OutVertsTinted = 0;
@@ -1134,9 +1259,9 @@ void AODTerrainManager::ApplyBiomeTint(FParsedTerrainTile& Tile, const FIntPoint
 
 		// ---- ELEVATION: subtle shift, richer/darker low, greyer/rockier
 		// high - smoothstep across the bands so there's no visible seam. ----
-		const float ElevT = FMath::Clamp((Z - ElevLowCm) / (ElevHighCm - ElevLowCm), 0.0f, 1.0f);
+		const float ElevT = FMath::Clamp((Z - Bands.ElevLowCm) / (Bands.ElevHighCm - Bands.ElevLowCm), 0.0f, 1.0f);
 		const float ElevS = ElevT * ElevT * (3.0f - 2.0f * ElevT);
-		const FLinearColor LowBiased = FMath::Lerp(GroundTint, ElevLowBias, 0.45f);
+		const FLinearColor LowBiased = FMath::Lerp(GroundTint, ElevLowBias, Bands.LowGreenBias);
 		const FLinearColor HighBiased = FMath::Lerp(GroundTint, ElevHighBias, 0.55f);
 		FLinearColor Tint = FMath::Lerp(LowBiased, HighBiased, ElevS);
 
@@ -1257,7 +1382,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath,
 		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve, bRuntimeCarve,
-		HashForTint, bTintEnabled, TintStrengthValue]()
+		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands]()
 	{
 		FParsedTerrainTile Parsed;
 		// Check existence first rather than just trying-then-falling-back -
@@ -1265,9 +1390,16 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		// prefix, and that's most of the tiles in VisualRadius, so
 		// avoiding LoadFileToArray's own "failed to read file" warning
 		// spam here (LogStreaming) actually matters.
-		const bool bUseFallback = !FallbackPath.IsEmpty()
-			&& !FPlatformFileManager::Get().GetPlatformFile().FileExists(*PrimaryPath);
-		const bool bOk = ParseTerrainTileFile(bUseFallback ? FallbackPath : PrimaryPath, Parsed);
+		// (ODTileSource::Resolve does that existence check, and fetches from
+		// -ODTileServer when one is set.)
+		FString ReadPath;
+		EODTileSource Src = ODTileSource::Resolve(PrimaryPath, ReadPath);
+		if (Src == EODTileSource::Missing && !FallbackPath.IsEmpty())
+		{
+			Src = ODTileSource::Resolve(FallbackPath, ReadPath);
+		}
+		const bool bPending = Src == EODTileSource::Pending;
+		const bool bOk = Src == EODTileSource::Ready && ParseTerrainTileFile(ReadPath, Parsed);
 
 		// Outlier-vertex safety net (2026-08-27, phantom-shard investigation)
 		// - runs on the RAW parsed tile, before the carve below ever reads
@@ -1345,7 +1477,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 			ApplyBiomeTint(Parsed, Key, CarveTileSizeCm,
 				HashForTint.IsValid() ? *HashForTint : EmptyBiomeHash,
 				HashForCarve.IsValid() ? *HashForCarve : EmptyStationHash,
-				TintStrengthValue, VertsTinted, DistinctBiomes, MinLuma, MaxLuma);
+				TintStrengthValue, Bands, VertsTinted, DistinctBiomes, MinLuma, MaxLuma);
 			if (VertsTinted > 0)
 			{
 				UE_LOG(LogTemp, Display,
@@ -1362,10 +1494,16 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		}
 
 		AsyncTask(ENamedThreads::GameThread,
-			[WeakThis, Key, Fidelity, bOk, Parsed = MoveTemp(Parsed)]() mutable
+			[WeakThis, Key, Fidelity, bOk, bPending, Parsed = MoveTemp(Parsed)]() mutable
 			{
 				if (!WeakThis.IsValid() || WeakThis->GetWorld() == nullptr)
 				{
+					return;
+				}
+				if (bPending)
+				{
+					ODTileSource::RetryLater(WeakThis.Get(),
+						Fidelity == ETileFidelity::Near ? WeakThis->PendingNearTiles : WeakThis->PendingCoarseTiles, Key);
 					return;
 				}
 				WeakThis->OnTileParsed(Key, Fidelity, bOk, MoveTemp(Parsed));
@@ -1557,6 +1695,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	const uint32 TCount = Parsed.Tris.Num() / 3;
 
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
 	const FVector3d Origin = VCount ? FVector3d(Parsed.Verts[0], Parsed.Verts[1], 0.0) : FVector3d::ZeroVector;
 	Comp->SetRelativeLocation(Origin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
@@ -1645,6 +1784,7 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 		const uint32 WTCount = Parsed.WallTris.Num() / 3;
 
 		auto* WallComp = NewObject<UDynamicMeshComponent>(this);
+		WallComp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 		WallComp->SetupAttachment(RootComponent);
 		const FVector3d WallOrigin(Parsed.WallVerts[0], Parsed.WallVerts[1], 0.0);
 		WallComp->SetRelativeLocation(WallOrigin);   // local origin: see AODRoadManager::CreateChunkMeshComponent (large-world precision)
@@ -2021,4 +2161,38 @@ void AODTerrainManager::GetStreamingProgress(const FVector& AroundPos, int32& Ou
 			}
 		}
 	}
+}
+
+void AODTerrainManager::LoadHorizon()
+{
+	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
+	{
+		return;
+	}
+	const double T0 = FPlatformTime::Seconds();
+	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (TEXT("horizon_") + TerrainTilePrefix.Mid(8) + TEXT(".bin"));
+	FString ReadPath;
+	FParsedTerrainTile Parsed;
+	if (ODTileSource::Resolve(Path, ReadPath) != EODTileSource::Ready || !ParseTerrainTileFile(ReadPath, Parsed)
+		|| Parsed.Verts.Num() < 3)
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no horizon mesh (%s)"), *Path);
+		return;
+	}
+	auto* Comp = NewObject<UDynamicMeshComponent>(this);
+	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
+	Comp->SetupAttachment(RootComponent);
+	Comp->SetRelativeLocation(FVector(Parsed.Verts[0], Parsed.Verts[1], 0.0));   // FillTileMesh's local origin
+	Comp->SetCollisionProfileName(TEXT("NoCollision"));
+	Comp->SetCastShadow(false);   // 160+ km of low-res ground: not worth shadow-map pages
+	Comp->RegisterComponent();
+	Comp->EditMesh([&](FDynamicMesh3& Mesh) { FillTileMesh(Mesh, Parsed); });
+	if (TerrainMID)
+	{
+		Comp->SetMaterial(0, TerrainMID);
+	}
+	HorizonComp = Comp;
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms"),
+		Parsed.Verts.Num() / 3, Parsed.Tris.Num() / 3, (FPlatformTime::Seconds() - T0) * 1000.0);
 }

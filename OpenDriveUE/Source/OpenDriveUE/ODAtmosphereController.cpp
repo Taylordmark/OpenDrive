@@ -14,11 +14,13 @@
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Math/RandomStream.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
+#include "ODVisualStyle.h"
 #include "ODWeatherController.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -42,15 +44,46 @@ const TCHAR* CloudMaterialPath =
 // too low flattens depth cueing. Tune in small steps (0.05-0.1) live -
 // the r.SkyAtmosphere.AerialPerspective.StartDepth cvar is a proven no-op.
 constexpr float AerialPerspectiveViewDistanceScale = 0.8f;
+// Visual Style Realistic (PLAN-VISUALS.md Track A): a bit more haze for depth
+// between ridgelines. Kept short of the 1.0 that caused the pale-hills veil.
+constexpr float RealisticAerialPerspectiveScale = 0.9f;
+constexpr float RealisticFogDensity = 0.0013f;   // Stylized 0.001
 
 // ---- Weather W2 (sec 7.40) targets at full weight ----
 const FLinearColor DustTan(1.0f, 0.72f, 0.42f);
 const FLinearColor StormGreen(0.62f, 0.9f, 0.55f);   // W4 tornado sky (StormTint)
-constexpr float FullCloudCoverage = 0.5f;     // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
-constexpr float OvercastSkyLuminance = 0.35f; // x SkyLuminanceFactor
-constexpr float OvercastSun = 0.25f;          // x sun intensity
-constexpr float OvercastSkyLight = 0.6f;      // x sky light intensity
+// Under a real overcast the direct sun is ~0 and the bright grey dome gives
+// nearly all the light; at 0.25 sun auto-exposure just gave the 2 stops back
+// and hard shadows stayed (2026-10-16 lighting audit, Gap 2).
+constexpr float FullCloudCoverage = 0.95f;    // m_SimpleVolumetricCloud_Inst Cloud_GlobalCoverage (baseline -0.2)
+constexpr float OvercastSkyLuminance = 0.6f;  // x SkyLuminanceFactor
+constexpr float OvercastSun = 0.04f;          // x sun intensity
+constexpr float OvercastSkyLight = 1.2f;      // x sky light intensity
+constexpr float OvercastSunAngleDeg = 8.0f;   // sun LightSourceAngle at full cover: what shadow is left goes soft
+constexpr float FullCoverAt = 0.85f;          // CloudCover reaching full weight (Overcast's own target)
 constexpr float FlashSeconds = 0.35f;
+
+// Lumen sky leaking into canopy shade (2026-10-20 audit, Gap 1C; sweep 0.1/0.3/0.6:
+// overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
+// for capture sweeps; re-applied every Tick (one float write).
+TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
+// Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
+// black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
+// The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
+// forest like dusk, so it eases from the engine toe at the horizon to DayFilmToe
+// by FullDayToeElevDeg of sun. od.FilmToe >= 0 overrides it (sweeps).
+constexpr float NightFilmToe = 0.55f;
+constexpr float DayFilmToe = 0.1f;
+constexpr float FullDayToeElevDeg = 15.0f;
+TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (< 0 = follow sun elevation)."));
+
+// ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
+// Was -1: frames ran ~2/3 stop darker than the reference photos.
+constexpr float AutoExposureBiasEV = -1.0f;
+// Local exposure: compresses sun vs canopy shade the way a camera's HDR does
+// (1 = off). Forest shade sat 14+ stops under the sunlit road and crushed to 0.
+constexpr float LocalShadowContrast = 0.5f;
+constexpr float LocalHighlightContrast = 0.7f;
 
 // ---- Lightning bolt + flash light (PLAN-REALISM Phase 6, 2026-10-09) ----
 // Mirrored in pipeline/check_lightning.py.
@@ -62,6 +95,24 @@ constexpr float BoltWidthPerKm = 1.5f;      // m wide per km away: stays a few p
 constexpr float BoltMinWidthM = 1.0f;
 constexpr float FlashLightScale = 0.15f;    // flash light = day sun x this x Flash (peak 1.5..6)
 constexpr float FlashLightFallbackLux = 10.0f;
+// Double flicker: bright stroke, a dip, a second stroke fading linearly out.
+constexpr float FlashStrokeS = 0.07f;
+constexpr float FlashDipEndS = 0.13f;
+constexpr float FlashDipLevel = 0.15f;
+constexpr float FlashTailLevel = 0.8f;
+
+// Integral of the flash envelope from 0 to T (0 before the strike). Tick
+// shows the envelope's MEAN over the frame, so every frame rate sees the
+// same light per strike and a slow frame can't skip the first stroke
+// (point-sampling did below ~15 fps).
+float FlashIntegral(float T)
+{
+	const float A = FMath::Clamp(T, 0.0f, FlashStrokeS);
+	const float B = FMath::Clamp(T, FlashStrokeS, FlashDipEndS) - FlashStrokeS;
+	const float Tail = FlashSeconds - FlashDipEndS;
+	const float C = FMath::Clamp(T, FlashDipEndS, FlashSeconds) - FlashDipEndS;
+	return A + FlashDipLevel * B + FlashTailLevel * (C - 0.5f * C * C / Tail);
+}
 
 // Appends N cylinder segments (/Engine/BasicShapes/Cylinder: 100 uu tall,
 // 100 uu across, centred) walking from A along Dir with sideways jitter;
@@ -208,7 +259,8 @@ void AODAtmosphereController::EnsureSkyAtmosphere()
 	Comp->SetMieAnisotropy(0.82f);              // close to 0.8 default, mild bump
 	Comp->SetAerialPerspectiveStartDepth(0.07f);   // vs 0.1 default - haze builds a bit sooner
 	Comp->SetHeightFogContribution(1.0f);
-	Comp->SetAerialPespectiveViewDistanceScale(AerialPerspectiveViewDistanceScale); // sic - engine's own spelling
+	Comp->SetAerialPespectiveViewDistanceScale(ODVisualStyle::IsRealistic()   // sic - engine's own spelling
+		? RealisticAerialPerspectiveScale : AerialPerspectiveViewDistanceScale);
 	// Large-world (2026-10-02): the default PlanetTopAtAbsoluteWorldOrigin puts
 	// the planet top at (0,0,0), so an area ~650 km from the origin sat ~33 km
 	// up the curve. Anchor the planet top to the component instead; Tick keeps
@@ -263,7 +315,7 @@ void AODAtmosphereController::EnsureHeightFog()
 	// read as thin high-altitude haze instead of pea soup. Cut density by
 	// another ~6x and pushed StartDistance out so nearby road/car geometry
 	// stays clean and only distance haze builds.
-	Comp->SetFogDensity(0.001f);
+	Comp->SetFogDensity(ODVisualStyle::IsRealistic() ? RealisticFogDensity : 0.001f);
 	Comp->SetFogHeightFalloff(0.1f);
 	Comp->SetFogMaxOpacity(0.45f);
 	Comp->SetStartDistance(20000.0f);
@@ -421,21 +473,71 @@ void AODAtmosphereController::SpawnGradeVolume()
 	// is an exposure/grade issue, not a material-graph or vertex-color one).
 	// Restored to match that proven value rather than re-derived from
 	// scratch, then confirmed by re-render at all three §7.15 vantages.
+	// 2026-10-16: eased to -0.5 (AutoExposureBiasEV) - the lighting audit
+	// found frames ~2/3 stop darker than reference photos of the same places.
 	S.bOverride_AutoExposureBias = true;
-	S.AutoExposureBias = -1.0f;
+	S.AutoExposureBias = AutoExposureBiasEV;
 	S.bOverride_AutoExposureSpeedUp = true;
 	S.AutoExposureSpeedUp = 3.0f;
 	S.bOverride_AutoExposureSpeedDown = true;
 	S.AutoExposureSpeedDown = 1.0f;
+	S.bOverride_LocalExposureShadowContrastScale = true;
+	S.LocalExposureShadowContrastScale = LocalShadowContrast;
+	S.bOverride_LocalExposureHighlightContrastScale = true;
+	S.LocalExposureHighlightContrastScale = LocalHighlightContrast;
+	// 2026-10-20 audit: Lumen treats masked canopy as solid, so forest shade
+	// got ~0 sky (overcast x30 sky light still 37 % black; Lumen GI off: 0.2 %).
+	// Real canopy passes ~10-20 % of open sky through/around the leaves.
+	S.bOverride_LumenSkylightLeaking = true;
+	S.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
+
+	// Visual Style Realistic (PLAN-VISUALS.md Track A): the "car ad" grade -
+	// warm highlights, firmer shadows, more bloom, no grain. Color-grading
+	// fields, not a LUT texture, so there's no asset to build. Exposure is
+	// untouched (the -1 bias fix above holds for both styles).
+	if (ODVisualStyle::IsRealistic())
+	{
+		S.ColorSaturation = FVector4(0.98, 0.98, 0.98, 1.0);
+		S.ColorContrast = FVector4(1.12, 1.12, 1.12, 1.0);
+		S.bOverride_ColorGainHighlights = true;
+		S.ColorGainHighlights = FVector4(1.04, 1.0, 0.94, 1.0);
+		S.bOverride_ColorGammaShadows = true;
+		S.ColorGammaShadows = FVector4(0.98, 0.99, 1.02, 1.0);   // cool, barely crushed (0.95 was too dark at night)
+		S.BloomIntensity = 0.7f;
+		S.BloomThreshold = 0.8f;
+		S.VignetteIntensity = 0.3f;
+		S.bOverride_FilmGrainIntensity = true;
+		S.FilmGrainIntensity = 0.0f;
+		// Car glass is translucent, so without this it only gets the blurry
+		// radiance-cache reflection - windscreens read as flat grey. Front layer
+		// = one extra GBuffer-ish pass for the nearest translucent surface only.
+		S.bOverride_LumenFrontLayerTranslucencyReflections = true;
+		S.LumenFrontLayerTranslucencyReflections = 1;
+	}
 
 	UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: spawned Grade post-process volume "
-		"(Priority=%.0f, saturation=%.2f, contrast=%.2f)"),
-		GradeVolume->Priority, S.ColorSaturation.X, S.ColorContrast.X);
+		"(style=%d, Priority=%.0f, saturation=%.2f, contrast=%.2f, bloom=%.2f@%.2f, vignette=%.2f)"),
+		ODVisualStyle::Level(), GradeVolume->Priority, S.ColorSaturation.X, S.ColorContrast.X,
+		S.BloomIntensity, S.BloomThreshold, S.VignetteIntensity);
 }
 
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	if (APostProcessVolume* PPV = GradeVolume.Get())
+	{
+		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
+		float Toe = CVarFilmToe.GetValueOnGameThread();
+		if (Toe < 0.0f)
+		{
+			const UDirectionalLightComponent* Sun = SunComp.Get();
+			const float ElevDeg = Sun ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-Sun->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
+			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(ElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
+		}
+		PPV->Settings.bOverride_FilmToe = true;
+		PPV->Settings.FilmToe = Toe;
+	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
 	// state isn't dirtied every frame (curvature at 1 km is 8 cm).
@@ -471,11 +573,20 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	// returns its baseline bit-for-bit.
 	auto Weight = [](float X) { X = FMath::Clamp(X, 0.0f, 1.0f); return X < 1e-3f ? 0.0f : X; };
 	const float FogW = Weight((20000.0f - Weather->VisibilityM) / 15000.0f);
-	const float CloudW = Weight((Weather->CloudCover - 0.1f) / 0.9f);
+	const float CloudW = Weight((Weather->CloudCover - 0.1f) / (FullCoverAt - 0.1f));
 	const float DustW = Weight(Weather->DustAmount);
 	const float TintW = Weight(Weather->StormTint);
 	const FLinearColor Green = FMath::Lerp(FLinearColor::White, StormGreen, TintW);
 	const float Flash = UpdateLightning(DeltaSeconds, *Weather);
+	if ((DiagAcc += DeltaSeconds) >= 10.0f)
+	{
+		DiagAcc = 0.0f;
+		const UDirectionalLightComponent* S = SunComp.Get();
+		const USkyLightComponent* K = SkyLightComp.Get();
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f | sky %.2f (base %.2f)"),
+			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
+			S ? S->LightSourceAngle : -1.0f, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
 	// nothing moved (most frames).
@@ -522,6 +633,7 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	if (UDirectionalLightComponent* Sun = SunComp.Get(); Sun && BaseSunIntensity > 0.0f && Sun->Intensity > 0.0f)
 	{
 		Sun->SetIntensity(BaseSunIntensity * FMath::Lerp(1.0f, OvercastSun, CloudW));
+		Sun->SetLightSourceAngle(FMath::Lerp(BaseSunAngle, OvercastSunAngleDeg, CloudW));
 	}
 	// Lightning (Phase 6): the bolt glows and FlashLight fires with Flash -
 	// day or night, since the night sun is below the horizon. Skipped in the
@@ -559,7 +671,11 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	}
 	if (USkyLightComponent* Sky = SkyLightComp.Get(); Sky && BaseSkyLightIntensity > 0.0f && Sky->Intensity > 0.0f)
 	{
-		Sky->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.0f, OvercastSkyLight, CloudW) * (1.0f + Flash));
+		// SkyAtmosphere radiance scales with the sun's lux, so the real-time
+		// capture dims with the sun: divide that back out, else overcast keeps
+		// clear-sky's sun:sky ratio (hard shadows, black forest) at lower exposure.
+		const float SunScale = FMath::Lerp(1.0f, OvercastSun, CloudW);
+		Sky->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.0f, OvercastSkyLight, CloudW) / SunScale * (1.0f + Flash));
 	}
 }
 
@@ -583,6 +699,7 @@ void AODAtmosphereController::FindLights()
 			}
 		}
 		BaseSunIntensity = SunComp.IsValid() ? SunComp->Intensity : 0.0f;
+		BaseSunAngle = SunComp.IsValid() ? SunComp->LightSourceAngle : 0.0f;
 	}
 	if (BaseSkyLightIntensity <= 0.0f)
 	{
@@ -601,15 +718,18 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 	{
 		FlashAge += DeltaSeconds;
 	}
-	if (Weather.State == EODWeatherState::Thunderstorm && Weather.PrecipIntensity > 0.5f)
+	if (Weather.State == EODWeatherState::Thunderstorm && Weather.PrecipIntensity > 0.5f && !Weather.IsIndoors())
 	{
 		StrikeCountdown -= DeltaSeconds;
 		if (StrikeCountdown <= 0.0f)
 		{
-			StrikeCountdown = FMath::FRandRange(8.0f, 30.0f);
+			// the strike happened -StrikeCountdown ago, inside this frame: the
+			// flash and the thunder delay both start from that instant
+			const float Late = -StrikeCountdown;
+			StrikeCountdown += FMath::FRandRange(8.0f, 30.0f);
 			const float DistM = FMath::FRandRange(500.0f, 8000.0f);
 			const float Near = 1.0f - (DistM - 500.0f) / 7500.0f;
-			FlashAge = 0.0f;
+			FlashAge = Late;
 			FlashPeak = FMath::Lerp(1.5f, 6.0f, Near);
 			Strike(DistM);
 			if (!AmbientMgr.IsValid())
@@ -618,7 +738,7 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 			}
 			if (AODAmbientSoundManager* Ambient = AmbientMgr.Get())
 			{
-				Ambient->QueueThunder(DistM / 343.0f, FMath::Lerp(0.35f, 1.0f, Near));
+				Ambient->QueueThunder(FMath::Max(DistM / 343.0f - Late, 0.0f), FMath::Lerp(0.35f, 1.0f, Near));
 			}
 			UE_LOG(LogTemp, Display, TEXT("ODAtmosphereController: lightning at %.0f m (flash x%.1f, thunder in %.1f s)"),
 				DistM, 1.0f + FlashPeak, DistM / 343.0f);
@@ -629,14 +749,12 @@ float AODAtmosphereController::UpdateLightning(float DeltaSeconds, const AODWeat
 		StrikeCountdown = 5.0f;   // first strike shortly after the storm builds
 	}
 
-	if (FlashAge < 0.0f || FlashAge > FlashSeconds)
+	// frame window [FlashAge - Dt, FlashAge]; done once it starts past the end
+	if (FlashAge < 0.0f || FlashAge - DeltaSeconds >= FlashSeconds)
 	{
 		FlashAge = -1.0f;
 		return 0.0f;
 	}
-	// Double flicker: bright stroke, a dip, a second stroke fading out.
-	const float Env = FlashAge < 0.07f ? 1.0f
-		: FlashAge < 0.13f ? 0.15f
-		: 0.8f * (1.0f - (FlashAge - 0.13f) / (FlashSeconds - 0.13f));
-	return FlashPeak * Env;
+	const float Dt = FMath::Max(DeltaSeconds, 1.0e-4f);
+	return FlashPeak * (FlashIntegral(FlashAge) - FlashIntegral(FlashAge - Dt)) / Dt;
 }

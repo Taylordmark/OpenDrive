@@ -13,6 +13,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/CommandLine.h"
 #include "ODVehicleMovement.h"
+#include "ODVisualStyle.h"
 
 AODDayNightController::AODDayNightController()
 {
@@ -29,6 +30,7 @@ void AODDayNightController::BeginPlay()
 	// without waiting out a full CycleSeconds run.
 	FParse::Value(FCommandLine::Get(), TEXT("odhour="), StartHour);
 	TimeOfDay = StartHour;
+	FParse::Value(FCommandLine::Get(), TEXT("odday="), StartDayOfWeek);
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{
 		Sun = *It;
@@ -37,6 +39,14 @@ void AODDayNightController::BeginPlay()
 		if (UDirectionalLightComponent* SunComp = Cast<UDirectionalLightComponent>(Sun->GetLightComponent()))
 		{
 			SunComp->ForwardShadingPriority = 1;
+			// Realistic: short screen-space contact shadows - tyre/road and
+			// wheel-well contact that the virtual shadow map's filtering
+			// softens away. World-space length so it's the same at any FOV.
+			if (ODVisualStyle::IsRealistic())
+			{
+				SunComp->ContactShadowLength = 30.0f;
+				SunComp->ContactShadowLengthInWS = true;
+			}
 			SunComp->MarkRenderStateDirty();   // the proxy copied 0 at registration
 		}
 		break;
@@ -115,12 +125,28 @@ void AODDayNightController::BeginPlay()
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	TimeOfDay = FMath::Fmod(TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f, 24.0f);
+	const float NextHour = TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f;
+	DayCount += NextHour >= 24.0f ? 1 : 0;
+	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
 
 	const float DayPhase = (TimeOfDay - 6.0f) / 12.0f * PI;  // 6h->0, 12h->pi/2
 	const float Elevation = FMath::Sin(DayPhase) * MaxElevation;
 	const float Azimuth = TimeOfDay * 15.0f + 90.0f;
 
+	// The sun turns every frame. The 2026-10-16 perf pass turned it in 0.25 deg
+	// steps to keep the Virtual Shadow Map cache, but that cache is keyed on
+	// the exact light direction: each step (~2.3 s) rendered one uncached
+	// frame and then rebuilt the whole static cache - the 120-175 ms skip.
+	// A light that moves every frame stays on VSM's cheaper uncached path
+	// (FVirtualShadowMapPerLightCacheEntry::Update): steady cost, no spikes.
+	// The moon casts no shadow, so it keeps the step.
+	auto Turn = [](AActor* Light, const FRotator& To)
+	{
+		if (Light && Light->GetActorQuat().AngularDistance(To.Quaternion()) > FMath::DegreesToRadians(0.25f))
+		{
+			Light->SetActorRotation(To);
+		}
+	};
 	if (Sun.IsValid())
 	{
 		Sun->SetActorRotation(FRotator(-Elevation, Azimuth, 0.0f));
@@ -129,7 +155,7 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	{
 		// Opposite the sun in azimuth, mirrored elevation - rises as the sun
 		// sets, peaks at solar midnight, sets as the sun rises.
-		Moon->SetActorRotation(FRotator(Elevation, Azimuth + 180.0f, 0.0f));
+		Turn(Moon.Get(), FRotator(Elevation, Azimuth + 180.0f, 0.0f));
 		if (UDirectionalLightComponent* MoonComp = Cast<UDirectionalLightComponent>(Moon->GetLightComponent()))
 		{
 			MoonComp->SetIntensity(Elevation < 0.0f ? MoonIntensity : 0.0f);

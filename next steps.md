@@ -249,8 +249,13 @@ gravel crunch, and the snow/wet grip feel.
 
 ## 3. Gameplay and UX
 
-- **4.3 cosmetics v1:** paint color and wraps. Acceptance: 4–6 cars, color
-  choice and preset choice, all persisted.
+- **In scope (Taylor, 2026-10-16), from a Crew 2 gap review:**
+  - **Cameras:** cockpit, hood and bumper views alongside the chase cam.
+  - **Landmarks:** recognisable real buildings and structures per area,
+    beyond the procedural footprints.
+  - **Lighting and reflections:** visuals still need a good bit of work.
+  - Paint (below) and the wheel with force feedback (§8, Arc 6) are in this
+    batch too.
 - **Stage 3 vehicle work:**
   - retune the five presets on the new physics;
   - make drift a progressive rear breakaway;
@@ -277,6 +282,14 @@ gravel crunch, and the snow/wet grip feel.
   - stage discovery (drive to a famous road to unlock its time trial);
   - a cache-management UI. This one is a release requirement.
 - **Night sky:** optional "real-time accurate" sun and moon phases (moon and stars done 2026-10-09).
+- **Change notifications (Taylor, 2026-10-13):** a small toast or line of
+  text when the **area**, **weather** or **road** changes. Today nothing on
+  the driving HUD shows any of them. The only place name is on the
+  full-screen map (`PlaceLabelText`, `ODRaceHUD.cpp`), and the weather and
+  current road are never shown. Skip any of the three that later gets a
+  permanent on-screen readout. Sources: AODGameMode area streaming,
+  AODWeatherController state changes, and the nearest named road from
+  `labels_<area>`.
 
 ## 4. World pipeline
 
@@ -418,7 +431,7 @@ gravel crunch, and the snow/wet grip feel.
   - pedals and an H-shifter;
   - per-device profiles in `GameUserSettings.ini`.
   - Acceptance: fully playable on a wheel.
-  - Force feedback comes after v1.
+  - Force feedback is in scope (Taylor, 2026-10-16), right after v1.
   - The deadzone/sensitivity hook from §7.32 is where to start.
 - **5.3, simulated engine sample banks:**
   - render an RPM × load sample grid offline per engine config (Engine
@@ -427,3 +440,4 @@ gravel crunch, and the snow/wet grip feel.
   - the 5.1 synth stays as the fallback.
 - **Optional:** a scripted whole-town review drive (pure pursuit on the
   §7.37 graph).
+- **Way later (Taylor, 2026-10-16):** speed traps, and an in-game radio.
