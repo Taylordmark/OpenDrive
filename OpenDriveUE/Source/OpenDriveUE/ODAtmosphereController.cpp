@@ -67,8 +67,15 @@ constexpr float FlashSeconds = 0.35f;
 // overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
 // for capture sweeps; re-applied every Tick (one float write).
 TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
-// Tone-curve toe sweep (2026-10-20 audit): < 0 leaves the engine curve alone.
-TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (engine 0.55; < 0 = no override)."));
+// Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
+// black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
+// The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
+// forest like dusk, so it eases from the engine toe at the horizon to DayFilmToe
+// by FullDayToeElevDeg of sun. od.FilmToe >= 0 overrides it (sweeps).
+constexpr float NightFilmToe = 0.55f;
+constexpr float DayFilmToe = 0.1f;
+constexpr float FullDayToeElevDeg = 15.0f;
+TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (< 0 = follow sun elevation)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
@@ -521,9 +528,15 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	if (APostProcessVolume* PPV = GradeVolume.Get())
 	{
 		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
-		const float Toe = CVarFilmToe.GetValueOnGameThread();
-		PPV->Settings.bOverride_FilmToe = Toe >= 0.0f;
-		if (Toe >= 0.0f) { PPV->Settings.FilmToe = Toe; }
+		float Toe = CVarFilmToe.GetValueOnGameThread();
+		if (Toe < 0.0f)
+		{
+			const UDirectionalLightComponent* Sun = SunComp.Get();
+			const float ElevDeg = Sun ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-Sun->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
+			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(ElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
+		}
+		PPV->Settings.bOverride_FilmToe = true;
+		PPV->Settings.FilmToe = Toe;
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
