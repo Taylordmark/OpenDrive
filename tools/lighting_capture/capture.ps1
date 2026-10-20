@@ -26,7 +26,7 @@ if ($Weather -ne '-') { $exec = "od.Weather $Weather,$exec" }
 while (Get-Process UnrealEditor -ErrorAction SilentlyContinue | Where-Object { $_.Handles -gt 0 }) { Start-Sleep -Seconds 10 }
 $before = @(Get-ChildItem $Shots -Filter *.png).Count
 $argLine = "`"$Root\OpenDriveUE.uproject`" $Map -game -windowed -resx=1600 -resy=900 -log LOG=cap_$Name.log " +
-    "-odhour=$Hour -odshot=$ShotAt -odperf=5 `"-ExecCmds=$exec`" -nosplash -unattended -NoZenAutoLaunch $Extra"
+    "-odhour=$Hour -odcycle=0 -odshot=$ShotAt -odperf=5 `"-ExecCmds=$exec`" -nosplash -unattended -NoZenAutoLaunch $Extra"
 $p = Start-Process -FilePath $UE -ArgumentList $argLine -PassThru
 $deadline = (Get-Date).AddSeconds($ShotAt + 600)   # -odshot counts from first world tick; boot is minutes
 while ((Get-Date) -lt $deadline -and -not $p.HasExited) {

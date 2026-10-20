@@ -30,6 +30,9 @@ void AODDayNightController::BeginPlay()
 	// without waiting out a full CycleSeconds run.
 	FParse::Value(FCommandLine::Get(), TEXT("odhour="), StartHour);
 	TimeOfDay = StartHour;
+	// -odcycle=<s> overrides CycleSeconds; 0 freezes the clock (lighting captures:
+	// at the default 1 h cycle a shot ~85 s after launch had drifted ~34 game min).
+	FParse::Value(FCommandLine::Get(), TEXT("odcycle="), CycleSeconds);
 	FParse::Value(FCommandLine::Get(), TEXT("odday="), StartDayOfWeek);
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{
@@ -125,7 +128,7 @@ void AODDayNightController::BeginPlay()
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	const float NextHour = TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f;
+	const float NextHour = CycleSeconds > 0.0f ? TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f : TimeOfDay;
 	DayCount += NextHour >= 24.0f ? 1 : 0;
 	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
 
