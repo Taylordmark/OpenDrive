@@ -70,6 +70,41 @@ code { font-family: var(--mono); font-size: .86em; }
   </ol>
 </div>
 
+<section class="find" id="after">
+  <div class="rank">Update 2026-10-20 · main @ 2d4af41 + Main's uncommitted ODAtmosphereController tuning</div>
+  <h2>After the fixes</h2>
+  <h3>Headlights only lit the left: fixed</h3>
+  <figure><img src="img/fix_headlight_h22.jpg" alt="Night headlights before and after the normals fix"></figure>
+  <figure><img src="img/fix_gasquet_h1730.jpg" alt="17:30 Gasquet before and after the normals fix"></figure>
+  <p><b>Cause:</b> the road, bridge, embankment, parking and water meshes never set up a normal overlay. Every vertex rendered with normal (0,1,0), pointing sideways along world +Y. The GBuffer WorldNormal view confirmed it: road (0,1,0), terrain (0,0,1). Headlights lit only road whose +Y side faced the lamp, a cut along the lamp plane that looked like the centre line. Daytime road shading also followed sun azimuth instead of elevation. The headlights themselves (IES, shadows, beam haze) and the road material were fine.</p>
+  <p><b>Fix (30479e2):</b> one <code>FMeshNormals::InitializeOverlayToPerVertexNormals</code> call in each of the five builders, the same call terrain, walls and guardrails already make.</p>
+
+  <h3>The ten looks re-measured</h3>
+  <figure><img src="img/fix_gasquet_h12.jpg" alt="Gasquet noon before and after"></figure>
+  <p>With correct normals the road faces the sun and is lit 2–3× brighter. Road albedo is about 0.12 linear, which is right for worn asphalt, so the material is fine. The frame is still too contrasty, though: the sunlit road clips and the forest shade stays black. Overcast shows the same: at 150 s the log reads sun 3005 (4 % of base) and sky light ×30, yet black pixels barely move (0.48 → 0.47). <b>Raising the sky light doesn't reach the canopy shade, so it looks like sky occlusion, not exposure.</b> That makes Gap 1C the next step: check how much sky the forest floor sees and the tree cards in Lumen, before any more exposure tuning.</p>
+  <div class="tbl"><table>
+    <tr><th>Look</th><th>mean b → a (ref)</th><th>p50 b → a (ref)</th><th>DR stops b → a (ref)</th><th>sat b → a (ref)</th><th>black share b → a</th></tr>
+    <tr><td>Gasquet noon</td><td class="n">141 → 150 (109)</td><td class="n">44 → 9 (61)</td><td class="n">16.4 → 16.6 (8.8)</td><td class="n">.22 → .35 (.40)</td><td class="n">.48 → .51</td></tr>
+    <tr><td>Gasquet 08:00</td><td class="n">123 → 125 (82)</td><td class="n">12 → 30 (48)</td><td class="n">16.6 → 16.6 (10.5)</td><td class="n">.41 → .43 (.67)</td><td class="n">.49 → .37</td></tr>
+    <tr><td>Gasquet 17:30</td><td class="n">95 → 93 (189)</td><td class="n">41 → 42 (192)</td><td class="n">16.5 → 16.2 (9.0)</td><td class="n">.54 → .61 (.34)</td><td class="n">.35 → .35</td></tr>
+    <tr><td>Gasquet overcast</td><td class="n">133 → 132 (139)</td><td class="n">40 → 35 (137)</td><td class="n">16.3 → 16.3 (5.8)</td><td class="n">.22 → .39 (.16)</td><td class="n">.48 → .47</td></tr>
+    <tr><td>Gasquet rain</td><td class="n">129 → 106 (144)</td><td class="n">74 → 62 (103)</td><td class="n">16.3 → 16.2 (7.6)</td><td class="n">.35 → .44 (.25)</td><td class="n">.39 → .34</td></tr>
+    <tr><td>Deals Gap noon</td><td class="n">106 → 107 (127)</td><td class="n">36 → 35 (109)</td><td class="n">16.0 → 16.0 (7.5)</td><td class="n">.50 → .52 (.36)</td><td class="n">.42 → .38</td></tr>
+    <tr><td>Deals Gap 17:30</td><td class="n">95 → 93 (189)</td><td class="n">52 → 47 (192)</td><td class="n">16.5 → 13.8 (9.0)</td><td class="n">.33 → .32 (.34)</td><td class="n">.14 → .17</td></tr>
+    <tr class="pick"><td>SF noon</td><td class="n">116 → 127 (148)</td><td class="n">109 → 124 (112)</td><td class="n">9.3 → 11.5 (9.7)</td><td class="n">.28 → .24 (.22)</td><td class="n">.02 → .06</td></tr>
+    <tr><td>SF 17:30</td><td class="n">95 → 73 (127)</td><td class="n">60 → 54 (108)</td><td class="n">9.1 → 9.5 (11.6)</td><td class="n">.29 → .29 (.38)</td><td class="n">.03 → .02</td></tr>
+    <tr class="pick"><td>Summit noon</td><td class="n">105 → 115 (147)</td><td class="n">102 → 115 (150)</td><td class="n">15.7 → 10.1 (6.9)</td><td class="n">.44 → .39 (.55)</td><td class="n">.16 → .12</td></tr>
+  </table></div>
+  <p><b>Open terrain improved:</b> Summit and SF noon moved toward the photos. <b>Forest scenes didn't:</b> Gasquet and Deals Gap still sit at ~16 stops against 8–10, and SF 17:30 got darker (mean 95 → 73) with exposure −1. The after shots ran at 1536×816 (the saved resolution changed between runs); Deals Gap noon ran at 1280×720. The first noon attempt crashed out of system RAM (WSL held 10 GB) and was re-shot.</p>
+  <details><summary>All ten after-fix pairs</summary><div class="stack">
+    <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
+    <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>
+    <figure><img src="img/fix_05_gasquet_rain.jpg" alt=""></figure><figure><img src="img/fix_06_dealsgap_noon.jpg" alt=""></figure>
+    <figure><img src="img/fix_07_dealsgap_golden.jpg" alt=""></figure><figure><img src="img/fix_08_sf_noon.jpg" alt=""></figure>
+    <figure><img src="img/fix_09_sf_golden.jpg" alt=""></figure><figure><img src="img/fix_10_summit_noon.jpg" alt=""></figure>
+  </div></details>
+</section>
+
 <section class="find">
   <h3>How every shot was taken</h3>
   <p>Each shot used the real <code>-game</code> path on the GPU (no <code>-nullrhi</code>, no offscreen). The run used the main checkout at fdc7f2c with the normal launch scalability, and ODPerf confirmed the same on every shot: <span class="nums">1280x720 sp 100 sg 3 style 1</span>. Lumen, VSM, the <code>_real</code> materials, forest, buildings and traffic were all on.</p>
