@@ -104,6 +104,26 @@ def tex_root():
     sys.exit("ground textures not downloaded - run content_src/textures/ground/download_ground_textures.py")
 
 
+def check_layer_means():
+    """LAYER_MEAN_LIN (the detail layers' hue divisor) = the sets' measured mean,
+    and *_SAT_KEEP land on the survey's saturation targets (median HSV S)."""
+    lin = lambda a: np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
+    for key, keep, target in (("grass", "GRASS_SAT_KEEP", 0.30), ("forest", "FOREST_SAT_KEEP", 0.29),
+                              ("dirt", "DIRT_SAT_KEEP", 0.15)):
+        aid = C["LAYERS"][key][0]
+        d = tex_root() / aid if aid not in C["REAL_SETS"] else tex_root().parents[1] / "realistic/terrain" / aid
+        a = lin(np.asarray(Image.open(next(d.glob("*_Color.*"))).convert("RGB"), dtype=np.float64) / 255.0)
+        m = a.reshape(-1, 3).mean(0)
+        assert np.allclose(m, C["LAYER_MEAN_LIN"][key], rtol=0.02), f"{aid} mean {m} != LAYER_MEAN_LIN[{key}]"
+        a = a[::4, ::4]
+        grey = (a @ np.array([0.3, 0.59, 0.11]))[..., None]
+        k = grey + (a - grey) * C[keep]
+        s = np.where(k <= 0.0031308, k * 12.92, 1.055 * np.clip(k, 0, 1) ** (1 / 2.4) - 0.055)
+        sat = float(np.median((s.max(-1) - s.min(-1)) / np.maximum(s.max(-1), 1e-6)))
+        print(f"{key} ({aid}): mean {m.round(4)}, saturation at {keep} {C[keep]} = {sat:.2f} (target {target})")
+        assert abs(sat - target) < 0.02, f"{keep} misses the saturation target"
+
+
 def contrast(x, k):
     return np.clip((x - 0.5) * k + 0.5, 0, 1)
 
@@ -177,6 +197,7 @@ def main():
     assert band.min() < 0.15 and band.max() > 0.85, "strata bands don't span dark..light"
     assert b_corr < 0.5, "strata repeat at one band"
     check_road_edge()
+    check_layer_means()
     print(f"OK - wrote {out / 'terrain_real_tiling.png'}")
 
 
