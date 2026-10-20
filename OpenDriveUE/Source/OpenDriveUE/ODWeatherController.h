@@ -137,8 +137,11 @@ public:
 
 	// ---- on-lens precipitation (2026-10-06, TickLens): drops/flakes land on
 	// the player camera, airflow pushes them out toward the screen edges,
-	// flakes stick, then melt into a small water smear. Sizes/positions are in
-	// screen half-widths (1 = center to the left/right edge).
+	// flakes stick, then melt into a small water smear. Parked (2026-10-20):
+	// water beads stick, then slip down in bursts at a wandering angle within
+	// +-10 deg, merge on contact and leave a fading wet trail; airflow takes
+	// over by LENS_STILL_MS. Sizes/positions are in screen half-widths
+	// (1 = center to the left/right edge).
 
 	/** Landings per second at PrecipIntensity 1, parked; x (1 + speed / 20 m/s). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
@@ -146,7 +149,7 @@ public:
 
 	/** Pool size (read once, when the layer is created). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
-	int32 LensMaxDrops = 40;
+	int32 LensMaxDrops = 60;
 
 	/** Mean drop radius, screen half-widths (each drop 0.5..1.4x). */
 	UPROPERTY(EditAnywhere, Category = "Weather|Lens")
@@ -345,12 +348,24 @@ private:
 		float Radius = 0.0f, Age = 0.0f, Life = 0.0f;
 		float Kind = 0.0f;   // 1 flake .. 0 water (melting)
 		bool bSnow = false;
+		float Angle = 0.0f, AngleTarget = 0.0f;   // slide heading off straight-down, rad
+		float Stick = 0.0f, Slip = 0.0f;          // s left stuck / s left of the current slip
+		float Stretch = 1.0f;                     // elongation along Angle while sliding
+		float Seed = 0.0f;                        // outline wobble
+		float TrailAcc = 0.0f;                    // slid distance since the last trail piece
+	};
+	/** A fading wet streak a sliding drop leaves behind. */
+	struct FLensTrail
+	{
+		FVector2D Pos = FVector2D::ZeroVector;
+		float Angle = 0.0f, Len = 0.0f, Width = 0.0f, Age = 0.0f, Life = 0.0f, Seed = 0.0f;
 	};
 	void TickLens(float DeltaSeconds);
 	void TickSnow(float DeltaSeconds);
 	bool bSnowHeld = false;
 
 	TArray<FLensDrop> LensDrops;
+	TArray<FLensTrail> LensTrails;
 	UPROPERTY()
 	TObjectPtr<UInstancedStaticMeshComponent> LensISM;
 	TWeakObjectPtr<UCameraComponent> LensCam;

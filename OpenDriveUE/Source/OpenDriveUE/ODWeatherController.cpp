@@ -135,6 +135,23 @@ namespace
 	constexpr float LENS_FADE_IN_S = 0.08f;      // softens the landing pop
 	constexpr float LENS_FADE_OUT = 0.25f;       // fades over the last fraction of its life
 	constexpr float LENS_TELEPORT_MS = 150.0f;   // a faster camera "speed" is a teleport/respawn, not driving
+	// parked drops (2026-10-20): stick, slip down in bursts, merge, trail
+	constexpr float LENS_STILL_MS = 4.2f;        // 15 km/h: airflow fully owns the drops from here
+	constexpr float LENS_SLIDE_MIN_R = 0.7f;     // x LensDropSize: smaller beads never slide
+	constexpr float LENS_SLIDE_SPEED = 0.08f;    // half-widths/s per LensDropSize of radius over the minimum
+	constexpr float LENS_SLIDE_MAX = 0.22f;      // half-widths/s
+	constexpr float LENS_STICK_S[2] = { 0.4f, 2.8f };   // stuck between slips
+	constexpr float LENS_SLIP_S[2] = { 0.15f, 0.9f };   // one slip
+	constexpr float LENS_MAX_ANGLE = 10.0f;      // deg off straight down, either side
+	constexpr float LENS_TURN_DEG_S = 15.0f;     // heading eases toward the slip's target
+	constexpr float LENS_SLIDE_STRETCH = 1.35f;  // sliding bead length / width
+	constexpr float LENS_PARKED_AGE = 0.35f;     // parked drops age at this rate (they linger on glass)
+	constexpr float LENS_MERGE = 0.85f;          // touch when centers are this x (r1 + r2) apart
+	constexpr int32 LENS_MAX_TRAILS = 120;
+	constexpr float LENS_TRAIL_STEP = 0.5f;      // x radius slid per trail piece
+	constexpr float LENS_TRAIL_W = 0.15f;         // trail width / drop radius
+	constexpr float LENS_TRAIL_LIFE[2] = { 1.5f, 3.0f };
+	constexpr float LENS_TRAIL_LOSS = 0.995f;    // radius kept per trail piece laid
 
 	constexpr float PUDDLE_PER_RAIN = 1.4f;      // standing-water level per unit rain rate (Rain 0.45 -> 0.63, HeavyRain full)
 
@@ -782,6 +799,7 @@ void AODWeatherController::SetIndoors(bool bOn)
 	if (bOn)
 	{
 		LensDrops.Reset();
+		LensTrails.Reset();
 		if (LensISM)
 		{
 			LensISM->SetVisibility(false);
@@ -826,10 +844,10 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 				LensISM->SetCastShadow(false);
 				LensISM->SetAffectDynamicIndirectLighting(false);
 				LensISM->TranslucencySortPriority = 100;   // over the falling pool and other translucency
-				LensISM->SetNumCustomDataFloats(2);         // 0 = Kind (1 flake .. 0 water), 1 = Fade
+				LensISM->SetNumCustomDataFloats(4);         // 0 Kind (1 flake .. 0 water), 1 Fade, 2 Trail, 3 Seed
 				LensISM->RegisterComponent();
-				TArray<FTransform> Xf;
-				Xf.Init(FTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector), FMath::Max(LensMaxDrops, 1));
+				TArray<FTransform> Xf;   // drops first, then trail pieces
+				Xf.Init(FTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector), FMath::Max(LensMaxDrops, 1) + LENS_MAX_TRAILS);
 				LensISM->AddInstances(Xf, false);
 			}
 			LensISM->AttachToComponent(Cam, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
@@ -862,7 +880,7 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 
 	// Landings: none in the garage showroom (indoors / menus).
 	const AODVehiclePawn* Car = Cast<AODVehiclePawn>(Player);
-	const int32 Pool = LensISM->GetInstanceCount();
+	const int32 Pool = LensISM->GetInstanceCount() - LENS_MAX_TRAILS;   // drop slots
 	if (PrecipIntensity > 0.02f && !bCovered && !(Car && Car->IsInShowroom()))   // covered: the drops already on run off
 	{
 		LensSpawnDebt += DeltaSeconds * LensDropsPerSecond * PrecipIntensity * (1.0f + LensSpeedMs / LENS_RATE_REF_MS);
@@ -878,6 +896,8 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 			D.Pos = FVector2D(FMath::FRandRange(-1.0f, 1.0f), FMath::FRandRange(-HalfH, HalfH));
 			D.Bias = FVector2D(FMath::FRandRange(-0.15f, 0.15f), FMath::FRandRange(-0.15f, 0.15f));
 			D.Radius = LensDropSize * FMath::FRandRange(0.5f, 1.4f);
+			D.Stick = FMath::FRandRange(LENS_STICK_S[0], LENS_STICK_S[1]);
+			D.Seed = FMath::FRand();
 			D.Life = D.bSnow ? LensSnowHoldSeconds + LensMeltSeconds + 0.5f * LensDropLifeSeconds
 				: LensDropLifeSeconds * FMath::FRandRange(0.7f, 1.3f);
 		}
@@ -888,29 +908,115 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 	}
 
 	// Motion: airflow pushes radially outward (faster with speed and with
-	// distance from center), crosswind pushes sideways, water sags. A flake
-	// clings until it melts, then rides the flow like water.
+	// distance from center), crosswind pushes sideways. A flake clings until
+	// it melts. Parked (SpeedW 0) water sticks, then slips down in bursts at
+	// a heading wandering within +-LENS_MAX_ANGLE, laying a trail; driving
+	// (SpeedW 1) it sags and rides the flow as before.
 	const FVector Right = Cam->GetRightVector();
 	const FVector2D Wind = WindAtMs(CamLoc);
 	const float WindX = (Wind.X * Right.X + Wind.Y * Right.Y) * LensWindDrift;
 	const float Drift = LensDriftPerMs * LensSpeedMs;
+	const float SpeedW = FMath::Clamp(LensSpeedMs / LENS_STILL_MS, 0.0f, 1.0f);
+	const float MaxAngle = FMath::DegreesToRadians(LENS_MAX_ANGLE);
+	const float Turn = FMath::DegreesToRadians(LENS_TURN_DEG_S) * DeltaSeconds;
 	for (int32 i = LensDrops.Num() - 1; i >= 0; --i)
 	{
 		FLensDrop& D = LensDrops[i];
-		D.Age += DeltaSeconds;
+		D.Age += DeltaSeconds * FMath::Lerp(LENS_PARKED_AGE, 1.0f, SpeedW);
 		if (D.bSnow)
 		{
 			D.Kind = 1.0f - FMath::Clamp((D.Age - LensSnowHoldSeconds) / FMath::Max(LensMeltSeconds, 0.01f), 0.0f, 1.0f);
 		}
 		const float Grip = FMath::Lerp(1.0f, LENS_SNOW_GRIP, D.Kind);
-		D.Pos += ((D.Pos + D.Bias) * Drift + FVector2D(WindX, -LENS_SAG * (1.0f - D.Kind))) * (Grip * DeltaSeconds);
+		FVector2D Step = ((D.Pos + D.Bias) * Drift + FVector2D(WindX, -LENS_SAG * (1.0f - D.Kind) * SpeedW)) * (Grip * DeltaSeconds);
+
+		// stick-slip: only water beads big enough to overcome surface tension
+		const float Over = D.Radius / FMath::Max(LensDropSize, 1.0e-4f) - LENS_SLIDE_MIN_R;
+		bool bSliding = false;
+		if (D.Kind < 0.5f && Over > 0.0f && SpeedW < 1.0f)
+		{
+			if (D.Slip > 0.0f)
+			{
+				D.Slip -= DeltaSeconds;
+				bSliding = true;
+				if (D.Slip <= 0.0f)
+				{
+					D.Stick = FMath::FRandRange(LENS_STICK_S[0], LENS_STICK_S[1]) / (1.0f + Over);   // heavier = restless
+				}
+			}
+			else if ((D.Stick -= DeltaSeconds) <= 0.0f)
+			{
+				D.Slip = FMath::FRandRange(LENS_SLIP_S[0], LENS_SLIP_S[1]);
+				D.AngleTarget = FMath::FRandRange(-MaxAngle, MaxAngle);
+			}
+		}
+		D.Angle = FMath::Clamp(D.Angle + FMath::Clamp(D.AngleTarget - D.Angle, -Turn, Turn), -MaxAngle, MaxAngle);
+		if (bSliding)
+		{
+			const float V = FMath::Min(LENS_SLIDE_SPEED * Over, LENS_SLIDE_MAX) * (1.0f - SpeedW);
+			const FVector2D Dir(FMath::Sin(D.Angle), -FMath::Cos(D.Angle));
+			Step += Dir * (V * DeltaSeconds);
+			D.TrailAcc += V * DeltaSeconds;
+			for (; D.TrailAcc >= LENS_TRAIL_STEP * D.Radius; D.TrailAcc -= LENS_TRAIL_STEP * D.Radius)
+			{
+				D.Radius *= LENS_TRAIL_LOSS;
+				if (LensTrails.Num() < LENS_MAX_TRAILS)
+				{
+					FLensTrail& T = LensTrails.AddDefaulted_GetRef();
+					T.Pos = D.Pos - Dir * (0.5f * D.Radius);
+					T.Angle = D.Angle;
+					T.Len = LENS_TRAIL_STEP * D.Radius * 1.6f;
+					T.Width = LENS_TRAIL_W * D.Radius;
+					T.Life = FMath::FRandRange(LENS_TRAIL_LIFE[0], LENS_TRAIL_LIFE[1]);
+					T.Seed = FMath::FRand();
+				}
+			}
+		}
+		D.Stretch = FMath::Lerp(D.Stretch, bSliding ? FMath::Lerp(LENS_SLIDE_STRETCH, 1.0f, SpeedW) : 1.0f,
+			1.0f - FMath::Exp(-6.0f * DeltaSeconds));
+		D.Pos += Step;
 		if (D.Age >= D.Life || FMath::Abs(D.Pos.X) > 1.0f + D.Radius || FMath::Abs(D.Pos.Y) > HalfH + D.Radius)
 		{
 			LensDrops.RemoveAtSwap(i);
 		}
 	}
 
-	const bool bVisible = LensDrops.Num() > 0;
+	// merge: touching water drops pool into the bigger one (area kept), which
+	// is now heavy enough to set off at once
+	for (int32 a = 0; a < LensDrops.Num(); ++a)
+	{
+		for (int32 b = LensDrops.Num() - 1; b > a; --b)
+		{
+			FLensDrop& A = LensDrops[a];
+			const FLensDrop& B = LensDrops[b];
+			if (A.Kind >= 0.5f || B.Kind >= 0.5f
+				|| FVector2D::DistSquared(A.Pos, B.Pos) > FMath::Square(LENS_MERGE * (A.Radius + B.Radius)))
+			{
+				continue;
+			}
+			const float Aa = A.Radius * A.Radius, Ab = B.Radius * B.Radius;
+			if (Ab > Aa)
+			{
+				A.Pos = B.Pos;
+				A.Angle = B.Angle;
+				A.Seed = B.Seed;
+			}
+			A.Radius = FMath::Sqrt(Aa + Ab);
+			A.Life = A.Age + FMath::Max(A.Life - A.Age, B.Life - B.Age);
+			A.Stick = 0.0f;
+			LensDrops.RemoveAtSwap(b);
+		}
+	}
+
+	for (int32 i = LensTrails.Num() - 1; i >= 0; --i)
+	{
+		if ((LensTrails[i].Age += DeltaSeconds) >= LensTrails[i].Life)
+		{
+			LensTrails.RemoveAtSwap(i);
+		}
+	}
+
+	const bool bVisible = LensDrops.Num() > 0 || LensTrails.Num() > 0;
 	if (LensISM->IsVisible() != bVisible)
 	{
 		LensISM->SetVisibility(bVisible);
@@ -921,24 +1027,45 @@ void AODWeatherController::TickLens(float DeltaSeconds)
 	}
 
 	// Camera-local quads (X = view axis, Y = right, Z = up); the Plane faces
-	// +Z, pitched 90 so it faces back at the camera. Unused slots scale to 0.
+	// +Z and its local X is turned to the drop's long axis (screen up rotated
+	// by Angle), normal back at the camera. Unused slots scale to 0.
 	const float HalfW = LENS_DISTANCE_CM * FMath::Tan(FMath::DegreesToRadians(Cam->FieldOfView * 0.5f));
-	const FQuat Facing = FRotator(90.0f, 0.0f, 0.0f).Quaternion();
-	for (int32 i = 0; i < Pool; ++i)
+	const int32 Total = LensISM->GetInstanceCount();
+	auto Place = [&](int32 Slot, const FVector2D& Pos, float Angle, float LongR, float CrossR,
+		float Kind, float Fade, float Trail, float Seed)
 	{
-		FTransform T(Facing, FVector::ZeroVector, FVector::ZeroVector);
+		const FVector Long(0.0f, -FMath::Sin(Angle), FMath::Cos(Angle));
+		const FQuat Q = FRotationMatrix::MakeFromXZ(Long, FVector(-1.0f, 0.0f, 0.0f)).ToQuat();
+		const FTransform T(Q, FVector(LENS_DISTANCE_CM, Pos.X * HalfW, Pos.Y * HalfW),
+			FVector(2.0f * LongR * HalfW / 100.0f, 2.0f * CrossR * HalfW / 100.0f, 1.0f));   // Plane is 100 cm across
+		LensISM->SetCustomDataValue(Slot, 0, Kind, false);
+		LensISM->SetCustomDataValue(Slot, 1, Fade, false);
+		LensISM->SetCustomDataValue(Slot, 2, Trail, false);
+		LensISM->SetCustomDataValue(Slot, 3, Seed, false);
+		LensISM->UpdateInstanceTransform(Slot, T, false, Slot == Total - 1, true);
+	};
+	const FTransform Hidden(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
+	for (int32 i = 0; i < Total; ++i)
+	{
 		if (i < LensDrops.Num())
 		{
 			const FLensDrop& D = LensDrops[i];
 			const float Fade = FMath::Min(D.Age / LENS_FADE_IN_S, 1.0f)
 				* FMath::Clamp((D.Life - D.Age) / (LENS_FADE_OUT * D.Life), 0.0f, 1.0f);
 			const float R = D.Radius * (D.bSnow ? FMath::Lerp(LENS_MELT_SHRINK, 1.0f, D.Kind) : 1.0f);
-			T.SetLocation(FVector(LENS_DISTANCE_CM, D.Pos.X * HalfW, D.Pos.Y * HalfW));
-			T.SetScale3D(FVector(2.0f * R * HalfW / 100.0f));   // Plane is 100 cm across
-			LensISM->SetCustomDataValue(i, 0, D.Kind, false);
-			LensISM->SetCustomDataValue(i, 1, Fade, false);
+			const float S = FMath::Sqrt(D.Stretch);   // area kept
+			Place(i, D.Pos, D.Angle, R * S, R / S, D.Kind, Fade, 0.0f, D.Seed);
 		}
-		LensISM->UpdateInstanceTransform(i, T, false, i == Pool - 1, true);
+		else if (i >= Pool && i - Pool < LensTrails.Num())
+		{
+			const FLensTrail& T = LensTrails[i - Pool];
+			const float Fade = 1.0f - FMath::Square(T.Age / FMath::Max(T.Life, 0.01f));
+			Place(i, T.Pos, T.Angle, 0.5f * T.Len, 0.5f * T.Width, 0.0f, Fade, 1.0f, T.Seed);
+		}
+		else
+		{
+			LensISM->UpdateInstanceTransform(i, Hidden, false, i == Total - 1, true);
+		}
 	}
 }
 

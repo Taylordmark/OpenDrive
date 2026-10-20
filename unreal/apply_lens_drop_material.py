@@ -9,12 +9,17 @@ layer is always on top), responsive AA (small screen-fixed translucency).
 Per-instance custom data (set by TickLens):
   [0] Kind  1 = snow flake .. 0 = water drop (a melting flake ramps 1 -> 0)
   [1] Fade  0..1 overall alpha (landing pop-in, end-of-life fade)
+  [2] Trail 1 = the faint wet streak a sliding drop leaves (2026-10-20)
+  [3] Seed  0..1 per-drop outline wobble, so no two beads are the same
+TickLens turns each quad's local X to the drop's slide axis and stretches it,
+so the round outline here becomes the sliding bead's ellipse.
 
 Looks (stylized, one Custom HLSL node per property - the bodies were checked
 with the Windows SDK dxc, ps_6_0):
-  water - a nearly clear disc with a faint rim and a highlight spot; the
-          dome Normal + Refraction (IOR mode, "RefractionIOR" param) bends
-          the scene through it like a real drop;
+  water - a nearly clear bead with an irregular outline, a dark meniscus
+          edge and a highlight spot; the dome Normal + Refraction (IOR mode,
+          "RefractionIOR" param) bends the scene through it like a real drop;
+  trail - a faint, softly refracting streak;
   snow  - an opaque soft six-lobed white blob, no refraction.
 
 UnrealEditor-Cmd.exe <OpenDriveUE.uproject> -run=pythonscript
@@ -27,30 +32,34 @@ MAT_DIR = "/Game/OpenDrive/Materials"
 MAT_NAME = "M_LensDrop"
 REFRACTION_IOR = 1.33
 
-# Custom node bodies: inputs UV (TexCoord 0), Kind, Fade (custom data 0/1).
-OPACITY_HLSL = """
-float2 d = UV - 0.5;
-float r = length(d) * 2.0;
-float rs = r * (1.0 + 0.22 * cos(6.0 * atan2(d.y, d.x)));
+# Custom node bodies: inputs UV (TexCoord 0), Kind, Fade, Trail, Seed
+# (custom data 0..3). RW = the water bead's radius with a seeded two-lobe
+# wobble, so beads read as irregular pools, not stamped circles.
+WOBBLE = ("float2 d = UV - 0.5;\n"
+          "float r = length(d) * 2.0;\n"
+          "float th = atan2(d.y, d.x);\n"
+          "float rw = r * (1.0 + 0.07 * sin(3.0 * th + Seed * 6.283) + 0.04 * sin(5.0 * th + Seed * 17.0));\n"
+          "float disc = 1.0 - smoothstep(0.85, 1.0, rw);\n"
+          "float rim = smoothstep(0.78, 0.97, rw) * disc;\n")
+OPACITY_HLSL = WOBBLE + """
+float rs = r * (1.0 + 0.22 * cos(6.0 * th));
 float flake = 1.0 - smoothstep(0.5, 0.8, rs);
-float disc = 1.0 - smoothstep(0.8, 1.0, r);
-float rim = smoothstep(0.55, 0.95, r) * disc;
-float hl = 1.0 - smoothstep(0.0, 0.3, length(d + 0.15) * 2.0);
-float water = disc * 0.12 + rim * 0.3 + hl * 0.5;
-return saturate(lerp(water, flake * 0.9, Kind) * Fade);
+float hl = 1.0 - smoothstep(0.0, 0.22, length(d + float2(0.14, 0.16)) * 2.0);
+float water = disc * 0.04 + rim * 0.5 + hl * 0.55;   // clear body, dark meniscus
+float streak = (1.0 - smoothstep(0.3, 1.0, r)) * 0.06;
+return saturate(lerp(lerp(water, streak, Trail), flake * 0.9, Kind) * Fade);
 """
 EMISSIVE_HLSL = """
 float2 d = UV - 0.5;
-float hl = 1.0 - smoothstep(0.0, 0.3, length(d + 0.15) * 2.0);
-return lerp(hl * float3(0.6, 0.65, 0.7), float3(0.33, 0.34, 0.35), Kind);
+float hl = 1.0 - smoothstep(0.0, 0.22, length(d + float2(0.14, 0.16)) * 2.0);
+return lerp(hl * (1.0 - Trail) * float3(0.6, 0.65, 0.7), float3(0.33, 0.34, 0.35), Kind);
 """
-COLOR_HLSL = """
-return lerp(float3(0.75, 0.8, 0.88), float3(0.95, 0.96, 0.98), Kind);
+COLOR_HLSL = WOBBLE + """
+float3 water = lerp(float3(0.35, 0.38, 0.42), float3(0.03, 0.035, 0.04), rim * (1.0 - Trail));
+return lerp(water, float3(0.95, 0.96, 0.98), Kind);
 """
-NORMAL_HLSL = """
-float2 d = (UV - 0.5) * 2.0;
-float disc = 1.0 - smoothstep(0.64, 1.0, dot(d, d));
-float2 n = d * (disc * (1.0 - Kind) * Fade);
+NORMAL_HLSL = WOBBLE + """
+float2 n = (d * 2.0) * (disc * (1.0 - Kind) * Fade * lerp(1.0, 0.3, Trail));
 return normalize(float3(n, 1.0));
 """
 
@@ -90,7 +99,13 @@ kind.set_editor_property("const_default_value", 0.0)
 fade = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -900, 300)
 fade.set_editor_property("data_index", 1)
 fade.set_editor_property("const_default_value", 1.0)
-SOURCES = {"UV": uv, "Kind": kind, "Fade": fade}
+trail = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -900, 450)
+trail.set_editor_property("data_index", 2)
+trail.set_editor_property("const_default_value", 0.0)
+seed = MEL.create_material_expression(mat, unreal.MaterialExpressionPerInstanceCustomData, -900, 600)
+seed.set_editor_property("data_index", 3)
+seed.set_editor_property("const_default_value", 0.0)
+SOURCES = {"UV": uv, "Kind": kind, "Fade": fade, "Trail": trail, "Seed": seed}
 
 customs = []
 
@@ -114,10 +129,10 @@ def custom(name, code, out_type, inputs, prop, y):
 
 F1 = unreal.CustomMaterialOutputType.CMOT_FLOAT1
 F3 = unreal.CustomMaterialOutputType.CMOT_FLOAT3
-custom("LensOpacity", OPACITY_HLSL, F1, ["UV", "Kind", "Fade"], unreal.MaterialProperty.MP_OPACITY, 0)
-custom("LensEmissive", EMISSIVE_HLSL, F3, ["UV", "Kind"], unreal.MaterialProperty.MP_EMISSIVE_COLOR, 200)
-custom("LensColor", COLOR_HLSL, F3, ["Kind"], unreal.MaterialProperty.MP_BASE_COLOR, 400)
-custom("LensNormal", NORMAL_HLSL, F3, ["UV", "Kind", "Fade"], unreal.MaterialProperty.MP_NORMAL, 600)
+custom("LensOpacity", OPACITY_HLSL, F1, ["UV", "Kind", "Fade", "Trail", "Seed"], unreal.MaterialProperty.MP_OPACITY, 0)
+custom("LensEmissive", EMISSIVE_HLSL, F3, ["UV", "Kind", "Trail"], unreal.MaterialProperty.MP_EMISSIVE_COLOR, 200)
+custom("LensColor", COLOR_HLSL, F3, ["UV", "Kind", "Trail", "Seed"], unreal.MaterialProperty.MP_BASE_COLOR, 400)
+custom("LensNormal", NORMAL_HLSL, F3, ["UV", "Kind", "Fade", "Trail", "Seed"], unreal.MaterialProperty.MP_NORMAL, 600)
 
 ior = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -400, 800)
 ior.set_editor_property("parameter_name", "RefractionIOR")
