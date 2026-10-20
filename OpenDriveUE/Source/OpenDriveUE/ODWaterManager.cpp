@@ -7,6 +7,7 @@
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
@@ -242,6 +243,9 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsed
 				}
 			}
 		}
+		// No normal overlay = every vert renders with a default (0,1,0) normal:
+		// lit by sun azimuth, and headlights cut off along the lamp plane.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 
 	// NO collision (task scope, 2026-08-27): driving INTO a lake is a future

@@ -7,6 +7,7 @@
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
+#include "DynamicMesh/MeshNormals.h"
 #include "DynamicMesh/DynamicMeshOverlay.h"
 #include "EngineUtils.h"
 #include "Kismet/GameplayStatics.h"
@@ -247,6 +248,9 @@ void AODEmbankmentManager::BuildSkirtMesh(UDynamicMeshComponent* Comp, const FPa
 				AddQuad(A, B, C, D, Au, Bu, Cu, Du);
 			}
 		}
+		// No normal overlay = every vert renders with a default (0,1,0) normal:
+		// lit by sun azimuth, and headlights cut off along the lamp plane.
+		FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
 	});
 }
 
