@@ -198,6 +198,12 @@ def main():
     mean = sum(vals) / len(vals)
     print(f"clump: {empty:.0%} empty, mean {mean:.2f}, max {max(vals):.2f}")
     assert 0.3 < empty < 0.55 and 0.45 < mean < 0.8 and max(vals) > 1.5, (empty, mean)
+    # grass carpet (ODForestManager BuildGrassCell): density x (0.5 + 0.8 * clump(.., 0))
+    # keeps the average instance count, never leaves a bare hole, and varies
+    carpet = [0.5 + 0.8 * clump(x * 200.0 + 100.0, y * 200.0 + 100.0, 0) for x in range(-300, 300) for y in range(-40, 40)]
+    cm = sum(carpet) / len(carpet)
+    print(f"carpet factor: mean {cm:.2f}, min {min(carpet):.2f}, max {max(carpet):.2f}")
+    assert 0.9 < cm < 1.1 and min(carpet) >= 0.5 and max(carpet) > 1.6, (cm, min(carpet), max(carpet))
     sq = {}
     for kx in range(0, 12):
         for ky in (1, 2, -2, -3):

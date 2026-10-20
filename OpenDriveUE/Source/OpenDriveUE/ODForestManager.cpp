@@ -2356,13 +2356,19 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 			}
 			const float Z00 = Z[sy][sx], Z10 = Z[sy][sx + 1], Z01 = Z[sy + 1][sx], Z11 = Z[sy + 1][sx + 1];
 			const float Slope = FVector2f((Z10 + Z11 - Z00 - Z01) * 0.5f, (Z01 + Z11 - Z00 - Z10) * 0.5f).Size() / Step;
-			const float Expected = PerSquare * FMath::Clamp(1.4f - Slope, 0.0f, 1.0f);   // thins past ~22 deg, none past ~55
+			// Carpet follows the ground cover's grass clumps (terrain survey
+			// 2026-10-16: an even 3/m2 field of one tuft reads as a dot screen
+			// at 15-60 m). Floor 0.5, peak ~1.8, mean ~1 (check_ground_cover.py),
+			// so no bare holes and the same instance count on average.
+			const float Cl = ODGroundCover::Clump(X0 + (sx + 0.5) * Step, Y0 + (sy + 0.5) * Step, 0);
+			const float Expected = PerSquare * FMath::Clamp(1.4f - Slope, 0.0f, 1.0f)   // thins past ~22 deg, none past ~55
+				* (0.5f + 0.8f * Cl);
 			const int32 Count = FMath::FloorToInt(Expected) + (Rng.FRand() < FMath::Frac(Expected) ? 1 : 0);
 			for (int32 c = 0; c < Count; ++c)
 			{
 				const float U = Rng.FRand(), V = Rng.FRand();
 				const float Yaw = Rng.FRand() * 360.0f;
-				const float Scale = 0.7f + Rng.FRand() * 0.9f;
+				const float Scale = (0.7f + Rng.FRand() * 0.9f) * (0.85f + 0.19f * Cl);   // clump cores stand taller
 				const double X = X0 + (sx + U) * Step, Y = Y0 + (sy + V) * Step;
 				bool bOnShoulder = false;
 				for (const int32 i : Stations)
