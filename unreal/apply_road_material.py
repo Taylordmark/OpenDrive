@@ -266,7 +266,7 @@ RealEdgeTileCm = 300.0
 RealEdgeTint = (1.08, 1.02, 0.92)                                  # = terrain SHOULDER_TINT
 RealEdgeDirtSet = ("Ground037", "/Game/OpenDrive/Textures/Ground")  # = terrain LAYERS["dirt"]
 RealEdgeDirtTileCm = 850.0
-RealEdgeDirtSatKeep = 0.55      # = terrain DIRT_SAT_KEEP
+RealEdgeDirtSatKeep = 0.37      # = terrain DIRT_SAT_KEEP
 RealEdgeDirtNoiseCm = 150.0     # = road_edge_blend's `fine` noise
 RealEdgeDirtSeed = (5.0, 67.0)
 RealEdgeMinM = 0.1              # fringe width range (m of pavement eaten) ...

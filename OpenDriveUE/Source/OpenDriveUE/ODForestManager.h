@@ -553,6 +553,12 @@ private:
 	float GrassLeadCm = 0.0f;   // this tick's lead, see GrassLeadSeconds
 	TMap<FIntPoint, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> GrassCells;   // null = built, nothing to grow
 	TMap<FIntPoint, double> GrassFirstTry;
+	// Why grass lattice corners come up bare (terrain survey 2026-10-20: the
+	// Concrete spawn had no carpet or cover at all, cause not found offline).
+	// Counted per committed cell, logged by UpdateGrass every 5 s while non-empty.
+	int32 GrassCornerStats[4] = {};   // on terrain, no hit/off the sanity band, in a lake, other actor
+	TMap<FName, int32> GrassOtherHits;   // "other actor" by class
+	double GrassStatsLogAt = 0.0;
 	// Realistic-only extra ground cover on the grass cells (ODGroundCover.h)
 	UPROPERTY()
 	FODGroundCoverAssets GroundCover;

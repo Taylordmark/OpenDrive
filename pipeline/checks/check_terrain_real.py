@@ -104,6 +104,81 @@ def tex_root():
     sys.exit("ground textures not downloaded - run content_src/textures/ground/download_ground_textures.py")
 
 
+def check_layer_means():
+    """LAYER_MEAN_LIN (the detail layers' hue divisor) = the sets' measured mean,
+    and *_SAT_KEEP land on the survey's saturation targets (median HSV S)."""
+    lin = lambda a: np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
+    for key, keep, target in (("grass", "GRASS_SAT_KEEP", 0.30), ("forest", "FOREST_SAT_KEEP", 0.29),
+                              ("dirt", "DIRT_SAT_KEEP", 0.15)):
+        aid = C["LAYERS"][key][0]
+        d = tex_root() / aid if aid not in C["REAL_SETS"] else tex_root().parents[1] / "realistic/terrain" / aid
+        a = lin(np.asarray(Image.open(next(d.glob("*_Color.*"))).convert("RGB"), dtype=np.float64) / 255.0)
+        m = a.reshape(-1, 3).mean(0)
+        assert np.allclose(m, C["LAYER_MEAN_LIN"][key], rtol=0.02), f"{aid} mean {m} != LAYER_MEAN_LIN[{key}]"
+        a = a[::4, ::4]
+        grey = (a @ np.array([0.3, 0.59, 0.11]))[..., None]
+        k = grey + (a - grey) * C[keep]
+        s = np.where(k <= 0.0031308, k * 12.92, 1.055 * np.clip(k, 0, 1) ** (1 / 2.4) - 0.055)
+        sat = float(np.median((s.max(-1) - s.min(-1)) / np.maximum(s.max(-1), 1e-6)))
+        print(f"{key} ({aid}): mean {m.round(4)}, saturation at {keep} {C[keep]} = {sat:.2f} (target {target})")
+        assert abs(sat - target) < 0.02, f"{keep} misses the saturation target"
+
+
+def check_cured_grass():
+    """Gap 2A: per biome ground tint (ODTerrainManager.cpp BiomeGroundTintTable),
+    lush biomes keep the old grass look, grass biomes cure instead of baring,
+    and only desert/badlands open up into full dirt patches."""
+    import re
+    cpp = (ROOT / "OpenDriveUE/Source/OpenDriveUE/ODTerrainManager.cpp").read_text(encoding="utf-8")
+    table = cpp[cpp.index("BiomeGroundTintTable[]"):]
+    table = table[:table.index("};")]
+    tints = {m[0]: tuple(map(float, m[1:])) for m in
+             re.findall(r"/\* (\w+)\s*\*/ \{ FLinearColor\(([\d.]+)f, ([\d.]+)f, ([\d.]+)f\)", table)}
+    assert len(tints) >= 13, f"parsed {len(tints)} biome tints"
+    ramp = lambda x, lo, hi: min(max((x - lo) / (hi - lo), 0.0), 1.0)
+    m = C["LAYER_MEAN_LIN"]["grass"]
+    grey = 0.3 * m[0] + 0.59 * m[1] + 0.11 * m[2]
+    assert abs(C["CURED_TINT_GAIN"] / (C["SAT_TINT_LUMA_K"] / grey) - 1) < 0.03,         "CURED_TINT_GAIN must stay SAT_TINT_LUMA_K / grass grey (sat_macro value-neutral)"
+    out = {}
+    for name, (r, g, _) in tints.items():
+        rg = r / max(g, 0.01)
+        dry, bare = ramp(rg, C["DRY_RG_LO"], C["DRY_RG_HI"]), ramp(rg, C["BARE_RG_LO"], C["BARE_RG_HI"])
+        lush_mul = C["LUSH_DIRT_MUL"] + (C["CURED_DIRT_MUL"] - C["LUSH_DIRT_MUL"]) * dry
+        out[name] = (dry, lush_mul + (1 - lush_mul) * bare)
+        print(f"  {name:16s} R/G {rg:.2f}  cured {dry:.2f}  dirt-patch mul {out[name][1]:.2f}")
+    for name in ("DeciduousForest", "EvergreenForest", "Rainforest", "Wetland"):
+        assert out[name] == (0.0, C["LUSH_DIRT_MUL"]), f"{name} must keep the lush look"
+    for name in ("PlainsGrassland", "Savanna", "Chaparral", "Farmland"):
+        assert out[name][0] > 0.5 and out[name][1] <= 0.6, f"{name} should be cured grass, not bare"
+    for name in ("DesertScrub", "CanyonBadlands"):
+        assert out[name][1] >= 0.85, f"{name} should open up into bare ground"
+
+
+def check_snow_aspect_drift():
+    """Gap 5: mirror of build_ground's snow_amt. South faces barer than north,
+    hollows fuller than ridges, flat open ground and no-DEM areas unchanged,
+    and no drift snow below the snow line."""
+    sat = lambda x: min(max(x, 0.0), 1.0)
+
+    def amt(snow_t, slope_deg, south, gully=0.0, ridge=0.0):
+        a = math.radians(slope_deg)
+        nz, ny = math.cos(a), math.sin(a) * (1 if south else -1)
+        steep_w = 1 - sat(nz) ** C["SLOPE_SOFTNESS"]
+        v = snow_t * (1 - steep_w * C["SNOW_STEEP_REDUCTION"])
+        k = ny * C["SNOW_ASPECT_GAIN"]
+        v *= 1 - sat(k) * C["SNOW_ASPECT_MELT"] + sat(-k) * C["SNOW_ASPECT_HOLD"]
+        return sat(v * (1 - ridge * C["SNOW_RIDGE_THIN"]) + gully * snow_t * C["SNOW_DRIFT_GULLY"])
+
+    s, n = amt(0.6, 25, True), amt(0.6, 25, False)
+    print(f"  snow 25 deg slope @ snow_t 0.6: south {s:.2f}  north {n:.2f}; "
+          f"gully {amt(0.6, 0, True, gully=1):.2f}  ridge {amt(0.6, 0, True, ridge=1):.2f}  flat {amt(0.6, 0, True):.2f}")
+    assert amt(0.6, 0, True) == amt(0.6, 0, False) == 0.6, "flat ground must not change"
+    assert s < 0.5 * n, "south faces should be clearly barer than north"
+    assert amt(0.6, 0, True, gully=1) > 0.8 and amt(0.6, 0, True, ridge=1) < 0.45
+    assert amt(0.0, 0, True, gully=1) == 0.0, "drifts must not appear below the snow line"
+    assert amt(1.0, 25, True) > 0.2, "south faces at full snow should still hold some"
+
+
 def contrast(x, k):
     return np.clip((x - 0.5) * k + 0.5, 0, 1)
 
@@ -177,6 +252,9 @@ def main():
     assert band.min() < 0.15 and band.max() > 0.85, "strata bands don't span dark..light"
     assert b_corr < 0.5, "strata repeat at one band"
     check_road_edge()
+    check_layer_means()
+    check_cured_grass()
+    check_snow_aspect_drift()
     print(f"OK - wrote {out / 'terrain_real_tiling.png'}")
 
 
