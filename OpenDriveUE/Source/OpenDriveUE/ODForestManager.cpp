@@ -2283,6 +2283,8 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 	float Z[N + 1][N + 1];
 	bool bGood[N + 1][N + 1];
 	int32 Misses = 0;
+	int32 Stats[4] = {};
+	TMap<FName, int32> Other;
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	if (Player)
@@ -2300,6 +2302,7 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 					FVector(X, Y, PlayerZHint - GroundTraceMarginCm), ECC_WorldStatic, Params))
 			{
 				++Misses;   // collision not streamed in here yet
+				++Stats[1];
 				continue;
 			}
 			if (FMath::Abs(Hit.ImpactPoint.Z - PlayerZHint) > GroundSanityMaxDeltaCm)
@@ -2307,12 +2310,18 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 				// fell through terrain whose collision is still cooking onto the
 				// floor plane far below - retry, same deferral as BuildTile's trees
 				++Misses;
+				++Stats[1];
 				continue;
 			}
 			const AActor* HitActor = Hit.GetActor();
-			bGood[iy][ix] = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>())
-				&& !(bUseWaterExclusion && IsInsideLake(X, Y));
+			const bool bTerrain = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>());
+			bGood[iy][ix] = bTerrain && !(bUseWaterExclusion && IsInsideLake(X, Y));
 			Z[iy][ix] = Hit.ImpactPoint.Z;
+			++Stats[bGood[iy][ix] ? 0 : bTerrain ? 2 : 3];
+			if (!bTerrain)
+			{
+				++Other.FindOrAdd(HitActor ? HitActor->GetClass()->GetFName() : FName(TEXT("None")));
+			}
 		}
 	}
 	if (Misses > 0)
@@ -2325,6 +2334,14 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 		}
 	}
 	GrassFirstTry.Remove(Key);
+	for (int32 s = 0; s < 4; ++s)
+	{
+		GrassCornerStats[s] += Stats[s];
+	}
+	for (const TPair<FName, int32>& O : Other)
+	{
+		GrassOtherHits.FindOrAdd(O.Key) += O.Value;
+	}
 
 	FBiomeRecipe Recipe;
 	float ForestW;
@@ -2490,6 +2507,22 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick); ++i)
 	{
 		BuildGrassCell(Want[i].Value, Player);
+	}
+	if (const double Now = FPlatformTime::Seconds(); Now - GrassStatsLogAt > 5.0
+		&& GrassCornerStats[0] + GrassCornerStats[1] + GrassCornerStats[2] + GrassCornerStats[3] > 0)
+	{
+		GrassStatsLogAt = Now;
+		GrassOtherHits.ValueSort(TGreater<int32>());
+		FString Top;
+		for (const TPair<FName, int32>& O : GrassOtherHits)
+		{
+			Top += FString::Printf(TEXT(" %s=%d"), *O.Key.ToString(), O.Value);
+			if (Top.Len() > 120) break;
+		}
+		UE_LOG(LogTemp, Display, TEXT("ODForestManager: grass corners last 5s - terrain %d, no hit/off band %d, lake %d, other %d%s"),
+			GrassCornerStats[0], GrassCornerStats[1], GrassCornerStats[2], GrassCornerStats[3], *Top);
+		FMemory::Memzero(GrassCornerStats);
+		GrassOtherHits.Reset();
 	}
 
 	for (auto It = GrassCells.CreateIterator(); It; ++It)
