@@ -14,6 +14,7 @@
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Math/RandomStream.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -61,6 +62,10 @@ constexpr float OvercastSkyLight = 1.2f;      // x sky light intensity
 constexpr float OvercastSunAngleDeg = 8.0f;   // sun LightSourceAngle at full cover: what shadow is left goes soft
 constexpr float FullCoverAt = 0.85f;          // CloudCover reaching full weight (Overcast's own target)
 constexpr float FlashSeconds = 0.35f;
+
+// Lumen sky leaking into canopy shade (2026-10-20 audit, Gap 1C). Live-tunable
+// for capture sweeps; re-applied every Tick (one float write).
+TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.1f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
@@ -474,7 +479,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 	// got ~0 sky (overcast x30 sky light still 37 % black; Lumen GI off: 0.2 %).
 	// Real canopy passes ~10-20 % of open sky through/around the leaves.
 	S.bOverride_LumenSkylightLeaking = true;
-	S.LumenSkylightLeaking = 0.1f;
+	S.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
 
 	// Visual Style Realistic (PLAN-VISUALS.md Track A): the "car ad" grade -
 	// warm highlights, firmer shadows, more bloom, no grain. Color-grading
@@ -509,6 +514,11 @@ void AODAtmosphereController::SpawnGradeVolume()
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	if (APostProcessVolume* PPV = GradeVolume.Get())
+	{
+		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
+	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
 	// state isn't dirtied every frame (curvature at 1 km is 8 cm).
