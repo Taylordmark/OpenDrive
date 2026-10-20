@@ -21,9 +21,11 @@ and embankment gravel moved to the paler Gravel030 in the 2026-10-16 survey fix)
   - height-aware blends: AO maps double as height, so dirt shows in the
     grass's low spots first, rock pokes through on slope transitions, and
     snow fills crevices before it covers ridges.
-  - the biome vertex tint still leads the hue (interface rule), but keeps
-    TINT_KEEP of each texture's own chroma instead of the stylized full
-    desaturate-and-retint.
+  - the ambientCG ground layers carry detail only: each is desaturated to
+    a measured target (*_SAT_KEEP) and divided by its own mean colour
+    (LAYER_MEAN_LIN), then takes the biome vertex tint's chroma, which
+    sat_macro() turns into the Sentinel-2 colour - so every area shows its
+    own measured hue instead of the textures' olive.
   - rock strata: world-Z bands (warped by XY noise so they dip) tint the
     triplanar rock on steep terrain, cut walls and boulders.
   - AO goes to the AO pin; boulders get moss on up-facing sides.
@@ -107,12 +109,20 @@ DIST_FAR_CM = 15000.0    # ... and holds FAR_W_AT_DIST from 150 m
 FAR_W_AT_DIST = 0.8      # never 1: two periods stay mixed at range too
 DIST_NORMAL_FLATTEN = 0.5
 
-TINT_KEEP = 0.35         # share of the texture's own chroma kept under the biome tint
 # terrain survey 2026-10-16 (docs/terrain_realism_research_src.html): the
-# ambientCG grass (S 0.56) and dirt (S 0.43) are far more saturated than the
-# real ground - keep this share of their saturation (lerp from grey)
-GRASS_SAT_KEEP = 0.6
-DIRT_SAT_KEEP = 0.55     # apply_road_material.py RealEdgeDirtSatKeep mirrors it
+# ambientCG grass (S 0.55) and dirt (S 0.44) are far more saturated than the
+# real ground - keep this share of their saturation (lerp from grey), which
+# lands on the measured targets (median HSV S): grass 0.30, dry dirt 0.15
+GRASS_SAT_KEEP = 0.58
+FOREST_SAT_KEEP = 0.5    # Ground076 S 0.57 -> 0.29
+DIRT_SAT_KEEP = 0.37     # apply_road_material.py RealEdgeDirtSatKeep mirrors it
+# mean linear albedo of each set's _Color map (check_terrain_real.py re-measures
+# them from content_src): the layers are divided by it so they add detail, not hue
+LAYER_MEAN_LIN = {
+    "grass": (0.0613, 0.1104, 0.0229),
+    "forest": (0.2574, 0.1303, 0.0487),
+    "dirt": (0.3382, 0.3153, 0.1176),
+}
 # dry vs lush from the biome vertex tint's R/G (deciduous 0.38 .. desert 1.31):
 # lush ground shows the grass layer through (fewer dirt patches - the cards are
 # only clumped accents now), dry shoulders get dustier
@@ -472,6 +482,15 @@ def desat_layer(g, layer, keep):
     return dict(layer, albedo=g.lerp(g.desat(layer["albedo"]), layer["albedo"], g.c(keep)))
 
 
+def detail_layer(g, layer, key, keep):
+    """desat_layer, then divided by the kept layer's mean colour (times its
+    grey, so brightness stays): mean chroma 1, the texture's variation stays."""
+    m = LAYER_MEAN_LIN[key]
+    grey = 0.3 * m[0] + 0.59 * m[1] + 0.11 * m[2]   # = the Desaturation node's weights
+    norm = [grey / (grey + (c - grey) * keep) for c in m]
+    return mul_albedo(g, desat_layer(g, layer, keep), g.c3(*norm))
+
+
 def snow_layer(g, layer):
     """Snow006 brightened to fresh-snow albedo."""
     return dict(layer, albedo=g.minv(g.mul(layer["albedo"], g.c(SNOW_ALBEDO_GAIN)), g.c(SNOW_ALBEDO_MAX)))
@@ -710,23 +729,21 @@ def build_ground():
     luma = g.dot(vtint, g.c3(0.2126, 0.7152, 0.0722))
 
     L = {k: planar_layer(g, SETS[k], xy, var_w, dist_t) for k in ("grass", "forest", "dirt", "scree", "snow")}
-    L["grass"] = desat_layer(g, L["grass"], GRASS_SAT_KEEP)
-    L["dirt"] = desat_layer(g, L["dirt"], DIRT_SAT_KEEP)
     L["snow"] = snow_layer(g, L["snow"])
     dry_t = g.ramp(g.div(g.mask(vtint, r=True), g.maxv(g.mask(vtint, gg=True), g.c(0.01))), DRY_RG_LO, DRY_RG_HI)
 
-    def biome_tint(albedo):
-        """Vertex tint leads the hue (stylized desaturate-and-retint), then
-        TINT_KEEP of the texture's per-pixel chroma ratio is put back so
-        blades and soil keep their own colour variation."""
-        grey = g.desat(albedo)
-        retinted = g.mul(g.mul(grey, g.c(TINT_GAIN)), vtint)
-        chroma = g.div(albedo, g.maxv(grey, g.c(0.02)))
-        return g.mul(retinted, g.lerp(g.c3(1.0, 1.0, 1.0), chroma, g.c(TINT_KEEP)))
-
-    grass = L["grass"] | {"albedo": biome_tint(L["grass"]["albedo"])}
-    forest = L["forest"] | {"albedo": biome_tint(L["forest"]["albedo"])}
+    # layers = detail; the hue is the biome tint's (sat_macro's reference),
+    # which sat_macro turns into the Sentinel-2 colour. Grass/forest keep the
+    # stylized value (TINT_GAIN * tint), dirt its own (tint chroma only).
+    vt_gain = g.mul(vtint, g.c(TINT_GAIN))
+    grass = mul_albedo(g, detail_layer(g, L["grass"], "grass", GRASS_SAT_KEEP), vt_gain)
+    forest = mul_albedo(g, detail_layer(g, L["forest"], "forest", FOREST_SAT_KEEP), vt_gain)
+    dirt = mul_albedo(g, detail_layer(g, L["dirt"], "dirt", DIRT_SAT_KEEP),
+                      g.div(vtint, g.maxv(luma, g.c(0.005))))
     scree = mul_albedo(g, L["scree"], g.c3(*SCREE_TINT))
+    # (the shoulder dust and road fringe come after sat_macro: plain
+    # desaturated dirt there, the soil's own colour)
+    L["dirt"] = desat_layer(g, L["dirt"], DIRT_SAT_KEEP)
 
     forest_w = g.sat(g.div(g.sub(g.c(FOREST_LUMA_HIGH), luma), g.c(FOREST_LUMA_HIGH - FOREST_LUMA_LOW)))
     veg = blend_layers(g, grass, forest, forest_w)
@@ -737,7 +754,7 @@ def build_ground():
     dirt_alpha = g.sat(g.add(g.mul(g.noise_xy(xy, MACRO_DIRT_SCALE_CM, (0.0, 0.0)), g.c(DIRT_PATCH_STRENGTH)),
                              g.mul(g.ramp(patch, 0.78, 0.95), g.c(0.75))))
     dirt_alpha = g.mul(dirt_alpha, g.lerp(g.c(LUSH_DIRT_MUL), one, dry_t))
-    veg = blend_layers(g, veg, L["dirt"], g.height_blend(dirt_alpha, veg["ao"], L["dirt"]["ao"]))
+    veg = blend_layers(g, veg, dirt, g.height_blend(dirt_alpha, veg["ao"], dirt["ao"]))
     veg["albedo"] = g.lerp(veg["albedo"], g.mul(veg["albedo"], g.c3(*PATCH_DRY_MUL)), g.ramp(patch, 0.5, 0.72))
 
     spring = g.mul(g.scalar_param("SpringGreen", 0.0), g.c(SPRING_GREEN_MAX_BLEND))
