@@ -512,12 +512,16 @@ private:
 	 *  default = the old look.
 	 *  Realism eval T6: same contract for pave_<area>_test.* (pipeline/
 	 *  build_pave_mask.py) -> PaveTex/PaveOrigin/PaveSizeCm/PaveAmount, the
-	 *  material's paved-ground layer. Returns the bound texture or null. */
+	 *  material's paved-ground layer; dem_<area>_test.* (pipeline/
+	 *  build_terrain_relief.py) -> DemTex/..., slope detail + gully/ridge.
+	 *  Returns the bound texture or null. */
 	UTexture2D* BindAreaTexture(const TCHAR* Kind, const TCHAR* Param);
 	UPROPERTY()
 	TObjectPtr<UTexture2D> SatTex;
 	UPROPERTY()
 	TObjectPtr<UTexture2D> PaveTex;
+	UPROPERTY()
+	TObjectPtr<UTexture2D> DemTex;
 
 	void RequestTileLoad(const FIntPoint& Key, ETileFidelity Fidelity);
 	void OnTileParsed(const FIntPoint& Key, ETileFidelity Fidelity, bool bOk, FParsedTerrainTile&& Parsed);

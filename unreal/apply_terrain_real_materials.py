@@ -130,6 +130,15 @@ DRY_RG_LO = 0.6
 DRY_RG_HI = 1.2
 LUSH_DIRT_MUL = 0.35
 TINT_GAIN = 2.0          # same regain as the stylized hue_from_tint
+# cured grass (terrain research gap 2A): dry_t cures the grass layer instead of
+# baring the ground - straw at the biome tint's chroma, brighter (CURED_TINT_GAIN
+# = SAT_TINT_LUMA_K / the grass layer's grey, so sat_macro's value ratio stays
+# neutral on it) - and grassland/savanna/chaparral keep CURED_DIRT_MUL patches;
+# only bare biomes (tint R/G BARE_RG_LO..HI: desert, badlands) open up fully
+CURED_TINT_GAIN = 2.85
+CURED_DIRT_MUL = 0.55
+BARE_RG_LO = 1.15
+BARE_RG_HI = 1.35
 HEIGHT_BLEND = 0.6       # how far AO-as-height bends a blend's edge (0 = plain lerp)
 
 SLOPE_SOFTNESS = 4.0
@@ -224,6 +233,19 @@ SAT_STEEP_REF_LUMA = 0.05    # ... and on steep (rock) ground - both fitted by c
 SAT_VALUE_EXP = 0.6      # softens the luminance ratio (imagery also carries hill shading)
 SAT_VALUE_CLAMP = (0.6, 1.6)
 SAT_CHROMA_CLAMP = (0.5, 2.0)
+# DEM relief (terrain research gap 4A): pipeline/build_terrain_relief.py ->
+# DemTex/DemOrigin/DemSizeCm/DemAmount (same extent contract as SatTex). RG =
+# high-passed slope, B = topographic position (> 0.5 gully, < 0.5 ridge).
+# pipeline/checks/check_terrain_relief.py mirrors these.
+DEM_GRAD_RANGE = 0.5          # = build_terrain_relief.GRAD_RANGE
+DEM_NORMAL_STRENGTH = 1.0     # share of the lost slope detail bent back into the normal ...
+DEM_NORMAL_NEAR_CM = 15000.0  # ... none up close (near tiles keep z15 relief at 0.3 m RTIN error) ...
+DEM_NORMAL_FAR_CM = 60000.0   # ... all of it from here (far tiles: 5 m error flattens gullies)
+DEM_GULLY = (0.55, 0.85)      # B ramp -> gully weight
+DEM_RIDGE = (0.45, 0.15)      # B ramp (falling) -> ridge weight
+DEM_GULLY_DIRT = 0.5          # added to the dirt-patch alpha in gullies
+DEM_RIDGE_DIRT = 0.6          # share of the dirt patches ridges lose (grass there)
+DEM_GULLY_ROCK = 0.3          # flat_w cut in gullies: cut banks show rock sooner
 # paved ground (T6, pave_layer)
 PAVE_SET = "Concrete034"     # /Game/OpenDrive/Textures/Road (import_road_textures.py)
 PAVE_TILE_CM = 300.0
@@ -730,13 +752,21 @@ def build_ground():
 
     L = {k: planar_layer(g, SETS[k], xy, var_w, dist_t) for k in ("grass", "forest", "dirt", "scree", "snow")}
     L["snow"] = snow_layer(g, L["snow"])
-    dry_t = g.ramp(g.div(g.mask(vtint, r=True), g.maxv(g.mask(vtint, gg=True), g.c(0.01))), DRY_RG_LO, DRY_RG_HI)
+    tint_rg = g.div(g.mask(vtint, r=True), g.maxv(g.mask(vtint, gg=True), g.c(0.01)))
+    dry_t = g.ramp(tint_rg, DRY_RG_LO, DRY_RG_HI)
+    bare_t = g.ramp(tint_rg, BARE_RG_LO, BARE_RG_HI)
+    dem = area_tex(g, xy, "Dem")
+    dem_w = g.mul(g.scalar_param("DemAmount", 0.0), g.mask(dem, r=True, a_out="A"))
+    dem_b = g.mask(dem, b=True, a_out="RGB")
+    gully, ridge = g.mul(g.ramp(dem_b, *DEM_GULLY), dem_w), g.mul(g.ramp(dem_b, *DEM_RIDGE), dem_w)
 
     # layers = detail; the hue is the biome tint's (sat_macro's reference),
     # which sat_macro turns into the Sentinel-2 colour. Grass/forest keep the
     # stylized value (TINT_GAIN * tint), dirt its own (tint chroma only).
+    # Cured grass: the same layer, brighter as it dries (CURED_TINT_GAIN).
     vt_gain = g.mul(vtint, g.c(TINT_GAIN))
-    grass = mul_albedo(g, detail_layer(g, L["grass"], "grass", GRASS_SAT_KEEP), vt_gain)
+    grass = mul_albedo(g, detail_layer(g, L["grass"], "grass", GRASS_SAT_KEEP),
+                       g.mul(vtint, g.lerp(g.c(TINT_GAIN), g.c(CURED_TINT_GAIN), dry_t)))
     forest = mul_albedo(g, detail_layer(g, L["forest"], "forest", FOREST_SAT_KEEP), vt_gain)
     dirt = mul_albedo(g, detail_layer(g, L["dirt"], "dirt", DIRT_SAT_KEEP),
                       g.div(vtint, g.maxv(luma, g.c(0.005))))
@@ -753,7 +783,10 @@ def build_ground():
                               g.noise_xy(xy, PATCH_COARSE_SCALE_CM, (59.0, 11.0)), g.c(0.6)), 1.8)
     dirt_alpha = g.sat(g.add(g.mul(g.noise_xy(xy, MACRO_DIRT_SCALE_CM, (0.0, 0.0)), g.c(DIRT_PATCH_STRENGTH)),
                              g.mul(g.ramp(patch, 0.78, 0.95), g.c(0.75))))
-    dirt_alpha = g.mul(dirt_alpha, g.lerp(g.c(LUSH_DIRT_MUL), one, dry_t))
+    dirt_alpha = g.mul(dirt_alpha, g.lerp(g.lerp(g.c(LUSH_DIRT_MUL), g.c(CURED_DIRT_MUL), dry_t), one, bare_t))
+    # DEM: gullies wash bare, ridges hold grass
+    dirt_alpha = g.sat(g.add(g.mul(dirt_alpha, g.sub(one, g.mul(ridge, g.c(DEM_RIDGE_DIRT)))),
+                             g.mul(gully, g.c(DEM_GULLY_DIRT))))
     veg = blend_layers(g, veg, dirt, g.height_blend(dirt_alpha, veg["ao"], dirt["ao"]))
     veg["albedo"] = g.lerp(veg["albedo"], g.mul(veg["albedo"], g.c3(*PATCH_DRY_MUL)), g.ramp(patch, 0.5, 0.72))
 
@@ -783,7 +816,8 @@ def build_ground():
     rock["rough"] = g.sat(g.add(rock["rough"], g.mul(g.sub(band, g.c(0.5)), g.c(-0.12))))
     steep = blend_layers(g, rock, scree, treeline_t)
 
-    base = blend_layers(g, steep, veg, g.height_blend(flat_w, steep["ao"], veg["ao"]))
+    base = blend_layers(g, steep, veg, g.height_blend(g.sat(g.sub(flat_w, g.mul(gully, g.c(DEM_GULLY_ROCK)))),
+                                                      steep["ao"], veg["ao"]))
 
     # sand / beach (stylized parity; no-op inland)
     sand = g.mul(g.sat(g.div(g.sub(g.c(BEACH_BAND_CM), g.sub(z, g.scalar_param("SeaLevelZCm", -OFF_Z_CM))),
@@ -844,7 +878,38 @@ def build_ground():
     out["rough"] = g.lerp(out["rough"], g.c(0.06), glint)
     out["normal"] = g.lerp(out["normal"], facet, glint)
     out["albedo"] = g.mul(out["albedo"], g.lerp(g.c(0.85), one, out["ao"]))   # cavity darkening
+    out["normal"] = dem_relief_normal(g, out["normal"], dem, dem_w, nrm, depth)
     finish(g, path, f"{MAT_DIR}/M_GroundStylized", out)
+
+
+def dem_relief_normal(g, normal, dem, dem_w, nrm, depth):
+    """Bend the vertex normal by the DEM's high-passed slope (the relief the
+    far mesh's RTIN dropped) in world space - a z = f(x, y) surface's normal is
+    (-fx, -fy, 1) - then into tangent space (UE's own basis, so no UV-sign
+    guess) and whiteout-blended under the layer normal."""
+    slope = g.mul(g.sub(g.mask(dem, r=True, gg=True, a_out="RGB"), g.c2(0.5, 0.5)), g.c(2.0 * DEM_GRAD_RANGE))
+    k = g.mul(g.mul(dem_w, g.c(-DEM_NORMAL_STRENGTH)), g.ramp(depth, DEM_NORMAL_NEAR_CM, DEM_NORMAL_FAR_CM))
+    bent = g.add(nrm, g.append(g.mul(slope, k), g.c(0.0)))
+    to_tangent = g.node(unreal.MaterialExpressionTransform,
+                        transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_WORLD,
+                        transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_TANGENT)
+    G.req(MEL.connect_material_expressions(bent, "", to_tangent, ""), "Transform(DEM normal)")
+    return g.custom("float3 b = normalize(B);\nreturn normalize(float3(A.xy + b.xy, A.z * b.z));",
+                    unreal.CustomMaterialOutputType.CMOT_FLOAT3, A=normal, B=to_tangent)
+
+
+def area_tex(g, xy, param):
+    """<param>Tex over its <param>Origin / <param>SizeCm world-XY extent
+    (AODTerrainManager::BindAreaTexture; white, 1 cm extent when unbound)."""
+    white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
+    origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name=f"{param}Origin")
+    size = g.node(unreal.MaterialExpressionVectorParameter, parameter_name=f"{param}SizeCm",
+                  default_value=unreal.LinearColor(1.0, 1.0, 0.0, 0.0))
+    uv = g.div(g.sub(xy, g.mask(origin, r=True, gg=True)), g.mask(size, r=True, gg=True))
+    tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name=f"{param}Tex", texture=white,
+                 sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
+    G.req(any(MEL.connect_material_expressions(uv, "", tex, p) for p in ("UVs", "Coordinates")), f"{param}Tex UV")
+    return tex
 
 
 def sat_macro(g, albedo, xy, depth, vtint, flat_w):
@@ -858,14 +923,7 @@ def sat_macro(g, albedo, xy, depth, vtint, flat_w):
     Weight = SatAmount (0 by default: walls, other users, no data = the old
     look) * texel confidence (alpha) * a distance ramp. Before wetness/snow,
     so both still apply on top."""
-    white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
-    origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="SatOrigin")
-    size = g.node(unreal.MaterialExpressionVectorParameter, parameter_name="SatSizeCm",
-                  default_value=unreal.LinearColor(1.0, 1.0, 0.0, 0.0))
-    uv = g.div(g.sub(xy, g.mask(origin, r=True, gg=True)), g.mask(size, r=True, gg=True))
-    tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name="SatTex", texture=white,
-                 sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
-    G.req(any(MEL.connect_material_expressions(uv, "", tex, p) for p in ("UVs", "Coordinates")), "SatTex UV")
+    tex = area_tex(g, xy, "Sat")
     luma_w = g.c3(0.2126, 0.7152, 0.0722)
     sl = g.maxv(g.dot(tex, luma_w, a_out="RGB"), g.c(0.005))
     sat_c = g.div(g.mask(tex, r=True, gg=True, b=True, a_out="RGB"), sl)
@@ -888,14 +946,7 @@ def pave_layer(g, base, xy, var_w, dist_t, flat_w):
     light concrete and dark weathered asphalt; flat ground only. PaveAmount
     0 by default = no pave (walls, areas without a mask). After sat_macro:
     the satellite's colour would only smear grass hues onto the slab."""
-    white = unreal.load_asset("/Engine/EngineResources/WhiteSquareTexture")
-    origin = g.node(unreal.MaterialExpressionDoubleVectorParameter, parameter_name="PaveOrigin")
-    size = g.node(unreal.MaterialExpressionVectorParameter, parameter_name="PaveSizeCm",
-                  default_value=unreal.LinearColor(1.0, 1.0, 0.0, 0.0))
-    uv = g.div(g.sub(xy, g.mask(origin, r=True, gg=True)), g.mask(size, r=True, gg=True))
-    tex = g.node(unreal.MaterialExpressionTextureSampleParameter2D, parameter_name="PaveTex", texture=white,
-                 sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
-    G.req(any(MEL.connect_material_expressions(uv, "", tex, p) for p in ("UVs", "Coordinates")), "PaveTex UV")
+    tex = area_tex(g, xy, "Pave")
     w = g.mul(g.mul(g.scalar_param("PaveAmount", 0.0), g.mask(tex, r=True, a_out="RGB")),
               g.sat(g.mul(flat_w, g.c(PAVE_FLAT_GAIN))))
     cdir = f"/Game/OpenDrive/Textures/Road/{PAVE_SET}"

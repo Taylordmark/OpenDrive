@@ -124,6 +124,36 @@ def check_layer_means():
         assert abs(sat - target) < 0.02, f"{keep} misses the saturation target"
 
 
+def check_cured_grass():
+    """Gap 2A: per biome ground tint (ODTerrainManager.cpp BiomeGroundTintTable),
+    lush biomes keep the old grass look, grass biomes cure instead of baring,
+    and only desert/badlands open up into full dirt patches."""
+    import re
+    cpp = (ROOT / "OpenDriveUE/Source/OpenDriveUE/ODTerrainManager.cpp").read_text(encoding="utf-8")
+    table = cpp[cpp.index("BiomeGroundTintTable[]"):]
+    table = table[:table.index("};")]
+    tints = {m[0]: tuple(map(float, m[1:])) for m in
+             re.findall(r"/\* (\w+)\s*\*/ \{ FLinearColor\(([\d.]+)f, ([\d.]+)f, ([\d.]+)f\)", table)}
+    assert len(tints) >= 13, f"parsed {len(tints)} biome tints"
+    ramp = lambda x, lo, hi: min(max((x - lo) / (hi - lo), 0.0), 1.0)
+    m = C["LAYER_MEAN_LIN"]["grass"]
+    grey = 0.3 * m[0] + 0.59 * m[1] + 0.11 * m[2]
+    assert abs(C["CURED_TINT_GAIN"] / (C["SAT_TINT_LUMA_K"] / grey) - 1) < 0.03,         "CURED_TINT_GAIN must stay SAT_TINT_LUMA_K / grass grey (sat_macro value-neutral)"
+    out = {}
+    for name, (r, g, _) in tints.items():
+        rg = r / max(g, 0.01)
+        dry, bare = ramp(rg, C["DRY_RG_LO"], C["DRY_RG_HI"]), ramp(rg, C["BARE_RG_LO"], C["BARE_RG_HI"])
+        lush_mul = C["LUSH_DIRT_MUL"] + (C["CURED_DIRT_MUL"] - C["LUSH_DIRT_MUL"]) * dry
+        out[name] = (dry, lush_mul + (1 - lush_mul) * bare)
+        print(f"  {name:16s} R/G {rg:.2f}  cured {dry:.2f}  dirt-patch mul {out[name][1]:.2f}")
+    for name in ("DeciduousForest", "EvergreenForest", "Rainforest", "Wetland"):
+        assert out[name] == (0.0, C["LUSH_DIRT_MUL"]), f"{name} must keep the lush look"
+    for name in ("PlainsGrassland", "Savanna", "Chaparral", "Farmland"):
+        assert out[name][0] > 0.5 and out[name][1] <= 0.6, f"{name} should be cured grass, not bare"
+    for name in ("DesertScrub", "CanyonBadlands"):
+        assert out[name][1] >= 0.85, f"{name} should open up into bare ground"
+
+
 def contrast(x, k):
     return np.clip((x - 0.5) * k + 0.5, 0, 1)
 
@@ -198,6 +228,7 @@ def main():
     assert b_corr < 0.5, "strata repeat at one band"
     check_road_edge()
     check_layer_means()
+    check_cured_grass()
     print(f"OK - wrote {out / 'terrain_real_tiling.png'}")
 
 

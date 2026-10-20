@@ -270,6 +270,7 @@ void AODTerrainManager::BeginPlay()
 		{
 			SatTex = BindAreaTexture(TEXT("sat"), TEXT("Sat"));
 			PaveTex = BindAreaTexture(TEXT("pave"), TEXT("Pave"));
+			DemTex = BindAreaTexture(TEXT("dem"), TEXT("Dem"));
 		}
 	}
 
