@@ -598,6 +598,63 @@ the baked tiles. The globe's area card gets a **Delete area** (with a
 confirmation) that removes the area's tiles and its entry in `user_areas.json`.
 Shared caches stay, so a redraw is cheap.
 
+## Round 8 (Taylor, 2026-10-20): honour the exact polygon by clipping the downloads
+
+Yes. This replaces the staircase cells (round 2) and "the curtain is the mask"
+(round 3). **Download by rectangle, clip to the polygon before anything is
+baked.** The rectangle downloads stay as they are: one cached query, and they're
+reusable when polygons overlap or get merged later.
+
+**Where the clip happens:**
+- Every OSM download already goes through `fetch_cache.overpass_json`. Round 4 A
+  adds a clip there, and it simply takes the polygon instead of a bbox.
+- That one point covers all 9 Overpass sites, including the stages that fetch
+  their own data (water, landmarks, parking, pave mask, sidewalks).
+- HPMS traffic gets the same clip.
+
+**What "throw away the excess" means per kind of data:**
+
+| Data | Rule |
+|---|---|
+| Roads (OSM ways) | Keep only the runs of nodes inside the polygon. A road that leaves and comes back becomes two pieces. Each run ends at its last inside node (typically <50 m short of the outline) rather than synthesizing a node exactly on the edge. |
+| Buildings, landmarks | Keep whole footprints whose centroid is inside, so a house is never cut in half. |
+| Place labels, furniture, signals | Points inside. |
+| Lakes, parking lots, plazas | Polygons intersected with the outline. |
+| Trees, forest cards | Point-in-polygon at placement. |
+| Traffic volumes (HPMS) | Segments intersected with the outline. |
+| Tile rasters (DEM, imagery, Sentinel-2, WorldCover) | Not clipped. They're per tile, and only tiles touching the polygon get baked. |
+
+**Terrain at the outline:**
+- Tiles that touch the polygon get baked whole (1 km tiles, so at most ~1 km of
+  overshoot). With no roads or buildings outside the outline, that overshoot is
+  bare land.
+- The bake writes a signed-distance mask of the outline per tile. The terrain
+  material switches to the "unsynced" boundary look **exactly at the drawn
+  outline**, not at a tile edge.
+- The curtain and push-back sit on the outline too, so the player sees and feels
+  the real polygon.
+- Past the baked tiles, the horizon mesh shows the coarse world as before.
+
+**Consequences to handle:**
+- **Roads dead-end at the outline.** Navigation simply never routes out. Traffic
+  cars need to despawn or turn around at a clipped end: worth checking in
+  `ODTrafficManager` before relying on it.
+- **A road that briefly leaves the polygon is cut in two.** Driving it means
+  hitting the curtain and coming back. If that's annoying, a later option is to
+  auto-include short excursions (say <300 m outside), which bumps the outline out
+  locally.
+- **Clipped inputs feed the per-cell input hash** (round 7), so redrawing the
+  outline rebakes only the cells along the changed edge.
+
+**Cost:**
+- one polygon-clip function on OSM element JSON (~40 lines with shapely, already
+  installed), with one assert test
+- point-in-polygon filters for the tree and building placers that sample rather
+  than read OSM
+- the outline mask in the terrain bake and material
+
+With two-pass, the clip sits at the source, so most stages need no changes.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
