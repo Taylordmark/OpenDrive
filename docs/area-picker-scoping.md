@@ -302,6 +302,82 @@ at the edge only; the driven world keeps to the realism bar.
    car-position file, and the boundary (material, curtain, push-back, sync-in).
 5. Menu: polygon drawing, start pick, consent card, progress card.
 
+## Round 4 (Taylor, 2026-10-20): download once for the whole polygon
+
+### What each fetch does today (inventory)
+| Source | Called from | Cached by | Shared across cells today? |
+|---|---|---|---|
+| Terrarium DEM | terrain_common (every height sampler) | z/x/y tile | **yes**, tile-keyed |
+| USGS imagery | classify_biomes, map texture | z/x/y tile | **yes** |
+| ESA WorldCover | classify_biomes, pave mask, far forest | COG block | **yes** |
+| Sentinel-2 | build_sat_albedo | COG byte range; scenes picked per MGRS tile | **yes**: same scenes, so no colour seam between cells |
+| MS building footprints | fetch_osm_buildings | quadkey file | **yes** |
+| OSM Overpass, 9 query sites | fetch_osm_network, fetch_osm_places, fetch_osm_buildings, build_water_tiles (×2), build_landmarks, build_parking_tiles, build_pave_mask, build_sidewalks | **query text, which contains the cell bbox** | **no**: every cell re-downloads its whole 11 km halo square |
+| FHWA HPMS | build_traffic_demand | state + bbox | **no** |
+| NASA POWER climate | fetch_climate, build_ground_bands | point (area centre) | no, but one tiny request each |
+
+So "download once" is mostly an **Overpass** and **HPMS** problem. The tile-keyed
+sources already download each tile only once. Overlapping halos only re-read them
+from `data/cache`.
+
+### Option A: download once (small change)
+- `test_areas` gains `FETCH_BBOX_SNWE`. For a drawn world it's the world's bbox
+  (polygon plus halo); for every existing area it equals `BBOX_SNWE`.
+- The 9 Overpass sites and HPMS put `FETCH_BBOX_SNWE` in their query, so every
+  cell sends identical text and hits the cache. They then call
+  `overpass_json(..., clip=BBOX_SNWE)`. A new ~30-line clip in `fetch_cache.py`
+  keeps what Overpass's own bbox would have returned:
+  - nodes inside the bbox
+  - ways with any node inside, with all their nodes
+  - relations with a kept member
+  - for `out center`, elements whose centre is inside
+- Climate is fetched at the world centre. Its effect is home-only at runtime anyway.
+- **Existing areas don't change** (their fetch bbox and clip bbox are the same).
+  It comes with one assert test for the clip.
+- A "Downloading map data" phase goes first on the progress card: 9 Overpass
+  queries plus HPMS for the whole polygon, then the cells bake offline.
+
+What A does *not* fix: each cell still computes its whole 11 km halo square
+(7.5× its own area). Neighbouring cells still build their own road stations over
+different extents, and that difference is what produced the gv_west/gv_east seams.
+
+### Option B: compute once too, a two-pass bake
+This is the roadmap's own "two-pass chunked bake, so a chunk's edges match its
+neighbours'" (next steps.md §4, step 3). Here it would be built for drawn worlds:
+- **Pass 1, the whole polygon, once:** every download (A), then the road graph:
+  - stations, settlements, retaining walls, junction pads
+  - routegraph and traffic
+  - labels, biomes, climate and ground bands
+  - the horizon (coarse terrain), which is what the boundary effect needs anyway
+
+  Every cell then shares **one** road network, so roads match at the cuts by
+  construction.
+- **Pass 2, per cell, nearest to the car first:** the tile writers (terrain
+  carve, road/ODR3 tiles, barriers, guardrails, embankments, bridges, tunnels,
+  sidewalks, buildings, furniture, sat/pave/relief, forest, far forest) write only
+  the tiles in that cell. They read pass 1's shared outputs. The halo shrinks from
+  3.5 km to the carve reach (~150 m, `TERRAIN_CARVE_OUTER_M`), so a 4 km cell
+  computes ~4.3 km, not 11 km.
+- **Wins:** pass 2 gets much faster per cell, the seams fix themselves (one road
+  network, one set of junction pads), and the per-cell duplicated whole-area files
+  (centerline, labels, routegraph, roadstations…) become one set.
+- **Costs:**
+  - Every one of the 58 stages has to be sorted into pass 1 or pass 2, and each
+    tile writer needs an "only tiles in rect R" filter.
+  - Pass 1 blocks the first drive. For a 30 km polygon it's roughly a
+    summit_county-sized road graph, which hasn't been timed.
+  - It's the biggest pipeline change in this doc.
+
+### Recommendation
+Do **A** now as part of the pipeline step. It's small, safe for the existing
+areas, and exactly what you asked for. Decide **B** from the timed test bake.
+`rebuild_area.py` prints a time per stage, so one 2–3-cell run shows:
+- how much time goes to the halo (B's speed win)
+- how much goes to whole-graph stages (B's up-front wait)
+- how bad the seams are (B's quality win)
+
+If the seams come out like gv_west/east, B is worth it regardless of speed.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
