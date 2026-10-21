@@ -27,14 +27,17 @@ int main()
 			C.Date, C.Hour, Utc, El, C.Noaa_El, Az, C.Noaa_Az, Ok ? "ok" : "FAIL");
 	}
 	// NOAA: Jun 21 sunset 20:54:31 PDT (sun centre at -0.833 deg)
-	double El, Az, Set = 0.0;
-	for (double H = 18.0; H < 23.0; H += 1.0 / 3600.0)
-	{
-		ODSolar::SunPosition(Lat, Lon, 172, H, -7.0, El, Az);
-		if (El < -0.833) { Set = H; break; }
-	}
-	const bool SetOk = std::fabs(Set - (20.0 + 54.0 / 60.0 + 31.0 / 3600.0)) < 2.0 / 60.0;
+	double Set = 0.0;
+	const bool SetOk = ODSolar::HourAtElevation(Lat, Lon, 172, -7.0, -0.833, false, Set)
+		&& std::fabs(Set - (20.0 + 54.0 / 60.0 + 31.0 / 3600.0)) < 2.0 / 60.0;
 	Fails += !SetOk;
 	std::printf("Jun 21 sunset %02d:%02d PDT (NOAA 20:54)  %s\n", int(Set), int(std::fmod(Set, 1.0) * 60.0), SetOk ? "ok" : "FAIL");
+	// rising branch: the morning crossing, and the sun really is there
+	double Rise = 0.0, El, Az;
+	const bool RiseFound = ODSolar::HourAtElevation(Lat, Lon, 355, -8.0, 2.0, true, Rise);
+	ODSolar::SunPosition(Lat, Lon, 355, Rise, -8.0, El, Az);
+	const bool RiseOk = RiseFound && Rise > 6.0 && Rise < 10.0 && std::fabs(El - 2.0) < 0.01;
+	Fails += !RiseOk;
+	std::printf("Dec 21 sun +2 deg rising %02d:%02d PST  %s\n", int(Rise), int(std::fmod(Rise, 1.0) * 60.0), RiseOk ? "ok" : "FAIL");
 	return Fails;
 }

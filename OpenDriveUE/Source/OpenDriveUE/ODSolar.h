@@ -39,4 +39,35 @@ namespace ODSolar
 		// from south, westward positive -> + 180 = from north
 		OutAzimuthDeg = std::atan2(std::sin(Ha), std::cos(Ha) * std::sin(Lat) - std::tan(Decl) * std::cos(Lat)) / D2R + 180.0;
 	}
+
+	/** Local clock hour [0, 24) on DayOfYear when the sun crosses TargetDeg,
+	 *  rising (morning) or setting. False if it never does that day (polar
+	 *  day/night). Bisects the half day between solar midnight and noon,
+	 *  where elevation is monotonic. */
+	inline bool HourAtElevation(double LatDeg, double LonDeg, double DayOfYear, double UtcOffset, double TargetDeg,
+		bool bRising, double& OutHour)
+	{
+		// solar noon on this clock, +-16 min equation of time is fine for the bracket
+		const double Noon = 12.0 + UtcOffset - LonDeg / 15.0;
+		double Lo = bRising ? Noon - 12.0 : Noon, Hi = bRising ? Noon : Noon + 12.0;
+		const auto Above = [&](double H)
+		{
+			double El, Az;
+			SunPosition(LatDeg, LonDeg, DayOfYear, H, UtcOffset, El, Az);
+			return El > TargetDeg;
+		};
+		// rising: below at Lo, above at Hi; setting the other way round
+		if (Above(Lo) == Above(Hi))
+		{
+			return false;
+		}
+		const bool bAboveLo = Above(Lo);
+		for (int I = 0; I < 30; ++I)   // 24 h / 2^30: far under a second
+		{
+			const double Mid = 0.5 * (Lo + Hi);
+			(Above(Mid) == bAboveLo ? Lo : Hi) = Mid;
+		}
+		OutHour = std::fmod(0.5 * (Lo + Hi) + 24.0, 24.0);
+		return true;
+	}
 }

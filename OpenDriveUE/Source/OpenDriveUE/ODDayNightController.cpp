@@ -189,6 +189,25 @@ void AODDayNightController::BeginPlay()
 	}
 }
 
+float AODDayNightController::CurrentDayOfYear() const
+{
+	return Season.IsValid() && !bPinnedDay ? 1.0f + Season->MonthOfYear() * (365.0f / 12.0f) : DayOfYear;
+}
+
+float AODDayNightController::ClockUtcOffset(float Day) const
+{
+	return UtcOffset + (bDaylightTime && ODSolar::IsUSDaylightTime(Day) ? 1.0f : 0.0f);
+}
+
+float AODDayNightController::HourAtSunElevation(float ElevationDeg, bool bRising, float Fallback) const
+{
+	// the date live, not as of the last Tick: the menu's Season row sets it just before
+	const float Day = CurrentDayOfYear();
+	double Hour;
+	return ODSolar::HourAtElevation(Latitude, Longitude, Day, ClockUtcOffset(Day), ElevationDeg, bRising, Hour)
+		? (float)Hour : Fallback;
+}
+
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
@@ -196,13 +215,9 @@ void AODDayNightController::Tick(float DeltaSeconds)
 	DayCount += NextHour >= 24.0f ? 1 : 0;
 	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
 
-	if (Season.IsValid() && !bPinnedDay)
-	{
-		DayOfYear = 1.0f + Season->MonthOfYear() * (365.0f / 12.0f);
-	}
+	DayOfYear = CurrentDayOfYear();
 	double ElevationDeg, CompassDeg;
-	ODSolar::SunPosition(Latitude, Longitude, DayOfYear, TimeOfDay,
-		UtcOffset + (bDaylightTime && ODSolar::IsUSDaylightTime(DayOfYear) ? 1.0f : 0.0f), ElevationDeg, CompassDeg);
+	ODSolar::SunPosition(Latitude, Longitude, DayOfYear, TimeOfDay, ClockUtcOffset(DayOfYear), ElevationDeg, CompassDeg);
 	const float Elevation = ElevationDeg;
 	// the light's yaw is where it shines TO: UE +X = east, +Y = south, so a sun
 	// at compass bearing B shines toward yaw B + 90 (east sun -> yaw 180)

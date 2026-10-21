@@ -141,6 +141,10 @@ public:
 	/** NightFactor() as of the last Tick (0 before the first). */
 	float GetNight() const { return FMath::Max(LastNight, 0.0f); }
 
+	/** Clock hour today when the sun crosses ElevationDeg rising (or
+	 *  setting) here - menu presets like Dusk. Fallback if it never does. */
+	float HourAtSunElevation(float ElevationDeg, bool bRising, float Fallback) const;
+
 private:
 	void UpdateHeadlights(bool bOn);
 
@@ -148,6 +152,8 @@ private:
 	TWeakObjectPtr<ADirectionalLight> Moon;
 	TWeakObjectPtr<class AODSeasonController> Season;
 	bool bPinnedDay = false;   // -oddoy= given: ignore the season clock
+	float CurrentDayOfYear() const;
+	float ClockUtcOffset(float Day) const;
 	TWeakObjectPtr<APostProcessVolume> NightGrade;
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> StarDome;
