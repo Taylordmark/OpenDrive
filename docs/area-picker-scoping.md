@@ -378,6 +378,29 @@ areas, and exactly what you asked for. Decide **B** from the timed test bake.
 
 If the seams come out like gv_west/east, B is worth it regardless of speed.
 
+## Round 5 (Taylor, 2026-10-20): why not 1 km cells with a 1.3 km halo?
+**Correction to round 3:** "a barely shorter first wait" compared both sizes with a
+3.5 km halo. With a 1.3 km halo, a 1 km start cell computes 13 km², against 44 km²
+for a 4 km cell with the same halo and 121 km² today. That's a ~3× shorter first
+wait. Once driving, the work per km of road is about the same for either size.
+
+To get there:
+1. **Terrain tile size.** Cells own whole terrain tiles, which are 2 km. Drawn
+   worlds would use 1 km tiles. `ODTerrainManager.TileSizeCm` is set per manager,
+   so the 8 existing areas stay at 2 km.
+2. **Halo size depends on A vs B.** With A (a road network per cell), the halo
+   has to cover every along-road reach: grade smoothing, pads, embankments,
+   bridges and tunnels. gv seamed at 3.5 km, so 1.3 km is risky. With B (a
+   shared road network), it only has to cover the carve, about 150 m.
+3. **Far tiles** are baked only within 6 km of a road the cell can see. A small
+   halo would leave holes, so instead bake every tile the cell owns.
+4. **The fixed cost per cell** (58 processes, their imports and DEM loads) hasn't
+   been measured. If it's minutes, it dominates 1 km cells, so the later cells
+   would grow to 2–4 km, or a cell's stages would run in one process.
+
+**Plan:** a 1 km start cell on 1 km tiles, growing to 2–4 km cells while driving,
+with B making the small halo safe. The timed test bake decides the numbers.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
