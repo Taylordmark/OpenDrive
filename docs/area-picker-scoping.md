@@ -152,6 +152,79 @@ elevation and imagery, Sentinel-2, ESA WorldCover and NASA POWER data for this
 area, about N MB. Bake?" During development, **I won't run a real fetch until you
 OK it**. I'll test the runner with a fake rebuild command and no network.
 
+## Revised design (Taylor, 2026-10-20): polygon, start point first, bake-as-you-drive
+
+Taylor asked for three things:
+- allow polygons, split into rectangles
+- have the player choose a start point before anything bakes
+- bake outward from that point and stream terrain from local disk while driving
+
+This runs on machinery that already exists, the **world members** used for the
+California world and the gv_west/gv_east split of green_valley:
+- Members share one LCC frame and sea-level datum (`world_frame.WORLDS`).
+- Each one owns a rect (`own_rect_cm`) on the 2 km terrain grid and bakes ~3–4 km
+  past it as a halo. `prune_unowned_tiles.py` cuts the halo back.
+- `build_world_manifest.py` lists the members in `worlds.json`.
+- `AODGameMode` spawns a member's manager set when the car is under 8 km from its
+  rect and drops it past 16 km.
+
+**Flow**
+1. **Draw a polygon** on the World globe: click vertices, drag to adjust, with a
+   live km² readout.
+2. **Pick a start point** inside it. Nothing bakes before this.
+3. **Split.** The runner makes a new world, an LCC centred on the polygon. It
+   grids the polygon's bbox into member cells, about 4 × 4 km (2 × 2 terrain
+   tiles), and keeps every cell that touches the polygon. Each cell becomes a
+   member area with its own `own_rect_cm`. At the edges the polygon becomes a
+   staircase at cell size. Clipping the bake to the exact outline isn't worth it.
+4. **Bake the start cell first.** The player waits for that one only, measured in
+   minutes and still unmeasured, with the progress card up. They then spawn at
+   the cell's menu spot, the turnout nearest the chosen point.
+5. **Bake outward while they drive.** The game writes the car's position and
+   heading to a small file about once a second. After each cell the runner picks
+   the next not-yet-baked cell closest to the car, weighted toward the direction
+   it's heading. Each finished cell re-runs `build_world_manifest.py`. The game
+   re-reads `worlds.json` every few seconds (today it reads it once, at
+   BeginPlay), and the existing 8 km spawn rule streams the new cell in from
+   local disk. No tile server is needed.
+
+**Honest limits**
+- **The car can outrun the bake.** Highway speed is about 1.5–2 km per minute,
+  and a cell takes minutes. Each cell runs the full 58-stage pipeline, so the
+  fixed per-cell cost is maybe 2–3 min of Python start-up plus the Overpass round
+  trips, before the real work. Unbaked ground has no terrain, so the edge of the
+  baked area needs a soft gate: a "still baking ahead" message and the road
+  barrier, or a speed cap. Bigger cells mean fewer seams and less overhead, but a
+  longer wait at the start. I'd make cell size one setting and tune it once
+  there's a real timing.
+- **Seams between members are the known weak spot.** The gv_west/gv_east cut
+  measured a terrain step with median 0 and max 15.1 m. At 1 of 60 crossings both
+  halves drew the road, and at 4 neither did. Road-fit gates failed within 200 m
+  of the cut (status.md, "Streaming, pipeline side"). Status.md says step 3's
+  two-pass bake is meant to fix this, and it isn't done. A polygon split into
+  many cells has many cuts, so **seam quality has to be solved, or at least
+  measured on a real split, before this feels good.**
+- **Some things are per member and get duplicated across cells:** centerline and
+  map lines, labels, routegraph, roadstations, biome, map texture. Navigation and
+  traffic routing across a cell edge haven't been checked. Ambient sound and
+  climate are still home-only (status.md).
+- **Bakes run one cell at a time.** Terrain already uses 8 worker processes, and
+  Overpass allows about 2 concurrent queries per IP.
+
+**Does this replace 4A?** No. It still needs the template level from 4A, run with
+`?odarea=<start cell>` as the home member, because the cells have no editor-made
+levels.
+
+**Suggested order**
+1. **Pipeline only, no game:** polygon → cells → `user_areas.json` world members,
+   plus the nearest-cell queue runner and status file. Assert tests cover the
+   split and the queue order, run against a fake rebuild command.
+2. **Measure, after your fetch OK:** bake one small real polygon of 2–3 cells.
+   Time each cell and run `verify_area_seam.py` on the cuts.
+3. **Runtime:** the template level and `?odarea`, a `worlds.json` re-read, the
+   car-position file and the edge gate.
+4. **Menu:** polygon draw, start pick, consent card, progress.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
