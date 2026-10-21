@@ -225,6 +225,83 @@ levels.
    car-position file and the edge gate.
 4. **Menu:** polygon draw, start pick, consent card, progress.
 
+## Round 3 (Taylor, 2026-10-20): edge effect, 1 km tiles, detail only near roads
+
+### Detail near the road: already how it works
+`build_terrain_mesh_tiles.py` already splits the terrain by distance from the road:
+
+| Zone | What's baked |
+|---|---|
+| Within 60 m of a road station (`NEAR_MARGIN_M`) | Near tiles: 7.8 m grid, 0.3 m error, collision |
+| Out to 6 km (`RENDER_DISTANCE_M`) | Far tiles: 5 m error, no collision |
+| Past 6 km and +80 km around the extent | One zoom-10 horizon mesh (`build_horizon.py`) |
+
+Nothing new is needed here.
+
+### 1 km tiles would make the bake slower, not faster
+Two sizes get mixed up here:
+- **The streaming tile** is 2 km for terrain and 500 m for roads. Loading from
+  local disk isn't the bottleneck. Shrinking it means 4× the files, a change to
+  `ODTerrainManager` `TileSizeCm`, and a rebake of every area.
+- **The bake cell** is what the player waits for. Each cell bakes a ~3.5 km halo
+  past its edges so roads meet their neighbours:
+  - A 4 km cell bakes an 11 km square, 7.5× its own area.
+  - A 1 km cell would bake an 8 km square, 64× its own area.
+  - Each cell also pays the fixed cost of 58 stage processes and its own Overpass
+    round trips.
+
+  So 1 km cells mean far more total work and a barely shorter first wait.
+
+**What would actually speed it up** is fetching once for the whole polygon: one
+Overpass query per dataset and one DEM pass. Cells then cut their bbox out of that
+local copy, with no network per cell. Before choosing a cell size, I should time
+each stage on the approved small test bake (`rebuild_area.py` already prints a
+time per stage). Then we know whether the fetches, terrain, junction pads or
+Python start-up dominate.
+
+### The edge: an Animus-style "unsynced" boundary
+This fits well with what's already baked:
+1. **Bake the coarse world first.** Right after the start cell, `build_horizon.py`
+   runs for the whole polygon (zoom 10, minutes). From the first second, the land
+   past the baked edge is real-shaped but low-poly.
+2. **Unbaked land looks unsynced.** The horizon mesh past the baked edge gets a
+   boundary material:
+   - faceted flat shading (its RTIN triangles already look faceted)
+   - a faint emissive grid along the triangle edges
+   - noise-driven vertex shimmer, so the polygons shift
+   - a desaturated, cool tint
+3. **A curtain at the edge.** A translucent vertical wall along the outline of the
+   baked cells, with an animated glitch/dissolve. A post-process blend ramps up
+   blur, chromatic aberration and desaturation over the last ~150 m. The car can't
+   go past it: a soft push-back force on the fixed physics step, then an invisible
+   blocker as a backstop. That's frame-rate independent, and there's no collision
+   on the coarse mesh, so the car never falls into the void.
+4. **A cell landing "syncs in."** When the runner finishes a cell, its tiles
+   stream in and a dissolve front sweeps outward over ~2 s (time-based). The coarse
+   facets resolve into the real terrain, and the curtain moves out.
+5. **The polygon outline gets the same curtain.** That makes it the runtime mask:
+   cells bake as whole squares (staircase), and anything outside the drawn outline
+   stays behind the curtain. **That covers most of the "polygon masking" work at
+   no pipeline cost.** Real pipeline clipping of roads, buildings and terrain to
+   the outline is only worth doing if you want the land just past the outline
+   gone, not merely unreachable.
+
+How it's built: everything in code, following the existing pattern. Materials come
+from an `unreal/apply_*_material.py` script, the curtain is a
+`UDynamicMeshComponent` built from the cell rects, and nothing is a paid asset or
+borrows anything from Ubisoft beyond the idea. It's a deliberately stylised effect
+at the edge only; the driven world keeps to the realism bar.
+
+### Revised order
+1. Timed test bake of one small real area, ≤10×10 km. Taylor approved this via the
+   coordinator. Run it as 2–3 cells to time each stage and measure the seams.
+2. Choose by the numbers: cell size, and whether to fetch once per polygon.
+3. Pipeline: polygon → cells → world members, the nearest-cell runner, and
+   horizon first.
+4. Runtime: template level and `?odarea`, a `worlds.json` re-read, the
+   car-position file, and the boundary (material, curtain, push-back, sync-in).
+5. Menu: polygon drawing, start pick, consent card, progress card.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
