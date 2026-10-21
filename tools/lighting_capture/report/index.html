@@ -136,6 +136,19 @@ code { font-family: var(--mono); font-size: .86em; }
     <tr><td>8500 K</td><td class="n">+0.62</td><td class="n">.54</td></tr>
   </table></div>
   <p>Each 1000 K takes off about 0.09 of blue, and the shade stays clearly blue. The sunset photo's shade is warm. Lifting the toe made the blue more visible, because shade that used to be black now shows its colour. The cause is the light itself: with the sun behind the canopy, only blue sky light reaches the road. A camera setting can't add the warm canopy bounce and transmission that's missing. <code>od.WhiteTemp</code> stays unset (6500 K), so nothing changes. The next levers are the light colour: less saturated sky light at low sun (sky light tint or capture), or warm bounce under the trees (Gap 1B).</p>
+  <h3>Gap 3: the blue is all sky light, and "17:30" was sunset</h3>
+  <figure><img src="img/diag_skywarm_sweep.jpg" alt="Gasquet at od.SkyWarm 0, 0.5 and 1"><figcaption>Sky light colour <code>od.SkyWarm</code> 0 · 0.5 · 1 (white → 1, 0.8, 0.6)</figcaption></figure>
+  <figure><img src="img/diag_blue_source.jpg" alt="Normal, fog off, sky lighting off"><figcaption>Normal · height fog off · sky lighting off</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet "17:30"</th><th>shadow tint</th><th>saturation</th><th>mean</th></tr>
+    <tr><td>Normal</td><td class="n">+0.81</td><td class="n">.67</td><td class="n">74</td></tr>
+    <tr><td>SkyWarm 0.5</td><td class="n">+0.72</td><td class="n">.59</td><td class="n">77</td></tr>
+    <tr><td>SkyWarm 1</td><td class="n">+0.56</td><td class="n">.49</td><td class="n">80</td></tr>
+    <tr><td>Height fog off</td><td class="n">+0.82</td><td class="n">.68</td><td class="n">74</td></tr>
+    <tr><td>Sky lighting off</td><td class="n">−0.06</td><td class="n">.33</td><td class="n">–</td></tr>
+  </table></div>
+  <p>Sky lighting supplies all of the blue; fog supplies none. Fully warm sky light only takes the tint about halfway.</p>
+  <p><b>The day clock ran during every capture.</b> At the default 24 h per real hour, a shot about 85 s after launch was taken roughly 34 game minutes past its <code>-odhour</code>. The "17:30" shots went from sun 7.7° to 0.5° before the screenshot, so they were sunset shots, and the old sun model set at 18:00 all year. Comparisons between shots still hold, since they all drifted the same, but the golden-hour photo comparison didn't. Fixed: <code>-odcycle=0</code> freezes the clock, and captures now pass it. The sun now also follows the real path for each place, date and DST (the real-sun change). Golden hour gets re-shot on that build.</p>
   <details><summary>All ten after-fix pairs</summary><div class="stack">
     <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
     <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>
