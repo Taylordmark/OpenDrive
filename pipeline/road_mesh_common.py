@@ -1471,6 +1471,25 @@ JUNCTION_SAME_SEG_RADIUS_M = 3.0
 # each other, not just disagreements steep enough to look wall-eligible.
 CROSS_ROAD_CONFLICT_MAX_GRADE = 0.05
 
+# Exemption to the cross-road pass above (2026-09-01, Lake Hughes town: seg
+# 3563 "Chaparral Forest Drive" - an ordinary side road climbing away from
+# Elizabeth Lake Road at its own legal ~10% grade - had EVERY station flagged
+# by the 0.05 cross-road threshold against valley-road stations 130-150m away
+# (dz 8-10m at that range is just a gentle hillside, not a torn canyon), which
+# CONFLICT_EXCLUDE_STATIONS dilation then flooded into is_bridge=True across
+# the whole segment with no OSM bridge tag). Two chains that physically MEET
+# at grade - some station pair within this radius whose elevation gap is
+# inside even the generous main-pass allowance - are a junction, not an
+# unrelated grade-separated crossing, so junction-connected chain pairs skip
+# the cross-road pass. The main CONFLICT_MAX_GRADE pass still applies to them
+# unchanged, so a genuinely steep disagreement elsewhere along the same two
+# chains is still caught. (Ported onto the vectorized pass 2026-10-20.)
+CROSS_ROAD_JUNCTION_RADIUS_M = 15.0   # ~3 station spacings - chain endpoints
+                                       # sharing an OSM junction node land well
+                                       # inside this (measured 2.76m at seg
+                                       # 3563/seg 36); disjoint parallel roads
+                                       # stay outside it
+
 # Cross-segment stations this close in XY are "the same physical junction
 # spot" for junction_agreement_pass()
 # (2026-09-06, immediate-queue item 5). Matches diagnose_junctions.py's
@@ -1628,6 +1647,30 @@ def _conflict_candidates(east_m, north_m, elev_m, seg_idx, station_idx, radius_m
     return tuple(np.concatenate([o[k] for o in out]) for k in range(4))
 
 
+def junction_connected_chain_pairs(east_m, north_m, elev_m, seg_idx,
+                                   radius_m=CROSS_ROAD_JUNCTION_RADIUS_M,
+                                   max_grade=CONFLICT_MAX_GRADE,
+                                   min_gap_m=CONFLICT_MIN_GAP_M):
+    """Set of (seg_a, seg_b) tuples (a < b) for every pair of DIFFERENT
+    chains that meet at grade somewhere: at least one cross-chain station
+    pair within radius_m in XY whose elevation gap is inside the main-pass
+    allowance (dz <= max_grade*d + min_gap_m). Two chains 2m apart in XY but
+    6m apart in Z are a crossing, not a junction, and stay un-connected. See
+    CROSS_ROAD_JUNCTION_RADIUS_M."""
+    from scipy.spatial import cKDTree
+    xy = np.c_[np.asarray(east_m, dtype=np.float64), np.asarray(north_m, dtype=np.float64)]
+    if len(xy) < 2:
+        return set()
+    elev_m = np.asarray(elev_m, dtype=np.float64)
+    seg_idx = np.asarray(seg_idx).astype(np.int64)
+    p = cKDTree(xy).query_pairs(radius_m, output_type="ndarray")
+    i, j = p[:, 0], p[:, 1]
+    d_m = np.hypot(*(xy[j] - xy[i]).T)
+    ok = (seg_idx[i] != seg_idx[j]) & (np.abs(elev_m[j] - elev_m[i]) <= max_grade * d_m + min_gap_m)
+    a, b = seg_idx[i[ok]], seg_idx[j[ok]]
+    return set(zip(np.minimum(a, b).tolist(), np.maximum(a, b).tolist()))
+
+
 # classify_wall_stations results on disk (2026-10-15): the wall, terrain and
 # verify stages each classify the same road_stations.json - up to ~8 calls a
 # bake. Keyed by a hash of every input, so a changed station set just misses.
@@ -1644,7 +1687,7 @@ def classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_n
     if len(east_m) < WALL_CACHE_MIN_STATIONS or args or set(kwargs) - {"half_width_m"}:
         return _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_name,
                                        *args, **kwargs)
-    h = hashlib.sha1()
+    h = hashlib.sha1(b"junction-exempt-v1")   # bump when classification logic changes
     for a in (east_m, north_m, elev_m, kwargs.get("half_width_m")):
         h.update(b"-" if a is None else np.ascontiguousarray(a, dtype=np.float64).tobytes())
     for a in (seg_idx, station_idx):
@@ -1753,9 +1796,19 @@ def _classify_wall_stations(east_m, north_m, elev_m, seg_idx, station_idx, road_
         grade[k] = abs(elev_m[j] - elev_m[i]) / dk if dk > 1e-6 else float("inf")
 
     # main-pass walls in pair order, then the cross-road pass's out-of-scope
-    # pairs the main pass didn't already take (pairs are unique, i < j)
+    # pairs the main pass didn't already take (pairs are unique, i < j),
+    # minus chain pairs that meet at grade (CROSS_ROAD_JUNCTION_RADIUS_M)
     wall_main = main & (~in_scope | (grade >= wall_min_grade))
     wall_cross = cross & ~main & ~in_scope
+    if wall_cross.any():
+        junction = junction_connected_chain_pairs(east_m, north_m, elev_m, seg_idx,
+                                                  max_grade=max_grade, min_gap_m=min_gap_m)
+        if junction:
+            si = np.asarray(seg_idx).astype(np.int64)
+            a, b = np.minimum(si[pi], si[pj]), np.maximum(si[pi], si[pj])
+            ja, jb = np.array(sorted(junction)).T
+            m = int(si.max()) + 1
+            wall_cross &= ~np.isin(a * m + b, ja * m + jb)
     wi = np.concatenate([pi[wall_main], pi[wall_cross]])
     wj = np.concatenate([pj[wall_main], pj[wall_cross]])
     exclude = np.zeros(n, dtype=bool)
