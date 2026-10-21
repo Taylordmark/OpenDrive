@@ -401,6 +401,108 @@ To get there:
 **Plan:** a 1 km start cell on 1 km tiles, growing to 2–4 km cells while driving,
 with B making the small halo safe. The timed test bake decides the numbers.
 
+## Round 6 (Taylor, 2026-10-20): why two-pass, how it streams, how long
+
+### Measured stage times
+Pulled from the `[i/N] script done in Xs` lines in past session logs. Mixed
+code eras and some runs were partial resumes, so treat these as orders of
+magnitude. Area sizes: green_valley ≈ 1,300 km², summit ≈ 2,200 km², oahu
+≈ 2,800 km² (much of it sea). Full runs: green_valley 21.7 min, summit
+49.2 min, skagit 132 min.
+
+| Stage | Observed | Notes |
+|---|---|---|
+| experimental_junction_pads | 20 min (gv), 52 min (skagit) | **the slowest stage**; scales with junction count |
+| build_terrain_mesh_tiles | 8–18 min (10.6 min summit on 8 workers) | |
+| build_road_network | 11–12 min | road mesh |
+| build_building_mesh | 7–12 min | scales with buildings |
+| verify_terrain_fit + verify_road_fit | 5–20 min | gates, not needed to drive |
+| build_road_stations | 3.5 min (oahu) | |
+| build_retaining_walls | 2.5–3.5 min | |
+| ~40 small stages | 2–80 s each | |
+| Python start-up per stage | ~1.5–2 s (the floor of the export_* stages) | **~1.5–2 min fixed per cell** |
+| Fresh Overpass fetches | 1 s cached, ~75 s for one fresh query; total depends on mirror queues | |
+
+Rule of thumb: ~1–1.5 s per km² for a whole bake, before the fixed cost.
+
+### Why two-pass
+Seams happen when two cells decide **the same shared thing differently**:
+- a road's elevation profile, which is smoothed along the whole road
+- whether a junction gets a pad
+- the terrain carve beside a road on the other side of the cut
+- which cell owns a road chunk that crosses the cut
+
+Each cell built its own network from its own clipped OSM, so they disagreed near
+the cut. The gv_west/gv_east result: steps up to 15 m, and 5 of 60 crossings
+with double or missing road.
+
+Two-pass splits **deciding** from **drawing**:
+- **Pass 1 decides once** for the whole polygon.
+- **Pass 2 draws per cell** from those decisions.
+
+Both sides of a cut read identical inputs, so they agree by construction. Pass 2
+only needs to reach as far as the carve (~150 m), not a 3.5 km halo, so cells get
+much cheaper. A bigger halo never truly fixes seams; it only pushes them further out.
+
+### The catch, and the corrected design
+If pass 1 held everything the whole polygon needs, the player would wait for
+junction pads, road mesh and buildings for the *entire* polygon before driving.
+That's tens of minutes. So:
+- **Pass 1 stays cheap:**
+  - the downloads, all at once (round 4 A)
+  - road stations, the single source of truth
+  - settlements, labels, routegraph and traffic, climate and ground bands
+  - the horizon mesh
+
+  These are global, minutes-scale decisions.
+- **Pass 2 does the expensive local work, per cell:**
+  - terrain, road mesh tiles, buildings, sidewalks, furniture, forest, sat/pave/relief
+  - **junction pads too**
+
+  Pads and walls only touch geometry within tens of metres. A cell computes them
+  for every junction inside its rect plus the carve margin, and the computation is
+  deterministic from the shared stations, so a pad straddling a cut comes out the
+  same on both sides. Turning `experimental_junction_pads.py` (whole-area today)
+  into that is the hardest single piece of B.
+- **Verification gates** run in the background after each cell, never blocking driving.
+
+### How it plays into streaming
+With B, **a drawn polygon is one area, not many world members:**
+- **One manager set and one set of polygon-wide sidecars from pass 1:** centerline
+  and map lines, labels, routegraph, stations, biome. So the minimap, navigation
+  and traffic cover the whole polygon from the first second, including roads not
+  baked yet. The member spawn/despawn logic, duplicate files and "home-only"
+  ambient/climate don't come into it.
+- **Per-tile files** (terrain_*, road_*, buildings_*, etc.) land on disk as each
+  cell finishes. The tile managers already stream per tile.
+  `ODTileSource` already has a `Pending` state ("not baked yet, ask again in
+  2 s"), built for live streaming. The local resolver returns `Pending` for a
+  tile inside a cell the runner's status file marks unbaked, and the normal
+  load otherwise. No HTTP server is needed.
+- **The boundary curtain** follows the edge of the finished cells in the same
+  status file. The coarse horizon past it is pass 1's.
+- **The runner** picks the next cell nearest the car, weighted ahead, from the
+  `.car.json` file as before.
+
+### Estimates (to confirm with the test bake)
+| Phase | 10×10 km polygon | 30×30 km polygon |
+|---|---|---|
+| Pass 1: downloads (Overpass ×9 + HPMS + DEM/imagery tiles) | ~3–8 min | ~5–15 min, mirror-dependent |
+| Pass 1: stations, settlements, labels, routegraph, horizon | ~1 min | ~2–4 min |
+| Pass 2: **1 km start cell** (~2 km² of work + ~1.5 min start-up) | ~2–3 min | ~2–3 min |
+| **First drive after** | **~6–12 min** | **~10–20 min** |
+| Pass 2: each further 4 km cell (~20 km² of work) | ~2.5–4 min | same; slower in dense towns |
+| Whole polygon done | ~25–40 min | ~3–4 h |
+
+Is that fast enough while driving? A 4 km cell takes ~3 min, and at 100 km/h you
+cross it in ~2.4 min. So on an open highway the car roughly keeps pace or gains;
+on twisty or town roads the bake stays ahead. To keep ahead, run a cell's stages
+in one Python process (saves the ~1.5–2 min start-up) and give cells ahead of the
+car priority. The boundary effect covers the case where the car catches up.
+
+**So: the player drives after pass 1 plus the start cell's pass 2,** not after
+pass 1 alone and not after the whole polygon.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
