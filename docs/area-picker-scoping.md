@@ -544,9 +544,12 @@ Everything below relies on this.
 - **The area you're in always has priority.** Entering another drawn area
   switches the runner to it after the current job. The other area's bake pauses,
   keeping the cells it has finished, and resumes later.
-- **On quitting the game:** finish the current job, then stop, and resume next
-  launch. Or keep baking in the background until the polygon is done. *Taylor's
-  call*; I'd default to stopping, so the PC isn't busy after quitting.
+- **On quitting the game:** a menu setting (Taylor, 2026-10-20). The default is
+  "finish the current job, then stop" and resume on the next launch. The option is
+  "keep baking in the background until the polygon is done". The game passes the
+  setting to the runner in `.car.json`. The runner checks it whenever a job ends,
+  and stops if the game is gone and the setting is "stop". It finds out the game is
+  gone because `.car.json` hasn't been written for 30 s.
 
 ### Overlapping something already baked
 **The problem with today's plan:** each drawn polygon gets its own LCC frame
