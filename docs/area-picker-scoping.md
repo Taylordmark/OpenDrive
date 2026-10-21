@@ -655,6 +655,43 @@ reusable when polygons overlap or get merged later.
 
 With two-pass, the clip sits at the source, so most stages need no changes.
 
+## Round 9 (Taylor, 2026-10-20): show baked coverage on the map
+
+The player sees every pre-baked area on the map as an area, not just a pin, so
+overlaps and missing chunks are visible.
+
+**Source of truth: the tiles on disk, not the status files.**
+- `build_world_manifest.py` already scans `terrain_*` tiles per area. It also
+  writes `Masks/coverage.json`, one entry per area:
+  - `outline_ll`: the drawn polygon, or a hand area's owned rect/bbox
+  - `tiles_ll`: the four corners of each baked terrain tile (1 km drawn, 2 km
+    hand), in lon/lat because areas use different frames
+  - `state` per tile: baked / pending / failed, with pending and failed coming
+    from the runner's status file
+- Reading the disk means a deleted, failed or never-baked tile shows up as a
+  **hole**, even if a status file claims otherwise.
+- Size check: summit_county's ~550 tiles is a few tens of KB. The runner
+  refreshes the file after each job.
+
+**What it looks like:**
+- **World globe, zoomed out:** each area drawn as its outline, with a pin.
+- **AreaMap and the drawing mode, zoomed in:**
+  - baked tiles as a translucent fill
+  - pending tiles hatched
+  - failed tiles red
+  - holes inside an outline left empty, with a dashed outline around them
+- **While drawing a new polygon:** where it overlaps existing coverage, the
+  overlap is highlighted, with a live readout:
+  - same zone, drawn area: "6.2 km² already baked, will be reused"
+  - a hand-made area: "overlaps Summit County, bakes its own copy"
+- **Tapping an area** opens its card: name, km² baked out of the total, any
+  failed cells with **Retry**, and **Delete area**.
+
+**How it's drawn:** AODRaceHUD already draws the globe pins at projected points,
+and `AreaCmToScreen`/`ProjectPin` already convert map points to screen points.
+Fills are HUD canvas triangles (2 per tile) and outlines are HUD lines, projected
+through the globe camera each frame. That's code only, no new assets.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
