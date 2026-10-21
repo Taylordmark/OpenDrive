@@ -149,6 +149,15 @@ code { font-family: var(--mono); font-size: .86em; }
   </table></div>
   <p>Sky lighting supplies all of the blue; fog supplies none. Fully warm sky light only takes the tint about halfway.</p>
   <p><b>The day clock ran during every capture.</b> At the default 24 h per real hour, a shot about 85 s after launch was taken roughly 34 game minutes past its <code>-odhour</code>. The "17:30" shots went from sun 7.7° to 0.5° before the screenshot, so they were sunset shots, and the old sun model set at 18:00 all year. Comparisons between shots still hold, since they all drifted the same, but the golden-hour photo comparison didn't. Fixed: <code>-odcycle=0</code> freezes the clock, and captures now pass it. The sun now also follows the real path for each place, date and DST (the real-sun change). Golden hour gets re-shot on that build.</p>
+  <figure><img src="img/diag_realsun.jpg" alt="Old sunset shot, real sun 17:30, 20:00, 20:00 with warm sky light"><figcaption>Old "17:30" (really sunset) · real sun 17:30 (35°) · 20:00 (8°) · 20:00 with SkyWarm 1. Clock frozen.</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet</th><th>sun</th><th>shadow tint</th><th>saturation</th></tr>
+    <tr><td>Old "17:30"</td><td class="n">~0.5°</td><td class="n">+0.81</td><td class="n">.67</td></tr>
+    <tr><td>Real 17:30</td><td class="n">35°</td><td class="n">+0.19</td><td class="n">.28</td></tr>
+    <tr><td>Real 20:00</td><td class="n">8°</td><td class="n">+0.44</td><td class="n">.45</td></tr>
+    <tr><td>20:00, SkyWarm 1</td><td class="n">8°</td><td class="n">+0.25</td><td class="n">.33</td></tr>
+  </table></div>
+  <p><b>Gap 3 was mostly the clock.</b> At real golden hour (sun 8°) the sunlight comes through the trunks warm, with long shafts across the road, and the shade tint is about half what the sunset shot had. Some cool cast left in deep shade is real: open shade under a blue sky is blue. <code>od.SkyWarm</code> stays at 0, but it's there if a warmer look is wanted later. Taylor confirmed the in-game look.</p>
   <details><summary>All ten after-fix pairs</summary><div class="stack">
     <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
     <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>
