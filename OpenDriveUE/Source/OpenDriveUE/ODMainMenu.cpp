@@ -149,14 +149,20 @@ const TCHAR* SeasonConfigSection = TEXT("OpenDrive.Season");
 // Time of Day / Weather rows (2026-10-05). Hours feed AODDayNightController::
 // TimeOfDay (Morning = its StartHour default, so an unset config changes
 // nothing); weather names are AODWeatherController's EODWeatherState names.
+// Dawn / Golden Hour / Dusk follow the real sun (2026-10-20): the hour the
+// sun crosses SunDeg at this area and date (Dir +1 rising, -1 setting, 0 =
+// fixed Hour; Hour is also the fallback). Dusk -5 deg = NightFactor ~0.96.
+// Mirrored in pipeline/check_night_exposure.py.
 struct FTimePreset
 {
 	const TCHAR* Name;
 	float Hour;
+	float SunDeg = 0.0f;
+	int32 Dir = 0;
 };
 const FTimePreset TimeOfDayPresets[] = {
-	{TEXT("Dawn"), 6.4f}, {TEXT("Morning"), 10.0f}, {TEXT("Noon"), 12.0f}, {TEXT("Afternoon"), 15.0f},
-	{TEXT("Golden Hour"), 17.5f}, {TEXT("Dusk"), 18.3f}, {TEXT("Night"), 22.0f},
+	{TEXT("Dawn"), 6.4f, 3.0f, 1}, {TEXT("Morning"), 10.0f}, {TEXT("Noon"), 12.0f}, {TEXT("Afternoon"), 15.0f},
+	{TEXT("Golden Hour"), 17.5f, 6.0f, -1}, {TEXT("Dusk"), 18.3f, -5.0f, -1}, {TEXT("Night"), 22.0f},
 };
 const TCHAR* const WeatherNames[] = {
 	TEXT("Auto"), TEXT("Clear"), TEXT("Overcast"), TEXT("Rain"), TEXT("HeavyRain"), TEXT("Sleet"), TEXT("Snow"),
@@ -1668,6 +1674,7 @@ void AODMainMenu::Adjust(int32 Dir)
 		// persisted the same GConfig way as the exhaust rows.
 		SeasonIdx = (SeasonIdx + Dir + UE_ARRAY_COUNT(SeasonNames)) % UE_ARRAY_COUNT(SeasonNames);
 		ApplySeason();
+		ApplyTimeOfDay();   // a new date moves Dawn/Dusk
 		// the Weather row only offers the picked season's weather (2026-10-09):
 		// re-apply instantly - Auto re-rolls in the new season (SetSeasonLock's
 		// own re-roll ramps in over minutes, so a winter blizzard kept falling),
@@ -1799,7 +1806,8 @@ void AODMainMenu::ApplyTimeOfDay()
 {
 	if (AODDayNightController* DayNight = FindActor<AODDayNightController>(GetWorld()))
 	{
-		DayNight->TimeOfDay = TimeOfDayPresets[TimeIdx].Hour;
+		const FTimePreset& P = TimeOfDayPresets[TimeIdx];
+		DayNight->TimeOfDay = P.Dir == 0 ? P.Hour : DayNight->HourAtSunElevation(P.SunDeg, P.Dir > 0, P.Hour);
 	}
 }
 

@@ -2,7 +2,8 @@
 make the lights of the car be pretty much the only source of light except
 for a very faint illumination from the stars").
 
-Mirrors AODDayNightController's sun elevation and NightFactor() and the
+Mirrors ODSolar.h's sun (real position at the area's lat/lon and date),
+AODDayNightController's NightFactor() and the
 exposure the night grade allows (auto-exposure floor NightMinEV, plus the
 Grade volume's -1 EV bias), then checks what fraction of mid grey the
 headlit road, moonlit ground and stars land at for the menu time presets.
@@ -17,7 +18,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from make_headlight_ies import road as head_road   # noqa: E402  IES low beam, x mid grey at NIGHT_MIN_EV
 
-MAX_ELEV = 68.0           # AODDayNightController::MaxElevation
 NIGHT_MIN_EV = 1.0        # AODDayNightController::NightMinEV
 EXPOSURE_BIAS = -1.0      # AODAtmosphereController grade AutoExposureBias
 MOON_LUX = 0.15           # AODDayNightController::MoonIntensity
@@ -32,11 +32,56 @@ DAY_EV = 12.0             # bright day exposure (Grade volume max)
 # M_BuildingFacade_real lit windows (PLAN-VISUALS Track G): constants parsed from its build script
 BUILDING_SCRIPT = Path(__file__).resolve().parent.parent / "unreal" / "apply_building_material_real.py"
 FACADE_SHARE = 0.5        # worst case: a street of facades fills half the screen
-PRESETS = {"Golden Hour": 17.5, "Dusk": 18.3, "Night": 22.0, "Noon": 12.0}
+# ODMainMenu TimeOfDayPresets: fixed hour, or (sun deg, +1 rising / -1 setting)
+PRESETS = {"Dawn": (3.0, 1), "Golden Hour": (6.0, -1), "Dusk": (-5.0, -1), "Night": 22.0, "Noon": 12.0}
+# (lat, lon, clock UTC offset with DST) - worldmap.json "ll", AODDayNightController AreaZones
+AREAS = {"far_gasquet": (41.8475, -123.965, -8), "deals_gap": (35.4975, -83.955, -5),
+         "summit_county": (39.525, -106.175, -7), "skagit_cascades": (48.275, -121.95, -8),
+         "oahu": (21.48, -157.975, -10)}
+DAYS = {"summer": 199, "winter": 15}   # AODSeasonController mid-July / mid-January
 
 
-def elevation(hour):
-    return math.sin((hour - 6.0) / 12.0 * math.pi) * MAX_ELEV
+def sun_elevation(lat, lon, doy, hour, utc):
+    """ODSolar::SunPosition (elevation only)."""
+    g = 2 * math.pi / 365 * (doy - 1 + (hour - utc - 12) / 24)
+    eqt = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g)
+                    - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+    decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g) - 0.006758 * math.cos(2 * g)
+            + 0.000907 * math.sin(2 * g) - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    ha = math.radians((hour * 60 + eqt + 4 * lon - 60 * utc) / 4 - 180)
+    la = math.radians(lat)
+    return math.degrees(math.asin(math.sin(la) * math.sin(decl) + math.cos(la) * math.cos(decl) * math.cos(ha)))
+
+
+def preset_hour(preset, lat, lon, doy, utc):
+    """ODSolar::HourAtElevation for sun-relative presets (no fallback needed
+    at these latitudes)."""
+    if not isinstance(preset, tuple):
+        return preset
+    target, rising = preset[0], preset[1] > 0
+    noon = 12 + utc - lon / 15
+    lo, hi = (noon - 12, noon) if rising else (noon, noon + 12)
+    above = lambda h: sun_elevation(lat, lon, doy, h, utc) > target
+    assert above(lo) != above(hi), "sun reaches the preset elevation"
+    a_lo = above(lo)
+    for _ in range(30):
+        mid = (lo + hi) / 2
+        if above(mid) == a_lo:
+            lo = mid
+        else:
+            hi = mid
+    return ((lo + hi) / 2) % 24
+
+
+def preset_elevations():
+    """{(area, season): {preset: (hour, sun deg)}} as the menu sets them."""
+    out = {}
+    for area, (lat, lon, utc) in AREAS.items():
+        for season, doy in DAYS.items():
+            u = utc + (1 if area != "oahu" and 69 <= doy < 307 else 0)
+            out[area, season] = {n: (h, sun_elevation(lat, lon, doy, h, u))
+                                 for n, h in ((n, preset_hour(p, lat, lon, doy, u)) for n, p in PRESETS.items())}
+    return out
 
 
 def night_factor(elev):
@@ -64,23 +109,32 @@ def building_constants():
     return out
 
 
-def check_windows(mid, tail):
+def check_windows(mid, tail, presets):
     """Lit windows by night: visible, below the tail lamps, never enough to
     lift auto-exposure off the night floor; dark by day; switched on by the
     same NightFactor as the grade (the shader re-derives it from the sun)."""
     b = building_constants()
     shader_night = lambda e: (lambda t: t * t * (3 - 2 * t))(
         min(max((b["NIGHT_ELEV_HI"] - e) / b["NIGHT_ELEV_SPAN"], 0.0), 1.0))
-    for hour in [h / 4 for h in range(96)]:
-        assert abs(shader_night(elevation(hour)) - night_factor(elevation(hour))) < 1e-9, "window night = grade night"
+    for e in range(-90, 91):
+        assert abs(shader_night(e) - night_factor(e)) < 1e-9, "window night = grade night"
     # dimmest = low jitter x the darkest interior-mapped room face (floor)
     lo = b["LIT_NITS"] * b["LIT_JITTER_MIN"] * b.get("INTERIOR_SHADE_MIN", 1.0) / mid
     hi = b["LIT_NITS"] / mid
-    u0, u1 = b["WINDOW_MARGIN_U"]
-    v0, v1 = b["WINDOW_MARGIN_V_UPPER"]
-    glass_share = (u1 - u0) * (v1 - v0)
-    lit_share = {n: b["LIT_MAX_FRACTION"] * night_factor(elevation(h)) for n, h in PRESETS.items()}
-    town = FACADE_SHARE * glass_share * b["LIT_MAX_FRACTION"] * (lo + hi) / 2
+    # lit glass share of a two-storey facade (ground + one upper floor, by
+    # height) for each archetype; storefront ground floors light more rooms,
+    # and a SHOP_DOOR_SHARE of their bays run the glass to the floor.
+    # Worst case: ignores house doors and balcony rails.
+    area = lambda r: (r[1] - r[0]) * (r[3] - r[2])
+    lit_glass = []
+    for i, ((gh, uh), gr, ur) in enumerate(zip(b["FACADE_FLOORS"], b["FACADE_WINDOW_GROUND"], b["FACADE_WINDOW_UPPER"])):
+        store = i == 2   # punched, house, storefront, curtain wall, balcony
+        g_area = area(gr) + (b["SHOP_DOOR_SHARE"] * (gr[1] - gr[0]) * gr[2] if store else 0.0)
+        g_lit = b["SHOP_LIT_FRACTION"] if store else b["LIT_MAX_FRACTION"]
+        lit_glass.append((gh * g_area * g_lit + uh * area(ur) * b["LIT_MAX_FRACTION"]) / (gh + uh))
+    lit_share = {n: b["LIT_MAX_FRACTION"] * max(night_factor(e) for _, e in presets) for n, presets in
+                 ((n, [p[n] for p in presets.values()]) for n in PRESETS)}
+    town = FACADE_SHARE * max(lit_glass) * (lo + hi) / 2
     print(f"lit windows x mid grey {lo:.1f}-{hi:.1f} | lit share " +
           "  ".join(f"{n} {v:.2f}" for n, v in lit_share.items()) +
           f" | facade street mean {town:.2f} x mid grey")
@@ -111,13 +165,15 @@ def main():
           f"brake day {brake_day:.2f}")
     print(f"night mid grey {mid:.2f} nits | x mid grey: road@10m {road10:.2f}  road@30m {road30:.3f}  "
           f"moonlit grass {moonlit:.3f}  brightest star {star:.0f}  median star on screen {median_star:.2f}")
-    for name, hour in PRESETS.items():
-        e = elevation(hour)
-        print(f"{name:12s} {hour:5.1f} h  sun {e:+6.1f} deg  night {night_factor(e):.2f}")
-
-    assert night_factor(elevation(12.0)) == 0.0 and night_factor(elevation(17.5)) == 0.0, "day untouched"
-    assert night_factor(elevation(18.3)) > 0.95, "menu Dusk is (almost) full night grade"
-    assert night_factor(elevation(22.0)) == 1.0
+    presets = preset_elevations()
+    for (area, season), row in presets.items():
+        print(f"{area:16s} {season:6s} " + "  ".join(
+            f"{n} {h:5.2f} h {e:+5.1f}" for n, (h, e) in row.items()))
+        night = {n: night_factor(e) for n, (_, e) in row.items()}
+        assert night["Noon"] == night["Golden Hour"] == night["Dawn"] == 0.0, "day untouched"
+        assert night["Dusk"] > 0.95, "menu Dusk is (almost) full night grade"
+        assert night["Night"] == 1.0, "Night is night everywhere, every season"
+        assert row["Dawn"][0] < 12 < row["Golden Hour"][0] < row["Dusk"][0], "dawn morning, golden hour before dusk"
     assert road10 > 1.0, "headlit road near the car reads at or above mid grey"
     assert road30 > 5 * moonlit, "headlights clearly beat the moon even at 30 m"
     assert 0.005 < moonlit < 0.05, "moonlit ground: very faint, not black, not lit"
@@ -126,7 +182,7 @@ def main():
     assert 10.0 < tail < 200.0 and brake_night < 500.0, "tails glow red at night without flooding bloom"
     assert brake_day > 0.1, "brake lights still read in daylight"
     assert behind["tail"] < 0.1 < behind["brake"] < behind["reverse"] < 1.5, "faint tail wash, visible brake and reverse"
-    check_windows(mid, tail)
+    check_windows(mid, tail, presets)
     print("PASS: night is headlights first, a faint moon/star floor, stars visible, lit windows in between")
 
 
