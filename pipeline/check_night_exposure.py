@@ -121,12 +121,20 @@ def check_windows(mid, tail, presets):
     # dimmest = low jitter x the darkest interior-mapped room face (floor)
     lo = b["LIT_NITS"] * b["LIT_JITTER_MIN"] * b.get("INTERIOR_SHADE_MIN", 1.0) / mid
     hi = b["LIT_NITS"] / mid
-    u0, u1 = b["WINDOW_MARGIN_U"]
-    v0, v1 = b["WINDOW_MARGIN_V_UPPER"]
-    glass_share = (u1 - u0) * (v1 - v0)
+    # lit glass share of a two-storey facade (ground + one upper floor, by
+    # height) for each archetype; storefront ground floors light more rooms,
+    # and a SHOP_DOOR_SHARE of their bays run the glass to the floor.
+    # Worst case: ignores house doors and balcony rails.
+    area = lambda r: (r[1] - r[0]) * (r[3] - r[2])
+    lit_glass = []
+    for i, ((gh, uh), gr, ur) in enumerate(zip(b["FACADE_FLOORS"], b["FACADE_WINDOW_GROUND"], b["FACADE_WINDOW_UPPER"])):
+        store = i == 2   # punched, house, storefront, curtain wall, balcony
+        g_area = area(gr) + (b["SHOP_DOOR_SHARE"] * (gr[1] - gr[0]) * gr[2] if store else 0.0)
+        g_lit = b["SHOP_LIT_FRACTION"] if store else b["LIT_MAX_FRACTION"]
+        lit_glass.append((gh * g_area * g_lit + uh * area(ur) * b["LIT_MAX_FRACTION"]) / (gh + uh))
     lit_share = {n: b["LIT_MAX_FRACTION"] * max(night_factor(e) for _, e in presets) for n, presets in
                  ((n, [p[n] for p in presets.values()]) for n in PRESETS)}
-    town = FACADE_SHARE * glass_share * b["LIT_MAX_FRACTION"] * (lo + hi) / 2
+    town = FACADE_SHARE * max(lit_glass) * (lo + hi) / 2
     print(f"lit windows x mid grey {lo:.1f}-{hi:.1f} | lit share " +
           "  ".join(f"{n} {v:.2f}" for n, v in lit_share.items()) +
           f" | facade street mean {town:.2f} x mid grey")
