@@ -503,6 +503,89 @@ car priority. The boundary effect covers the case where the car catches up.
 **So: the player drives after pass 1 plus the start cell's pass 2,** not after
 pass 1 alone and not after the whole polygon.
 
+## Round 7 (Taylor, 2026-10-20): teleporting, switching areas, overlaps
+
+### What exists today
+- **Picking a start (town)** on the AreaMap screen in the same area calls
+  `AODVehiclePawn::TeleportToSpawn`. It drops the car and waits on the ground
+  snap until real streamed terrain and road are under it.
+- **Picking another area** calls `OpenArea()`, which runs OpenLevel with `?od...`
+  options and reloads the whole level.
+- **Out-of-bounds** snaps the car back to the nearest road.
+
+### Make the cell grid flexible first
+With B, a "cell" is no longer an area. It's a **job rect** that pass 2 fills,
+over a fixed **1 km tile grid**. The runner chooses each job's size:
+- **1 km** when the player is waiting: the start, or a teleport target.
+- **2–4 km** when the player is driving and the bake is ahead.
+
+Everything below relies on this.
+
+### Teleporting inside the same drawn area
+- **A baked spot** works as today: instant, the normal ground snap.
+- **An unbaked spot:**
+  - The game updates `.car.json` with a `target`. The runner finishes its current
+    job (it never kills one; that loses minutes of work) and then bakes a 1 km job
+    at the target: ~2–3 min after the current job.
+  - The map shows the wait before you confirm: "This spot isn't synced yet, about
+    4 min. Wait there, or keep driving and we'll tell you."
+  - **Wait there:** the camera sits over the target's coarse "unsynced" horizon
+    with the boundary effect. The ground snap treats `Pending` tiles as "keep
+    waiting", not as a timeout. The car drops in when the tiles land.
+  - **Keep driving:** a HUD toast when it's ready, plus a "Go" on the map.
+- **The map shows baked vs unbaked:** the finished cells come from the status
+  file, so the player can see where they can teleport instantly.
+
+### Switching to another area (OpenLevel)
+- **Only one bake runs at a time,** because terrain alone uses 8 workers. **The
+  bake competes with the game for CPU while driving.** While a drive is running,
+  the runner drops to below-normal priority and fewer workers (a flag in
+  `.car.json` that the game sets). That costs bake speed to protect fps.
+- **The area you're in always has priority.** Entering another drawn area
+  switches the runner to it after the current job. The other area's bake pauses,
+  keeping the cells it has finished, and resumes later.
+- **On quitting the game:** finish the current job, then stop, and resume next
+  launch. Or keep baking in the background until the polygon is done. *Taylor's
+  call*; I'd default to stopping, so the PC isn't busy after quitting.
+
+### Overlapping something already baked
+**The problem with today's plan:** each drawn polygon gets its own LCC frame
+centred on itself, so two polygons' grids never line up and nothing can be shared.
+**Fix: fixed zone frames.** A handful of predefined LCC worlds cover the US, the
+way `california` already does: a few CONUS zones plus Alaska and Hawaii. Every
+drawn polygon joins the zone containing its centre and snaps to that zone's 1 km
+grid. Two polygons in the same zone then share tiles, and neighbouring polygons
+meet seamlessly.
+
+Cases:
+1. **Overlap with an earlier drawn area in the same zone.** The new area is the
+   union of the two:
+   - Pass 1 reruns for the union. It's cheap and the downloads are cached.
+   - **Per-cell input hash:** each job records a hash of its inputs (the stations
+     and OSM within its rect plus the carve margin, plus the pipeline's
+     geometry-shaping constants, the same list `generation_id.py` already hashes
+     globally). A cell whose hash hasn't changed is reused. Only cells whose
+     inputs changed rebake: the new ground, plus the old cells next to the join,
+     where roads now continue.
+   - The same mechanism handles redrawing an outline, a fresher OSM pull, or a
+     pipeline update, all with minimal rebaking.
+   - Today's global generation id would move to per cell. The runtime check only
+     logs, so it would compare within a cell.
+2. **Overlap with one of the 8 hand-made areas.** They use their own frames, 2 km
+   tiles and (except the california members) their own height datum, so their
+   tiles can't be reused. Allow it with a warning: "Overlaps Summit County. This
+   bakes its own copy; most downloads are reused." It becomes its own area on the
+   globe.
+3. **A polygon crossing a zone boundary** joins the zone of its centre. LCC stays
+   accurate for hundreds of km past its standard parallels, so that's fine at
+   ≤30 km.
+
+### Disk
+Raw downloads are ~11 MB for sf_russian_hill and ~656 MB for summit_county, plus
+the baked tiles. The globe's area card gets a **Delete area** (with a
+confirmation) that removes the area's tiles and its entry in `user_areas.json`.
+Shared caches stay, so a redraw is cheap.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
