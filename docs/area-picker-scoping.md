@@ -544,6 +544,15 @@ Everything below relies on this.
 - **The area you're in always has priority.** Entering another drawn area
   switches the runner to it after the current job. The other area's bake pauses,
   keeping the cells it has finished, and resumes later.
+- **The bake always keeps going while the game is open** (Taylor, 2026-10-20),
+  menus included, not only while driving:
+  - The game writes `.car.json` about once a second from every screen.
+  - It sets `mode: "drive"` when the car is out, and `mode: "menu"` otherwise.
+    In menu mode the file has no live car position, so the runner keeps working
+    outward from the last car position, or the start point if there isn't one.
+  - Priority follows the mode: **full priority and all workers at the menu**,
+    where nothing competes for frame rate, and low priority with fewer workers
+    only while driving.
 - **On quitting the game:** a menu setting (Taylor, 2026-10-20). The default is
   "finish the current job, then stop" and resume on the next launch. The option is
   "keep baking in the background until the polygon is done". The game passes the
