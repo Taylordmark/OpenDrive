@@ -48,6 +48,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
+from bake_job import tile_in_job
 from building_roofs import clean_ring, make_roof, triangulate
 from classify_settlements import MIN_BUILDINGS_PER_TILE
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, bake_map, half_width_for_stations, road_ue_z_m
@@ -542,6 +543,10 @@ def main():
               "tile_counts": tile_counts, "known_tree": known_tree,
               "known_vals": [known[i] for i in known_idx]}
     items = list(zip(buildings_raw, rings, centroids_cm.tolist(), known))
+    # (2026-10-21) a pass-2 job builds only the buildings its tiles own (by
+    # centroid tile, the tile export_building_mesh_bin.py files them under)
+    items = [it for it in items if tile_in_job(int(it[2][0] // TERRAIN_TILE_SIZE_CM),
+                                               int(it[2][1] // TERRAIN_TILE_SIZE_CM), TERRAIN_TILE_SIZE_CM)]
     chunks = [items[i:i + CHUNK_BUILDINGS] for i in range(0, len(items), CHUNK_BUILDINGS)]
     out, stats = [], Counter()
     for part, part_stats in bake_map(build_chunk, chunks, WORKER_GB, _init_shared, (shared,)):

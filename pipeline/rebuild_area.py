@@ -92,6 +92,18 @@ export_centerline_bin.py (same, superseded for the open-world area by
 export_road_centerline_bin.py), analyze_audio_test.py, analyze_brap.py.
 
 Usage:  python pipeline/rebuild_area.py
+        python pipeline/rebuild_area.py --pass 1
+        python pipeline/rebuild_area.py --pass 2 --rect x0,y0,x1,y1
+
+Two-pass drawn-area bake (2026-10-21, docs/area-picker-contract.md, scoping
+round 6): --pass 1 runs PASS1 once for the whole drawn polygon (downloads,
+stations and every polygon-wide decision); --pass 2 --rect runs the rest for
+one job rect (east/north metres on the 1 km grid), each tile writer writing
+only the tiles in it (bake_job.py). The gates are non-blocking in pass 2.
+PASS_BOTH stages run in both: build_road_network writes the station sidecar
++ meta in pass 1 and the job's road mesh in pass 2; build_road_furniture
+gives pass 1's routegraph its controls and pass 2 its props on the job's
+terrain. No --pass = the whole bake, exactly as before.
 
 None of the underlying scripts take an --area flag (checked 2026-08-21,
 `grep argparse` across pipeline/ finds none) - the active area is switched
@@ -213,33 +225,74 @@ STAGES = [
     ("build_world_manifest.py", "write Content/OpenDrive/Masks/worlds.json (streamed world members)"),
 ]
 
+# (2026-10-21) the two-pass split - see the module docstring
+PASS1 = {
+    "fetch_osm_network.py", "fetch_osm_places.py", "fetch_osm_buildings.py",
+    "build_road_stations.py", "classify_settlements.py", "build_retaining_walls.py",
+    "build_water_tiles.py",   # whole lakes: terrain reads them as beds across job edges
+    "export_road_centerline_bin.py", "build_traffic_demand.py",
+    "build_place_labels.py", "export_place_labels_bin.py", "classify_biomes.py", "export_biome_bin.py",
+    "fetch_climate.py", "build_ground_bands.py", "build_map_texture.py", "build_horizon.py",
+    "bake_area_relief.py",
+}
+PASS_BOTH = {"build_road_network.py", "build_road_furniture.py", "build_world_manifest.py"}
+GATES = {"verify_terrain_fit.py", "verify_road_fit.py"}
+
+
+def stages_for(bake_pass):
+    """STAGES for --pass 1 / 2, or all of them (None)."""
+    if bake_pass is None:
+        return STAGES
+    return [st for st in STAGES
+            if st[0].split()[0] in PASS_BOTH or (st[0].split()[0] in PASS1) == (bake_pass == "1")]
+
 
 def main():
-    print(f"=== rebuild_area.py: AREA_NAME = {AREA_NAME!r} ({len(STAGES)} stages) ===")
+    # --pass 1 | --pass 2 --rect x0,y0,x1,y1 (2026-10-21): bake_job.py reads these
+    arg = lambda flag: sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else None
+    bake_pass, rect = arg("--pass"), arg("--rect")
+    if bake_pass not in (None, "1", "2") or (bake_pass == "2") != (rect is not None):
+        sys.exit("usage: rebuild_area.py [--from <script>] [--pass 1 | --pass 2 --rect x0,y0,x1,y1]")
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    env.pop("OD_PASS", None)
+    env.pop("OD_JOB_RECT_M", None)
+    if bake_pass:
+        env["OD_PASS"] = bake_pass
+    if rect:
+        x0, y0, x1, y1 = (float(v) for v in rect.split(","))
+        assert x0 < x1 and y0 < y1, rect
+        env["OD_JOB_RECT_M"] = rect
+    stages = stages_for(bake_pass)
+    print(f"=== rebuild_area.py: AREA_NAME = {AREA_NAME!r} ({len(stages)} stages"
+          f"{f', pass {bake_pass}' if bake_pass else ''}{f', rect {rect}' if rect else ''}) ===")
     t_start = time.time()
 
     # --from <script>: resume at that stage (e.g. a terrain-only change)
     start = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else None
-    for i, (cmd, desc) in enumerate(STAGES, start=1):
+    for i, (cmd, desc) in enumerate(stages, start=1):
         script, *args = cmd.split()
         if start and script != start:
             continue
         start = None
         script_path = PIPELINE_DIR / script
         if not script_path.is_file():
-            print(f"\n[{i}/{len(STAGES)}] FAILED: {script} not found at {script_path}")
+            print(f"\n[{i}/{len(stages)}] FAILED: {script} not found at {script_path}")
             sys.exit(1)
 
-        print(f"\n[{i}/{len(STAGES)}] {script} - {desc}")
+        print(f"\n[{i}/{len(stages)}] {script} - {desc}")
         t0 = time.time()
         # UTF-8 stdout: OSM names (e.g. Hawaiian macrons) crash cp1252 when piped
-        result = subprocess.run([sys.executable, str(script_path), *args],
-                                env={**os.environ, "PYTHONUTF8": "1"})
+        result = subprocess.run([sys.executable, str(script_path), *args], env=env)
         dt = time.time() - t0
 
+        if result.returncode != 0 and bake_pass == "2" and script in GATES:
+            # (2026-10-21) never blocks driving: the job's tiles are on disk
+            print(f"[{i}/{len(stages)}] {script} FAILED (exit {result.returncode}) - "
+                  "a gate, non-blocking in pass 2; continuing")
+            continue
         if result.returncode != 0:
             print(
-                f"\n=== rebuild_area.py: stage {i}/{len(STAGES)} ({script}) "
+                f"\n=== rebuild_area.py: stage {i}/{len(stages)} ({script}) "
                 f"FAILED with exit code {result.returncode} after {dt:.1f}s. "
                 "Stopping - the bake is incomplete/partial, nothing further "
                 "will run. Fix the failure above and re-run rebuild_area.py "
@@ -248,11 +301,11 @@ def main():
             )
             sys.exit(result.returncode)
 
-        print(f"[{i}/{len(STAGES)}] {script} done in {dt:.1f}s")
+        print(f"[{i}/{len(stages)}] {script} done in {dt:.1f}s")
 
     total = time.time() - t_start
     print(
-        f"\n=== rebuild_area.py: all {len(STAGES)} stages completed for "
+        f"\n=== rebuild_area.py: all {len(stages)} stages completed for "
         f"AREA_NAME={AREA_NAME!r} in {total / 60:.1f} min. "
         "verify_terrain_fit.py and verify_road_fit.py above both check the "
         "actual .bin files on disk - a PASS is still not a substitute for "

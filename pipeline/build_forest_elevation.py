@@ -41,6 +41,7 @@ from pathlib import Path
 import numpy as np
 
 import build_terrain_mesh_tiles as btmt
+from bake_job import bake_pass, in_outline
 from bin_tile_io import parse_terrain_tile_bin
 from road_mesh_common import sample_mesh_heights
 from test_areas import AREA_NAME, owns
@@ -94,7 +95,7 @@ def main():
     y_cm = -north * 100.0
     # the grid's extent is the forest's ownership at runtime, so it ends
     # where the area's owned tiles do (2026-10-05, step 3)
-    keep = owns(x_cm, y_cm)
+    keep = owns(x_cm, y_cm) & in_outline(east, north)   # (2026-10-21) and inside a drawn outline
     x_cm, y_cm = x_cm[keep], y_cm[keep]
 
     tile_cm = btmt.TERRAIN_TILE_SIZE_CM
@@ -113,11 +114,17 @@ def main():
     # 37-95 m from pads. Reading what's shipped is also exactly what
     # verify_forest_elevation_fit.py checks against.
     elev_cm = np.full(len(x_cm), np.nan, dtype=np.float64)
+    no_tile = np.zeros(len(x_cm), dtype=bool)
     n_miss = 0
     for n_done, ((tx, ty), idxs) in enumerate(tiles.items(), 1):
         idxs = np.array(idxs)
         parsed = parse_terrain_tile_bin(OUT_DIR / f"terrain_{AREA_NAME}_test_tile_{tx}_{ty}.bin")
         if parsed is None:
+            if bake_pass():
+                # (2026-10-21) two-pass bake: a tile no job has baked yet -
+                # its trees come when it does (this stage reruns every job)
+                no_tile[idxs] = True
+                continue
             n_miss += len(idxs)
             continue
         positions = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
@@ -134,7 +141,7 @@ def main():
               f"filling from the nearest valid candidate; check before "
               f"trusting this file if that count is large")
         valid = np.where(~np.isnan(elev_cm))[0]
-        missing = np.where(np.isnan(elev_cm))[0]
+        missing = np.where(np.isnan(elev_cm) & ~no_tile)[0]
         if len(valid) and len(missing):
             for i in missing:
                 d2 = (x_cm[valid] - x_cm[i]) ** 2 + (y_cm[valid] - y_cm[i]) ** 2
@@ -145,6 +152,7 @@ def main():
     # ORIGIN_HEIGHT_M subtraction needed here, unlike the old live-streaming
     # version where a georeference actor applied that shift at
     # runtime instead).
+    x_cm, y_cm, elev_cm = x_cm[~no_tile], y_cm[~no_tile], elev_cm[~no_tile]
     x_out = x_cm.astype(np.float32)
     y_out = y_cm.astype(np.float32)
     z_out = elev_cm.astype(np.float32)

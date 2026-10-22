@@ -32,9 +32,10 @@ from pathlib import Path
 
 import numpy as np
 
+from bake_job import CARVE_MARGIN_M, bake_pass, in_job
 from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM
-from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
+from road_mesh_common import (CHUNK_STATIONS, ROAD_HALF_WIDTH, ROAD_LIFT, STATION_SPACING,
                               build_road_chunks, half_width_for_stations,
                               road_ue_z_m, shipped_terrain_heights,
                               unpaved_stations)
@@ -43,6 +44,10 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test"
 STATIONS_PATH = OUT / "road_stations.json"
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+# a pass-2 job meshes every segment with a station this close to its rect:
+# a chunk spans CHUNK_STATIONS (750 m), so one bucketed into the rect can
+# start that far outside it
+JOB_REACH_M = CHUNK_STATIONS * STATION_SPACING + CARVE_MARGIN_M
 
 
 def write_station_sidecar(path, segment_geoms, gen_id_bytes):
@@ -138,13 +143,20 @@ def main():
                             if highway_classes else None)
             junction_suppress = junction_suppress_full[lo:hi]
             name = seg["name"] if len(runs) == 1 else f"{seg['name']}_p{run_idx}"
-            chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
-                                                   spacing=STATION_SPACING, is_oneway=is_oneway,
-                                                   highway_classes=highway_classes,
-                                                   osm_lanes=osm_lanes, half_width_s=half_width_s,
-                                                   junction_suppress=junction_suppress,
-                                                   is_unpaved=is_unpaved,
-                                                   ground_cm=shipped_terrain_heights)
+            # (2026-10-21, two-pass drawn-area bake) pass 1 writes only the
+            # polygon-wide station sidecar + meta (build_road_chunks' cx/cy/cz
+            # are just e/n/z in cm); a pass-2 job meshes only the segments
+            # that reach its rect (a chunk is <= CHUNK_STATIONS long)
+            if bake_pass() == "1" or not in_job(e * 100.0, -n * 100.0, JOB_REACH_M).any():
+                chunks, cx, cy, cz = [], e * 100.0, -n * 100.0, z * 100.0
+            else:
+                chunks, cx, cy, cz = build_road_chunks(s, e, n, z, name_prefix=name,
+                                                       spacing=STATION_SPACING, is_oneway=is_oneway,
+                                                       highway_classes=highway_classes,
+                                                       osm_lanes=osm_lanes, half_width_s=half_width_s,
+                                                       junction_suppress=junction_suppress,
+                                                       is_unpaved=is_unpaved,
+                                                       ground_cm=shipped_terrain_heights)
             segments.append({"name": name, "chunks": chunks})
             hw_m = (half_width_s if half_width_s is not None
                     else np.full(len(cx), ROAD_HALF_WIDTH))
@@ -157,7 +169,12 @@ def main():
     if not segment_geoms:
         raise SystemExit("No segments in road_stations.json - check build_road_stations.py's output.")
 
-    (OUT / "road_mesh.json").write_text(json.dumps({"segments": segments}))
+    if bake_pass() != "1":
+        (OUT / "road_mesh.json").write_text(json.dumps({"segments": segments}))
+    if bake_pass() == "2":
+        print(f"pass 2: {sum(1 for sg in segments if sg['chunks'])} segment(s) meshed for the job; "
+              "pass 1's station sidecar + meta kept")
+        return
 
     MASKS_DIR.mkdir(parents=True, exist_ok=True)
     gen_id = compute_generation_id()

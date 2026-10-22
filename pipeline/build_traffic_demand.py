@@ -42,7 +42,8 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from fetch_cache import cached_bytes
+from bake_job import outline_ll
+from fetch_cache import cached_bytes, clip_geojson_lines
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, lonlat_bbox, to_local
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "checks"))
@@ -148,7 +149,9 @@ def hpms_features(state, snwe):
                     raise RuntimeError(d.get("error", d))
                 feats += d["features"]
                 if len(d["features"]) < 2000:
-                    return year, feats
+                    # (2026-10-21) a drawn area keeps the sections inside its outline
+                    poly = outline_ll()
+                    return year, (feats if poly is None else clip_geojson_lines(feats, poly))
                 off += 2000
         except (requests.HTTPError, RuntimeError) as err:
             print(f"  HPMS {state} {year}: {err} - trying an older year")

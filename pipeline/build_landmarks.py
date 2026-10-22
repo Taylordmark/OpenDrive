@@ -42,6 +42,7 @@ from building_roofs import make_roof, obb
 from export_building_mesh_bin import pack_tile
 from fetch_cache import overpass_json
 from fetch_osm_buildings import HEADERS
+from bake_job import tile_in_job   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import road_ue_z_m
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
@@ -342,7 +343,7 @@ def main():
     gen_id = compute_generation_id()
     gen_id_bytes = pack_generation_id(gen_id)
     written = []
-    for tile in sorted(set(foot_tiles) | set(mesh_tiles)):
+    for tile in sorted(t for t in set(foot_tiles) | set(mesh_tiles) if tile_in_job(*t, TERRAIN_TILE_SIZE_CM)):
         path = OUT_DIR / f"landmarks_{AREA_NAME}_test_tile_{tile[0]}_{tile[1]}.bin"
         path.write_bytes(pack_landmark_tile(foot_tiles[tile], mesh_tiles[tile], gen_id_bytes))
         written.append(path)

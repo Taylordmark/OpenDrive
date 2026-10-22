@@ -67,7 +67,14 @@ import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, bake_map, bake_workers, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
+from bake_job import in_job
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns, to_local
+
+
+def owns(x_cm, y_cm, _owns=owns):
+    """(2026-10-21) owned, and inside a pass-2 job's rect: a job checks its own tiles."""
+    return _owns(x_cm, y_cm) & in_job(x_cm, y_cm)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"

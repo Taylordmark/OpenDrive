@@ -57,6 +57,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, ROAD_TILE_SIZE_CM
 
@@ -124,7 +125,7 @@ def main():
     xs = [k[0] for k in buckets]
     ys = [k[1] for k in buckets]
     written_paths = []
-    for (tx, ty), tile_chunks in buckets.items():
+    for (tx, ty), tile_chunks in job_items(buckets, ROAD_TILE_SIZE_CM):
         out_path = OUT_DIR / f"roadv3_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(out_path, tile_chunks, gen_id_bytes)
         written_paths.append(out_path)

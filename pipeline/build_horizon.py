@@ -25,6 +25,7 @@ import numpy as np
 import requests
 
 import build_terrain_mesh_tiles as B
+from bake_job import outline_local
 from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_lonlat
 
@@ -40,6 +41,10 @@ OUT_PATH = B.OUT_DIR / f"horizon_{AREA_NAME}_test.bin"
 
 def baked_extent_m():
     """(e0, n0, e1, n1) of every terrain tile on disk for this area (metres)."""
+    # (2026-10-21) a drawn area: its outline's extent - pass 1 builds the
+    # horizon before any terrain tile exists (scoping round 6)
+    if outline_local() is not None:
+        return outline_local().bounds
     keys = [tuple(map(int, re.search(r"_tile_(-?\d+)_(-?\d+)\.bin$", p).groups()))
             for p in glob.glob(str(B.OUT_DIR / f"terrain_{AREA_NAME}_test_tile_*.bin"))]
     if not keys:

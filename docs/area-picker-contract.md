@@ -88,3 +88,21 @@ first_drive_s = 300 + 0.5 * km2 + 150
 done_s        = first_drive_s + 12 * km2
 disk_mb       = 50 + 1.0 * km2
 ```
+
+## Outline mask: `Masks/outline_<area>_test_tile_<tx>_<ty>.bin` (pipeline writes, terrain reads)
+Written by `build_terrain_mesh_tiles.py` next to a drawn area's terrain tile,
+only for tiles the drawn outline crosses. A terrain tile with no outline file
+is wholly inside the outline (and hand areas never have one).
+```
+'O','D','O','1'          magic
+uint32 L, L bytes        generation id (as the terrain tile)
+uint32 N                 samples per side (65)
+float32 x0_cm, y0_cm     tile min corner, UE cm (tx * size, ty * size)
+float32 size_cm          tile side (terrain_tile_m * 100)
+N*N float32              signed distance to the outline in metres, + inside,
+                         - outside; row r, column c is at
+                         (x0 + c * size / (N - 1), y0 + r * size / (N - 1))
+```
+Sample bilinearly; the "unsynced" look starts where it goes below 0.
+`OD_JOB_RECT_M` is east/north metres: UE cm = (east * 100, -north * 100), so
+terrain tile `ty` spans north `(-(ty + 1) * size, -ty * size]`.

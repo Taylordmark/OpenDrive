@@ -19,6 +19,9 @@ import json
 import struct
 from pathlib import Path
 
+import numpy as np
+
+from bake_job import in_job, job_rect
 from test_areas import AREA_NAME
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +43,11 @@ def main():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUT_DIR / f"building_centroids_{AREA_NAME}_test.bin"
+    # (2026-10-21) a pass-2 job's building_mesh.json holds only its own
+    # buildings: keep the earlier jobs' points outside its rect
+    if job_rect() is not None and out_path.exists():
+        old = np.frombuffer(out_path.read_bytes(), "<f4", offset=8).reshape(-1, 2)
+        centroids = [tuple(p) for p in old[~in_job(old[:, 0], old[:, 1])]] + centroids
     with open(out_path, "wb") as f:
         f.write(b"ODC1")
         f.write(struct.pack("<I", len(centroids)))

@@ -166,7 +166,22 @@ def delete_stale_tiles(out_dir: Path, glob_pattern: str, written_paths) -> int:
     written = {Path(p).resolve() for p in written_paths}
     deleted = 0
     for existing in out_dir.glob(glob_pattern):
-        if existing.resolve() not in written:
+        if existing.resolve() not in written and _in_job(existing.name):
             existing.unlink()
             deleted += 1
     return deleted
+
+
+def _in_job(name):
+    """(2026-10-21, area picker) A pass-2 job owns only the tiles in its rect:
+    tiles another job baked are never stale. True with no job rect."""
+    import re
+    from bake_job import job_rect, tile_in_job
+    if job_rect() is None:
+        return True
+    m = re.search(r"_tile_(-?\d+)_(-?\d+)\.bin$", name)
+    if not m:
+        return False   # a whole-area file: not this job's to delete
+    from test_areas import ROAD_TILE_SIZE_CM, TERRAIN_TILE_SIZE_CM
+    size = ROAD_TILE_SIZE_CM if name.startswith(("road_", "roadv3_")) else TERRAIN_TILE_SIZE_CM
+    return tile_in_job(int(m[1]), int(m[2]), size)

@@ -64,6 +64,7 @@ import requests
 from pymartini import Martini
 
 import test_areas
+from bake_job import job_rect, outline_local, outline_sdf_m
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from build_tunnels import cut_holes, load_tunnels
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
@@ -1656,6 +1657,42 @@ def sample_built_tiles(jobs, station_data):
         yield from pool.map(_sample_one_tile, jobs, chunksize=4)
 
 
+OUTLINE_GRID_N = 65   # outline mask samples per tile side (15.6 m on a 1 km tile)
+
+
+def tile_touches_outline(tx, ty, tile_cm):
+    """True when UE tile (tx, ty) overlaps the drawn outline (always, for a hand area)."""
+    poly = outline_local()
+    if poly is None:
+        return True
+    import shapely
+    t = tile_cm / 100.0
+    return poly.intersects(shapely.box(tx * t, -(ty + 1) * t, (tx + 1) * t, -ty * t))
+
+
+def write_outline_masks(tiles, gen_id_bytes):
+    """(2026-10-21, scoping round 8) Per-tile signed distance to a drawn
+    area's outline, so the terrain material switches to the "unsynced" look
+    exactly at the drawn edge. Written only for tiles the outline crosses
+    (some sample outside); no file next to a terrain tile = wholly inside.
+    Format: docs/area-picker-contract.md "Outline mask"."""
+    if outline_local() is None:
+        return 0
+    n_out, t = 0, TERRAIN_TILE_SIZE_CM
+    ax = np.arange(OUTLINE_GRID_N) * (t / (OUTLINE_GRID_N - 1))
+    for tx, ty in tiles:
+        gx, gy = np.meshgrid(tx * t + ax, ty * t + ax)   # row = UE y, col = UE x
+        d = outline_sdf_m(gx.ravel() / 100.0, -gy.ravel() / 100.0).astype("<f4")
+        path = OUT_DIR / f"outline_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        if d.min() >= 0:
+            path.unlink(missing_ok=True)
+            continue
+        path.write_bytes(b"ODO1" + struct.pack("<I", len(gen_id_bytes)) + gen_id_bytes
+                         + struct.pack("<Ifff", OUTLINE_GRID_N, tx * t, ty * t, t) + d.tobytes())
+        n_out += 1
+    return n_out
+
+
 def main():
     # 2026-09-03: --lakes-only restricts the rebake to tiles that actually
     # touch a baked lake bbox (padded by the water-depression falloff/blend
@@ -1691,6 +1728,22 @@ def main():
                      or ty * tile_cm > by1 or (ty + 1) * tile_cm < by0)
         }
         print(f"--bbox-cm={bbox_cm}: {len(tiles)} tile(s) in scope")
+
+    # (2026-10-21, two-pass drawn-area bake) a pass-2 job bakes every tile in
+    # its rect that touches the drawn outline, near where classify_tiles says
+    # so, else far - not just those within RENDER_DISTANCE_M of a road
+    # (scoping round 5 #3). The carve reads every station, so a road just
+    # outside the rect still carves the job's edge tiles.
+    rect = job_rect()
+    if rect is not None:
+        tile_cm = TERRAIN_TILE_SIZE_CM
+        t_m = tile_cm / 100.0
+        x0, y0, x1, y1 = rect
+        tiles = {(tx, ty): tiles.get((tx, ty), False)
+                 for tx in range(math.floor(x0 / t_m), math.ceil(x1 / t_m))
+                 for ty in range(math.floor(-y1 / t_m), math.ceil(-y0 / t_m))
+                 if tile_touches_outline(tx, ty, tile_cm)}
+        print(f"job rect {rect}: {len(tiles)} tile(s) in scope")
 
     if lakes_only:
         lakes = _get_lake_beds()
@@ -1737,6 +1790,10 @@ def main():
                 print(f"  {i + 1}/{len(tiles)} tile(s) built")
     n_coarse_fallback = len(written_coarse_paths)
 
+    n_outline = write_outline_masks(tiles, gen_id_bytes)
+    if n_outline:
+        print(f"wrote {n_outline} outline mask(s) (tiles the drawn outline crosses)")
+
     if lakes_only or bbox_cm is not None or "--far-only" in sys.argv:
         print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "
               f"rebuilt, the rest are intentionally left as-is)")
@@ -1746,6 +1803,8 @@ def main():
         n_stale_coarse = delete_stale_tiles(
             OUT_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin", written_coarse_paths)
         print(f"deleted {n_stale_coarse} stale coarse-fallback tile(s) from a previous run")
+        delete_stale_tiles(OUT_DIR, f"outline_{AREA_NAME}_test_tile_*.bin",
+                           [OUT_DIR / f"outline_{AREA_NAME}_test_tile_{tx}_{ty}.bin" for tx, ty in tiles])
     print(f"Built {len(tiles)} terrain tile(s) ({n_coarse_fallback} with a coarse fallback), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 

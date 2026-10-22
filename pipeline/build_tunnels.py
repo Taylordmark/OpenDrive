@@ -33,6 +33,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from export_retaining_wall_bin import write_tile
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, bank_slopes,
                               half_width_for_stations, road_ue_z_m)
@@ -466,7 +467,7 @@ def main():
     gen_id_bytes = pack_generation_id(compute_generation_id())
     for kind, tiles in buckets.items():
         written = []
-        for (tx, ty), chunks in tiles.items():
+        for (tx, ty), chunks in job_items(tiles, TERRAIN_TILE_SIZE_CM):
             path = OUT_DIR / f"{kind}_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
             write_tile(path, chunks, gen_id_bytes)
             written.append(path)

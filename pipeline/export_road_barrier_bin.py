@@ -33,6 +33,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from bake_job import tile_in_job   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
 
@@ -63,7 +64,7 @@ def main():
 
     all_tiles = set(point_buckets) | set(run_buckets)
     written_paths = []
-    for tx, ty in all_tiles:
+    for tx, ty in (t for t in all_tiles if tile_in_job(*t, TERRAIN_TILE_SIZE_CM)):
         tile_points = point_buckets.get((tx, ty), [])
         tile_runs = run_buckets.get((tx, ty), [])
         out_path = OUT_DIR / f"barrier_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
