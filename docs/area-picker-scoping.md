@@ -692,7 +692,7 @@ and `AreaCmToScreen`/`ProjectPin` already convert map points to screen points.
 Fills are HUD canvas triangles (2 per tile) and outlines are HUD lines, projected
 through the globe camera each frame. That's code only, no new assets.
 
-## Round 10: quick wins (proposed, for Taylor to pick)
+## Round 10: quick wins (Taylor, 2026-10-21: accepted 1-6 and 8)
 Each one reuses something that already exists, and each is small.
 
 | # | Win | Built from | Size |
@@ -707,8 +707,8 @@ Each one reuses something that already exists, and each is small.
 | 8 | **"Ready to drive" alert** if the game is minimized or in another menu: a HUD toast plus a taskbar flash. | the status file, `FPlatformApplicationMisc`/window flash | XS |
 | 9 | **Paste a GeoJSON or KML polygon** (for example from Google My Maps or geojson.io) for exact outlines. | small parser, same validation | S |
 
-**Recommended set:** 1, 2, 3, 4 and 6. They change the most for the least work.
-5 and 8 are almost free, so add them too. 7 and 9 are nice-to-haves.
+**In scope:** 1, 2, 3, 4, 5, 6 and 8 (Taylor agreed with the recommendation).
+**Deferred:** 7 (extend an area) and 9 (paste GeoJSON or KML). They're nice-to-haves.
 
 ## Caveat
 
@@ -725,7 +725,11 @@ These are 1A + 2A + 3 + 4A + 5:
    (size, US bounds, key) and the status parsing.
 3. Template level and runtime prefixes (`?odarea`), runtime map texture, and
    manifest-based area discovery.
-4. World screen: a "New area" mode with rectangle draw and adjust, readout and
-   limits, a confirm card, launching the runner, a progress card, Cancel and Retry.
+4. World screen: a "New area" mode with polygon draw and edit (round 10 #6) and the
+   road corridor tool (#1). It also gets the live estimate readout (#2) with limits,
+   the start point snapped to a road or picked from a town (#4), auto-naming (#5),
+   a confirm card, launching the runner, a progress card, Cancel and Retry.
+5. AreaMap draws the pass-1 road centerline across the whole polygon before any
+   cells bake (#3), plus the "ready to drive" toast and taskbar flash (#8).
 
 Building happens only once no UnrealEditor is running.
