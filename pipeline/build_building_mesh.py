@@ -702,7 +702,7 @@ def build_chunk(chunk):
                                              FACADE_BAY_M[archetype])
         n_solid = len(verts)
         if shape != "flat":
-            roofed = make_roof(verts, uvs, tris, shape == "hip")
+            roofed = make_roof(verts, uvs, tris, shape == "hip", (b.get("roof_height_m") or 0) * 100.0)
             if roofed:
                 verts, uvs, tris, n_solid = roofed
             else:

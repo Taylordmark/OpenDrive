@@ -7,10 +7,14 @@ both gable and hip,
     except the eave line at the wall top, which runs exactly round the
     footprint (where the walls meet it),
   - end walls are vertical and keep the wall's U;
-dents and bays included; L-shapes, triangles, octagons, flat-roof buildings
+dents and bays included (no eaves here, see test_eaves); L-shapes, triangles, octagons, flat-roof buildings
 stay flat there. cover_roof() then takes the L/T/U-shapes (rectangles on
 the footprint grid, each roofed, faces up, end walls vertical and facing out,
 >= COVER_MIN covered) and still leaves triangles and octagons flat.
+test_eaves: a rectangle's roof runs out past the walls (hip all round, gable
+along the ridge sides only), meets the wall top at the wall line, and the
+fascia / soffit / gable-end box closes it: every open edge lies on the wall
+face; roof:height sets the rise, capped at MAX_K.
 
 Run:  python pipeline/tests/test_building_roofs.py"""
 import math
@@ -20,7 +24,7 @@ from pathlib import Path
 PIPE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPE))
 from build_building_mesh import extrude_footprint   # noqa: E402
-from building_roofs import COVER_MIN, cover_roof, make_roof, pitch_roof   # noqa: E402
+from building_roofs import COVER_MIN, FASCIA_CM, MAX_K, cover_roof, make_roof, pitch_roof   # noqa: E402
 
 TOL = 1e-3   # cm, = building_roofs.EPS_WELD
 
@@ -129,7 +133,7 @@ def test_shapes():
     for name, (ring, pitched) in SHAPES.items():
         for hip in (False, True):
             verts, uvs, tris = extrude_footprint(ring, 500.0, 640.0, 0)
-            res = pitch_roof(verts, uvs, tris, 0, hip=hip)
+            res = pitch_roof(verts, uvs, tris, 0, hip=hip, overhang_cm=0)
             assert (res is not None) == pitched, f"{name}: pitched={res is not None}"
             assert pitch_roof(verts, uvs, tris, 1, hip=hip) is None, "flat_roof stays flat"
             if res:
@@ -206,8 +210,60 @@ def test_cover():
                   f"{len(faces)} roof + {len(ends)} end tris, {covered / abs(shoelace(ring)):.0%} covered")
 
 
+def test_eaves():
+    o, top = 45.0, 1140.0
+    for name, ring in (("rect", rect(1200, 800)), ("rect cw rotated", rect(1200, 800, 0.7)[::-1]),
+                       ("square", rect(1000, 1000, 0.3))):
+        for hip in (False, True):
+            verts, uvs, tris = extrude_footprint(ring, 500.0, 640.0, 0)
+            n_walls = sum(1 for x in tris if not all(verts[i][2] > top - 1 for i in x))
+            v, uv, t, n_solid = pitch_roof(verts, uvs, tris, 0, hip=hip, overhang_cm=o)
+            new = t[n_walls:]
+            faces = [x for x in new if any(i < n_solid for i in x)]
+            for x in faces:
+                assert normal(*(v[i] for i in x))[2] > 0.55, f"{name}: roof face up"
+            w, d = math.dist(ring[0], ring[1]), math.dist(ring[1], ring[2])
+            long_w = max(w, d)
+            want = (w + 2 * o) * (d + 2 * o) if hip else long_w * (min(w, d) + 2 * o)
+            area = sum(shoelace([v[i] for i in x]) for x in faces)
+            assert abs(area - want) < 1.0, f"{name}: roof covers {area:.0f} vs {want:.0f}"
+            soffit = [x for x in new if normal(*(v[i] for i in x))[2] < -0.999]
+            assert soffit, f"{name}: soffit faces down"
+            zs = min(v[i][2] for x in new for i in x)
+            assert top - 150.0 < zs < top - FASCIA_CM, f"{name}: eave box bottom {zs - top:.0f}"
+            # roof meets the wall top on the eave sides
+            for i in range(4):
+                a, b = ring[i], ring[(i + 1) % 4]
+                if hip or math.dist(a, b) > min(w, d) + 1:
+                    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                    z = max(roof_z(mid, [v[j] for j in f]) for f in faces)
+                    assert abs(z - top) < 1.0, f"{name}: roof at the wall line {z - top:.2f}"
+            # watertight but for the wall face, which the box closes against
+            ids, reps = weld([v[i] for x in new for i in x])
+            edges = {}
+            for k in range(0, len(ids), 3):
+                for j in range(3):
+                    e = tuple(sorted((ids[k + j], ids[k + (j + 1) % 3])))
+                    edges[e] = edges.get(e, 0) + 1
+            for (a, b), c in edges.items():
+                pa, pb = reps[a], reps[b]
+                if c == 1:
+                    mid = tuple((pa[k] + pb[k]) / 2 for k in range(3))
+                    assert all(on_ring(q, ring) and zs - TOL <= q[2] <= top + 600 for q in (pa, pb, mid)),                         f"{name}: open edge off the wall {pa} {pb}"
+                else:
+                    assert c == 2, f"{name}: edge shared by {c} faces"
+            print(f"  {name:32s} {'hip' if hip else 'gable':5s} eave box {top - zs:.0f} cm, "
+                  f"{len(new) - len(faces)} end/box tris")
+    verts, uvs, tris = extrude_footprint(rect(1200, 800), 500.0, 640.0, 0)
+    for rise, want in ((300.0, 300.0), (2000.0, MAX_K * 400.0)):
+        v = pitch_roof(verts, uvs, tris, 0, hip=False, rise_cm=rise)[0]
+        assert abs(max(p[2] for p in v) - top - want) < 1e-3, f"roof:height {rise} -> {max(p[2] for p in v) - top}"
+
+
 if __name__ == "__main__":
     test_shapes()
     print("PASS shapes")
     test_cover()
     print("PASS cover")
+    test_eaves()
+    print("PASS eaves")
