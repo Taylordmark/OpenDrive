@@ -732,6 +732,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
     flat_x = gx_cm.reshape(-1)
     flat_y = gy_cm.reshape(-1)
     flat_z = z_cm.reshape(-1).copy()
+    beds = []
     touched = False
     for lake in lakes:
         bx0, bx1, by0, by1 = lake["bbox"]
@@ -749,7 +750,15 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             for hx, hy in lake.get("holes", ()):
                 d = np.minimum(d, _dist_to_ring(flat_x[ix], flat_y[ix], hx, hy))
             return d / 100.0
-        shore_z_cm = lake["z_cm"] + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
+        def water_z_cm(ix):
+            # a ribbon quad slopes downstream (tilt_ribbon_quad); a plane
+            # through its ring is exact, and flat (== z_cm) for a lake
+            rz = lake.get("ring_z")
+            if rz is None or np.ptp(rz) < 1.0:
+                return lake["z_cm"]
+            A = np.column_stack([lake["ring_x"], lake["ring_y"], np.ones(len(rz))])
+            p = np.linalg.lstsq(A, rz, rcond=None)[0]
+            return flat_x[ix] * p[0] + flat_y[ix] * p[1] + p[2]
 
         if inside.any():
             touched = True
@@ -757,9 +766,11 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             dist_m = ring_dist_m(idx)
             depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
                 np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
-            bed_z = lake["z_cm"] - depth_m * 100.0
+            bed_z = water_z_cm(idx) - depth_m * 100.0
             pw = road_protect_w(idx, flat_x, flat_y)
-            flat_z[idx] = pw * flat_z[idx] + (1.0 - pw) * bed_z
+            # applied after every rim below: a touching ribbon quad's (or
+            # lake's) bank blend must not lift this bed back over the water
+            beds.append((idx, pw, bed_z))
 
         # Exterior rim band: blend raw terrain height down to shore_z_cm (the
         # SAME height the interior side starts at, at dist_m==0) as points
@@ -789,7 +800,10 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             continue
         touched = True
         t = blend_t[blend_t > 0.0] * (1.0 - road_protect_w(rim_idx, flat_x, flat_y))
+        shore_z_cm = water_z_cm(rim_idx) + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
         flat_z[rim_idx] = flat_z[rim_idx] * (1.0 - t) + shore_z_cm * t
+    for idx, pw, bed_z in beds:
+        flat_z[idx] = pw * flat_z[idx] + (1.0 - pw) * bed_z
     return flat_z.reshape(z_cm.shape) if touched else z_cm
 
 
@@ -1487,6 +1501,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # WATER_BED_MIN_DEPTH_M. Applied here (after road carve/downsample, on
     # the tile's FINAL grid) so it covers NEAR and FAR tiles identically,
     # before either triangulation branch below sees z_cm.
+    z_dry = z_cm
     z_cm = apply_water_depression(
         gx_cm, gy_cm, z_cm, _get_lake_beds(),
         st_east_m=st_x_cm[keep] / 100.0 if keep.any() else None,
@@ -1503,6 +1518,12 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # additive, so the tolerance is unchanged.
     # Far tiles (T4): z x FAR_ROAD_ERROR_GAIN in the road zone so martini's
     # error there is judged 10x stricter; vertices still take the real z.
+    # Far tiles: water beds take the road zone's strict tolerance too - at
+    # 5 m RTIN smoothed a sloped ribbon's narrow bed away and buried it
+    # (Deals Gap 2026-10-21: 35% of far ribbon area under terrain).
+    if not is_near:
+        wet = np.abs(z_cm - z_dry) > 1.0
+        road_zone = wet if road_zone is None else road_zone | wet
     z_err = z_cm / 100.0 if road_zone is None else z_cm / 100.0 * np.where(road_zone, FAR_ROAD_ERROR_GAIN, 1.0)
     tile = _martini_for(n).create_tile(z_err.astype(np.float32))
     grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M if is_near else MAX_ERROR_FAR_M)

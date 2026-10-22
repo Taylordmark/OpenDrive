@@ -607,6 +607,7 @@ bool AODForestManager::LoadCenterline()
 	{
 		return false;
 	}
+	PadPointStart = RoadCenterline.Num();
 	LoadPoints(CenterlineFilePrefix.Replace(TEXT("centerline_"), TEXT("padpts_")));
 	return true;
 }
@@ -1213,6 +1214,32 @@ bool AODForestManager::IsNearCenterline(double WorldX, double WorldY) const
 				if (FVector2D::DistSquared(RoadCenterline[Idx], Here) < ExclusionSq)
 				{
 					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool AODForestManager::IsNearPadPoint(double WorldX, double WorldY) const
+{
+	// GrassPadClearCm << CenterlineCellCm, so the 3x3 buckets cover it
+	const FVector2D Here(WorldX, WorldY);
+	const int32 CellX = FMath::FloorToInt(WorldX / CenterlineCellCm);
+	const int32 CellY = FMath::FloorToInt(WorldY / CenterlineCellCm);
+	for (int32 dy = -1; dy <= 1; ++dy)
+	{
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			if (const TArray<int32>* Bucket = CenterlineBuckets.Find(FIntPoint(CellX + dx, CellY + dy)))
+			{
+				for (int32 Idx : *Bucket)
+				{
+					if (Idx >= PadPointStart
+						&& FVector2D::DistSquared(RoadCenterline[Idx], Here) < GrassPadClearCm * GrassPadClearCm)
+					{
+						return true;
+					}
 				}
 			}
 		}
@@ -2279,7 +2306,7 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 	const double X0 = Key.X * (double)GrassCellCm, Y0 = Key.Y * (double)GrassCellCm;
 
 	// corner lattice: a corner is good only on real terrain (not road/pad/
-	// bridge/building/parking/trunk capsule) and outside lakes
+	// bridge/building/parking/trunk capsule), outside lakes and off pads
 	float Z[N + 1][N + 1];
 	bool bGood[N + 1][N + 1];
 	int32 Misses = 0;
@@ -2315,7 +2342,10 @@ bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player
 			}
 			const AActor* HitActor = Hit.GetActor();
 			const bool bTerrain = HitActor && (HitActor->IsA<AODTerrainManager>() || HitActor->IsA<ALandscapeProxy>());
-			bGood[iy][ix] = bTerrain && !(bUseWaterExclusion && IsInsideLake(X, Y));
+			// pad check: a pad whose collision hasn't registered yet (the Chaos
+			// same-frame bug, see IsNearRoadStation) traces through to terrain
+			bGood[iy][ix] = bTerrain && !(bUseWaterExclusion && IsInsideLake(X, Y))
+				&& !IsNearPadPoint(X, Y);
 			Z[iy][ix] = Hit.ImpactPoint.Z;
 			++Stats[bGood[iy][ix] ? 0 : bTerrain ? 2 : 3];
 			if (!bTerrain)
