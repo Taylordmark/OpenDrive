@@ -96,6 +96,9 @@ void AODRaceHUD::RefreshODManagedKeyBindings()
 		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn, false},
 		{EODInputAction::WorldMap, &AODRaceHUD::ToggleWorldMap, true},
 		{EODInputAction::ClearRoute, &AODRaceHUD::ClearRouteKey, true},
+		{EODInputAction::MediaPlayPause, &AODRaceHUD::MediaPlayPause, false},
+		{EODInputAction::MediaNext, &AODRaceHUD::MediaNext, false},
+		{EODInputAction::MediaPrev, &AODRaceHUD::MediaPrev, false},
 	};
 	for (const FActionFn& B : Binds)
 	{

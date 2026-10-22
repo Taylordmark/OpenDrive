@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/HUD.h"
 #include "InputCoreTypes.h"
+#include "ODMedia.h"
 #include "ODMenuTabs.h"
 #include "ODRaceHUD.generated.h"
 
@@ -86,6 +87,9 @@ public:
 private:
 	void ToggleWorldMap() { if (bWorldMapOpen) { CloseWorldMap(); } else { OpenWorldMap(); } }
 	void ClearRouteKey();
+	void MediaPlayPause() { ODMedia::PlayPause(); }
+	void MediaNext() { ODMedia::Next(); }
+	void MediaPrev() { ODMedia::Prev(); }
 	AODRoadManager* FindNavRoadMgr() const;
 	void SetMapCursor(bool bVisible);
 	/** Polls its own input (pan/zoom/drag/pick) - see SS7.37 for controls. */
