@@ -7,7 +7,7 @@ the contract the pawn relies on, from data/cars/real/real_manifest.json:
   and proportions; mirrors, wings and lamp detail may stick out a little);
   width within TOL, or out to the fender flares the generator recorded
   (FenderYCm), which may grow at most FENDER_ALLOW cm a side past it;
-- triangle budget: ultra 40-120k, high ~1/2, Standard ~0.22 of ultra;
+- triangle budget: ultra 40-120k, high ~1/2, Standard ~1/3 of ultra (own once-subdivided build);
 - wheel authored at radius 34 / half width 13 (the pawn scales by WheelRadius/34),
   every tyre kind (road + the per-setup ones) exported;
 - arches, for every garage setup in unreal/apply_tuning_presets.py (its tyre
@@ -78,7 +78,7 @@ for car, m in man["cars"].items():
     t = m["tris"]
     u, h, s = (t[f"SM_Car_{car}_real{x}"] for x in ("_ultra", "_high", ""))
     check(40000 <= u <= 120000, f"{car}: ultra {u} tris in 40-120k")
-    check(0.4 < h / u < 0.6 and 0.15 < s / u < 0.3, f"{car}: tiers {h}/{s} of {u}")
+    check(0.4 < h / u < 0.6 and 0.25 < s / u < 0.45, f"{car}: tiers {h}/{s} of {u}")
     for x in ("", "_high", "_ultra"):
         check((REAL / "fbx" / f"SM_Car_{car}_real{x}.fbx").exists(), f"SM_Car_{car}_real{x}.fbx exists")
     arches = m.get("arches", {})

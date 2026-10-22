@@ -73,9 +73,11 @@ chrome/tire/rim/lights) named by the Blender material, UV0 points every face
 at its T_CarPalette2 cell (lamps are told apart by cell, see
 unreal/apply_car_lights_material.py), UV1 is a non-overlapping unwrap.
 
-Tiers: <name>_real_ultra is the full mesh, _real_high and _real (Standard)
-are Decimate-collapsed from it (UV0 is re-snapped to the palette cells
-afterwards: collapse interpolates UVs across cell borders).
+Tiers: <name>_real_ultra is the full mesh (cage subdivided twice),
+_real_high is Decimate-collapsed from it (UV0 is re-snapped to the palette
+cells afterwards: collapse interpolates UVs across cell borders), and _real
+(Standard) is its own build on the cage subdivided once (CAR_TIERS). Wheels
+are all decimated (TIER_RATIO).
 
 Outputs (data/cars/real/, gitignored like the rest of data/):
     fbx/SM_Car_<Car>_real{,_high,_ultra}.fbx
@@ -155,10 +157,13 @@ R_REF = mcm.REF_WHEEL_RADIUS_CM
 
 # --------------------------------------------------------------- design knobs
 CAGE_SPACING = 7.8       # cm between loft stations in the cage
-SUBDIV = 2               # Catmull-Clark levels on the body cage
 GAP = 0.5                # panel gap width, cm
 LIP = 1.2                # turned-in panel edge depth, cm
-TIER_RATIO = {"_ultra": 1.0, "_high": 0.5, "": 0.22}   # Decimate ratio per tier suffix
+TIER_RATIO = {"_ultra": 1.0, "_high": 0.5, "": 0.22}   # Decimate ratio per tier suffix (wheels)
+# car tiers per Catmull-Clark level on the body cage: Standard is its own
+# once-subdivided build, not a decimated ultra (collapse faceted the curves
+# and chewed the panel gaps)
+CAR_TIERS = {2: {"_ultra": 1.0, "_high": 0.5}, 1: {"": 1.0}}
 CREASE = {0: 1.0, 1: 0.0, 2: 0.8, 3: 0.45, 4: 0.6, 5: 0.6}   # section point -> edge crease
 
 # panel ids (face attribute "panel"); 0 = never split
@@ -1582,11 +1587,12 @@ def export_fbx(ob, path):
                              colors_type="NONE", use_tspace=False)
 
 
-def make_tiers(src, base_name):
-    """Decimate the full mesh into the three tiers, fix up UVs/normals,
-    export each; returns {tier name: triangles}."""
-    out = {}
-    for suffix, ratio in TIER_RATIO.items():
+def make_tiers(src, base_name, tiers=TIER_RATIO):
+    """Decimate the full mesh into the tiers {suffix: ratio}, fix up
+    UVs/normals, export each; returns ({tier name: triangles}, the _ultra
+    object or None)."""
+    out, ultra = {}, None
+    for suffix, ratio in tiers.items():
         name = f"{base_name}{suffix}"
         ob = bpy.data.objects.new(name, src.data.copy())
         bpy.context.scene.collection.objects.link(ob)
@@ -1612,12 +1618,26 @@ def make_tiers(src, base_name):
 
 
 def build_car(name):
-    t0 = time.time()
     car = Car(name)
+    tris, ultra = {}, None
+    for subdiv, tiers in CAR_TIERS.items():
+        body = build_body(car, subdiv)
+        t, u = make_tiers(body, f"SM_Car_{name}_real", tiers)
+        tris.update(t)
+        ultra = ultra or u
+        bpy.data.objects.remove(body)
+    return car, tris, ultra
+
+
+def build_body(car, subdiv):
+    """The joined car (body, lamp internals, parts, interior) on the cage
+    subdivided `subdiv` times."""
+    t0 = time.time()
+    name = car.name
     part, xs, S = build_cage(car)
     body = to_object(part, f"SM_Car_{name}_src")
     m = body.modifiers.new("ss", "SUBSURF")
-    m.levels = m.render_levels = SUBDIV
+    m.levels = m.render_levels = subdiv
     apply_mods(body)
     bm = bm_of(body)
     interior = build_interior(car, bm)
@@ -1633,10 +1653,8 @@ def build_car(name):
     bm = bm_of(body)
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
     bm_back(bm, body)
-    log(name, "built", len(xs), "stations", gaps, "gap edges", f"{time.time() - t0:.1f}s")
-    tris, ultra = make_tiers(body, f"SM_Car_{name}_real")
-    bpy.data.objects.remove(body)
-    return car, tris, ultra
+    log(name, "built", len(xs), "stations", gaps, "gap edges", f"subdiv {subdiv}", f"{time.time() - t0:.1f}s")
+    return body
 
 
 def arch_clearance(car, ob):
