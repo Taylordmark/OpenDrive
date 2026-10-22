@@ -543,6 +543,7 @@ constexpr float RowH = 54.0f;
 constexpr float FooterH = 58.0f;
 
 const FODMenuTab PauseTabs[] = {{TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume}};
+const FODMenuTab EnvTabs[] = {{TEXT("ENVIRONMENT"), 0, ODEnvironment::NumRows}};   // fun #7
 
 // "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
 float ParsePercent(const FString& V)
@@ -2762,7 +2763,7 @@ void AODRaceHUD::DrawHUD()
 		}
 		else
 		{
-			DrawMenuPanel(Menu->GetTitle(), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+			DrawMenuPanel(Menu->GetTitle(), Menu->IsEnvOpen() ? EnvTabs : PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
 				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
 			const float S = MenuScale();
 			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),

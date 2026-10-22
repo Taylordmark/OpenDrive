@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "InputCoreTypes.h"
+#include "ODEnvironment.h"
 #include "ODPauseMenu.generated.h"
 
 class UODVehicleMovement;
@@ -30,18 +31,23 @@ public:
 	AODPauseMenu();
 	virtual void BeginPlay() override;
 
-	enum : int32 { RowWorldMap, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
+	enum : int32 { RowWorldMap, RowEnvironment, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
 
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
-	const TCHAR* GetTitle() const { return bWheelLost ? TEXT("Wheel disconnected") : TEXT("Paused"); }
+	const TCHAR* GetTitle() const
+	{
+		return bEnvOpen ? TEXT("Environment") : bWheelLost ? TEXT("Wheel disconnected") : TEXT("Paused");
+	}
 
 	/** The driving wheel stopped answering: pause with that as the title.
 	 *  Opening rescans devices, so a replugged wheel works on Resume. */
 	void OpenForWheelLost();
 	int32 GetSelected() const { return Selected; }
-	int32 NumRows() const { return NumPauseRows; }
-	int32 GetFooterRow() const { return RowResume; }
+	// the Environment page (fun #7, ODEnvironment.h) swaps in its rows + a Back footer
+	int32 NumRows() const { return bEnvOpen ? ODEnvironment::NumRows + 1 : NumPauseRows; }
+	int32 GetFooterRow() const { return bEnvOpen ? ODEnvironment::NumRows : RowResume; }
+	bool IsEnvOpen() const { return bEnvOpen; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
@@ -49,7 +55,7 @@ public:
 
 	/** Drop the pause overlay WITHOUT unpausing - the world map (SS7.37)
 	 *  takes the screen over and owns the unpause when it closes. */
-	void HideForOverlay() { bOpen = false; bSettingsOpen = false; }
+	void HideForOverlay() { bOpen = false; bSettingsOpen = false; bEnvOpen = false; }
 
 	// keyboard handlers, also the HUD's mouse entry points
 	void Up();
@@ -91,6 +97,7 @@ private:
 	int32 GearboxIdx = 1;    // Sport (stage-1 shift defaults) - init only
 
 	bool bSettingsOpen = false;
+	bool bEnvOpen = false;
 	UPROPERTY()
 	TObjectPtr<AODSettingsMenu> SettingsMenu;
 };
