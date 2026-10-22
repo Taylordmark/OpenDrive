@@ -14,6 +14,8 @@ the contract the pawn relies on, from data/cars/real/real_manifest.json:
   size / width, ride height, camber, steering lock): >= 1.5 cm visible gap
   over the tyre at static ride height (Street 1.5-4.5), and the tyre clear of
   the body at static, at the bump stop, at full lock and at bump + lock;
+- smoothness: no angle over KINK deg between neighbouring body faces of one
+  panel on the ultra hull, away from the crease lines;
 - every FBX present, LICENSE.txt present.
 
 python pipeline/checks/check_car_meshes_real.py   (exit 1 on any failure)
@@ -31,6 +33,7 @@ REAL = ROOT / "data" / "cars" / "real"
 OBJ = ROOT / "data" / "cars" / "procedural" / "obj"
 TOL = 4.0
 FENDER_ALLOW = 18.0    # cm a side the fender flares may stand past the stylized width (Offroad tyres at bump + lock: 16-17)
+KINK = 30.0           # deg per ultra edge (today's worst: nose caps / cab back edge, ~27)
 SETUPS = list(tuning_setups.setups())
 fails = []
 
@@ -79,6 +82,8 @@ for car, m in man["cars"].items():
     u, h, s = (t[f"SM_Car_{car}_real{x}"] for x in ("_ultra", "_high", ""))
     check(40000 <= u <= 120000, f"{car}: ultra {u} tris in 40-120k")
     check(0.4 < h / u < 0.6 and 0.25 < s / u < 0.45, f"{car}: tiers {h}/{s} of {u}")
+    k = m.get("Kink")
+    check(k is not None and k["deg"] <= KINK, f"{car}: worst kink {k and k['deg']} deg (max {KINK}) at {k and k['at']}")
     for x in ("", "_high", "_ultra"):
         check((REAL / "fbx" / f"SM_Car_{car}_real{x}.fbx").exists(), f"SM_Car_{car}_real{x}.fbx exists")
     arches = m.get("arches", {})
