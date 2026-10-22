@@ -4,6 +4,7 @@
 
 #include "ODBinSidecarUtil.h"
 #include "ODTileSource.h"
+#include "ODBakeLink.h"
 #include "ODForestManager.h" // EODBiome only, for BiomeGroundTintTable below - no calls into AODForestManager itself
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -22,11 +23,13 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
+#include "TimerManager.h"
 #include "Misc/Paths.h"
 
 using namespace UE::Geometry;
 
 static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed);
+static void TagOutsideOutline(FDynamicMesh3& Mesh, const FVector2D& Origin, const FString& MaskPath);
 
 // ---------------------------------------------------------------------
 // Runtime terrain carve (2026-08-26, Arc 7 rescope): a straight port of
@@ -283,6 +286,9 @@ void AODTerrainManager::BeginPlay()
 	// point-classified biome sidecar AODForestManager's BlendAt() reads, into
 	// this manager's OWN spatial hash - see LoadBiomeSidecar/ApplyBiomeTint.
 	LoadBiomeSidecar();
+	// drawn areas only use it (outline masks / ODBakeLink outline); a missing
+	// asset is the same silent no-op as TerrainMat (2026-10-21)
+	UnsyncedMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/OpenDrive/Materials/M_ODUnsynced.M_ODUnsynced"));
 	LoadHorizon();
 
 	// Diagnostic-only override (2026-08-25): lets a headless test bisect
@@ -1379,10 +1385,15 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 	const bool bTintEnabled = bEnableBiomeTint;
 	const float TintStrengthValue = BiomeTintStrength;
 
+	// drawn-area outline mask beside the terrain tile (2026-10-21), only read
+	// when the unsynced material exists to show it
+	const FString OutlinePath = UnsyncedMat && TerrainTilePrefix.StartsWith(TEXT("terrain_"))
+		? TerrainTileFilePath(TEXT("outline_") + TerrainTilePrefix.Mid(8), Key) : FString();
+
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath,
 		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve, bRuntimeCarve,
-		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands]()
+		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands, OutlinePath]()
 	{
 		FParsedTerrainTile Parsed;
 		// Check existence first rather than just trying-then-falling-back -
@@ -1491,6 +1502,10 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		{
 			Parsed.Mesh = MakeShared<FDynamicMesh3>();
 			FillTileMesh(*Parsed.Mesh, Parsed);
+			if (!OutlinePath.IsEmpty())
+			{
+				TagOutsideOutline(*Parsed.Mesh, FVector2D(Parsed.Verts[0], Parsed.Verts[1]), OutlinePath);
+			}
 		}
 
 		AsyncTask(ENamedThreads::GameThread,
@@ -1502,6 +1517,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 				}
 				if (bPending)
 				{
+					WeakThis->WasPendingTiles.Add(Key);   // dissolves in when it lands (2026-10-21)
 					ODTileSource::RetryLater(WeakThis.Get(),
 						Fidelity == ETileFidelity::Near ? WeakThis->PendingNearTiles : WeakThis->PendingCoarseTiles, Key);
 					return;
@@ -1592,6 +1608,10 @@ void AODTerrainManager::ProcessPendingTileBuilds()
 
 		FTerrainTile NewTile;
 		BuildTile(NewTile, Build.Parsed, Build.TargetFidelity);
+		if (WasPendingTiles.Remove(Build.Key) > 0)
+		{
+			SpawnSyncIn(NewTile.Comp);
+		}
 		Tiles.Add(Build.Key, MoveTemp(NewTile));
 		++NumBuilt;
 
@@ -1676,6 +1696,63 @@ static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed)
 	// the "no grass, no floor" bug: exposure/material-load were both
 	// fine, the mesh just never had real normals).
 	FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
+}
+
+// Outline mask (2026-10-21, area picker; docs/area-picker-contract.md
+// "Outline mask"): material ID 1 (UnsyncedMat) on every triangle whose
+// centroid samples below 0 in the tile's outline_* signed-distance grid. No
+// file = the tile is wholly inside (or a hand area) and nothing changes.
+// Parse thread - plain data only. Mesh verts are local to Origin.
+static void TagOutsideOutline(FDynamicMesh3& Mesh, const FVector2D& Origin, const FString& MaskPath)
+{
+	TArray<uint8> Bytes;
+	if (!FPlatformFileManager::Get().GetPlatformFile().FileExists(*MaskPath) || !FFileHelper::LoadFileToArray(Bytes, *MaskPath)
+		|| Bytes.Num() < 8 || FMemory::Memcmp(Bytes.GetData(), "ODO1", 4) != 0)
+	{
+		return;
+	}
+	int64 At = 4;
+	auto Read = [&](void* Out, int64 Size)
+	{
+		if (At + Size > Bytes.Num())
+		{
+			return false;
+		}
+		FMemory::Memcpy(Out, Bytes.GetData() + At, Size);
+		At += Size;
+		return true;
+	};
+	uint32 L = 0, N = 0;
+	float X0 = 0.0f, Y0 = 0.0f, Size = 0.0f;
+	if (!Read(&L, 4) || (At += L) > Bytes.Num() || !Read(&N, 4) || !Read(&X0, 4) || !Read(&Y0, 4) || !Read(&Size, 4)
+		|| N < 2 || Size <= 0.0f || At + (int64)N * N * 4 > Bytes.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: bad outline mask %s"), *MaskPath);
+		return;
+	}
+	const uint8* D = Bytes.GetData() + At;
+	auto Cell = [&](int32 R, int32 C)
+	{
+		float V;
+		FMemory::Memcpy(&V, D + ((int64)R * N + C) * 4, 4);
+		return (double)V;
+	};
+	auto Sample = [&](double X, double Y)
+	{
+		const double C = FMath::Clamp((X - X0) / Size * (N - 1), 0.0, N - 1.001);
+		const double R = FMath::Clamp((Y - Y0) / Size * (N - 1), 0.0, N - 1.001);
+		const int32 C0 = (int32)C, R0 = (int32)R;
+		const double Fc = C - C0, Fr = R - R0;
+		return FMath::Lerp(FMath::Lerp(Cell(R0, C0), Cell(R0, C0 + 1), Fc),
+			FMath::Lerp(Cell(R0 + 1, C0), Cell(R0 + 1, C0 + 1), Fc), Fr);
+	};
+	Mesh.Attributes()->EnableMaterialID();
+	FDynamicMeshMaterialAttribute* Mat = Mesh.Attributes()->GetMaterialID();
+	for (const int32 Tid : Mesh.TriangleIndicesItr())
+	{
+		const FVector3d C = Mesh.GetTriCentroid(Tid);
+		Mat->SetValue(Tid, Sample(C.X + Origin.X, C.Y + Origin.Y) < 0.0 ? 1 : 0);
+	}
 }
 
 void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& Parsed, ETileFidelity Fidelity)
@@ -1767,6 +1844,10 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	if (TerrainMID)
 	{
 		Comp->SetMaterial(0, TerrainMID);
+	}
+	if (UnsyncedMat)
+	{
+		Comp->SetMaterial(1, UnsyncedMat);   // TagOutsideOutline's triangles, if any
 	}
 	TMaterial = Lap(Clock);
 
@@ -1865,6 +1946,17 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 
 	ProcessPendingTileBuilds();
+
+	if (HorizonComp && UnsyncedMat && GetWorld()->GetRealTimeSeconds() >= NextHorizonCheck)
+	{
+		NextHorizonCheck = GetWorld()->GetRealTimeSeconds() + 1.0;
+		const uint32 V = ODBakeLink::StatusVersion();
+		if (V != HorizonStatusVersion && ODBakeLink::ActiveOutline().IsValid())
+		{
+			HorizonStatusVersion = V;
+			RetagHorizon();
+		}
+	}
 
 	FVector Loc;
 	if (!Vista.StreamCenter(this, Loc))
@@ -2195,4 +2287,56 @@ void AODTerrainManager::LoadHorizon()
 	HorizonComp = Comp;
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms"),
 		Parsed.Verts.Num() / 3, Parsed.Tris.Num() / 3, (FPlatformTime::Seconds() - T0) * 1000.0);
+}
+
+void AODTerrainManager::RetagHorizon()
+{
+	// (2026-10-21, area picker) the horizon past a drawn area is never baked
+	// in detail: slot 1 (UnsyncedMat) outside the outline and over cells the
+	// runner hasn't baked yet. Re-run only when a status.json changed.
+	const TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> Outline = ODBakeLink::ActiveOutline();
+	if (!HorizonComp || !UnsyncedMat || !Outline.IsValid())
+	{
+		return;
+	}
+	const FVector2D Origin(HorizonComp->GetComponentLocation());
+	int32 NumOut = 0;
+	HorizonComp->EditMesh([&](FDynamicMesh3& Mesh)
+	{
+		Mesh.Attributes()->EnableMaterialID();
+		FDynamicMeshMaterialAttribute* Mat = Mesh.Attributes()->GetMaterialID();
+		for (const int32 Tid : Mesh.TriangleIndicesItr())
+		{
+			const FVector3d C = Mesh.GetTriCentroid(Tid);
+			const FVector2D P(C.X + Origin.X, C.Y + Origin.Y);
+			const bool bOut = ODBakeLink::SignedDistanceCm(*Outline, P) < 0.0 || ODBakeLink::IsPointPending(P);
+			Mat->SetValue(Tid, bOut ? 1 : 0);
+			NumOut += bOut ? 1 : 0;
+		}
+	});
+	HorizonComp->SetMaterial(1, UnsyncedMat);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon retag - %d unsynced tris"), NumOut);
+}
+
+void AODTerrainManager::SpawnSyncIn(const UDynamicMeshComponent* Src)
+{
+	// (2026-10-21) a tile that was Pending lands under a copy of itself in the
+	// unsynced look whose CustomPrimitiveData[0] = now makes M_ODUnsynced
+	// dissolve it away over ~2 s - the "sync-in". Render-only, self-destroying.
+	if (!UnsyncedMat || !Src || !GetWorld())
+	{
+		return;
+	}
+	auto* C = NewObject<UDynamicMeshComponent>(this);
+	C->SetupAttachment(RootComponent);
+	C->SetRelativeLocation(Src->GetRelativeLocation() + FVector(0.0, 0.0, 5.0));
+	C->SetCollisionProfileName(TEXT("NoCollision"));
+	C->SetCastShadow(false);
+	C->RegisterComponent();
+	C->SetMesh(FDynamicMesh3(*Src->GetMesh()));
+	C->SetMaterial(0, UnsyncedMat);
+	C->SetMaterial(1, UnsyncedMat);
+	C->SetCustomPrimitiveDataFloat(0, GetWorld()->GetTimeSeconds());
+	FTimerHandle Unused;
+	GetWorldTimerManager().SetTimer(Unused, FTimerDelegate::CreateWeakLambda(C, [C]() { C->DestroyComponent(); }), 2.2f, false);
 }

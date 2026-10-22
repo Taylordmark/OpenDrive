@@ -1,5 +1,6 @@
 #include "ODVehicleMovement.h"
 
+#include "ODBakeLink.h"
 #include "ODCarGrime.h"
 
 #include "ODVehicleDef.h"
@@ -472,6 +473,37 @@ void UODVehicleMovement::AsyncPhysicsTickComponent(float DeltaTime, float SimTim
 	TickDrivetrain(Body, Dt);
 	TickTires(Body, Dt);
 	TickAero(Body);
+
+	// drawn-area edge (2026-10-21, area picker): a soft spring + damper back
+	// toward the outline over the last 30 m inside it, and past 20 m outside
+	// no more outward speed at all. Here on the fixed step, so the push is
+	// the same at any frame rate. Hand areas have no outline: no-op.
+	if (const TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> Outline = ODBakeLink::ActiveOutline())
+	{
+		constexpr double SoftBandCm = 3000.0, HardOutCm = 2000.0, Stiff = 0.4, Damp = 2.0;
+		const FVector P = Body->GetComponentLocation();
+		const FVector2D P2(P);
+		const double D = ODBakeLink::SignedDistanceCm(*Outline, P2);
+		if (D < SoftBandCm)
+		{
+			// inward normal = the distance field's gradient (+ inside)
+			FVector2D N(ODBakeLink::SignedDistanceCm(*Outline, P2 + FVector2D(100.0, 0.0)) - ODBakeLink::SignedDistanceCm(*Outline, P2 - FVector2D(100.0, 0.0)),
+				ODBakeLink::SignedDistanceCm(*Outline, P2 + FVector2D(0.0, 100.0)) - ODBakeLink::SignedDistanceCm(*Outline, P2 - FVector2D(0.0, 100.0)));
+			if (N.Normalize())
+			{
+				FVector V = Body->GetPhysicsLinearVelocity();
+				const double VOut = -FVector2D::DotProduct(FVector2D(V), N);   // cm/s away from the area
+				const double Accel = (SoftBandCm - D) * Stiff + Damp * FMath::Max(VOut, 0.0);
+				Body->AddForce(FVector(N.X, N.Y, 0.0) * (Accel * Body->GetMass()));
+				if (D < -HardOutCm && VOut > 0.0)
+				{
+					V.X += N.X * VOut;
+					V.Y += N.Y * VOut;
+					Body->SetPhysicsLinearVelocity(V);
+				}
+			}
+		}
+	}
 
 	// body dirt for the Realistic materials (ODCarGrime.h): per distance
 	// rolled this fixed step, at the mean rate of the wheels on the ground

@@ -36,7 +36,9 @@ public class OpenDriveUE : ModuleRules
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
 			"Json",
 			// ODTileSource: -ODTileServer live tile fetch.
-			"HTTP"
+			"HTTP",
+			// ODBakeLink: "ready to drive" toast (FSlateNotificationManager, 2026-10-21).
+			"Slate"
 		});
 
 		// ODWheelDevice: racing wheel input + force feedback (Arc 6)
