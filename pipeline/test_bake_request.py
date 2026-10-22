@@ -175,4 +175,18 @@ with tempfile.TemporaryDirectory() as tmp:
         st = br.read_json(br.BAKE / "u_c" / "status.json")
         assert st["state"] == want and st["pass1_done"] and set(st["cells"].values()) == {"pending"}, st
 
+# delete: only this key's files go, a longer key sharing the prefix stays
+masks = tmp / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
+masks.mkdir(parents=True)
+for n in ("terrain_u_d_test_tile_0_0.bin", "relief_u_d.png", "outline_u_d_tile_1_2.bin", "relief_u_d2.png", "terrain_u_d_x_test_tile_0_0.bin"):
+    (masks / n).touch()
+(br.BAKE / "u_d").mkdir(parents=True)
+ua = br.world_frame.load_user_areas()
+ua["areas"]["u_d"] = {}
+br.write_json(br.world_frame.USER_AREAS_JSON, ua)
+assert br.delete("u_d") == 3 and not (br.BAKE / "u_d").exists()
+assert sorted(f.name for f in masks.iterdir()) == ["relief_u_d2.png", "terrain_u_d_x_test_tile_0_0.bin"]
+assert "u_d" not in br.world_frame.load_user_areas()["areas"]
+assert br.runner_lock()
+
 print("test_bake_request: all checks passed")

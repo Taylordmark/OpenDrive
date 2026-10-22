@@ -4,6 +4,7 @@ and launches this detached (cwd = repo root):
 
     python pipeline/bake_request.py --run data/bake/requests/<key>.json
     python pipeline/bake_request.py --retry <key>     (failed/paused/cancelled cells)
+    python pipeline/bake_request.py --delete <key>    (the area card's Delete)
 
 It validates the request (a corridor is buffered into the polygon), registers
 the area in data/user_areas.json as a member of its fixed zone world, runs
@@ -440,7 +441,51 @@ def run(req, rebuild_cmd=None, elev_range_m=None):
     return 0 if status["state"] != "failed" else 1
 
 
+def delete(key):
+    """Remove a drawn area: its baked files, bake dir and user_areas.json entry.
+    Shared download caches stay, so a redraw is cheap."""
+    import shutil
+    content = ROOT / "OpenDriveUE" / "Content" / "OpenDrive"
+    # f"_{key}_test" / f"_{key}_tile_" / f"_{key}." never match a longer key that starts with this one
+    tags = (f"_{key}_test", f"_{key}_tile_", f"_{key}.")
+    gone = [f for f in content.rglob("*") if f.is_file() and any(t in f.name for t in tags)]
+    for f in gone:
+        f.unlink()
+    for d in (ROOT / "data" / "road_tiles" / f"{key}_test", BAKE / key):
+        shutil.rmtree(d, ignore_errors=True)
+    data = world_frame.load_user_areas()
+    if data["areas"].pop(key, None) is not None:
+        write_json(world_frame.USER_AREAS_JSON, data)
+    refresh_coverage()
+    return len(gone)
+
+
+def runner_lock():
+    """One runner at a time (terrain alone uses 8 workers): an OS lock on
+    data/bake/runner.lock, held until this process exits. False if taken."""
+    BAKE.mkdir(parents=True, exist_ok=True)
+    f = open(BAKE / "runner.lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    runner_lock.handle = f   # keep it open (and locked) for the process lifetime
+    return True
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--delete" and KEY_RE.match(argv[2]):
+        print(f"deleted {delete(argv[2])} files of {argv[2]}")
+        return 0
+    if not runner_lock():
+        # ponytail: the live runner doesn't pick this request up; --retry <key> later does
+        print("another bake runner is already running; request left for --retry")
+        return 3
     if len(argv) == 3 and argv[1] == "--run":
         req = read_json(argv[2]) or {}
     elif len(argv) == 3 and argv[1] == "--retry" and KEY_RE.match(argv[2]):
