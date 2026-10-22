@@ -7,9 +7,13 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
+#include "ImageUtils.h"
+#include "Engine/Texture2D.h"
 #include "Misc/Paths.h"
 #include "ODAmbientSoundManager.h"
 #include "ODAtmosphereController.h"
+#include "ODBakeLink.h"
+#include "ODBoundaryEffect.h"
 #include "ODBarrierManager.h"
 #include "ODBridgeManager.h"
 #include "ODBuildingManager.h"
@@ -70,9 +74,18 @@ void AODGameMode::BeginPlay()
 			break;
 		}
 	}
-	if (!HomeArea.IsEmpty())
+	// ?odarea=<key> (2026-10-21): the area template level, no road manager of its own
+	const TCHAR* DrawnKey = GetWorld() ? GetWorld()->URL.GetOption(TEXT("odarea="), nullptr) : nullptr;
+	if (HomeArea.IsEmpty() && DrawnKey && *DrawnKey)
+	{
+		StartDrawnArea(DrawnKey);
+	}
+	else if (!HomeArea.IsEmpty())
 	{
 		SpawnAreaSet(HomeArea);
+	}
+	if (!HomeArea.IsEmpty())
+	{
 		// 3c ambient traffic: follows the nearest open-world area itself, off in races
 		if (GetWorld() && !TActorIterator<AODTrafficManager>(GetWorld()))
 		{
@@ -130,6 +143,113 @@ void AODGameMode::FreezeStreaming(bool bFreeze)
 		{
 			A->SetActorTickEnabled(!bFreeze);
 		}
+	}
+}
+
+// worlds.json "terrain_tile_m" of Area's entry (2026-10-21, area picker: drawn
+// areas bake 1 km terrain tiles, hand areas 2 km and don't list it), then
+// data/user_areas.json for a drawn area the manifest doesn't list yet.
+static float TerrainTileCmFor(const FString& Area, float Default)
+{
+	static TMap<FString, float> Cache;   // ponytail: read once per run - a re-bake mid-run keeps its tile size anyway
+	static bool bRead = false;
+	if (!bRead)
+	{
+		bRead = true;
+		FString Text;
+		TSharedPtr<FJsonObject> Root;
+		if (FFileHelper::LoadFileToString(Text, *ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worlds.json")))
+			&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) && Root.IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& World : Root->Values)
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Members = nullptr;
+				if (!World.Value.IsValid() || !World.Value->TryGetArray(Members))
+				{
+					continue;
+				}
+				for (const TSharedPtr<FJsonValue>& V : *Members)
+				{
+					const TSharedPtr<FJsonObject>* Obj = nullptr;
+					FString Name;
+					double TileM = 0.0;
+					if (V.IsValid() && V->TryGetObject(Obj) && (*Obj)->TryGetStringField(TEXT("name"), Name)
+						&& (*Obj)->TryGetNumberField(TEXT("terrain_tile_m"), TileM) && TileM > 0.0)
+					{
+						Cache.Add(Name, (float)(TileM * 100.0));
+					}
+				}
+			}
+		}
+	}
+	if (const float* Cm = Cache.Find(Area))
+	{
+		return *Cm;
+	}
+	ODBakeLink::FUserArea User;
+	return ODBakeLink::LoadUserArea(Area, User) ? User.TerrainTileCm : Default;
+}
+
+void AODGameMode::StartDrawnArea(const FString& Key)
+{
+	ODBakeLink::FUserArea Area;
+	if (!ODBakeLink::LoadUserArea(Key, Area))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODGameMode: ?odarea=%s isn't in data/user_areas.json - nothing to spawn"), *Key);
+		return;
+	}
+	ODBakeLink::SetActiveArea(&Area);
+	// spawned while HomeArea is still "" so SpawnAreaSet builds the whole set
+	// (the template places none of the level-placed families); home from here on
+	TArray<AActor*> Spawned = SpawnAreaSet(Key);
+	HomeArea = Key;
+	UE_LOG(LogTemp, Display, TEXT("ODGameMode: drawn area '%s' (%s) - %d manager(s), outline %d pts, terrain tile %.0f m"),
+		*Key, *Area.Name, Spawned.Num(), Area.OutlineCm.Num(), Area.TerrainTileCm / 100.0f);
+
+	AODRoadManager* Road = nullptr;
+	for (AActor* A : Spawned)
+	{
+		Road = Road ? Road : Cast<AODRoadManager>(A);
+	}
+	// runtime map texture: what build_openworld_test_level.py imports as an
+	// asset for hand areas, read straight from data/road_tiles/ here
+	const FString TexDir = ODBakeLink::RepoRoot() / TEXT("data/road_tiles") / (Key + TEXT("_test"));
+	FString MetaText;
+	TSharedPtr<FJsonObject> Meta;
+	if (Road && FFileHelper::LoadFileToString(MetaText, *(TexDir / TEXT("map_texture_meta.json")))
+		&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(MetaText), Meta) && Meta.IsValid())
+	{
+		if (UTexture2D* Tex = FImageUtils::ImportFileAsTexture2D(TexDir / TEXT("map_texture.png")))
+		{
+			Road->MapTexture = Tex;
+			Road->MapTextureCenterCm = FVector2D(Meta->GetNumberField(TEXT("center_x_cm")), Meta->GetNumberField(TEXT("center_y_cm")));
+			Road->MapTextureSpanCm = (float)Meta->GetNumberField(TEXT("span_cm"));
+		}
+	}
+
+	if (Area.OutlineCm.Num() >= 3)
+	{
+		GetWorld()->SpawnActor<AODBoundaryEffect>();
+	}
+
+	// the car to the runner's road-snapped start (else the drawn one); the
+	// menu captures this as its default "Drive" spot
+	FVector2D Start = Area.StartCm;
+	if (!ODBakeLink::SnappedStartCm(Start) && !Area.bHasStart)
+	{
+		return;
+	}
+	float Yaw = 0.0f;
+	FVector2D Snap;
+	float SnapYaw;
+	if (Road && Road->NearestRoadPoint(Start, Snap, SnapYaw))
+	{
+		Start = Snap;
+		Yaw = SnapYaw;
+	}
+	if (AODVehiclePawn* Pawn = Cast<AODVehiclePawn>(UGameplayStatics::GetPlayerPawn(this, 0)))
+	{
+		Pawn->TeleportToSpawn(FVector(Start.X, Start.Y, 0.0), Yaw);
 	}
 }
 
@@ -199,6 +319,8 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 	if (AODTerrainManager* Terrain = Cast<AODTerrainManager>(Begin(AODTerrainManager::StaticClass(), true)))
 	{
 		Terrain->TerrainTilePrefix = FString::Printf(TEXT("terrain_%s_test"), *Area);
+		// drawn areas bake 1 km tiles (2026-10-21): worlds.json terrain_tile_m
+		Terrain->TileSizeCm = TerrainTileCmFor(Area, Terrain->TileSizeCm);
 		// build_openworld_test_level.py's 6.2 km: past the 6 km far-tile bake
 		Terrain->VisualRadius = 620000.0f;
 		if (Vista)

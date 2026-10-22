@@ -100,6 +100,12 @@ private:
 	 *  grid as the player drives - see that class for the full design. */
 	void EnsureAmbientSoundManager();
 
+	/** Drawn area (2026-10-21, area picker): the /Game/Areas/AreaTemplate
+	 *  level opened with ?odarea=<key> has no area managers of its own - spawn
+	 *  the key's whole set as home, its runtime map texture, the boundary
+	 *  effect, and drop the car at the (runner-snapped) start. */
+	void StartDrawnArea(const FString& Key);
+
 	/** "<area>" from the level's own road manager's "road_<area>_test", "" with none. */
 	FString HomeArea;
 	UPROPERTY()

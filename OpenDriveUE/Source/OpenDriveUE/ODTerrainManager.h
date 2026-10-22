@@ -498,6 +498,20 @@ private:
 	UPROPERTY()
 	TObjectPtr<UDynamicMeshComponent> HorizonComp;
 
+	/** Drawn-area boundary look (2026-10-21, area picker; ODBakeLink.h):
+	 *  M_ODUnsynced (unreal/apply_boundary_materials.py) on material slot 1 -
+	 *  near tiles' triangles outside the outline (Masks/outline_* SDF), the
+	 *  horizon's outside the outline or in a cell still baking. Tiles that came
+	 *  back Pending get a dissolving copy of themselves when they land. Null
+	 *  material (script not run) = none of it, the old look. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> UnsyncedMat;
+	TSet<FIntPoint> WasPendingTiles;
+	uint32 HorizonStatusVersion = 0;
+	double NextHorizonCheck = 0.0;
+	void RetagHorizon();
+	void SpawnSyncIn(const UDynamicMeshComponent* Src);
+
 	/** groundbands_<area>_test.json -> GroundBands (tile-local, for the tint)
 	 *  + GroundBandsWorld, and the TreelineLow/HighZCm + SeaLevelZCm params on TerrainMID. */
 	void LoadGroundBands();

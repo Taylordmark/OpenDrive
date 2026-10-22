@@ -1,4 +1,5 @@
 #include "ODTrafficManager.h"
+#include "ODBakeLink.h"
 
 #include "Algo/Sort.h"
 #include "Algo/BinarySearch.h"
@@ -1184,6 +1185,15 @@ bool AODTrafficManager::SpawnAgent(int32 Link, float S, uint8 Lane, float V, uin
 	return true;
 }
 
+// A drawn area's roads are clipped at its outline (2026-10-21, area picker):
+// a one-way dead end there sits in the boundary curtain, so its car may go
+// even while seen. Two-way dead ends already U-turn via their Reverse link.
+static bool AtOutline(const FVector& P)
+{
+	const TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> Outline = ODBakeLink::ActiveOutline();
+	return Outline.IsValid() && ODBakeLink::SignedDistanceCm(*Outline, FVector2D(P)) < 5000.0;
+}
+
 bool AODTrafficManager::Noticed(const FVector& P) const
 {
 	// 2D: TeleportToSpawn parks the pawn 6 km up until its ground snap, and the
@@ -1536,7 +1546,7 @@ void AODTrafficManager::Step(float Dt)
 			StopAt(DistEnd - StopLineCm);
 			// dead end with no way round: it stops short of the end, so the S >= Length
 			// removal below never fired and a queue stood behind it for good
-			if (DistEnd < StopLineCm + 500.0f && Ag.V < 50.0f && !Noticed(Ag.CurPos))
+			if (DistEnd < StopLineCm + 500.0f && Ag.V < 50.0f && (!Noticed(Ag.CurPos) || AtOutline(Ag.CurPos)))
 			{
 				Remove.AddUnique(i);
 			}

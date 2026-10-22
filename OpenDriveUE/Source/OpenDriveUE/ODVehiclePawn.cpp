@@ -1,5 +1,6 @@
 #include "ODVehiclePawn.h"
 #include "ODAssetDetail.h"
+#include "ODBakeLink.h"
 #include "ODVisualStyle.h"
 
 #include "AssetRegistry/ARFilter.h"
@@ -667,6 +668,23 @@ void AODVehiclePawn::TrySnapToGround()
 			|| Hit.PhysMaterial->GetName().Contains(TEXT("DirtRoad")));
 
 	const double Now = GetWorld()->GetTimeSeconds();
+
+	// drawn area still baking here (2026-10-21, area picker): the road isn't
+	// missing, it's coming - keep waiting with no timeout and no off-road
+	// nudge (both restart once the cell is baked), and car.json's target_cm
+	// tells the runner to bake this spot first.
+	if (!bOnRoad && ODBakeLink::IsPointPending(FVector2D(Loc)))
+	{
+		const FVector2D Target(Loc);
+		ODBakeLink::SetTarget(&Target);
+		if (Now - LastSnapLogTime > 5.0)
+		{
+			LastSnapLogTime = Now;
+			UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: spawn (%.0f,%.0f) waiting for its cell to bake"), Loc.X, Loc.Y);
+		}
+		SpawnTime = Now;
+		return;
+	}
 	const bool bTimedOut = (Now - SpawnTime) > GroundSnapTimeoutSec;
 
 	// One-shot nudge to nearby real pavement (2026-09-03 fix, "car tips over
@@ -968,6 +986,7 @@ void AODVehiclePawn::TrySnapToGround()
 		Movement->EngageParkHold();
 	}
 	bGroundSnapped = true;
+	ODBakeLink::SetTarget(nullptr);   // car.json: no longer waiting anywhere (2026-10-21)
 	bEverGroundSnapped = true;   // real-world snap completed - arms the warm
 	                              // settle for later mid-drive resets (NOT set
 	                              // by PlaceInShowroom's fake snap)

@@ -286,7 +286,10 @@ void AODMainMenu::BeginPlay()
 			StartPoses.RemoveAt(i);
 		}
 	}
-	CurrentAreaIdx = AreaLevels.IndexOfByKey(UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName()));
+	// drawn areas share one template level, told apart by ?odarea= (2026-10-21, area picker B)
+	const TCHAR* DrawnKey = GetWorld()->URL.GetOption(TEXT("odarea="), nullptr);
+	CurrentAreaIdx = AreaLevels.IndexOfByKey(UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName())
+		+ (DrawnKey && *DrawnKey ? FString(TEXT("?odarea=")) + DrawnKey : FString()));
 	FString SavedArea;
 	GConfig->GetString(AreaConfigSection, TEXT("Level"), SavedArea, GGameUserSettingsIni);
 	AreaIdx = FMath::Max(0, AreaLevels.IndexOfByKey(SavedArea));   // missing/unlisted -> first area
@@ -2084,6 +2087,30 @@ void AODMainMenu::FindAreaLevels()
 		Key.RemoveFromStart(TEXT("OpenWorld_"));
 		AreaNames.Add(FName::NameToDisplayString(Key, false));
 		AreaKeys.Add(Key);
+	}
+
+	// --- area picker B (2026-10-21): drawn areas from data/user_areas.json,
+	// all opened through the one template level as "<template>?odarea=<key>"
+	// (AODGameMode::StartDrawnArea). Minimal hook; the menu UI is agent C's.
+	FString UserText;
+	TSharedPtr<FJsonObject> UserRoot;
+	const TSharedPtr<FJsonObject>* UserAreas = nullptr;
+	if (FFileHelper::LoadFileToString(UserText, *(FPaths::ProjectDir() / TEXT("../data/user_areas.json")))
+		&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(UserText), UserRoot) && UserRoot.IsValid()
+		&& UserRoot->TryGetObjectField(TEXT("areas"), UserAreas))
+	{
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& A : (*UserAreas)->Values)
+		{
+			const TSharedPtr<FJsonObject>* Obj = nullptr;
+			FString Name = A.Key;
+			if (A.Value->TryGetObject(Obj))
+			{
+				(*Obj)->TryGetStringField(TEXT("name"), Name);
+			}
+			AreaLevels.Add(TEXT("/Game/Areas/AreaTemplate?odarea=") + A.Key);
+			AreaNames.Add(Name);
+			AreaKeys.Add(A.Key);
+		}
 	}
 }
 
