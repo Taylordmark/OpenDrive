@@ -12,7 +12,12 @@
  * shows a start banner, tracks the trip and shows an arrival card.
  *
  * Headless self-check: -odtripcheck logs "ODRoadTrip: SELFCHECK PASS/FAIL ..."
- * once the route is set (or after TripCheckTimeoutSec) and exits with 0 / 1.
+ * once the route is set (or after TripCheckTimeoutSec) and exits (grep the log;
+ * UnrealEditor-Cmd's exit code came back 0 on FAIL too). Needs a saved start town
+ * ([OpenDrive.Area] Town= in GameUserSettings.ini), as a menu Drive always has -
+ * green_valley's PlayerStart sits on a 164-node graph island, so no route from it:
+ *   UnrealEditor-Cmd OpenDriveUE.uproject "/Game/Areas/OpenWorld_green_valley?odengine=0?oddest=1136941,423339"
+ *     -game -nullrhi -nosound -unattended -stdout -odtripcheck
  */
 UCLASS()
 class OPENDRIVEUE_API AODRoadTrip : public AActor
