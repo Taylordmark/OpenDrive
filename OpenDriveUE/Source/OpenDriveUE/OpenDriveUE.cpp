@@ -11,9 +11,65 @@
 #include "ODBakeLink.h"
 #include "ODTileSource.h"
 #include "ODVisualStyle.h"
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <dxgi1_4.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 namespace
 {
+/**
+ * This process's VRAM use vs the OS budget, plus what spilled to shared system
+ * memory, in MB (2026-10-22). Summit County ran at 70 ms GPU for ~2.5 min after
+ * loading, then dropped to 22 ms with every pass (base pass, Lumen) slowing and
+ * recovering together, which looks like VRAM oversubscription on the 8 GB card.
+ * These numbers in the ODPerf line confirm or rule that out.
+ */
+bool QueryVram(float& UsedMb, float& BudgetMb, float& SharedMb)
+{
+#if PLATFORM_WINDOWS
+	// the adapter with the most dedicated memory is the one UE renders on
+	static IDXGIAdapter3* Adapter = []() -> IDXGIAdapter3*
+	{
+		IDXGIFactory1* Factory = nullptr;
+		if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&Factory)))
+		{
+			return nullptr;
+		}
+		IDXGIAdapter3* Best = nullptr;
+		SIZE_T BestMem = 0;
+		IDXGIAdapter1* A = nullptr;
+		for (UINT I = 0; Factory->EnumAdapters1(I, &A) != DXGI_ERROR_NOT_FOUND; ++I)
+		{
+			DXGI_ADAPTER_DESC1 Desc;
+			IDXGIAdapter3* A3 = nullptr;
+			if (SUCCEEDED(A->GetDesc1(&Desc)) && Desc.DedicatedVideoMemory > BestMem
+				&& SUCCEEDED(A->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&A3)))
+			{
+				if (Best) { Best->Release(); }
+				Best = A3;
+				BestMem = Desc.DedicatedVideoMemory;
+			}
+			A->Release();
+		}
+		Factory->Release();
+		return Best;
+	}();
+	DXGI_QUERY_VIDEO_MEMORY_INFO Local, Shared;
+	if (Adapter && SUCCEEDED(Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &Local))
+		&& SUCCEEDED(Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &Shared)))
+	{
+		UsedMb = Local.CurrentUsage / 1048576.0f;
+		BudgetMb = Local.Budget / 1048576.0f;
+		SharedMb = Shared.CurrentUsage / 1048576.0f;
+		return true;
+	}
+#endif
+	return false;
+}
+
+
 /**
  * `stat unit` in the log (2026-10-16, perf pass): every 5 s one ODPerf line
  * with frame avg/p95/max and the game / render / RHI / GPU thread ms, draw
@@ -110,10 +166,13 @@ struct FPerfLog
 		}
 		static IConsoleVariable* SP = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
 		const UGameUserSettings* GS = GEngine ? GEngine->GetGameUserSettings() : nullptr;
-		UE_LOG(LogTemp, Display, TEXT("ODPerf: %.1fs avg %.1f ms (%.0f fps) p95 %.1f max %.1f hitches %d | game %.1f draw %.1f rhi %.1f gpu %.1f ms | draws %llu tris %.2fM | %dx%d sp %.0f sg %d style %d"),
+		float VramMb = -1.0f, BudgetMb = -1.0f, SharedMb = -1.0f;
+		QueryVram(VramMb, BudgetMb, SharedMb);
+		UE_LOG(LogTemp, Display, TEXT("ODPerf: %.1fs avg %.1f ms (%.0f fps) p95 %.1f max %.1f hitches %d | game %.1f draw %.1f rhi %.1f gpu %.1f ms | draws %llu tris %.2fM | %dx%d sp %.0f sg %d style %d | vram %.0f/%.0f MB shared %.0f MB"),
 			Now - WindowStart, Avg, 1000.0f / FMath::Max(Avg, 0.01f), FrameMs[FMath::Min(N - 1, N * 95 / 100)], FrameMs.Last(), Hitches,
 			Ms(GameC), Ms(RenderC), Ms(RhiC), Ms(GpuC), Draws / N, (double)Prims / N / 1.0e6,
-			Res.X, Res.Y, SP ? SP->GetFloat() : 100.0f, GS ? GS->GetOverallScalabilityLevel() : -2, ODVisualStyle::Level());
+			Res.X, Res.Y, SP ? SP->GetFloat() : 100.0f, GS ? GS->GetOverallScalabilityLevel() : -2, ODVisualStyle::Level(),
+			VramMb, BudgetMb, SharedMb);
 		FrameMs.Reset();
 		Hitches = 0;
 		GameC = RenderC = RhiC = GpuC = Draws = Prims = 0;

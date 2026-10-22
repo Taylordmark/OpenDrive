@@ -48,7 +48,7 @@ public class OpenDriveUE : ModuleRules
 		// ODWheelDevice: racing wheel input + force feedback (Arc 6)
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib" });
+			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib", "dxgi.lib" });
 		}
 	}
 }
