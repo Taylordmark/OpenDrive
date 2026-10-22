@@ -12,7 +12,7 @@ Usage:  python build_terrain_mesh_tiles.py   (needs road_stations.json first)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json
 Writes  OpenDriveUE/Content/OpenDrive/Masks/terrain_<AREA_NAME>_test_tile_<tx>_<ty>.bin
-        (one ODT1 file per built tile; combines what a separate
+        (one ODT2 file per built tile; combines what a separate
         build+export pair does for roads into one script, since - unlike
         the road network - there's no intermediate JSON representation
         worth keeping around here)
@@ -38,7 +38,26 @@ bounds:
     missing file the runtime never retries" semantics AODRoadManager
     already relies on for MissingTiles).
 
-ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
+ODT2 format (2026-10-21; Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin
+and terrain_coarse_..., written by bin_tile_io.write_terrain_tile_bin):
+    'O','D','T','2'                                   magic (4 bytes)
+    16 bytes   generation id (same bytes/offset as ODT1)
+    uint8      has_collision   (0 or 1)
+    uint8      flags           bit0: indices are uint16 (V <= 65536), else uint32
+    uint32 LE  vertex_count
+    uint32 LE  tri_count
+    float64 LE u0_cm, v0_cm, uv_size_cm   (tile min corner tx*size, ty*size; tile side)
+    uint32 LE  Z               zlib stream length (zlib.compress level 6)
+    Z bytes    zlib( vertex_count * (float32 x, y, z) cm, UE world frame
+                     + tri_count * 3 indices, uint16 or uint32 per flags )
+    UVs are not stored: uv = ((x - u0) / size, (y - v0) / size) in double
+    from the float32 x/y, then float32 - matches the old stored UVs within
+    2e-5. Positions and triangles are bit for bit what ODT1 held (~30% of
+    the ODT1 size). The writer checks its UVs derive this way (within 1e-4)
+    and falls back to ODT1 if not.
+
+ODT1 (legacy layout, still read by bin_tile_io and AODTerrainManager until
+an area is rebaked):
     'O','D','T','1'                                   magic (4 bytes)
     16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
                2026-08-21 - see that module's docstring)
@@ -65,6 +84,7 @@ from pymartini import Martini
 
 import test_areas
 from bake_job import job_rect, outline_local, outline_sdf_m
+from bin_tile_io import write_terrain_tile_bin as write_tile_bin   # ODT2 writer (2026-10-21)
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from build_tunnels import cut_holes, load_tunnels
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
@@ -1392,7 +1412,7 @@ def build_seam_skirt(gx_cm, gy_cm, z_cm, n, drop_cm=None):
 def build_tile(tx, ty, is_near, station_data, session, caches):
     """Builds one tile's regular-grid mesh. Returns a dict with has_collision
     plus (verts Px3 cm, uvs Px2, tris Tx3) - the single production function
-    both main() (writes the ODT1 sidecar) and verify_terrain_fit.py (checks
+    both main() (writes the ODT2 sidecar) and verify_terrain_fit.py (checks
     the actual built mesh, not a reimplementation) call into."""
     st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
@@ -1528,19 +1548,10 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     if is_near:
         verts, uvs, tris = cut_holes(verts, uvs, tris, _get_tunnels())
 
-    return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
-
-
-def write_tile_bin(path, tile, gen_id_bytes):
-    verts, uvs, tris = tile["verts"], tile["uvs"], tile["tris"]
-    with open(path, "wb") as f:
-        f.write(b"ODT1")
-        f.write(gen_id_bytes)
-        f.write(struct.pack("<BII", 1 if tile["has_collision"] else 0,
-                             len(verts), len(tris)))
-        f.write(struct.pack(f"<{verts.size}f", *verts.reshape(-1)))
-        f.write(struct.pack(f"<{uvs.size}f", *uvs.reshape(-1)))
-        f.write(struct.pack(f"<{tris.size}I", *tris.reshape(-1)))
+    # uv_frame (2026-10-21): the UVs above are (x - x0) / tile_cm etc., so
+    # ODT2 derives them instead of storing them (see the module docstring)
+    return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris,
+            "uv_frame": (x0_cm, y0_cm, tile_cm)}
 
 
 def background_bbox_tile_range():

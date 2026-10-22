@@ -167,7 +167,7 @@ FEstimate Estimate(double Km2)
 	E.Km2 = Km2;
 	E.FirstDriveS = 300.0 + 0.5 * Km2 + 150.0;
 	E.DoneS = E.FirstDriveS + 30.0 * Km2;   // bake_request.DONE_S_PER_KM2
-	E.DiskMb = 50.0 + 1.0 * Km2;
+	E.DiskMb = 10.0 + 0.5 * Km2;   // (2026-10-21) ODT2 tiles: Tail of the Dragon 28.7 km2 = 22 MB
 	return E;
 }
 
@@ -263,7 +263,7 @@ bool FODAreaGeoCheck::RunTest(const FString& Parameters)
 	const FEstimate E = Estimate(100.0);
 	TestEqual(TEXT("first drive"), E.FirstDriveS, 500.0);
 	TestEqual(TEXT("done"), E.DoneS, 3500.0);
-	TestEqual(TEXT("disk"), E.DiskMb, 150.0);
+	TestEqual(TEXT("disk"), E.DiskMb, 60.0);
 	const double Cal[4] = {34.0, 40.5, 37.25, -120.0};
 	const FVector2D O = LccInverse(0.0, 0.0, Cal);
 	TestEqual(TEXT("lcc origin"), O.X, -120.0, 1e-9);

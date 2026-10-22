@@ -54,7 +54,7 @@ DONE_S_PER_KM2 = 30          # (2026-10-21) Tail of the Dragon test: 28.8 km2 of
 def estimate(km2):
     """Contract's live estimate (the menu shows the same numbers)."""
     first = 300 + 0.5 * km2 + 150
-    return {"first_drive_s": first, "done_s": first + DONE_S_PER_KM2 * km2, "disk_mb": 50 + 1.0 * km2}
+    return {"first_drive_s": first, "done_s": first + DONE_S_PER_KM2 * km2, "disk_mb": 10 + 0.5 * km2}   # (2026-10-21) ODT2 tiles: Tail of the Dragon 28.7 km2 = 22 MB
 
 
 def slug_key(name):

@@ -80,7 +80,7 @@ assert br.next_job({"0_0": "baked", "1_0": "failed"}, (0, 0)) is None
 
 # --- estimate (contract)
 e = br.estimate(100)
-assert (e["first_drive_s"], e["done_s"], e["disk_mb"]) == (500, 3500, 150), e
+assert (e["first_drive_s"], e["done_s"], e["disk_mb"]) == (500, 3500, 60), e
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)

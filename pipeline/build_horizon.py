@@ -2,7 +2,7 @@
 
 Terrain tiles are baked only within RENDER_DISTANCE_M (6 km) of a road and
 streamed within AODTerrainManager::VisualRadius, so past ~6 km the world
-just ended. This writes ONE low-res ODT1 mesh, horizon_<area>_test.bin,
+just ended. This writes ONE low-res ODT2 mesh, horizon_<area>_test.bin,
 covering the baked tile extent plus HORIZON_MARGIN_M (80 km) on every side:
 a 513x513 grid (~0.3-0.5 km) of zoom-10 Terrarium, RTIN-simplified, that
 AODTerrainManager::LoadHorizon draws once (no collision, no shadow) under
@@ -81,7 +81,7 @@ def outside_dist_m(e, n, ext):
 
 
 def build(ext, elev_fn):
-    """elev_fn(east_m, north_m) -> metres MSL. Returns the ODT1 tile dict and stats."""
+    """elev_fn(east_m, north_m) -> metres MSL. Returns the terrain tile dict and stats."""
     e0, n0, e1, n1 = ext
     ce, cn = (e0 + e1) / 2, (n0 + n1) / 2
     half = max(e1 - e0, n1 - n0) / 2 + HORIZON_MARGIN_M
@@ -112,7 +112,10 @@ def build(ext, elev_fn):
     verts = verts[used]
     uvs = np.stack([gxi[used] / (n - 1), gyi[used] / (n - 1)], -1).astype(np.float32)
     tris = remap[tris].astype(np.uint32)
-    return ({"has_collision": False, "verts": verts, "uvs": uvs, "tris": tris},
+    # (2026-10-21) the grid spans x [ce-half, ce+half], UE y [-(cn+half), -(cn-half)],
+    # so the UVs above derive from position and the mesh writes as ODT2
+    uv_frame = ((ce - half) * 100.0, -(cn + half) * 100.0, 2 * half * 100.0)
+    return ({"has_collision": False, "verts": verts, "uvs": uvs, "tris": tris, "uv_frame": uv_frame},
             dict(half_km=half / 1000, cell_m=cell, verts=len(verts), tris=len(tris)))
 
 

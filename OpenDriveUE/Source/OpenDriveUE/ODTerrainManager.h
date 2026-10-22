@@ -40,7 +40,7 @@ struct FParsedTerrainTile
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
 
-	// pipeline/generation_id.py's per-run id, read from the ODT1 header
+	// pipeline/generation_id.py's per-run id, read from the ODT1/ODT2 header
 	// (2026-08-21) - see AODTerrainManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
@@ -409,6 +409,12 @@ public:
 	/** This area's ground bands in WORLD Z (actor offset applied) - what
 	 *  AODSeasonController sweeps the snow line between. */
 	const FODGroundBands& GetGroundBandsWorld() const { return GroundBandsWorld; }
+
+	/** ParseTerrainTileFile's in-memory half: an ODT1 or ODT2 tile (2026-10-21,
+	 *  ODT2 = zlib payload + derived UVs) into the same FParsedTerrainTile.
+	 *  Public only so the OpenDrive.Terrain.ODT2 automation test can feed it
+	 *  a buffer. */
+	static bool ParseTerrainTileBytes(const TArray<uint8>& Bin, FParsedTerrainTile& Out);
 
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);

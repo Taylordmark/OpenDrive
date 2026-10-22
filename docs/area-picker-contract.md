@@ -88,7 +88,7 @@ after each job.
 km2 = polygon area
 first_drive_s = 300 + 0.5 * km2 + 150
 done_s        = first_drive_s + 30 * km2    (2026-10-21 Tail of the Dragon test; was 12)
-disk_mb       = 50 + 1.0 * km2
+disk_mb       = 10 + 0.5 * km2         (2026-10-21 ODT2 tiles: Tail of the Dragon 28.7 km2 = 22 MB; was 50 + 1.0)
 ```
 
 ## Outline mask: `Masks/outline_<area>_test_tile_<tx>_<ty>.bin` (pipeline writes, terrain reads)
