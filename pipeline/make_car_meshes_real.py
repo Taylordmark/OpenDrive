@@ -441,11 +441,11 @@ class Car:
 
     def zt(self, x):
         px, _, pzt = zip(*sorted(self.profile))
-        return float(np.interp(x, px, pzt))
+        return float(pchip(x, px, pzt))
 
     def width(self, x):
         wx, wh = zip(*sorted(self.plan))
-        return float(np.interp(x, wx, wh))
+        return float(pchip(x, wx, wh))
 
     def seg_of(self, x):
         """x-segment index between door shut lines (splits glass panels)."""
@@ -470,6 +470,7 @@ BUMP_CLEAR = 2.5     # well roof radius = wheel radius + this, round the full-bu
 BUMP_TRAVEL = 8.0    # UODVehicleMovement::BumpTravelCm: the bump stop, tyre top over the authored one
 FENDER_OUT = 3.0     # fender skin this far outboard of any tyre point above the lip (tucks under at bump / lock)
 FLARE_TAPER = 0.3    # fender flare width falls off this many cm per cm fore / aft of where it is needed
+FLARE_ROUND = 25.0   # ... over a hyperbola this round at the top (cm), not a cone point
 WELL_CLEAR = 34.0    # well inner wall at least this far inboard of the half-track (tyre_sweep widens it)
 MAX_STEER = 38.0     # ODVehicleDef MaxSteerAngleDeg default (no car overrides it); x SteerLockScale
 
@@ -560,6 +561,28 @@ PROFILE = {
 }
 
 
+def pchip(x, xp, fp):
+    """Monotone cubic (Fritsch-Carlson / PCHIP) through the typed outline
+    points, in place of np.interp's straight segments: smooth, but never
+    past a point (flat at every local min / max), so the bbox holds.
+    Clamped to the end values outside like np.interp."""
+    xp, fp = np.asarray(xp, float), np.asarray(fp, float)
+    h = np.diff(xp)
+    assert (h > 0).all(), xp
+    d = np.diff(fp) / h
+    m = np.empty_like(fp)
+    m[0], m[-1] = d[0], d[-1]
+    w1, w2 = 2 * h[1:] + h[:-1], h[1:] + 2 * h[:-1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        hm = (w1 + w2) / (w1 / d[:-1] + w2 / d[1:])      # weighted harmonic mean of the slopes
+    m[1:-1] = np.where(d[:-1] * d[1:] > 0, hm, 0.0)
+    x = np.clip(np.asarray(x, float), xp[0], xp[-1])
+    i = np.clip(np.searchsorted(xp, x, side="right") - 1, 0, len(h) - 1)
+    t = (x - xp[i]) / h[i]
+    return ((2 * t ** 3 - 3 * t ** 2 + 1) * fp[i] + (t ** 3 - 2 * t ** 2 + t) * h[i] * m[i]
+            + (3 * t ** 2 - 2 * t ** 3) * fp[i + 1] + (t ** 3 - t ** 2) * h[i] * m[i + 1])
+
+
 def sections(car, xs):
     """Per station: list of (y, z) for the right half section points S0..Slast
     and the top-cap (centre) height/half width - the stylized build_hull
@@ -567,9 +590,9 @@ def sections(car, xs):
     st = car.style
     px, pzb, pzt = (np.array(c) for c in zip(*sorted(car.profile)))
     wx, wh = (np.array(c) for c in zip(*sorted(car.plan)))
-    zb = np.interp(xs, px, pzb)
-    zt = np.interp(xs, px, pzt)
-    w = np.interp(xs, wx, wh)
+    zb = pchip(xs, px, pzb)
+    zt = pchip(xs, px, pzt)
+    w = pchip(xs, wx, wh)
     zb_floor = zb.copy()
     r = car.r_arch
     well = np.full_like(xs, -1e9)
@@ -641,7 +664,8 @@ def sections(car, xs):
             m = p[(np.abs(p[:, 0] - (x - (car.fx, car.rx)[a])) < 8.0) & (p[:, 2] >= lo) & (p[:, 2] <= hi)]
             if len(m):
                 req[i] = car.ht + m[:, 1].max() + FENDER_OUT
-        req = np.max(req[None, :] - FLARE_TAPER * np.abs(xs[:, None] - xs[None, :]), axis=1)
+        dx = xs[:, None] - xs[None, :]
+        req = np.max(req[None, :] - FLARE_TAPER * (np.sqrt(dx ** 2 + FLARE_ROUND ** 2) - FLARE_ROUND), axis=1)
         Y[k] = np.maximum(Y[k], req)
     # side scallop: the lower flank pulled in from the front door shut to
     # the rear arch opening, after the flares (their taper would fill it;
@@ -656,8 +680,8 @@ def sections(car, xs):
         # steering sweep, so its inner wall drops inboard of the well
         Y[4] = Y[4] + (np.minimum(Y[4], car.ht - car.well_clear + 2.0) - Y[4]) * t
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
-        Y.append(np.minimum(np.interp(xs, cx, cw), Y[4] - 2.0))
-        Z.append(np.interp(xs, cx, cz))
+        Y.append(np.minimum(pchip(xs, cx, cw), Y[4] - 2.0))
+        Z.append(pchip(xs, cx, cz))
     crease = {**CREASE, 2: sh["crease"]}
     Y, Z, key = densify(np.stack(Y, 1), np.stack(Z, 1), crease, sh["round"])
     if car.valley and not car.center:
