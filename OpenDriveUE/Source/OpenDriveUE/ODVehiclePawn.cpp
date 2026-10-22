@@ -19,6 +19,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "EngineUtils.h"
 #include "ODInputConfig.h"
+#include "ODMedia.h"
 #include "ODRoadManager.h"
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -1297,6 +1298,9 @@ void AODVehiclePawn::TickWheel()
 	{
 		ResetVehicle();
 	}
+	if (Pressed(EODWheelButton::MediaPlayPause)) { ODMedia::PlayPause(); }
+	if (Pressed(EODWheelButton::MediaNext)) { ODMedia::Next(); }
+	if (Pressed(EODWheelButton::MediaPrev)) { ODMedia::Prev(); }
 	if (Movement->bManualGearbox)
 	{
 		if (Pressed(EODWheelButton::ShiftUp))

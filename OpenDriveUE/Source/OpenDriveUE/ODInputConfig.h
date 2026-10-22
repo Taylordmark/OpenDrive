@@ -59,6 +59,9 @@ enum class EODInputAction : uint8
 	ShiftUp,      // manual gearbox (Arc 6); ignored in automatic
 	ShiftDown,
 	PhotoMode,    // fun #4: pause into photo mode (or back out)
+	MediaPlayPause,   // music controls: OS media keys (ODMedia)
+	MediaNext,
+	MediaPrev,
 	Count  // sentinel, not a real action
 };
 
