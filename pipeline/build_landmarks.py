@@ -286,7 +286,8 @@ def in_bbox(geom):
 
 def fetch_ways(ids):
     q = f"[out:json][timeout:120];way(id:{','.join(map(str, sorted(ids)))});out tags geom;"
-    return {w["id"]: w for w in overpass_json(q, HEADERS, timeout=200)["elements"]}
+    # unclipped: a lookup by id across every area, checked for deleted ways below
+    return {w["id"]: w for w in overpass_json(q, HEADERS, timeout=200, clip=False)["elements"]}
 
 
 def tile_of(x, y):

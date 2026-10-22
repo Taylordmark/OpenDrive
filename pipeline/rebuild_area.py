@@ -234,6 +234,9 @@ PASS1 = {
     "build_place_labels.py", "export_place_labels_bin.py", "classify_biomes.py", "export_biome_bin.py",
     "fetch_climate.py", "build_ground_bands.py", "build_map_texture.py", "build_horizon.py",
     "bake_area_relief.py",
+    # whole-area textures, not tiles: once, not per job (~80 s a job in the
+    # Tail of the Dragon test). Sat masks the pre-pad road footprint.
+    "build_sat_albedo.py", "build_pave_mask.py",
 }
 PASS_BOTH = {"build_road_network.py", "build_road_furniture.py", "build_world_manifest.py"}
 GATES = {"verify_terrain_fit.py", "verify_road_fit.py"}

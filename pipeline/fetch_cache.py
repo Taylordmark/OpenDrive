@@ -48,7 +48,7 @@ def cached_bytes(kind, name, fetch):
     return data
 
 
-def overpass_json(query, headers, timeout=200):
+def overpass_json(query, headers, timeout=200, clip=True):
     """POST an Overpass QL query (trying each mirror), cached by query text."""
     def fetch():
         for wait in (0, *OVERPASS_RETRY_WAITS_S):
@@ -73,7 +73,7 @@ def overpass_json(query, headers, timeout=200):
     # rectangle download above stays cached as-is (scoping round 8)
     from bake_job import outline_ll
     poly = outline_ll()
-    return data if poly is None else clip_osm(data, poly)
+    return data if poly is None or not clip else clip_osm(data, poly)
 
 
 CLIP_ID0 = 2 * 10 ** 15   # synthetic ids for split ways / cut nodes (build_track uses 1e15)
