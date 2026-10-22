@@ -9,6 +9,10 @@ Usage:  python build_landmarks.py          (needs road_stations.json)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json, OSM via Overpass (cached)
 Writes  OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test_tile_<tx>_<ty>.bin
+        OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test.json
+            (2026-10-22, landmark hunting: [{name, kind, centroid_cm [x, y], radius_cm,
+            height_m}] for AODChallengeManager; checks/verify_landmark_sidecar.py.
+            `--sidecar` rewrites just this from landmarks.json, no OSM or meshes)
         data/road_tiles/<AREA_NAME>_test/landmarks.json   (summary, checks/verify_landmarks.py)
 
 Geometry is OSM only (ODbL, already credited) plus code: no third-party models.
@@ -341,7 +345,22 @@ def main():
         written.append(path)
     n_stale = delete_stale_tiles(OUT_DIR, f"landmarks_{AREA_NAME}_test_tile_*.bin", written)
     SUMMARY_PATH.write_text(json.dumps(dict(area=AREA_NAME, generation_id=gen_id, landmarks=summary), indent=1))
+    write_sidecar(summary, OUT_DIR)
     print(f"{len(here)} landmark(s) -> {len(written)} tile(s), {n_stale} stale deleted, gen {gen_id} -> {OUT_DIR}")
+
+
+def write_sidecar(summary, out_dir):
+    """The runtime's landmark list: names and centroids, kept out of ODL1
+    (the place labels share that magic)."""
+    out = []
+    for lm in summary:
+        ring = lm["footprint"]
+        cx, cy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+        out.append(dict(name=lm["name"], kind="building", centroid_cm=[round(cx, 1), round(cy, 1)],
+                        radius_cm=round(max(math.dist((cx, cy), p) for p in ring), 1), height_m=lm["height_m"]))
+    path = out_dir / f"landmarks_{AREA_NAME}_test.json"
+    path.write_text(json.dumps(dict(area=AREA_NAME, landmarks=out), indent=1), encoding="utf-8")
+    print(f"wrote {path} ({len(out)} landmark(s))")
 
 
 # ------------------------------------------------------------- --list mode
@@ -419,4 +438,7 @@ out tags center;"""
 
 
 if __name__ == "__main__":
-    list_candidates() if "--list" in sys.argv else main()
+    if "--sidecar" in sys.argv:
+        write_sidecar(json.loads(SUMMARY_PATH.read_text())["landmarks"], OUT_DIR)
+    else:
+        list_candidates() if "--list" in sys.argv else main()
