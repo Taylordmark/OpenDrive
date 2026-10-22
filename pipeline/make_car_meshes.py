@@ -87,10 +87,12 @@ PALETTE = [
     (0.03, 0.03, 0.035),  # 21 lmp dark
     (0.90, 0.92, 0.95),   # 22 reverse lamp - the only lights cell with blue > 0.75
                            #    (M_CarLights tells head/tail/reverse apart by colour)
+    (1.00, 0.45, 0.02),   # 23 indicator - amber, the only lights cell with blue < 0.2 and
+                          #    green > 0.25; left/right by the sign of local Y
 ]
 N_CELL = len(PALETTE)
 GLASS, PLASTIC, TIRE, RIM, HEADLIGHT, TAILLIGHT, ACCENT, CHROME = 10, 11, 12, 13, 14, 15, 16, 17
-REVERSE = 22
+REVERSE, AMBER = 22, 23
 TRIM, HUB = PLASTIC, RIM   # backward-compat aliases
 
 # ---------------------------------------------------------- material slots
@@ -99,7 +101,7 @@ CATEGORY_OF = {
     6: "body", 7: "plastic", 8: "body", 9: "plastic", 18: "body", 19: "plastic", 20: "body", 21: "plastic",
     GLASS: "glass", PLASTIC: "plastic", TIRE: "tire", RIM: "rim",
     HEADLIGHT: "lights", TAILLIGHT: "lights", ACCENT: "plastic", CHROME: "chrome",
-    REVERSE: "lights",
+    REVERSE: "lights", AMBER: "lights",
 }
 CATEGORY_ORDER = ["body", "plastic", "glass", "chrome", "tire", "rim", "lights"]
 CATEGORY_KD = {
@@ -391,7 +393,9 @@ def build_hull(m, profile, plan, body_cell, dark_cell, style,
                 yr = y0 + 0.3 * (y1 - y0)
                 vpanel(m, x, s * y0, s * yr, z0, z1, REVERSE)
                 y0 = yr
-            vpanel(m, x, s * y0, s * y1, z0, z1, lamp)
+            ya = y1 - 0.2 * (ly[1] - ly[0]) * hw   # outboard 20% is the indicator
+            vpanel(m, x, s * ya, s * y1, z0, z1, AMBER)
+            vpanel(m, x, s * y0, s * ya, z0, z1, lamp)
         center = style["grille_cell"] if sgn > 0 else PLASTIC
         vpanel(m, x, -0.44 * hw, 0.44 * hw, lo + 0.12 * h, lo + 0.50 * h, center)
 
@@ -607,7 +611,8 @@ def build_pickup():
                               rx, wr + style["arch_margin_cm"])
     for s in (1, -1):   # vertical corner taillights
         vpanel(m, tail_x - 0.6, s * (bed_w - 14), s * (bed_w - 0.5), 48.0, 86.0, PLASTIC)
-        vpanel(m, tail_x - 0.9, s * (bed_w - 12), s * (bed_w - 2), 60.0, 84.0, TAILLIGHT)
+        vpanel(m, tail_x - 0.9, s * (bed_w - 12), s * (bed_w - 2), 74.0, 84.0, AMBER)
+        vpanel(m, tail_x - 0.9, s * (bed_w - 12), s * (bed_w - 2), 60.0, 74.0, TAILLIGHT)
         vpanel(m, tail_x - 0.9, s * (bed_w - 12), s * (bed_w - 2), 50.0, 60.0, REVERSE)
     return finish(m, "SM_Car_Pickup", "Pickup", fx, rx, ht, wr, 2380.0, 268.0 - tail_x)
 

@@ -151,6 +151,7 @@ PAL = mcm.PALETTE
 N_CELL = mcm.N_CELL
 GLASS, PLASTIC, TIRE, RIM = mcm.GLASS, mcm.PLASTIC, mcm.TIRE, mcm.RIM
 HEADLIGHT, TAILLIGHT, ACCENT, CHROME, REVERSE = mcm.HEADLIGHT, mcm.TAILLIGHT, mcm.ACCENT, mcm.CHROME, mcm.REVERSE
+AMBER = mcm.AMBER
 CAT_OF = mcm.CATEGORY_OF
 CATS = mcm.CATEGORY_ORDER
 R_REF = mcm.REF_WHEEL_RADIUS_CM
@@ -1259,6 +1260,15 @@ def cut_body(car, body, extra):
         elif kind == "valance":
             continue
         elif kind == "head":
+            # outboard 20% is the amber indicator, a shallow recess beside the headlamp
+            # (deeper broke into the Concept's front arch behind its thin nose)
+            outer_hi = abs(y1) > abs(y0)
+            ya = y1 - 0.2 * w if outer_hi else y0 + 0.2 * w
+            aa, ab = sorted((ya, y1 if outer_hi else y0))
+            surface_cutter(cut, bvh, 0, sgn, rrect_at(0.5 * (aa + ab) + (-0.3 if outer_hi else 0.3), cv,
+                                                       ab - aa + 0.6, h, 0.3 * min(ab - aa, h)), 1.6, PLASTIC, AMBER)
+            y0, y1 = sorted((y0 if outer_hi else y1, ya))
+            w, cu = y1 - y0, 0.5 * (y0 + y1)
             surface_cutter(cut, bvh, 0, sgn, rrect_at(cu, cv, w, h, 0.4 * min(w, h)), 4.5, PLASTIC, CHROME)
             n = 2 if w > 2.6 * h else 1
             r = min(0.36 * h, 0.2 * w, 4.5)
@@ -1282,12 +1292,16 @@ def cut_body(car, body, extra):
                 xm = min(xl) - 3.2
                 rbox(inner, xm, xm + 1.0, ys[0], ys[-1], z0 + 0.1 * h, z0 + 0.1 * h + 1.0, HEADLIGHT, r=0.3)
         elif kind == "tail":
-            # outboard 70% tail, inboard 30% reverse (as the stylized lamp),
-            # plus a deeper inset lit area inside the tail part
+            # inboard 30% reverse, outboard 20% amber indicator, tail between
+            # (as the stylized lamp), plus a deeper inset lit area inside the tail part
             inboard_lo = abs(y0) < abs(y1)
             yr = y0 + 0.3 * w if inboard_lo else y1 - 0.3 * w
+            ya = y1 - 0.2 * w if inboard_lo else y0 + 0.2 * w
             ra, rb = sorted((y0 if inboard_lo else y1, yr))
-            ta, tb = sorted((yr, y1 if inboard_lo else y0))
+            aa, ab = sorted((ya, y1 if inboard_lo else y0))
+            ta, tb = sorted((yr, ya))
+            surface_cutter(cut, bvh, 0, sgn, rrect_at(0.5 * (aa + ab) + (-0.3 if inboard_lo else 0.3), cv,
+                                                       ab - aa + 0.6, h, 0.25 * h), 1.6, PLASTIC, AMBER)
             surface_cutter(cut, bvh, 0, sgn, rrect_at(0.5 * (ra + rb) + (0.3 if inboard_lo else -0.3), cv,
                                                        rb - ra + 0.6, h, 0.25 * h), 1.6, PLASTIC, REVERSE)
             surface_cutter(cut, bvh, 0, sgn, rrect_at(0.5 * (ta + tb), cv, tb - ta, h, 0.3 * h), 2.0,
