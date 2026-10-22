@@ -117,6 +117,7 @@ private:
 	int32 EditFailLeg = INDEX_NONE;    // waypoint whose leg has no road
 	bool bEditSaveFailed = false;
 	void ToggleMiniMap() { bShowMiniMap = !bShowMiniMap; }
+	void ToggleReplay();   // #9, defined in ODReplay.cpp
 	void ZoomIn() { MiniMapZoomM = FMath::Max(20.0f, MiniMapZoomM * 0.8f); }
 	void ZoomOut() { MiniMapZoomM = FMath::Min(800.0f, MiniMapZoomM / 0.8f); }
 

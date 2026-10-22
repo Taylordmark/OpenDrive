@@ -27,6 +27,7 @@
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
 #include "ODRaceManager.h"
+#include "ODReplay.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
@@ -102,6 +103,7 @@ void AODRaceHUD::RefreshODManagedKeyBindings()
 		{EODInputAction::MediaPlayPause, &AODRaceHUD::MediaPlayPause, false},
 		{EODInputAction::MediaNext, &AODRaceHUD::MediaNext, false},
 		{EODInputAction::MediaPrev, &AODRaceHUD::MediaPrev, false},
+		{EODInputAction::Replay, &AODRaceHUD::ToggleReplay, false},
 	};
 	for (const FActionFn& B : Binds)
 	{
@@ -2883,6 +2885,10 @@ void AODRaceHUD::DrawHUD()
 	// race timer, warnings (2026-10-14): Rajdhani + the cluster palette,
 	// centred and scaled from 1080p like the menus
 	const FMenuPaint HP{Canvas, MenuScale()};
+	if (const AODReplay* Replay = AODReplay::Find(GetWorld()); Replay && Replay->IsActive())
+	{
+		Replay->DrawOverlay(Canvas, MenuScale());
+	}
 	const FLinearColor Go(0.3f, 1.0f, 0.4f);
 
 	// ---- race timer / gate progress (needs an actual race)

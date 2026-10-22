@@ -62,6 +62,7 @@ enum class EODInputAction : uint8
 	MediaPlayPause,   // music controls: OS media keys (ODMedia)
 	MediaNext,
 	MediaPrev,
+	Replay,      // #9 instant replay
 	Count  // sentinel, not a real action
 };
 

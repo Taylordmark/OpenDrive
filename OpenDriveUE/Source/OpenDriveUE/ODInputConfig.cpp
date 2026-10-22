@@ -34,6 +34,7 @@ const FActionMeta ActionTable[] = {
 	{EODInputAction::MediaPlayPause, TEXT("MediaPlayPause"), EKeys::Backslash, FKey()},
 	{EODInputAction::MediaNext,   TEXT("MediaNext"),    EKeys::Period,    EKeys::Gamepad_DPad_Right},
 	{EODInputAction::MediaPrev,   TEXT("MediaPrev"),    EKeys::Comma,     EKeys::Gamepad_DPad_Left},
+	{EODInputAction::Replay,      TEXT("Replay"),       EKeys::I,         EKeys::Gamepad_DPad_Down},
 };
 static_assert(UE_ARRAY_COUNT(ActionTable) == FODInputConfig::NumActions,
 	"ActionTable must have one entry per EODInputAction");
