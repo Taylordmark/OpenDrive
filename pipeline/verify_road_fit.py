@@ -430,9 +430,10 @@ def check_poke_through():
         misses = int(np.isnan(p).sum())
         p = p[~np.isnan(p)]
         bad = np.where(poke > POKE_TOL_M)[0]
+        stats = (f"terrain-minus-road median {np.median(p):+.2f}m, p99.9 {np.percentile(p, 99.9):+.2f}m, "
+                 f"max {p.max():+.2f}m; " if len(p) else "")
         print(f"poke-through [{label}]: {len(idx)} non-bridge/tunnel station(s), {misses} without terrain; "
-              f"terrain-minus-road median {np.median(p):+.2f}m, p99.9 {np.percentile(p, 99.9):+.2f}m, "
-              f"max {p.max():+.2f}m; {len(bad)} above {POKE_TOL_M}m")
+              f"{stats}{len(bad)} above {POKE_TOL_M}m")
         for i in bad[np.argsort(-poke[bad])][:10]:
             print(f"  station {i}: terrain {poke[i]:+.2f}m above road at "
                   f"({pe[i]:.0f}, {pn[i]:.0f}) m")
