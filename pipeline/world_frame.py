@@ -37,6 +37,51 @@ WORLD_DATUM_M = {
     "california": 0.0,
 }
 
+# (2026-10-21, docs/area-picker-contract.md) Fixed zone worlds for areas drawn
+# in-game: a drawn polygon joins the zone holding its centre, so drawn areas
+# in one zone share coordinates and the 1 km cell grid. CONUS is 3 latitude
+# bands x 4 longitude bands (8 deg bands, parallels inset 1/6 per Snyder, so
+# scale error stays ~0.1%; members sit <~700 km from the origin, like
+# california's), plus Alaska and Hawaii. ZONES holds each one's (S, W, N, E)
+# pick box; their union is also the "US only" check.
+ZONES = {}
+for _b, (_s, _n) in zip("smn", ((24.0, 32.0), (32.0, 40.0), (40.0, 49.5))):
+    for _k, (_w, _e) in enumerate(((-125.0, -111.0), (-111.0, -97.0), (-97.0, -83.0), (-83.0, -66.5)), 1):
+        _d = (_n - _s) / 6
+        WORLDS[f"zone_{_b}{_k}"] = (_s + _d, _n - _d, (_s + _n) / 2, (_w + _e) / 2)
+        ZONES[f"zone_{_b}{_k}"] = (_s, _w, _n, _e)
+WORLDS["zone_alaska"] = (55.0, 65.0, 60.0, -150.0)
+ZONES["zone_alaska"] = (51.0, -180.0, 71.5, -129.9)
+WORLDS["zone_hawaii"] = (19.5, 21.5, 20.5, -157.0)
+ZONES["zone_hawaii"] = (18.8, -160.4, 22.4, -154.6)
+for _name in ZONES:
+    WORLD_DATUM_M[_name] = 0.0
+
+
+def pick_zone(lon, lat):
+    """Zone world whose pick box holds (lon, lat), or None (outside the US)."""
+    return next((z for z, (s, w, n, e) in ZONES.items() if s <= lat <= n and w <= lon <= e), None)
+
+
+# (2026-10-20) Drawn areas are recorded in data/user_areas.json
+# {"worlds": {name: [lat1, lat2, lat0, lon0]}, "areas": {...}}; their worlds
+# are zones above (setdefault keeps the table authoritative), datum sea
+# level like california. test_areas.py merges the "areas" half.
+USER_AREAS_JSON = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "user_areas.json"
+
+
+def load_user_areas():
+    import json
+    try:
+        return json.loads(USER_AREAS_JSON.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"worlds": {}, "areas": {}}
+
+
+for _name, _lcc in load_user_areas()["worlds"].items():
+    WORLDS.setdefault(_name, tuple(_lcc))
+    WORLD_DATUM_M.setdefault(_name, 0.0)
+
 # Chunks are corner-aligned at the frame origin, so the 2 km terrain tiles
 # and 500 m road tiles (also origin-aligned) nest inside them exactly.
 CHUNK_SIZE_M = 64000.0
