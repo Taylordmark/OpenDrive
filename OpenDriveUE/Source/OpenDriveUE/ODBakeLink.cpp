@@ -259,8 +259,9 @@ namespace
 	{
 		UWorld* World = GEngine && GEngine->GameViewport ? GEngine->GameViewport->GetWorld() : nullptr;
 		const AODVehiclePawn* Pawn = World ? Cast<AODVehiclePawn>(UGameplayStatics::GetPlayerPawn(World, 0)) : nullptr;
-		const bool bDrive = Pawn && Pawn->IsGroundSnapped() && !Pawn->IsInShowroom() && !World->IsPaused();
-		if (bDrive)
+		// (2026-10-21) just where the car is; no drive/menu mode - the runner always
+		// bakes at below-normal priority, so the OS keeps the game smooth on any screen
+		if (Pawn && !Pawn->IsInShowroom())
 		{
 			GLastPos = FVector2D(Pawn->GetActorLocation());
 			GLastHeading = (float)Pawn->GetActorRotation().Yaw;
@@ -273,10 +274,10 @@ namespace
 		}
 		const FString Key = ODBakeLink::ActiveKey();
 		const FString Text = FString::Printf(
-			TEXT("{\"area\": %s, \"mode\": \"%s\", \"x_cm\": %.1f, \"y_cm\": %.1f, \"heading_deg\": %.1f, ")
+			TEXT("{\"area\": %s, \"x_cm\": %.1f, \"y_cm\": %.1f, \"heading_deg\": %.1f, ")
 			TEXT("\"target_cm\": %s, \"quit_behaviour\": \"%s\", \"t\": %.3f}\n"),
 			Key.IsEmpty() ? TEXT("null") : *FString::Printf(TEXT("\"%s\""), *Key.ReplaceCharWithEscapedChar()),
-			bDrive ? TEXT("drive") : TEXT("menu"), GLastPos.X, GLastPos.Y, GLastHeading,
+			GLastPos.X, GLastPos.Y, GLastHeading,
 			GTarget ? *FString::Printf(TEXT("[%.1f, %.1f]"), GTarget->X, GTarget->Y) : TEXT("null"),
 			*Quit, FDateTime::UtcNow().ToUnixTimestampDecimal());
 		const FString Dir = ODBakeLink::RepoRoot() / TEXT("data/bake");

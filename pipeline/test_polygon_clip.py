@@ -100,4 +100,11 @@ both = [s for s in p1 if s in p2]
 assert {s[0].split()[0] for s in both} == rebuild_area.PASS_BOTH
 assert len(p1) + len(p2) - len(both) == len(rebuild_area.STAGES)
 assert rebuild_area.stages_for(None) == rebuild_area.STAGES
+# --- curtain post heights (build_horizon, pass 1)
+import shapely
+import build_horizon
+sq = shapely.Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
+pts = build_horizon.curtain_points(sq, lambda e, n: e + build_horizon.ORIGIN_HEIGHT_M)
+assert len(pts) == 16 and tuple(pts[1]) == (2500.0, -0.0, 2500.0), pts[:2]   # UE: Y = -north, Z vs datum
+assert tuple(pts[5]) == (10000.0, -2500.0, 10000.0), pts[5]
 print("test_polygon_clip: all checks passed")

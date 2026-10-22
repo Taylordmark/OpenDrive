@@ -56,13 +56,15 @@ Log: `data/bake/<key>/bake.log`.
 
 ## Car heartbeat: `data/bake/car.json` (game writes about 1 Hz on every screen)
 ```
-{"area": key | null, "mode": "drive" | "menu", "x_cm": f, "y_cm": f,
+{"area": key | null, "x_cm": f, "y_cm": f,
  "heading_deg": f, "target_cm": [x, y] | null,
  "quit_behaviour": "stop_after_job" | "keep_baking", "t": unix seconds}
 ```
-In `menu` mode the position is the last known one. The runner treats the file
-as stale after 30 s, meaning the game is gone. Priority: full with all workers
-in `menu`, below-normal with fewer workers in `drive`.
+The position is the car's last known one (it holds still in the garage and
+the menus). The runner treats the file as stale after 30 s, meaning the game
+is gone. (2026-10-21) No drive/menu mode: the runner always bakes at
+below-normal OS priority on all cores but two, so the game gets the CPU
+whenever it needs it while driving, and the bake gets the idle CPU at menus.
 
 ## Pass and job rect for pipeline stages (runner sets, stages read)
 - `OD_AREA=<key>` as today.

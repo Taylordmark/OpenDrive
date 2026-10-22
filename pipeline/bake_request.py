@@ -145,13 +145,13 @@ def plan_cells(poly_m):
                   if shape.intersects(box(i * CELL_M, j * CELL_M, (i + 1) * CELL_M, (j + 1) * CELL_M)))
 
 
-def next_job(cells, car_m, heading=None, wait_cell=None, driving=False):
+def next_job(cells, car_m, heading=None, wait_cell=None):
     """(job cells, rect_m x0,y0,x1,y1) for the next pass-2 job, or None.
     cells {"i_j": state}; car_m (x, y) zone metres; heading (east, north) unit
     vector; wait_cell = a cell the player is waiting on (start, teleport
     target): a 1 km job. Otherwise the pending cell nearest the car (one
     behind counts up to double), as the biggest aligned k km block that is
-    all pending, k <= 2 while driving within 2 km of it, else k <= 4."""
+    all pending, k <= 2 within 2 km of the car (stay just ahead), else k <= 4."""
     pending = {c for c, s in cells.items() if s == "pending"}
     if not pending:
         return None
@@ -167,7 +167,7 @@ def next_job(cells, car_m, heading=None, wait_cell=None, driving=False):
             ahead = (dx * heading[0] + dy * heading[1]) / d if heading and d else 1.0
             return d * (1.5 - 0.5 * ahead), c
         pick = min(pending, key=cost)
-        k = 2 if driving and cost(pick)[0] < 2 * CELL_M else 4
+        k = 2 if cost(pick)[0] < 2 * CELL_M else 4
     i, j = ij(pick)
     for k in range(k, 0, -1):
         bi, bj = i // k * k, j // k * k
@@ -281,30 +281,29 @@ def refresh_coverage():
 
 
 def read_car(key):
-    """(car.json or {}, the car if it's in this area else None, game alive,
-    driving = low priority). Never written = run by hand: alive, menu."""
+    """(car.json or {}, the car if it's in this area else None, game alive).
+    Never written = run by hand: alive."""
     raw = read_json(BAKE / "car.json")
     if raw is None:
-        return {}, None, True, False
+        return {}, None, True
     alive = time.time() - float(raw.get("t", 0)) <= CAR_STALE_S
     # ponytail: a car in another drawn area doesn't switch the runner to it yet
     # (scoping round 7); the game should only launch one runner at a time
-    return raw, (raw if raw.get("area") == key else None), alive, alive and raw.get("mode") == "drive"
+    return raw, (raw if raw.get("area") == key else None), alive
 
 
-def run_job(argv, env_extra, low, log, status, status_path, rebuild_cmd):
-    """One rebuild_area.py job; returns (exit code, last output lines)."""
-    env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
-    kw = {}
-    if low:   # driving: stay out of the game's way (Windows children inherit it)
-        env["OD_BAKE_WORKERS"] = str(max(1, (os.cpu_count() or 4) // 4))
-        if os.name == "nt":
-            kw["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
-        else:
-            kw["preexec_fn"] = lambda: os.nice(10)
+def run_job(argv, env_extra, log, status, status_path, rebuild_cmd):
+    """One rebuild_area.py job; returns (exit code, last output lines).
+    (2026-10-21) Always below-normal priority on all cores but two: the OS gives
+    the game the CPU whenever it wants it (driving) and the bake gets the rest
+    (menus, alt-tabbed), so the runner never needs to know which screen is up.
+    Windows children inherit the priority class."""
+    env = {**os.environ, "PYTHONUTF8": "1", **env_extra,
+           "OD_BAKE_WORKERS": str(max(1, (os.cpu_count() or 4) - 2))}
+    kw = ({"creationflags": subprocess.BELOW_NORMAL_PRIORITY_CLASS} if os.name == "nt"
+          else {"preexec_fn": lambda: os.nice(10)})
     cmd = list(rebuild_cmd) + argv
-    log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)} {env_extra} low={low} ===\n")
-    # ponytail: priority is set per job; a mode change mid-job applies from the next job
+    log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)} {env_extra} ===\n")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace", cwd=ROOT, env=env, **kw)
     tail = []
@@ -373,7 +372,7 @@ def run(req, rebuild_cmd=None, elev_range_m=None):
     write_status(status_path, status)
 
     with open(d / "bake.log", "a", encoding="utf-8") as log:
-        rc, tail = run_job(["--pass", "1"], {"OD_AREA": key, "OD_PASS": "1"}, read_car(key)[3],
+        rc, tail = run_job(["--pass", "1"], {"OD_AREA": key, "OD_PASS": "1"},
                            log, status, status_path, rebuild_cmd)
         if rc:
             status.update(state="failed", error="\n".join(tail))
@@ -397,7 +396,7 @@ def run(req, rebuild_cmd=None, elev_range_m=None):
         write_status(status_path, status)
 
         while True:
-            raw, car, alive, low = read_car(key)
+            raw, car, alive = read_car(key)
             if cancel.exists():
                 cancel.unlink(missing_ok=True)
                 status["state"] = "cancelled"
@@ -415,8 +414,7 @@ def run(req, rebuild_cmd=None, elev_range_m=None):
             if car_m is None:   # menu with no car here yet: grow outward from the start
                 car_m = to_zone([status["start_snapped_ll"] or req["start_ll"]], zone)[0]
             ready = status["cells"].get(status["start_cell"]) == "baked"
-            job = next_job(status["cells"], car_m, heading, target or (None if ready else status["start_cell"]),
-                           driving=low and car is not None)
+            job = next_job(status["cells"], car_m, heading, target or (None if ready else status["start_cell"]))
             if job is None:
                 status["state"] = "failed" if "failed" in status["cells"].values() else "done"
                 break
@@ -426,7 +424,7 @@ def run(req, rebuild_cmd=None, elev_range_m=None):
             write_status(status_path, status)
             rect_s = ",".join(str(int(v)) for v in rect)
             rc, tail = run_job(["--pass", "2", "--rect", rect_s],
-                               {"OD_AREA": key, "OD_PASS": "2", "OD_JOB_RECT_M": rect_s}, low,
+                               {"OD_AREA": key, "OD_PASS": "2", "OD_JOB_RECT_M": rect_s},
                                log, status, status_path, rebuild_cmd)
             for c in job_cells:
                 status["cells"][c] = "failed" if rc else "baked"

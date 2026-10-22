@@ -12,7 +12,8 @@ class UPostProcessComponent;
  * Spawned by AODGameMode::StartDrawnArea when ODBakeLink has an outline:
  *  - a curtain: a translucent M_ODCurtain ribbon standing on the outline
  *    (unreal/apply_boundary_materials.py), ground-traced every ~50 m, its
- *    unresolved posts re-traced as terrain streams in;
+ *    unresolved posts re-traced as terrain streams in; until then they stand
+ *    on pass 1's DEM heights (build_horizon.py's curtain_<key>_test.bin);
  *  - an unbound post-process that desaturates + fringes the view over the
  *    last 150 m inside the outline and fully outside it.
  * The physical push-back lives in UODVehicleMovement's fixed step; the
@@ -39,6 +40,7 @@ private:
 
 	TArray<FVector2D> Posts;    // densified outline, UE cm
 	TArray<float> PostZ;        // ground Z, NaN = not traced onto ground yet
+	TArray<float> BakedZ;       // pass-1 DEM height (curtain_<key>_test.bin), NaN = none
 	int32 NumUnresolved = 0;
 	double NextRetrace = 0.0;
 };

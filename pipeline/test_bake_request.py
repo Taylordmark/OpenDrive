@@ -68,7 +68,7 @@ grid = {f"{i}_{j}": "pending" for i in range(8) for j in range(8)}
 assert br.next_job(grid, (500, 500), None, "3_3") == (["3_3"], (3000, 3000, 4000, 4000))
 job, rect = br.next_job(grid, (-20000, -20000))           # far car: a 4 km block
 assert len(job) == 16 and rect == (0, 0, 4000, 4000), (job, rect)
-job, rect = br.next_job(grid, (4500, 4500), driving=True)  # driving right there: 2 km
+job, rect = br.next_job(grid, (4500, 4500))                # car right there: 2 km
 assert len(job) == 4 and rect == (4000, 4000, 6000, 6000), (job, rect)
 g2 = {**grid, "2_2": "baked"}
 job, rect = br.next_job(g2, (-20000, -20000))              # block has a baked cell: shrinks
@@ -150,8 +150,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert st["name"] == "Bigtown area" and abs(br.to_zone([st["start_snapped_ll"]], ZONE)[0][1] - (Y0 + 1200)) < 1
     jobs = (tmp / "jobs.txt").read_text().splitlines()
     assert jobs[0] == "--pass 1|" and jobs[1].endswith(f"|{int(X0) + 2000},{int(Y0) + 1000},{int(X0) + 3000},{int(Y0) + 2000}"), jobs
-    # pass 1, start cell, the 3 cells south of it (a 3 km block), then 1 km leftovers
-    assert len(jobs) == 5 and len(st["cells"]) == 6, jobs
+    # pass 1, start cell, then (all within 2 km of the start) 1-2 km jobs
+    assert len(jobs) == 4 and len(st["cells"]) == 6, jobs
     ua = json.loads(world_frame.USER_AREAS_JSON.read_text())
     a = ua["areas"][key]
     assert a["world"] == ZONE and a["drawn"] and a["terrain_tile_m"] == 1000 and a["name"] == "Bigtown area"
@@ -166,7 +166,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # cancel: stops before pass 2; a stale car.json + stop_after_job pauses
     for setup, want in ((lambda: (br.BAKE / "u_c").mkdir(parents=True) or (br.BAKE / "u_c" / "cancel").touch(), "cancelled"),
-                        (lambda: br.write_json(br.BAKE / "car.json", {"t": time.time() - 60, "mode": "menu"}), "paused")):
+                        (lambda: br.write_json(br.BAKE / "car.json", {"t": time.time() - 60}), "paused")):
         for p in ("road_tiles", "raw"):
             shutil.rmtree(tmp / "data" / p, ignore_errors=True)
         shutil.rmtree(br.BAKE / "u_c", ignore_errors=True)

@@ -9,6 +9,8 @@
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "ODBakeLink.h"
 
 using namespace UE::Geometry;
@@ -59,6 +61,37 @@ void AODBoundaryEffect::BeginPlay()
 	PostZ.Init(NAN, Posts.Num());
 	NumUnresolved = Posts.Num();
 
+	// (2026-10-21) pass 1's DEM heights along the outline: 'ODC1' + uint32 N +
+	// N * (float X, Y, Z cm), so far posts stand on the ground before any trace
+	// ponytail: nearest point by brute force, once (~2.4k posts x ~4.8k points at 30 km)
+	BakedZ.Init(NAN, Posts.Num());
+	TArray<uint8> Bin;
+	const FString CurtainPath = FPaths::ProjectContentDir() / FString::Printf(
+		TEXT("OpenDrive/Masks/curtain_%s_test.bin"), *ODBakeLink::ActiveKey());
+	if (FFileHelper::LoadFileToArray(Bin, *CurtainPath, FILEREAD_Silent) && Bin.Num() >= 8
+		&& FMemory::Memcmp(Bin.GetData(), "ODC1", 4) == 0)
+	{
+		uint32 N = 0;
+		FMemory::Memcpy(&N, Bin.GetData() + 4, 4);
+		if (Bin.Num() >= 8 + (int64)N * 12)
+		{
+			const float* P = reinterpret_cast<const float*>(Bin.GetData() + 8);
+			for (int32 i = 0; i < Posts.Num(); ++i)
+			{
+				double Best = TNumericLimits<double>::Max();
+				for (uint32 k = 0; k < N; ++k)
+				{
+					const double D2 = FVector2D::DistSquared(Posts[i], FVector2D(P[k * 3], P[k * 3 + 1]));
+					if (D2 < Best)
+					{
+						Best = D2;
+						BakedZ[i] = P[k * 3 + 2];
+					}
+				}
+			}
+		}
+	}
+
 	Curtain = NewObject<UDynamicMeshComponent>(this);
 	Curtain->SetupAttachment(RootComponent);
 	Curtain->SetCollisionProfileName(TEXT("NoCollision"));
@@ -78,7 +111,8 @@ void AODBoundaryEffect::RebuildCurtain()
 	{
 		return;
 	}
-	// unresolved posts take the nearest resolved neighbour's Z (else the car's)
+	// unresolved posts stand on their baked DEM height, else take the nearest
+	// resolved neighbour's Z (else the car's)
 	TArray<double> Z;
 	Z.SetNumUninitialized(Posts.Num());
 	const APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0);
@@ -86,6 +120,11 @@ void AODBoundaryEffect::RebuildCurtain()
 	for (int32 i = 0; i < Posts.Num(); ++i)
 	{
 		Z[i] = Fallback;
+		if (FMath::IsNaN(PostZ[i]) && !FMath::IsNaN(BakedZ[i]))
+		{
+			Z[i] = BakedZ[i];
+			continue;
+		}
 		for (int32 d = 0; d < Posts.Num() / 2 + 1; ++d)
 		{
 			const float L = PostZ[(i - d + Posts.Num()) % Posts.Num()], R = PostZ[(i + d) % Posts.Num()];
