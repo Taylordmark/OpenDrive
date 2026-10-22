@@ -128,12 +128,15 @@ def main():
         tall_counts[(tx, ty)] += (known_levels(b) or 0) >= CITY_TALL_LEVELS
         shop_counts[(tx, ty)] += b.get("building_tag") in SHOP_TAGS
 
+    # (2026-10-21) thresholds are per 2 km tile; a drawn area's 1 km tiles
+    # count as 2 km-equivalents so a downtown still reads as City
+    k = (200000.0 / TERRAIN_TILE_SIZE_CM) ** 2
     tiles = {}
     for (tx, ty), n in counts.items():
-        if n < MIN_BUILDINGS_PER_TILE:
+        if n * k < MIN_BUILDINGS_PER_TILE:
             continue
         frac = residential_counts[(tx, ty)] / n
-        tiles[f"{tx},{ty}"] = pick_archetype(n, frac, tall_counts[(tx, ty)], shop_counts[(tx, ty)])
+        tiles[f"{tx},{ty}"] = pick_archetype(n * k, frac, tall_counts[(tx, ty)] * k, shop_counts[(tx, ty)] * k)
 
     # building count per tile too: build_traffic_demand.py's population proxy
     OUT_PATH.write_text(json.dumps({"tiles": tiles,
