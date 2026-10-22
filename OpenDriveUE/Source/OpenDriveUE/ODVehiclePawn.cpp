@@ -639,8 +639,16 @@ void AODVehiclePawn::BeginPlay()
 void AODVehiclePawn::TrySnapToGround()
 {
 	// sample every tick (not just post-settle) so hitches during the settle
-	// window already count against the quiet period
-	if (GetWorld()->GetDeltaSeconds() > SnapHitchFrameSec)
+	// window already count against the quiet period. A hitch is a frame well
+	// over the running frame time (2026-10-22): against the flat 75 ms alone, a
+	// GPU-bound area at a steady ~73 ms/frame (livetest6, Summit County) held
+	// the release ~7.5 s past its settle for no gain - the car drives at that
+	// frame rate anyway. The running time ignores the frame's own excess over
+	// 0.25 s so one load frame doesn't blind it to the next burst.
+	const float Dt = GetWorld()->GetDeltaSeconds();
+	const float Clamped = FMath::Min(Dt, 0.25f);
+	SnapFrameAvgSec = SnapFrameAvgSec > 0.0f ? FMath::Lerp(SnapFrameAvgSec, Clamped, 0.1f) : Clamped;
+	if (Dt > FMath::Max(SnapHitchFrameSec, 2.0 * SnapFrameAvgSec))
 	{
 		LastHitchTime = GetWorld()->GetTimeSeconds();
 	}
@@ -986,6 +994,8 @@ void AODVehiclePawn::TrySnapToGround()
 		Movement->EngageParkHold();
 	}
 	bGroundSnapped = true;
+	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: physics released %.1fs after spawn (settle ready %.1fs, frame avg %.0f ms)"),
+		Now - SpawnTime, SnapReadyTime - SpawnTime, SnapFrameAvgSec * 1000.0f);
 	ODBakeLink::SetTarget(nullptr);   // car.json: no longer waiting anywhere (2026-10-21)
 	bEverGroundSnapped = true;   // real-world snap completed - arms the warm
 	                              // settle for later mid-drive resets (NOT set

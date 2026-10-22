@@ -1494,19 +1494,28 @@ void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
 				return;
 			}
 			const bool bOn = i == Focus;
-			const float R = (bOn ? 5.5f : 3.5f) * S;
+			// picked (2026-10-22): an accent dot with a ring pulsing out of it and
+			// "Loading" in place of the sub line until the fly-in lands on the area
+			const bool bPicked = i == Menu->GetPickingPin();
+			const float R = (bPicked ? 7.0f : bOn ? 5.5f : 3.5f) * S;
+			if (bPicked)
+			{
+				const float Pulse = float(FMath::Frac(FPlatformTime::Seconds() * 1.5));
+				Disc(Pt, R + (3.0f + 14.0f * Pulse) * S, FLinearColor(Accent.R, Accent.G, Accent.B, 0.45f * (1.0f - Pulse)));
+			}
 			Disc(Pt, R + 2.5f * S, FLinearColor(Accent.R, Accent.G, Accent.B, bOn ? 0.3f : 0.18f));
-			Disc(Pt, R, bOn ? FLinearColor::White : Accent);
+			Disc(Pt, R, bPicked ? Accent : bOn ? FLinearColor::White : Accent);
 			if (!bOn)
 			{
 				return;
 			}
-			const float LX = Pt.X + 12.0f * S;
-			const bool bSub = !Pins[i].Sub.IsEmpty();
+			const float LX = Pt.X + (bPicked ? 15.0f : 12.0f) * S;
+			const FString Sub = bPicked ? TEXT("Loading…") : Pins[i].Sub;
+			const bool bSub = !Sub.IsEmpty();
 			P.Text(Pins[i].Name, LX, Pt.Y - (bSub ? 7.0f : 0.0f) * S, 16.0f, EMenuWeight::Bold, Accent, false, 40);
 			if (bSub)
 			{
-				P.Text(Pins[i].Sub, LX, Pt.Y + 9.0f * S, 12.0f, EMenuWeight::SemiBold, DimCol);
+				P.Text(Sub, LX, Pt.Y + 9.0f * S, 12.0f, EMenuWeight::SemiBold, bPicked ? FLinearColor::White : DimCol);
 			}
 		};
 		for (int32 i = 0; i < Pins.Num(); ++i)

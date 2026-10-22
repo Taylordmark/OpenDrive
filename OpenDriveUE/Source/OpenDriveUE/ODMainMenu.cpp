@@ -616,6 +616,12 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	}
 	const double Now = GetWorld()->GetRealTimeSeconds();
 	AreaDraw.Poll(Now);   // coverage.json / status.json / pass-1 roads, when they change (1 Hz)
+	if (VistaAtFrame != 0 && GFrameCounter >= VistaAtFrame)
+	{
+		VistaAtFrame = 0;
+		ShowStartVista(AreaIdx);
+	}
+	UpdatePreload(Now);
 	if (DriveStart >= 0.0)
 	{
 		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
@@ -1206,18 +1212,67 @@ void AODMainMenu::PickPin(int32 Pin)
 	{
 		return;
 	}
-	const int32 Area = AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key);
+	const int32 Area = PinArea(Pin);
 	if (Area == INDEX_NONE)
 	{
 		return;
 	}
 	SetFocusedPin(Pin);
-	// the cluster's last-picked area if it is in it, else the pin's own
-	// (2026-10-14): drape its relief and fly down onto it; Tick enters AreaMap once landed
-	FocusArea(ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area);
+	// drape its relief and fly down onto it (2026-10-14); Tick enters AreaMap once landed
+	FocusArea(Area);
 	PickingPin = Pin;
 	FlyToArea(WorldPickSec);
-	ShowStartVista(AreaIdx);   // preload (2026-10-16): streams during the fly-in and the turnout pick
+	// the vista (2026-10-16) streams during the fly-in and the turnout pick, but
+	// spawning it holds the game thread for seconds (livetest6: 6.1 s), so it
+	// waits two frames for the picked pin to reach the screen first (2026-10-22)
+	VistaAtFrame = GFrameCounter + 2;
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: pin picked -> %s"), *AreaKeys[AreaIdx]);
+}
+
+int32 AODMainMenu::PinArea(int32 Pin) const
+{
+	const int32 Area = Globe.IsValid() && Globe->GetPins().IsValidIndex(Pin)
+		? AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key) : INDEX_NONE;
+	return Area != INDEX_NONE && ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area;
+}
+
+void AODMainMenu::UpdatePreload(double Now)
+{
+	const int32 Area = Screen == EODMenuScreen::World ? PinArea(FocusedPin)
+		: Screen == EODMenuScreen::AreaMap || Screen == EODMenuScreen::Start ? AreaIdx : INDEX_NONE;
+	const FString Want = Area != CurrentAreaIdx && AreaLevels.IsValidIndex(Area) ? AreaLevels[Area] : FString();
+	if (Want != PreloadWant)
+	{
+		PreloadWant = Want;
+		PreloadWantSince = Now;
+	}
+	if (PreloadName == PreloadWant || bPreloadInFlight)
+	{
+		return;   // held, or one still landing (it is released once it has)
+	}
+	if (!PreloadName.IsEmpty())
+	{
+		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload released %s"), *PreloadName);
+		Preloaded.Reset();   // unreferenced now: the next GC drops it
+		PreloadName.Empty();
+	}
+	if (PreloadWant.IsEmpty() || Now - PreloadWantSince < PreloadDelaySec)
+	{
+		return;
+	}
+	PreloadName = PreloadWant;
+	PreloadStart = Now;
+	bPreloadInFlight = true;
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload start %s"), *PreloadName);
+	LoadPackageAsync(PreloadName, FLoadPackageAsyncDelegate::CreateWeakLambda(this,
+		[this](const FName& Name, UPackage* Package, EAsyncLoadingResult::Type Result)
+		{
+			bPreloadInFlight = false;
+			Preloaded.Reset(Result == EAsyncLoadingResult::Succeeded ? Package : nullptr);
+			UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload %s %s in %.2f s%s"), *Name.ToString(),
+				Preloaded ? TEXT("loaded") : TEXT("FAILED"), GetWorld()->GetRealTimeSeconds() - PreloadStart,
+				PreloadWant == PreloadName ? TEXT("") : TEXT(" (no longer wanted)"));
+		}));
 }
 
 void AODMainMenu::FlyToArea(float Seconds)
@@ -1532,6 +1587,8 @@ void AODMainMenu::DriveNow()
 	SavePicks();   // (Activate holds Drive until the cut, so no fade is pending here)
 	DriveStart = GetWorld()->GetRealTimeSeconds();   // Tick runs the ease / fade, then DriveGo
 	bDriveHere = !(AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx);
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s, level package %s)"), bDriveHere ? TEXT("here") : TEXT("open level"),
+		bDriveHere ? TEXT("n/a") : Preloaded ? TEXT("preloaded") : bPreloadInFlight ? TEXT("still loading") : TEXT("not preloaded"));
 	const AODVehiclePawn* Pawn = FindPawn();
 	if (const UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr)
 	{
