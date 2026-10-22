@@ -203,7 +203,7 @@ constexpr double WorldOverviewAlt = 1.7;
 constexpr float WorldShowSec = 0.9f;           // fly out to the overview on (re)entering World
 constexpr float WorldBrowseSec = 0.7f;         // arrows: fly to the next pin at 0.7 x overview
 constexpr double WorldPickAlt = 0.06;          // fly-in altitude for an area without a relief drape
-constexpr const TCHAR* DrawnAreaLevel = TEXT("/Game/Areas/OpenWorld_Template");   // (2026-10-21) + ?odarea=<key>
+constexpr const TCHAR* DrawnAreaLevel = TEXT("/Game/Areas/AreaTemplate");   // (2026-10-21) + ?odarea=<key>
 constexpr float WorldPickSec = 1.8f;           // picked pin: fly down onto the drape, then the AreaMap screen
 constexpr float WorldBlendSec = 0.5f;          // view target blend onto the globe camera
 // AreaMap framing (2026-10-14): the drape fits the screen left of the rows
