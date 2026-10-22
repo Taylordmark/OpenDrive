@@ -39,6 +39,11 @@ constexpr int32 FarCardsPerCell = 3;
 // terrain (analyze_forest_distribution.py --zcheck): floating past the 1.5 m
 // sink 2.4% -> 0.6% (Summit County), 5.7% -> 1.2% (Deals Gap).
 constexpr double FarExtraSink = 0.25;
+// Past ~1.5 km (where cards drop to LOD1, MakeCardMesh) the extra cards cull
+// and the primary card's LOD1 stands 1.7x wider for the cell's ~3 crowns:
+// ~90% of the 5 km disc draws 1 card per cell, not 3 (4 GB VRAM pass).
+constexpr int32 FarExtraCullCm = 150000;
+constexpr float FarLod1Widen = 1.7f;
 // Band cards hide per 200 m square, not per 1 km chunk: hiding a whole chunk
 // once it touched SpawnRadius left the road corridor bare out to ~1.9 km
 // ahead, since the near trees stop at SpawnRadius.
@@ -150,6 +155,7 @@ UStaticMesh* AODForestManager::MakeCardMesh(int32 AtlasRow, int32 AtlasCol)
 	for (int32 Lod = 0; Lod < 2; ++Lod)
 	{
 		const int32 NumCards = Lod == 0 ? 3 : 2;
+		const float Half = Lod == 0 ? 50.0f : 50.0f * FarLod1Widen;
 		FMeshDescription& Desc = Descs[Lod];
 		FStaticMeshAttributes Attr(Desc);
 		Attr.Register();
@@ -182,11 +188,11 @@ UStaticMesh* AODForestManager::MakeCardMesh(int32 AtlasRow, int32 AtlasCol)
 		for (int32 i = 0; i < NumCards; ++i)
 		{
 			const float Ang = i * UE_PI / NumCards;
-			const FVector3f D(FMath::Cos(Ang) * 50.0f, FMath::Sin(Ang) * 50.0f, 0.0f);
+			const FVector3f D(FMath::Cos(Ang) * Half, FMath::Sin(Ang) * Half, 0.0f);
 			const FVector3f Up(0, 0, 100);
 			Quad({-D, D, D + Up, -D + Up});
 		}
-		Quad({{-50, -50, 55}, {50, -50, 55}, {50, 50, 55}, {-50, 50, 55}});
+		Quad({{-Half, -Half, 55}, {Half, -Half, 55}, {Half, Half, 55}, {-Half, Half, 55}});
 	}
 
 	UStaticMesh* Mesh = NewObject<UStaticMesh>(this);
@@ -197,6 +203,8 @@ UStaticMesh* AODForestManager::MakeCardMesh(int32 AtlasRow, int32 AtlasCol)
 	Mesh->BuildFromMeshDescriptions({&Descs[0], &Descs[1]}, Params);
 	// sphere ~15 m for a needle card: 0.02 is ~1.5 km at the game's FOV. The
 	// build's default (0.75^LOD) would drop to LOD1 at ~40 m.
+	// ponytail: bounds come from LOD0, so the wider LOD1 can frustum-cull a
+	// few px early at the screen edge; extend the bounds if that ever shows.
 	Mesh->GetRenderData()->ScreenSize[1].Default = 0.02f;
 	return Mesh;
 }
@@ -212,8 +220,8 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 	}
 	const int32 Ix0 = (Key.X - Tile.X * 2) * (FarCells / 2), Iy0 = (Key.Y - Tile.Y * 2) * (FarCells / 2);
 
-	// batch key: mesh, band square (-1 = off-band). Card meshes first, then street species.
-	TMap<TPair<UStaticMesh*, int32>, TArray<FTransform>> Batches;
+	// batch key: mesh, band square (-1 = off-band), extra card (k > 0). Card meshes first, then street species.
+	TMap<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>> Batches;
 	TArray<uint8> Bytes;
 	Bytes.SetNumUninitialized(Recs->Value * FarRecBytes);
 	if (!FarFile->Seek(Recs->Key) || !FarFile->Read(Bytes.GetData(), Bytes.Num()))
@@ -272,7 +280,7 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 			UStaticMesh* Mesh = TreeMeshes.IsValidIndex(Species) ? TreeMeshes[Species].Get() : nullptr;
 			if (Mesh)
 			{
-				Batches.FindOrAdd({Mesh, false}).Add(FTransform(Yaw, Base - FVector(0, 0, 20), FVector(Rng.FRandRange(0.9, 1.25))));
+				Batches.FindOrAdd({Mesh, -1, false}).Add(FTransform(Yaw, Base - FVector(0, 0, 20), FVector(Rng.FRandRange(0.9, 1.25))));
 				Chunk.Trunks.Add(Base);
 			}
 			continue;
@@ -282,7 +290,7 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 		const int32 Sub = bBand ? (Iy - Iy0) / FarBandSubCells * FarBandSubs + (Ix - Ix0) / FarBandSubCells : -1;
 		const double Gx = Slope(Cell, Base, 0), Gy = Slope(Cell, Base, 1);
 		const FVector Center(Tile.X * FarTileCm + (Ix + 0.5) * FarCellCm, Tile.Y * FarTileCm + (Iy + 0.5) * FarCellCm, 0.0);
-		TArray<FTransform>& Batch = Batches.FindOrAdd({CardMeshes[bNeedle ? 0 : 1].Get(), Sub});
+		UStaticMesh* Card = CardMeshes[bNeedle ? 0 : 1].Get();
 		for (int32 k = 0; k < FarCardsPerCell; ++k)
 		{
 			FVector At = Base;
@@ -295,7 +303,7 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 			const FRotator CardYaw = k == 0 ? Yaw : FRotator(0.0, Rng.FRandRange(0.0, 360.0), 0.0);
 			const double W = bNeedle ? Rng.FRandRange(700.0, 1000.0) : Rng.FRandRange(1100.0, 1700.0);
 			const double H = bNeedle ? Rng.FRandRange(1400.0, 2200.0) : Rng.FRandRange(1000.0, 1500.0);
-			Batch.Add(FTransform(CardYaw, At - FVector(0, 0, 150), FVector(W / 100.0, W / 100.0, H / 100.0)));
+			Batches.FindOrAdd({Card, Sub, k > 0}).Add(FTransform(CardYaw, At - FVector(0, 0, 150), FVector(W / 100.0, W / 100.0, H / 100.0)));
 			if (!bBand)
 			{
 				Chunk.Trunks.Add(At);
@@ -303,9 +311,10 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 		}
 	}
 
-	for (TPair<TPair<UStaticMesh*, int32>, TArray<FTransform>>& B : Batches)
+	for (TPair<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>>& B : Batches)
 	{
-		UStaticMesh* Mesh = B.Key.Key;
+		UStaticMesh* Mesh = B.Key.Get<0>();
+		const int32 BandSub = B.Key.Get<1>();
 		const bool bCard = CardMeshes.Contains(Mesh);
 		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
 		Hism->SetupAttachment(RootComponent);
@@ -317,23 +326,27 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 			if (DeciduousFoliageMID) { Hism->SetMaterial(1, DeciduousFoliageMID); }
 		}
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		// cards: whole far radius; street trees: the near trees' 450/600 m
-		Hism->SetCullDistances(bCard ? (int32)(FarForestRadius * 0.9f) : 45000, bCard ? (int32)FarForestRadius : 60000);
+		// cards: whole far radius (extras FarExtraCullCm); street trees: the near trees' 450/600 m
+		const int32 CullEnd = !bCard ? 60000 : B.Key.Get<2>() ? FarExtraCullCm : (int32)FarForestRadius;
+		Hism->SetCullDistances(bCard ? (int32)(CullEnd * 0.9f) : 45000, CullEnd);
 		// ponytail: cards cast no shadow (100k+ instances in VSM); street trees do
 		Hism->SetCastShadow(!bCard);
 		Hism->WorldPositionOffsetDisableDistance = 10000;   // ODForestManager.cpp WpoDisableCm
 		Hism->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
 		Hism->SetAffectDynamicIndirectLighting(false);
+		// cards stand past Lumen's ~200 m trace range and cast no shadow: keep
+		// their ~350k instances out of the TLAS
+		Hism->bVisibleInRayTracing = !bCard;
 		Hism->RegisterComponent();
 		Hism->AddInstances(B.Value, false, /*bWorldSpace*/false);   // actor-relative, same as BuildTile
-		if (B.Key.Value < 0)
+		if (BandSub < 0)
 		{
 			Chunk.Hisms.Add(Hism);
 			continue;
 		}
 		Hism->SetVisibility(false);   // UpdateFarForest shows it once the square is past the near scatter
 		Chunk.BandHisms.Add(Hism);
-		const FIntPoint Sq(B.Key.Value % FarBandSubs, B.Key.Value / FarBandSubs);
+		const FIntPoint Sq(BandSub % FarBandSubs, BandSub / FarBandSubs);
 		Chunk.BandCenters.Add(FVector2D(Key) * FarChunkCm + (FVector2D(Sq) + 0.5) * (FarBandSubCells * FarCellCm));
 	}
 }
