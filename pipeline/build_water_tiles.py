@@ -1000,10 +1000,10 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
                            (qre1 * 100.0, -qrn1 * 100.0), (qle1 * 100.0, -qln1 * 100.0)]
                 za = _lerp(z_cm[i], z_cm[i + 1], ta)
                 zb = _lerp(z_cm[i], z_cm[i + 1], tb)
-                q_z_cm = float((za + zb) / 2.0)
-                verts, uvs, tris, method = build_lake_mesh(q_xy_cm, q_z_cm)
+                verts, uvs, tris, method = build_lake_mesh(q_xy_cm, float((za + zb) / 2.0))
                 if len(tris) == 0:
                     return 0.0
+                tilt_ribbon_quad(verts, q_xy_cm, za, zb)
                 cx_cm = float(np.mean([p[0] for p in q_xy_cm]))
                 cy_cm = float(np.mean([p[1] for p in q_xy_cm]))
                 ribbons.append({"verts": verts, "uvs": uvs, "tris": tris,
@@ -1050,6 +1050,17 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
         "n_gap_segments": n_gap_segments, "n_gap_fragments_dropped": n_gap_fragments_dropped,
     }
     return ribbons, summaries, stats
+
+
+def tilt_ribbon_quad(verts, q_xy_cm, za, zb):
+    """Slopes a ribbon quad from za (its ta edge, q_xy_cm[0:2]) to zb (tb
+    edge, [2:4]) in place. Flat quads stepped ~9 m apart down Calderwood
+    dam's face read as floating strips (Deals Gap, 2026-10-21); sloped ones
+    meet their neighbours at the same Z."""
+    a = np.mean(q_xy_cm[0:2], axis=0)
+    d = np.mean(q_xy_cm[2:4], axis=0) - a
+    s = np.clip((verts[:, :2] - a) @ d / max(float(d @ d), 1e-6), 0.0, 1.0)
+    verts[:, 2] = za + (zb - za) * s
 
 
 def polygon_area_m2(ring_e, ring_n):
@@ -1270,6 +1281,7 @@ def main():
     buckets = defaultdict(list)
     n_too_small = n_fallback_elev = n_fan_fallback = n_flowing = 0
     lake_summaries = []
+    lake_rings_m = []
 
     for poly in polygons:
         if poly.get("water_tag") in FLOWING_WATER_TAGS:
@@ -1313,6 +1325,7 @@ def main():
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
         buckets[(tx, ty)].append({"verts": verts, "uvs": uvs, "tris": tris, "kind": KIND_LAKE})
+        lake_rings_m.append(np.c_[east_m, north_m])
 
         lake_summaries.append({
             "way_id": poly["way_id"], "name": poly["name"] or "(unnamed)",
@@ -1331,6 +1344,15 @@ def main():
         print("  WARNING: no road points loaded - waterway/road overlap check skipped")
     ribbons, chain_summaries, ww_stats = build_waterway_ribbons(
         chains, session, dem_cache, road_idx)
+    # A river's OSM line runs on through the lakes and river polygons it
+    # feeds; its flat-profile ribbon there floated metres over (or under) the
+    # polygon's own surface (Calderwood tailrace, Deals Gap 2026-10-21).
+    import shapely
+    lakes_union = shapely.union_all([shapely.make_valid(shapely.Polygon(r)) for r in lake_rings_m])
+    n_ribbon_all = len(ribbons)
+    ribbons = [rb for rb in ribbons if not shapely.contains_xy(
+        lakes_union, rb["centroid_cm"][0] / 100.0, -rb["centroid_cm"][1] / 100.0)]
+    print(f"  dropped {n_ribbon_all - len(ribbons)} ribbon segment(s) lying inside a lake polygon")
     for rb in ribbons:
         cx_cm, cy_cm = rb["centroid_cm"]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)

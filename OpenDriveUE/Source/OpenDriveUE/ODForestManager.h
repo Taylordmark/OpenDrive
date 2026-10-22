@@ -268,6 +268,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
 	float GrassShoulderClearCm = 350.0f;
 
+	/** Lattice corners this close to a junction-pad point are bare, so grass
+	 *  and bushes stay off pads whose collision hasn't registered (Deals Gap,
+	 *  2026-10-21). export_pad_points_bin.py keeps every pad point within
+	 *  this of a sample - keep its PAD_REACH_CM in step. */
+	static constexpr float GrassPadClearCm = 400.0f;
+
 	UPROPERTY(EditAnywhere, Category = "Ground Cover")
 	float RockSlopeMinRatio = 0.04f;
 
@@ -501,6 +507,7 @@ private:
 	             float& OutForestWeight, EODBiome& OutNearestBiome) const;
 	bool ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const;
 	bool IsNearCenterline(double WorldX, double WorldY) const;
+	bool IsNearPadPoint(double WorldX, double WorldY) const;
 	bool WithinCenterlineBand(double WorldX, double WorldY) const;
 	bool IsNearBuilding(double WorldX, double WorldY) const;
 	bool IsNearRoadStation(double WorldX, double WorldY) const;
@@ -768,6 +775,7 @@ private:
 
 	TArray<FVector2D> RoadCenterline;
 	TMap<FIntPoint, TArray<int32>> CenterlineBuckets;
+	int32 PadPointStart = MAX_int32;   // RoadCenterline index where padpts_ begin
 	bool bUseCenterlineExclusion = false;
 	static constexpr float CenterlineCellCm = 3000.0f;   // 30 m, >> 5 m station spacing
 
