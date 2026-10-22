@@ -260,7 +260,7 @@ void ODRoadTrip::DrawHUD(const AActor* Ctx, UCanvas* Canvas, float S, bool bMetr
 		{TEXT("Average speed"), Speed(Trip->DistCm / Sec)},
 		{TEXT("Top speed"), Speed(Trip->TopCmS)},
 	};
-	const float W = 460.0f * S, RowH = 34.0f * S, H = 96.0f * S + RowH * UE_ARRAY_COUNT(Rows);
+	const float W = 460.0f * S, TripRowH = 34.0f * S, H = 96.0f * S + TripRowH * UE_ARRAY_COUNT(Rows);
 	const float X = Cx - W * 0.5f, Y = Canvas->SizeY * 0.28f;
 	const FLinearColor Ok(0.4f, 1.0f, 0.5f);
 	Rect(X, Y, W, H, Ink.CopyWithNewOpacity(0.82f));
@@ -269,7 +269,7 @@ void ODRoadTrip::DrawHUD(const AActor* Ctx, UCanvas* Canvas, float S, bool bMetr
 	Text(FString::Printf(TEXT("%s  to  %s"), *Trip->StartName, *Trip->DestName), Cx, Y + 62.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol, 1);
 	for (int32 i = 0; i < UE_ARRAY_COUNT(Rows); ++i)
 	{
-		const float Ry = Y + 100.0f * S + RowH * i;
+		const float Ry = Y + 100.0f * S + TripRowH * i;
 		Text(Rows[i].Key, X + 32.0f * S, Ry, 20.0f, EMenuWeight::Medium, DimCol, 0);
 		Text(Rows[i].Value, X + W - 32.0f * S, Ry, 22.0f, EMenuWeight::Bold, TextCol, 2);
 	}

@@ -14,6 +14,7 @@ THIRD_PARTY_INCLUDES_START
 #include <winrt/Windows.Storage.Streams.h>
 THIRD_PARTY_INCLUDES_END
 #include "Windows/HideWindowsPlatformTypes.h"
+#undef LoadImage   // winuser.h macro; unity builds put ODTerrainManager (FImageUtils::LoadImage) after this file
 #endif
 
 namespace
