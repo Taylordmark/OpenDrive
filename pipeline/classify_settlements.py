@@ -50,6 +50,10 @@ from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, to_local
 
 MIN_BUILDINGS_PER_TILE = 3   # below this, a tile isn't "populated" - just a
                               # stray footprint or two near town's edge
+# (2026-10-21) settlements are classified on a fixed 2 km grid whatever the
+# area's terrain tile size (drawn areas bake 1 km tiles), so the thresholds
+# below keep their tuned meaning and every area reads the same
+SETTLEMENT_CELL_CM = 200000.0
 CITY_DENSITY_PER_TILE = 150  # >= this many footprints in one 2 km tile reads
                               # as a real downtown block, not an ordinary town
 
@@ -120,23 +124,20 @@ def main():
         lat, lon = footprint_centroid(b["nodes"])
         east_m, north_m = to_local(lon, lat)
         x_cm, y_cm = east_m * 100.0, -north_m * 100.0
-        tx = int(x_cm // TERRAIN_TILE_SIZE_CM)
-        ty = int(y_cm // TERRAIN_TILE_SIZE_CM)
+        tx = int(x_cm // SETTLEMENT_CELL_CM)
+        ty = int(y_cm // SETTLEMENT_CELL_CM)
         counts[(tx, ty)] += 1
         if b.get("building_tag") in RESIDENTIAL_TAGS:
             residential_counts[(tx, ty)] += 1
         tall_counts[(tx, ty)] += (known_levels(b) or 0) >= CITY_TALL_LEVELS
         shop_counts[(tx, ty)] += b.get("building_tag") in SHOP_TAGS
 
-    # (2026-10-21) thresholds are per 2 km tile; a drawn area's 1 km tiles
-    # count as 2 km-equivalents so a downtown still reads as City
-    k = (200000.0 / TERRAIN_TILE_SIZE_CM) ** 2
     tiles = {}
     for (tx, ty), n in counts.items():
-        if n * k < MIN_BUILDINGS_PER_TILE:
+        if n < MIN_BUILDINGS_PER_TILE:
             continue
         frac = residential_counts[(tx, ty)] / n
-        tiles[f"{tx},{ty}"] = pick_archetype(n * k, frac, tall_counts[(tx, ty)] * k, shop_counts[(tx, ty)] * k)
+        tiles[f"{tx},{ty}"] = pick_archetype(n, frac, tall_counts[(tx, ty)], shop_counts[(tx, ty)])
 
     # building count per tile too: build_traffic_demand.py's population proxy
     OUT_PATH.write_text(json.dumps({"tiles": tiles,

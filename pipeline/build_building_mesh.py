@@ -50,7 +50,7 @@ from scipy.spatial import cKDTree
 
 from bake_job import tile_in_job
 from building_roofs import clean_ring, make_roof, triangulate
-from classify_settlements import MIN_BUILDINGS_PER_TILE
+from classify_settlements import MIN_BUILDINGS_PER_TILE, SETTLEMENT_CELL_CM
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, bake_map, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -417,8 +417,8 @@ def build_chunk(chunk):
     known_tree, known_vals = S["known_tree"], S["known_vals"]
     out, stats = [], Counter()
     for b, ring_xy_cm, (cx_cm, cy_cm), levels in chunk:
-        tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
-        ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
+        tx = int(cx_cm // SETTLEMENT_CELL_CM)
+        ty = int(cy_cm // SETTLEMENT_CELL_CM)
         tile_key = f"{tx},{ty}"
         archetype_tile = S["settlement"].get(tile_key)
         if archetype_tile is None and S["tile_counts"][tile_key] >= MIN_BUILDINGS_PER_TILE:
@@ -534,7 +534,7 @@ def main():
     known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
     tile_counts = defaultdict(int)
     for cx, cy in centroids_cm:
-        tile_counts[f"{int(cx // TERRAIN_TILE_SIZE_CM)},{int(cy // TERRAIN_TILE_SIZE_CM)}"] += 1
+        tile_counts[f"{int(cx // SETTLEMENT_CELL_CM)},{int(cy // SETTLEMENT_CELL_CM)}"] += 1
 
     # buildings are independent: CHUNK_BUILDINGS at a time over bake_map
     # (2026-10-15), merged back in input order

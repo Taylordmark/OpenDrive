@@ -44,7 +44,8 @@ import requests
 
 from bake_job import outline_ll
 from fetch_cache import cached_bytes, clip_geojson_lines
-from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, lonlat_bbox, to_local
+from classify_settlements import SETTLEMENT_CELL_CM
+from test_areas import AREA_NAME, lonlat_bbox, to_local
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "checks"))
 from verify_route_graph import load_graph   # noqa: E402
@@ -257,7 +258,7 @@ def main():
     counts = {tuple(map(int, k.split(","))): n for k, n in st.get("counts", {}).items()}
     if not counts and st.get("tiles"):
         print("  settlement_tiles.json has no counts - re-run classify_settlements.py")
-    tile = lambda xy: (int(xy[0] * 100.0 // TERRAIN_TILE_SIZE_CM), int(-xy[1] * 100.0 // TERRAIN_TILE_SIZE_CM))
+    tile = lambda xy: (int(xy[0] * 100.0 // SETTLEMENT_CELL_CM), int(-xy[1] * 100.0 // SETTLEMENT_CELL_CM))
     bcount = np.array([counts.get(tile(p), 0) for p in mid], dtype=np.float64)
 
     hit = m >= 0
@@ -268,7 +269,7 @@ def main():
 
     if counts:
         (tx, ty), _ = max(counts.items(), key=lambda kv: kv[1])
-        town = np.array([(tx + 0.5) * TERRAIN_TILE_SIZE_CM / 100.0, -(ty + 0.5) * TERRAIN_TILE_SIZE_CM / 100.0])
+        town = np.array([(tx + 0.5) * SETTLEMENT_CELL_CM / 100.0, -(ty + 0.5) * SETTLEMENT_CELL_CM / 100.0])
     else:
         town = en.mean(axis=0)
     inbound = np.linalg.norm(b - town, axis=1) < np.linalg.norm(a - town, axis=1)
