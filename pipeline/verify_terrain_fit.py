@@ -78,10 +78,17 @@ from bin_tile_io import parse_terrain_tile_bin, read_generation_id_header
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
 from build_terrain_mesh_tiles import MAX_ERROR_NEAR_M
 from generation_id import compute_generation_id
+from bake_job import in_job
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, owns
 from road_mesh_common import ROAD_LIFT, bake_map
 from road_mesh_common import (CONFLICT_SAME_CHAIN_GAP_STATIONS, STATION_SPACING,
                               WALL_EMBED_MARGIN_M, classify_wall_stations, sample_mesh_heights)
+
+
+def owns(x_cm, y_cm, _owns=owns):
+    """(2026-10-21) owned, and inside a pass-2 job's rect: a job checks its own tiles."""
+    return _owns(x_cm, y_cm) & in_job(x_cm, y_cm)
+
 
 # 1.0 m was the original first-pass tolerance, sized for the old uniform-41
 # grid (~50 m spacing), where the carve stamped elevation almost exactly at

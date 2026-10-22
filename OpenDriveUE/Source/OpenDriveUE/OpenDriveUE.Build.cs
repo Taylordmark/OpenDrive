@@ -30,13 +30,17 @@ public class OpenDriveUE : ModuleRules
 			// FSlateFontInfo / GWhiteTexture - menu panel text at real pixel
 			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
 			"SlateCore",
+			// SEditableTextBox - the New Area name field (ODAreaDraw, 2026-10-21)
+			"Slate",
 			"RenderCore",
 			// GNumDrawCallsRHI / RHIGetGPUFrameCycles (OpenDriveUE.cpp perf log).
 			"RHI",
 			// climate_<area>_test.json (ODWeatherController, Weather W1).
 			"Json",
 			// ODTileSource: -ODTileServer live tile fetch.
-			"HTTP"
+			"HTTP",
+			// ODBakeLink: "ready to drive" toast (FSlateNotificationManager, 2026-10-21).
+			"Slate"
 		});
 
 		// ODWheelDevice: racing wheel input + force feedback (Arc 6)

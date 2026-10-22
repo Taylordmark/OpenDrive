@@ -38,8 +38,9 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
-from test_areas import AREA_NAME
+from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_bridges.json"
@@ -61,7 +62,7 @@ def main():
     print(f"generation id: {gen_id}")
 
     written_paths = []
-    for (tx, ty), tile_runs in run_buckets.items():
+    for (tx, ty), tile_runs in job_items(run_buckets, TERRAIN_TILE_SIZE_CM):
         out_path = OUT_DIR / f"bridge_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         written_paths.append(out_path)
         with open(out_path, "wb") as f:

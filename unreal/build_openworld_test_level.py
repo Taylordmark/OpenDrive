@@ -56,6 +56,13 @@ starts with the file already gone works fine every time). load_level() as
 a "does it exist" probe doesn't work either - on a missing package it
 silently returns True against the engine's blank transient startup level
 instead of failing, which then can't be saved ("no filename").
+
+OD_TEMPLATE=1 (2026-10-21, area picker piece B) builds /Game/Areas/AreaTemplate
+instead: no area at all (no terrain/road/buildings/walls/barrier/forest
+managers, no ocean), just the gameplay managers, lights, grade and a
+PlayerStart at the origin. AODGameMode::StartDrawnArea fills it at runtime
+from the ?odarea=<key> URL option (data/user_areas.json). Run
+unreal/apply_boundary_materials.py once too (M_ODUnsynced, M_ODCurtain).
 """
 
 import json
@@ -99,6 +106,12 @@ FOREST_ENABLED = True
 # flagged switchback conflict nearby, same "no hole" semantics as buildings.
 WALL_ENABLED = True
 
+# drawn-area template (2026-10-21) - see the module docstring
+TEMPLATE = os.environ.get("OD_TEMPLATE") == "1"
+if TEMPLATE:
+    LEVEL = "/Game/Areas/AreaTemplate"
+    ROADS_ENABLED = BUILDINGS_ENABLED = BARRIER_ENABLED = FOREST_ENABLED = WALL_ENABLED = False
+
 SPAWN_HEIGHT_ABOVE_ORIGIN_CM = 2000.0   # 20 m - clearance for tile streaming to catch up before landing
                                          # (was 300 m; cut down 2026-07-20 once -odtrace showed both
                                          # terrain and road tiles actually stream in well under a
@@ -132,7 +145,9 @@ SPAWN_HEIGHT_ABOVE_ORIGIN_CM = 2000.0   # 20 m - clearance for tile streaming to
 ALA_MOANA_LATLON = (21.2908, -157.8420)
 ALA_MOANA_ELEV_M = 1.0
 
-if ROADS_ENABLED:
+if TEMPLATE:
+    road_start = {"location_cm": [0.0, 0.0, 0.0], "yaw_deg": 0.0}   # the game mode teleports the pawn
+elif ROADS_ENABLED:
     ROAD_META_PATH = (Path(__file__).resolve().parents[1] / "data" / "road_tiles"
                        / f"{AREA_NAME}_test" / "road_test_meta.json")
     road_meta = json.loads(ROAD_META_PATH.read_text())
@@ -182,26 +197,27 @@ def spawn(cls, loc, rot, label):
 # UE-frame cm coordinates directly (road_mesh_common.road_ue_z_m applies
 # the same ORIGIN_HEIGHT_M shift build_terrain_mesh_tiles.py used when
 # baking, so there's nothing left for a runtime actor to reconcile).
-terrain_mgr = spawn(unreal.ODTerrainManager, (0, 0, 0), (0, 0, 0), "TerrainManager")
-terrain_mgr.set_editor_property("terrain_tile_prefix", f"terrain_{AREA_NAME}_test")
-# AODTerrainManager's SpawnRadius default (400,000 cm = 4 km) is well short
-# of build_terrain_mesh_tiles.py's RENDER_DISTANCE_M (6,000 m) - the far/
-# background tiles specifically baked so distant mountains stay visible
-# (no collision, coarse grid, "the player can never reach it") were sitting
-# on disk built and fine, just never REQUESTED at runtime because nothing
-# closer than 6 km ever entered the 4 km load radius. Found live 2026-07-28
-# (Taylor: a gap "way in the distance") - not a bad/missing tile, just a
-# runtime radius that didn't reach as far as the offline bake did. 620,000 cm
-# gives a small margin past the 6 km build radius so the edge doesn't clip.
-#
-# 2026-09-01: SpawnRadius was split by the two-tier streaming rework
-# (405de3c) into VisualRadius (coarse, no collision) + CollisionRadius
-# (near-fidelity upgrade) - this script wasn't updated then and failed on
-# the first summit_county rebuild. The 6.2 km rationale above applies to
-# the VISUAL tier; CollisionRadius keeps its 2 km header default.
-terrain_mgr.set_editor_property("visual_radius", 620000.0)
-log(f"spawned TerrainManager (tile prefix: terrain_{AREA_NAME}_test, "
-    f"visual_radius=6.2km to match build_terrain_mesh_tiles.py's 6km far-tile bake)")
+if not TEMPLATE:   # the drawn area's managers are spawned at runtime (2026-10-21)
+    terrain_mgr = spawn(unreal.ODTerrainManager, (0, 0, 0), (0, 0, 0), "TerrainManager")
+    terrain_mgr.set_editor_property("terrain_tile_prefix", f"terrain_{AREA_NAME}_test")
+    # AODTerrainManager's SpawnRadius default (400,000 cm = 4 km) is well short
+    # of build_terrain_mesh_tiles.py's RENDER_DISTANCE_M (6,000 m) - the far/
+    # background tiles specifically baked so distant mountains stay visible
+    # (no collision, coarse grid, "the player can never reach it") were sitting
+    # on disk built and fine, just never REQUESTED at runtime because nothing
+    # closer than 6 km ever entered the 4 km load radius. Found live 2026-07-28
+    # (Taylor: a gap "way in the distance") - not a bad/missing tile, just a
+    # runtime radius that didn't reach as far as the offline bake did. 620,000 cm
+    # gives a small margin past the 6 km build radius so the edge doesn't clip.
+    #
+    # 2026-09-01: SpawnRadius was split by the two-tier streaming rework
+    # (405de3c) into VisualRadius (coarse, no collision) + CollisionRadius
+    # (near-fidelity upgrade) - this script wasn't updated then and failed on
+    # the first summit_county rebuild. The 6.2 km rationale above applies to
+    # the VISUAL tier; CollisionRadius keeps its 2 km header default.
+    terrain_mgr.set_editor_property("visual_radius", 620000.0)
+    log(f"spawned TerrainManager (tile prefix: terrain_{AREA_NAME}_test, "
+        f"visual_radius=6.2km to match build_terrain_mesh_tiles.py's 6km far-tile bake)")
 
 spawn(unreal.ODScreenshotHook, (0, 0, 0), (0, 0, 0), "ScreenshotHook")
 log("spawned ScreenshotHook (-odshot works on this Landscape-free level too)")
@@ -486,42 +502,45 @@ log("spawned Grade post-process volume (saturation/contrast/exposure bias, "
 # fetch (next steps.md sec 7.7 has that scoped separately). Won't flood
 # inland water sitting above sea level (e.g. Wahiawa Reservoir) - a flat
 # plane can't tell "below sea level" from "an inland lake at elevation."
-if not unreal.EditorAssetLibrary.does_asset_exist("/Game/OpenDrive/Materials/M_WaterStylized"):
+if TEMPLATE:   # the ocean is sized to OD_AREA's bbox - meaningless for a drawn area (2026-10-21)
+    pass
+elif not unreal.EditorAssetLibrary.does_asset_exist("/Game/OpenDrive/Materials/M_WaterStylized"):
     log("WARNING: M_WaterStylized not found - run unreal/apply_water_material.py "
         "at least once to create it (Content/ is git-ignored, doesn't survive a fresh checkout)")
-water_mat = unreal.load_asset("/Game/OpenDrive/Materials/M_WaterStylized")
+if not TEMPLATE:
+    water_mat = unreal.load_asset("/Game/OpenDrive/Materials/M_WaterStylized")
 
-south, west, north, east = test_areas.BBOX_SNWE
-# bbox corners through the shared frame (2026-10-05) - the bbox centre is
-# no longer the local origin for a world member (far_gasquet sits ~600 km
-# out), so the plane is centred on the bbox itself; corners, not edges, are
-# plenty under WATER_MARGIN_M (and need no numpy - UE's Python has none)
-corners = [test_areas.to_local(lon, lat) for lat in (south, north) for lon in (west, east)]
-ce, cn = [e for e, _ in corners], [n for _, n in corners]
-# generous margin past the real bbox so the shoreline never clips into a
-# visible flat-plane edge at the horizon
-WATER_MARGIN_M = 20000.0
-half_width_cm = ((max(ce) - min(ce)) / 2.0 + WATER_MARGIN_M) * 100.0
-half_height_cm = ((max(cn) - min(cn)) / 2.0 + WATER_MARGIN_M) * 100.0
-sea_level_z_cm = -test_areas.ORIGIN_HEIGHT_M * 100.0
+    south, west, north, east = test_areas.BBOX_SNWE
+    # bbox corners through the shared frame (2026-10-05) - the bbox centre is
+    # no longer the local origin for a world member (far_gasquet sits ~600 km
+    # out), so the plane is centred on the bbox itself; corners, not edges, are
+    # plenty under WATER_MARGIN_M (and need no numpy - UE's Python has none)
+    corners = [test_areas.to_local(lon, lat) for lat in (south, north) for lon in (west, east)]
+    ce, cn = [e for e, _ in corners], [n for _, n in corners]
+    # generous margin past the real bbox so the shoreline never clips into a
+    # visible flat-plane edge at the horizon
+    WATER_MARGIN_M = 20000.0
+    half_width_cm = ((max(ce) - min(ce)) / 2.0 + WATER_MARGIN_M) * 100.0
+    half_height_cm = ((max(cn) - min(cn)) / 2.0 + WATER_MARGIN_M) * 100.0
+    sea_level_z_cm = -test_areas.ORIGIN_HEIGHT_M * 100.0
 
-water = actor_sub.spawn_actor_from_class(
-    unreal.StaticMeshActor,
-    unreal.Vector((max(ce) + min(ce)) * 50.0, -(max(cn) + min(cn)) * 50.0, sea_level_z_cm),
-    unreal.Rotator(0, 0, 0))
-water.set_actor_label("Ocean")
-water.set_folder_path(FOLDER)
-water_mesh_comp = water.get_component_by_class(unreal.StaticMeshComponent)
-# /Engine/BasicShapes/Plane is 100x100 uu (1x1 m) - scale to the bbox's
-# real-world half-extents (scale = size in cm / 100).
-water_mesh_comp.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
-water.set_actor_scale3d(unreal.Vector(half_width_cm / 50.0, half_height_cm / 50.0, 1.0))
-if water_mat:
-    water_mesh_comp.set_material(0, water_mat)
-water_mesh_comp.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
-log(f"spawned Ocean water plane at z={sea_level_z_cm:.0f}cm "
-    f"({half_width_cm/100.0*2:.0f}m x {half_height_cm/100.0*2:.0f}m, "
-    f"material={'M_WaterStylized' if water_mat else 'MISSING - flat default gray'})")
+    water = actor_sub.spawn_actor_from_class(
+        unreal.StaticMeshActor,
+        unreal.Vector((max(ce) + min(ce)) * 50.0, -(max(cn) + min(cn)) * 50.0, sea_level_z_cm),
+        unreal.Rotator(0, 0, 0))
+    water.set_actor_label("Ocean")
+    water.set_folder_path(FOLDER)
+    water_mesh_comp = water.get_component_by_class(unreal.StaticMeshComponent)
+    # /Engine/BasicShapes/Plane is 100x100 uu (1x1 m) - scale to the bbox's
+    # real-world half-extents (scale = size in cm / 100).
+    water_mesh_comp.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
+    water.set_actor_scale3d(unreal.Vector(half_width_cm / 50.0, half_height_cm / 50.0, 1.0))
+    if water_mat:
+        water_mesh_comp.set_material(0, water_mat)
+    water_mesh_comp.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
+    log(f"spawned Ocean water plane at z={sea_level_z_cm:.0f}cm "
+        f"({half_width_cm/100.0*2:.0f}m x {half_height_cm/100.0*2:.0f}m, "
+        f"material={'M_WaterStylized' if water_mat else 'MISSING - flat default gray'})")
 
 # ---------------------------------------------------------------- save
 if not lls.save_current_level():

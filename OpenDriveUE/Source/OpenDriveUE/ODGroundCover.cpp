@@ -210,7 +210,7 @@ void FODGroundCoverAssets::Load(UObject* Outer)
 		CardMID != nullptr);
 }
 
-void FODGroundCoverAssets::BuildCell(const ODGroundCover::FCell& C, USceneComponent* Root, float CullEndCm, float WpoDisableCm,
+void FODGroundCoverAssets::BuildCell(const ODGroundCover::FCell& C, USceneComponent* Root, float CullEndCm, float WpoDisableDistCm,
 	TFunctionRef<void(UHierarchicalInstancedStaticMeshComponent*)> FoliageMat,
 	TArray<UHierarchicalInstancedStaticMeshComponent*>& OutComps) const
 {
@@ -255,7 +255,7 @@ void FODGroundCoverAssets::BuildCell(const ODGroundCover::FCell& C, USceneCompon
 		const float End = s == Pebble ? CullEndCm * 0.4f : CullEndCm;
 		Hism->SetCullDistances(End * 0.5f, End);   // M_GroundCover_real fades cards over this band
 		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableDistCm;
 		Hism->SetCastShadow(false);
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();

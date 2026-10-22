@@ -98,7 +98,7 @@ WATER_PATH = RAW_DIR / "osm_water.json"
 WATERWAYS_PATH = RAW_DIR / "osm_waterways.json"
 OUT_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 
-TERRAIN_TILE_SIZE_CM = 200000.0   # same 2 km grid settlement_tiles.json keys off
+from classify_settlements import SETTLEMENT_CELL_CM as TERRAIN_TILE_SIZE_CM   # settlement_tiles.json's grid
 
 CELL_SIZE_M = 100.0               # coarse grid, per Taylor's brief - fine
                                    # enough for a ~60 m water-proximity fade,

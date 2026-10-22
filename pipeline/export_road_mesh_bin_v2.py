@@ -57,6 +57,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, ROAD_TILE_SIZE_CM
 
@@ -124,7 +125,7 @@ def main():
     xs = [k[0] for k in buckets]
     ys = [k[1] for k in buckets]
     written_paths = []
-    for (tx, ty), tile_chunks in buckets.items():
+    for (tx, ty), tile_chunks in job_items(buckets, ROAD_TILE_SIZE_CM):
         out_path = OUT_DIR / f"roadv3_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(out_path, tile_chunks, gen_id_bytes)
         written_paths.append(out_path)
@@ -138,7 +139,7 @@ def main():
     n_stale = delete_stale_tiles(OUT_DIR, f"roadv3_{AREA_NAME}_test_tile_*.bin", written_paths)
     print(f"deleted {n_stale} stale ODR3 road tile(s) from a previous run")
     print(f"{len(chunks)} chunks -> {len(buckets)} tile(s) "
-          f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
+          f"(x[{min(xs, default=None)}..{max(xs, default=None)}] y[{min(ys, default=None)}..{max(ys, default=None)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
     print("NOTE: AODRoadManager PREFERS these ODR3 tiles over the ODR2 tiles in "
           "Masks/ wherever both exist - keep the two exports in the same bake "

@@ -37,6 +37,7 @@ from build_tunnels import OUT_DIR, ue_volume
 from export_retaining_wall_bin import write_tile
 from fetch_cache import overpass_json
 from fetch_osm_network import HEADERS
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -225,7 +226,7 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     gen_id_bytes = pack_generation_id(compute_generation_id())
     written = []
-    for (tx, ty), chunks in buckets.items():
+    for (tx, ty), chunks in job_items(buckets, TERRAIN_TILE_SIZE_CM):
         path = OUT_DIR / f"sidewalk_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(path, chunks, gen_id_bytes)
         written.append(path)

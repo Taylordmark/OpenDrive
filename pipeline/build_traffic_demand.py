@@ -42,8 +42,10 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from fetch_cache import cached_bytes
-from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, lonlat_bbox, to_local
+from bake_job import outline_ll
+from fetch_cache import cached_bytes, clip_geojson_lines
+from classify_settlements import SETTLEMENT_CELL_CM
+from test_areas import AREA_NAME, lonlat_bbox, to_local
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "checks"))
 from verify_route_graph import load_graph   # noqa: E402
@@ -148,7 +150,9 @@ def hpms_features(state, snwe):
                     raise RuntimeError(d.get("error", d))
                 feats += d["features"]
                 if len(d["features"]) < 2000:
-                    return year, feats
+                    # (2026-10-21) a drawn area keeps the sections inside its outline
+                    poly = outline_ll()
+                    return year, (feats if poly is None else clip_geojson_lines(feats, poly))
                 off += 2000
         except (requests.HTTPError, RuntimeError) as err:
             print(f"  HPMS {state} {year}: {err} - trying an older year")
@@ -254,7 +258,7 @@ def main():
     counts = {tuple(map(int, k.split(","))): n for k, n in st.get("counts", {}).items()}
     if not counts and st.get("tiles"):
         print("  settlement_tiles.json has no counts - re-run classify_settlements.py")
-    tile = lambda xy: (int(xy[0] * 100.0 // TERRAIN_TILE_SIZE_CM), int(-xy[1] * 100.0 // TERRAIN_TILE_SIZE_CM))
+    tile = lambda xy: (int(xy[0] * 100.0 // SETTLEMENT_CELL_CM), int(-xy[1] * 100.0 // SETTLEMENT_CELL_CM))
     bcount = np.array([counts.get(tile(p), 0) for p in mid], dtype=np.float64)
 
     hit = m >= 0
@@ -265,7 +269,7 @@ def main():
 
     if counts:
         (tx, ty), _ = max(counts.items(), key=lambda kv: kv[1])
-        town = np.array([(tx + 0.5) * TERRAIN_TILE_SIZE_CM / 100.0, -(ty + 0.5) * TERRAIN_TILE_SIZE_CM / 100.0])
+        town = np.array([(tx + 0.5) * SETTLEMENT_CELL_CM / 100.0, -(ty + 0.5) * SETTLEMENT_CELL_CM / 100.0])
     else:
         town = en.mean(axis=0)
     inbound = np.linalg.norm(b - town, axis=1) < np.linalg.norm(a - town, axis=1)

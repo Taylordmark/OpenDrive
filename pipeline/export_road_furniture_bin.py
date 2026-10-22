@@ -23,6 +23,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from build_road_furniture import OUT_PATH as SRC, TYPES
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
 
@@ -43,7 +44,7 @@ def main():
     print(f"generation id: {gen_id}")
 
     written_paths = []
-    for (tx, ty), tile_props in buckets.items():
+    for (tx, ty), tile_props in job_items(buckets, TERRAIN_TILE_SIZE_CM):
         out_path = OUT_DIR / f"furniture_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         written_paths.append(out_path)
         with open(out_path, "wb") as f:
