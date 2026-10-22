@@ -616,12 +616,10 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	}
 	const double Now = GetWorld()->GetRealTimeSeconds();
 	AreaDraw.Poll(Now);   // coverage.json / status.json / pass-1 roads, when they change (1 Hz)
-	if (VistaAtFrame != 0 && GFrameCounter >= VistaAtFrame)
+	if (VistaStep >= 0)
 	{
-		VistaAtFrame = 0;
-		ShowStartVista(AreaIdx);
+		StepStartVista(Now);
 	}
-	UpdatePreload(Now);
 	if (DriveStart >= 0.0)
 	{
 		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
@@ -1222,10 +1220,10 @@ void AODMainMenu::PickPin(int32 Pin)
 	FocusArea(Area);
 	PickingPin = Pin;
 	FlyToArea(WorldPickSec);
-	// the vista (2026-10-16) streams during the fly-in and the turnout pick, but
-	// spawning it holds the game thread for seconds (livetest6: 6.1 s), so it
-	// waits two frames for the picked pin to reach the screen first (2026-10-22)
-	VistaAtFrame = GFrameCounter + 2;
+	// the vista (2026-10-16) streams during the fly-in and the turnout pick; its
+	// heavy setup runs on workers and its managers spawn one per frame (Tick,
+	// 2026-10-22, was one 6-8 s frame in livetest6-8)
+	ShowStartVista(AreaIdx);
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: pin picked -> %s"), *AreaKeys[AreaIdx]);
 }
 
@@ -1234,45 +1232,6 @@ int32 AODMainMenu::PinArea(int32 Pin) const
 	const int32 Area = Globe.IsValid() && Globe->GetPins().IsValidIndex(Pin)
 		? AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key) : INDEX_NONE;
 	return Area != INDEX_NONE && ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area;
-}
-
-void AODMainMenu::UpdatePreload(double Now)
-{
-	const int32 Area = Screen == EODMenuScreen::World ? PinArea(FocusedPin)
-		: Screen == EODMenuScreen::AreaMap || Screen == EODMenuScreen::Start ? AreaIdx : INDEX_NONE;
-	const FString Want = Area != CurrentAreaIdx && AreaLevels.IsValidIndex(Area) ? AreaLevels[Area] : FString();
-	if (Want != PreloadWant)
-	{
-		PreloadWant = Want;
-		PreloadWantSince = Now;
-	}
-	if (PreloadName == PreloadWant || bPreloadInFlight)
-	{
-		return;   // held, or one still landing (it is released once it has)
-	}
-	if (!PreloadName.IsEmpty())
-	{
-		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload released %s"), *PreloadName);
-		Preloaded.Reset();   // unreferenced now: the next GC drops it
-		PreloadName.Empty();
-	}
-	if (PreloadWant.IsEmpty() || Now - PreloadWantSince < PreloadDelaySec)
-	{
-		return;
-	}
-	PreloadName = PreloadWant;
-	PreloadStart = Now;
-	bPreloadInFlight = true;
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload start %s"), *PreloadName);
-	LoadPackageAsync(PreloadName, FLoadPackageAsyncDelegate::CreateWeakLambda(this,
-		[this](const FName& Name, UPackage* Package, EAsyncLoadingResult::Type Result)
-		{
-			bPreloadInFlight = false;
-			Preloaded.Reset(Result == EAsyncLoadingResult::Succeeded ? Package : nullptr);
-			UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload %s %s in %.2f s%s"), *Name.ToString(),
-				Preloaded ? TEXT("loaded") : TEXT("FAILED"), GetWorld()->GetRealTimeSeconds() - PreloadStart,
-				PreloadWant == PreloadName ? TEXT("") : TEXT(" (no longer wanted)"));
-		}));
 }
 
 void AODMainMenu::FlyToArea(float Seconds)
@@ -1587,8 +1546,7 @@ void AODMainMenu::DriveNow()
 	SavePicks();   // (Activate holds Drive until the cut, so no fade is pending here)
 	DriveStart = GetWorld()->GetRealTimeSeconds();   // Tick runs the ease / fade, then DriveGo
 	bDriveHere = !(AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx);
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s, level package %s)"), bDriveHere ? TEXT("here") : TEXT("open level"),
-		bDriveHere ? TEXT("n/a") : Preloaded ? TEXT("preloaded") : bPreloadInFlight ? TEXT("still loading") : TEXT("not preloaded"));
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s)"), bDriveHere ? TEXT("here") : TEXT("open level"));
 	const AODVehiclePawn* Pawn = FindPawn();
 	if (const UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr)
 	{
@@ -2491,14 +2449,12 @@ void AODMainMenu::ShowStartVista(int32 Area)
 	bVistaDirty = true;
 	AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // Tick's vista-stream wait cap
 	AODWeatherController::LoadClimateFile(AreaKeys[Area] + TEXT("_test"), VistaSpot.Climate);
-	for (AActor* A : GM->SpawnVistaSet(AreaKeys[Area], VistaCarWorld() - VistaSpot.CarCm, VistaRegion()))
-	{
-		VistaActors.Add(A);
-		if (AODForestManager* Forest = Cast<AODForestManager>(A))
-		{
-			VistaSpot.Forest = Forest;
-		}
-	}
+	// the managers spawn in StepStartVista, once their area's textures and lake
+	// index are built off the game thread (AODGameMode::PrewarmArea)
+	VistaStep = 0;
+	VistaPickTime = AreaEnterTime;
+	VistaMaxFrameMs = 0.0;
+	GM->PrewarmArea(AreaKeys[Area]);
 	if (VistaSpot.bHasSea)
 	{
 		const FVector Car = VistaCarWorld();
@@ -2523,7 +2479,33 @@ void AODMainMenu::ShowStartVista(int32 Area)
 		bVistasSpawned = true;
 		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
 	}
-	SetWeatherClimate(Area);   // its climate; Auto rolls once here and holds for the visit
+}
+
+void AODMainMenu::StepStartVista(double Now)
+{
+	VistaMaxFrameMs = FMath::Max(VistaMaxFrameMs, double(FApp::GetDeltaTime()) * 1000.0);
+	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+	if (!GM || !AreaKeys.IsValidIndex(VistaArea) || !GM->PrewarmArea(AreaKeys[VistaArea]))
+	{
+		return;   // workers still decoding/indexing; the globe keeps animating
+	}
+	// one manager family per frame: each BeginPlay is now tens of ms, not seconds
+	for (AActor* A : GM->SpawnVistaSet(AreaKeys[VistaArea], VistaCarWorld() - VistaSpot.CarCm, VistaRegion(), VistaStep))
+	{
+		VistaActors.Add(A);
+		if (AODForestManager* Forest = Cast<AODForestManager>(A))
+		{
+			VistaSpot.Forest = Forest;
+		}
+	}
+	if (++VistaStep < AODGameMode::NumVistaSteps())
+	{
+		return;
+	}
+	VistaStep = -1;
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: area vista %s spawned %.2fs after pick, longest frame %.0f ms (%d actor(s))"),
+		*AreaKeys[VistaArea], Now - VistaPickTime, VistaMaxFrameMs, VistaActors.Num());
+	SetWeatherClimate(VistaArea);   // its climate (needs the forest copy); Auto rolls once here and holds for the visit
 }
 
 void AODMainMenu::ClearStartVista()
@@ -2537,6 +2519,7 @@ void AODMainMenu::ClearStartVista()
 	}
 	VistaActors.Reset();
 	VistaSpot.Forest = nullptr;
+	VistaStep = -1;
 	if (VistaArea != INDEX_NONE)
 	{
 		VistaArea = INDEX_NONE;
@@ -2562,7 +2545,7 @@ void AODMainMenu::DestroyVistas()
 
 bool AODMainMenu::IsStartVistaReady() const
 {
-	if (VistaArea == INDEX_NONE)
+	if (VistaArea == INDEX_NONE || VistaStep >= 0)
 	{
 		return false;
 	}

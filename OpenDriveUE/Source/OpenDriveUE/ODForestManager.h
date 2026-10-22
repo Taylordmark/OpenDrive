@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GenericPlatform/GenericPlatformFile.h" // IFileHandle (far forest)
+#include "Tasks/Task.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
 #include "ODGroundCover.h"
@@ -490,6 +491,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	FString WaterTilePrefix;
 
+	/** Game thread (2026-10-22): start building WaterPrefix's lakes on a
+	 *  worker, so the vista's and then the level's forest manager both pick
+	 *  them up instead of each spending 1-5 s on 518 tile files in
+	 *  BeginPlay. Holds one area: another prefix drops the old one. True
+	 *  once built; call again to poll. */
+	static bool PrewarmLakes(const FString& WaterPrefix);
+
 	// --- trunk collision (moved from the retired ODForestCollisionManager) ---
 	UPROPERTY(EditAnywhere, Category = "Collision")
 	int32 PoolSize = 96;   // trunks + rocks share it (2026-10-09, was 48 trunks only)
@@ -825,18 +833,32 @@ private:
 		// and even-odd parity runs over all of them so the island stays dry.
 		int32 Feature = 0;
 	};
-	TArray<FLakeRing> LakeRings;
 
-	// Segment index over LakeRings (2026-09-29): not "a handful of lakes" -
-	// summit_county loads 45k rings (mostly river ribbons), and the old
-	// per-candidate scan over all of them was 20-57 ms forest ticks
+	// Segment index over a lake ring list (2026-09-29): not "a handful of
+	// lakes" - summit_county loads 45k rings (mostly river ribbons), and the
+	// old per-candidate scan over all of them was 20-57 ms forest ticks
 	// (Insights trace, forest.utrace). Segment I runs Ring[I] -> Ring[I-1].
 	struct FLakeSeg { int32 Ring; int32 I; };
 	static constexpr double LakeGridCellCm = 5000.0;
-	TMap<FIntPoint, TArray<FLakeSeg>> LakeSegCells;   // segments within shore margin of each cell
-	TMap<int32, TArray<FLakeSeg>> LakeSegRows;         // segments whose Y-span overlaps each row, grouped by ring
-	void BuildLakeIndex();
-	bool IsInsideLakeBruteForce(double WorldX, double WorldY) const;
+	/** Plain data, built on a worker and shared read-only by every forest
+	 *  manager of the area (2026-10-22, LoadLakes/PrewarmLakes). */
+	struct FLakeData
+	{
+		TArray<FLakeRing> Rings;
+		TMap<FIntPoint, TArray<FLakeSeg>> SegCells;   // segments within shore margin of each cell
+		TMap<int32, TArray<FLakeSeg>> SegRows;         // segments whose Y-span overlaps each row, grouped by ring
+		void BuildIndex();
+		bool IsInside(double WorldX, double WorldY) const;
+		bool IsInsideBruteForce(double WorldX, double WorldY) const;
+	};
+	TSharedPtr<const FLakeData> Lakes;
+	static TSharedPtr<const FLakeData> LoadLakes(const FString& WaterPrefix);   // any thread, null when none
+	struct FLakeCache
+	{
+		FString Key;   // prefix + ODBakeLink status version: a drawn area's re-bake misses
+		UE::Tasks::TTask<TSharedPtr<const FLakeData>> Task;
+	};
+	static FLakeCache& LakeCache();
 	bool bUseWaterExclusion = false;
 
 	// Road-station exclusion (2026-08-26) - see RoadStationFilePrefix's

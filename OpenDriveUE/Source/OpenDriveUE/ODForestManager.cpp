@@ -1,4 +1,5 @@
 #include "ODForestManager.h"
+#include "ODBakeLink.h"
 #include "ODTileSource.h"
 #include "ODAssetDetail.h"
 #include "ODVisualStyle.h"
@@ -705,6 +706,37 @@ bool AODForestManager::LoadWaterLakes()
 	{
 		return false;   // no baked water for this area/actor instance - unaffected
 	}
+	const double T0 = FPlatformTime::Seconds();
+	PrewarmLakes(WaterTilePrefix);   // no-op once the menu's pin pick started it
+	Lakes = LakeCache().Task.GetResult();
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: lakes '%s' waited %.0f ms on the game thread (%s)"),
+		*WaterTilePrefix, (FPlatformTime::Seconds() - T0) * 1000.0, Lakes.IsValid() ? TEXT("found") : TEXT("none"));
+	return Lakes.IsValid();
+}
+
+AODForestManager::FLakeCache& AODForestManager::LakeCache()
+{
+	static FLakeCache Cache;   // ponytail: one area; key by area if hopping back and forth shows up
+	return Cache;
+}
+
+bool AODForestManager::PrewarmLakes(const FString& WaterPrefix)
+{
+	check(IsInGameThread());
+	FLakeCache& C = LakeCache();
+	const FString Key = FString::Printf(TEXT("%s@%u"), *WaterPrefix, ODBakeLink::StatusVersion());
+	if (C.Key != Key || !C.Task.IsValid())
+	{
+		C.Key = Key;
+		C.Task = UE::Tasks::Launch(UE_SOURCE_LOCATION, [WaterPrefix]() { return LoadLakes(WaterPrefix); });
+	}
+	return C.Task.IsCompleted();
+}
+
+TSharedPtr<const AODForestManager::FLakeData> AODForestManager::LoadLakes(const FString& WaterPrefix)
+{
+	const double T0 = FPlatformTime::Seconds();
+	const TSharedRef<FLakeData> D = MakeShared<FLakeData>();
 	// Same ODL1 tile sidecars AODWaterManager streams
 	// (Content/OpenDrive/Masks/<WaterTilePrefix>_tile_<tx>_<ty>.bin,
 	// pipeline/build_water_tiles.py) - read back ALL of them up front here
@@ -725,7 +757,7 @@ bool AODForestManager::LoadWaterLakes()
 			AllBin.AddUnique(FileName);
 		}
 	}
-	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
+	const FString TileMatch = WaterPrefix + TEXT("_tile_");
 
 	int32 TileFileCount = 0;
 	int32 FeatureCount = 0;   // FLakeRing::Feature
@@ -948,7 +980,7 @@ bool AODForestManager::LoadWaterLakes()
 					}
 					else
 					{
-						FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
+						FLakeRing& LR = D->Rings.AddDefaulted_GetRef();
 						LR.Ring.Reserve(RingIdx.Num());
 						LR.MinX = MinX; LR.MaxX = MaxX; LR.MinY = MinY; LR.MaxY = MaxY;
 						LR.Feature = FeatureCount;
@@ -964,20 +996,20 @@ bool AODForestManager::LoadWaterLakes()
 		}
 	}
 
-	if (LakeRings.Num() == 0)
+	if (D->Rings.Num() == 0)
 	{
 		UE_LOG(LogTemp, Display,
 			TEXT("ODForestManager: no baked lake tiles found for WaterTilePrefix='%s' "
 			     "(%d tile file(s) scanned) - no water exclusion"),
-			*WaterTilePrefix, TileFileCount);
-		return false;
+			*WaterPrefix, TileFileCount);
+		return nullptr;
 	}
-	BuildLakeIndex();
+	D->BuildIndex();
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d lake boundary ring(s) from %d water tile file(s) "
-		     "(WaterTilePrefix='%s') - trees/bushes/rocks/scrub excluded from open water"),
-		LakeRings.Num(), TileFileCount, *WaterTilePrefix);
-	return true;
+		     "(WaterTilePrefix='%s') in %.0f ms on a worker - trees/bushes/rocks/scrub excluded from open water"),
+		D->Rings.Num(), TileFileCount, *WaterPrefix, (FPlatformTime::Seconds() - T0) * 1000.0);
+	return D;
 }
 
 // Matches pipeline/build_terrain_mesh_tiles.py's WATER_SHORE_BLEND_M (12 m,
@@ -1003,14 +1035,14 @@ static double DistPointToSegment2D(double Px, double Py, double Ax, double Ay, d
 	return FMath::Sqrt((Px - CX) * (Px - CX) + (Py - CY) * (Py - CY));
 }
 
-void AODForestManager::BuildLakeIndex()
+void AODForestManager::FLakeData::BuildIndex()
 {
-	LakeSegCells.Reset();
-	LakeSegRows.Reset();
+	SegCells.Reset();
+	SegRows.Reset();
 	const double M = LakeShoreExclusionMarginCm;
-	for (int32 r = 0; r < LakeRings.Num(); ++r)   // ring order keeps each row's segments grouped by ring
+	for (int32 r = 0; r < Rings.Num(); ++r)   // ring order keeps each row's segments grouped by ring
 	{
-		const TArray<FVector2D>& Ring = LakeRings[r].Ring;
+		const TArray<FVector2D>& Ring = Rings[r].Ring;
 		for (int32 i = 0, j = Ring.Num() - 1; i < Ring.Num(); j = i++)
 		{
 			const FLakeSeg Seg{r, i};
@@ -1020,12 +1052,12 @@ void AODForestManager::BuildLakeIndex()
 			{
 				for (int32 cx = FMath::FloorToInt32((X0 - M) / LakeGridCellCm); cx <= FMath::FloorToInt32((X1 + M) / LakeGridCellCm); ++cx)
 				{
-					LakeSegCells.FindOrAdd(FIntPoint(cx, cy)).Add(Seg);
+					SegCells.FindOrAdd(FIntPoint(cx, cy)).Add(Seg);
 				}
 			}
 			for (int32 row = FMath::FloorToInt32(Y0 / LakeGridCellCm); row <= FMath::FloorToInt32(Y1 / LakeGridCellCm); ++row)
 			{
-				LakeSegRows.FindOrAdd(row).Add(Seg);
+				SegRows.FindOrAdd(row).Add(Seg);
 			}
 		}
 	}
@@ -1038,24 +1070,29 @@ void AODForestManager::BuildLakeIndex()
 	constexpr int32 NumChecks = 500;
 	for (int32 k = 0; k < NumChecks; ++k)
 	{
-		const FLakeRing& LR = LakeRings[Rng.RandRange(0, LakeRings.Num() - 1)];
+		const FLakeRing& LR = Rings[Rng.RandRange(0, Rings.Num() - 1)];
 		const double X = Rng.FRandRange(LR.MinX - 2.0 * M, LR.MaxX + 2.0 * M);
 		const double Y = Rng.FRandRange(LR.MinY - 2.0 * M, LR.MaxY + 2.0 * M);
-		const bool bBrute = IsInsideLakeBruteForce(X, Y);
+		const bool bBrute = IsInsideBruteForce(X, Y);
 		Inside += bBrute;
-		Mismatches += (bBrute != IsInsideLake(X, Y));
+		Mismatches += (bBrute != IsInside(X, Y));
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: lake index %d cell(s), %d row(s); self-check %d/%d mismatch(es) vs brute force (%d inside)"),
-		LakeSegCells.Num(), LakeSegRows.Num(), Mismatches, NumChecks, Inside);
+		SegCells.Num(), SegRows.Num(), Mismatches, NumChecks, Inside);
 #endif
 }
 
 bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 {
+	return Lakes.IsValid() && Lakes->IsInside(WorldX, WorldY);
+}
+
+bool AODForestManager::FLakeData::IsInside(double WorldX, double WorldY) const
+{
 	auto SegEnds = [this](const FLakeSeg& S, const FVector2D*& Pi, const FVector2D*& Pj)
 	{
-		const TArray<FVector2D>& Ring = LakeRings[S.Ring].Ring;
+		const TArray<FVector2D>& Ring = Rings[S.Ring].Ring;
 		Pi = &Ring[S.I];
 		Pj = &Ring[S.I == 0 ? Ring.Num() - 1 : S.I - 1];
 	};
@@ -1063,7 +1100,7 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	const FVector2D* Pj;
 
 	// Shore band: any segment within the margin of this point is in this cell.
-	if (const TArray<FLakeSeg>* Near = LakeSegCells.Find(FIntPoint(
+	if (const TArray<FLakeSeg>* Near = SegCells.Find(FIntPoint(
 			FMath::FloorToInt32(WorldX / LakeGridCellCm), FMath::FloorToInt32(WorldY / LakeGridCellCm))))
 	{
 		for (const FLakeSeg& S : *Near)
@@ -1080,7 +1117,7 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	// whose Y-span covers this row (a crossing segment must). Row lists are
 	// grouped by ring and a feature's rings are consecutive, so parity resets
 	// whenever the feature changes - an island ring flips it back to dry.
-	const TArray<FLakeSeg>* Row = LakeSegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
+	const TArray<FLakeSeg>* Row = SegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
 	if (!Row)
 	{
 		return false;
@@ -1089,13 +1126,13 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	bool bInside = false;
 	for (const FLakeSeg& S : *Row)
 	{
-		if (LakeRings[S.Ring].Feature != CurFeature)
+		if (Rings[S.Ring].Feature != CurFeature)
 		{
 			if (bInside)
 			{
 				return true;
 			}
-			CurFeature = LakeRings[S.Ring].Feature;
+			CurFeature = Rings[S.Ring].Feature;
 		}
 		SegEnds(S, Pi, Pj);
 		if (((Pi->Y > WorldY) != (Pj->Y > WorldY)) &&
@@ -1107,11 +1144,11 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	return bInside;
 }
 
-bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) const
+bool AODForestManager::FLakeData::IsInsideBruteForce(double WorldX, double WorldY) const
 {
 	int32 CurFeature = INDEX_NONE;
 	bool bInside = false;   // parity over the current feature's rings
-	for (const FLakeRing& LR : LakeRings)
+	for (const FLakeRing& LR : Rings)
 	{
 		if (LR.Feature != CurFeature)
 		{
