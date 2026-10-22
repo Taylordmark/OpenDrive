@@ -5,6 +5,7 @@
 #include "ODVehicleAudio.generated.h"
 
 class UODEngineSynth;
+class UODHornSynth;
 class UODRoadNoiseSynth;
 class UODVehicleMovement;
 
@@ -62,6 +63,10 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UODRoadNoiseSynth> Road;
+
+	UPROPERTY()
+	TObjectPtr<UODHornSynth> Horn;
+	int32 HornVehicleIdx = -1;   // car the horn voice was picked for
 
 	TWeakObjectPtr<APawn> BoundCar;
 	double LastImpactTime = -1.0;

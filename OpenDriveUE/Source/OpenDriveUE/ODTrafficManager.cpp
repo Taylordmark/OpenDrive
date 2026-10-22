@@ -22,10 +22,12 @@
 #include "ODBinSidecarUtil.h"
 #include "ODDayNightController.h"
 #include "ODEngineSynth.h"
+#include "ODHornSynth.h"
 #include "ODMenuVista.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODTileSource.h"
+#include "ODVehiclePawn.h"
 #include "ODVehicleDef.h"
 #include "ODVisualStyle.h"
 
@@ -66,6 +68,13 @@ constexpr float BumpHoldS = 3.0f;              // a bumped car stands this long
 constexpr float ContactGapCm = 50.0f;          // hard floor on the bumper gap to anything ahead
 constexpr float NeighbourCm = 1500.0f;         // any-link look-ahead (merges, junctions, lane entry)
 constexpr float CarHalfWidthCm = 190.0f;       // centre-to-centre lateral clearance of two cars
+// the player's horn (fun-features #8a)
+constexpr float HornRangeCm = 4000.0f;         // cars this far ahead hear it
+constexpr float HornConeCos = 0.866f;          // within 30 degrees of the player's nose
+constexpr float DodgeClearCm = 4500.0f;        // a dodge (or pull-over) ends this far from the player
+constexpr float PullRightCm = 150.0f;          // a honked, stood car edges this far toward the kerb
+constexpr float HonkBackHeat = 3.0f;           // presses (or ~3 s held) before a car honks back
+constexpr float GreenHonkS = 3.0f;             // a wasted green before the car behind honks
 
 /** Closing speed along the contact normal: a sideswipe at speed is a scrape, not a wreck. */
 float ClosingCmS(const FVector& PlayerVel, const FVector& CarVel, const FVector& Normal)
@@ -131,6 +140,54 @@ bool Overlaps(const FVector& PA, const FQuat& RA, const FVector& EA, const FVect
 			return false;
 		}
 	}
+	return true;
+}
+
+// ---- horn reactions (fun-features #8a), pure for the self-check ----
+// a car the player's horn is aimed at: ahead, inside the cone, in range (2D)
+bool InHornCone(const FVector& From, const FVector& Fwd, const FVector& P)
+{
+	const FVector2D D(P - From);
+	const double Len = D.Size();
+	return Len > 1.0 && Len < HornRangeCm && FVector2D::DotProduct(D / Len, FVector2D(Fwd).GetSafeNormal()) > HornConeCos;
+}
+
+// a honked car takes a free lane to its right, else (stood, and not held at a stop
+// line or signal: Why 3) edges toward the kerb to let the player by
+enum class EHonkReact : uint8 { None, LaneRight, PullRight };
+EHonkReact HonkReact(float V, uint8 Why, bool bRightLaneFree)
+{
+	if (Why == 3)
+	{
+		return EHonkReact::None;
+	}
+	return bRightLaneFree ? EHonkReact::LaneRight : V < 300.0f ? EHonkReact::PullRight : EHonkReact::None;
+}
+
+// an oncoming car in the lane a dodge swings into (Lat, + = right) that it would meet
+// in the ~4 s the swing takes
+bool Oncoming(const FVector& Pos, const FQuat& Rot, float Lat, const FVector& BPos, const FQuat& BRot, float BV)
+{
+	const FVector F = Rot.GetForwardVector();
+	if (FVector::DotProduct(F, BRot.GetForwardVector()) > -0.7)
+	{
+		return false;
+	}
+	const FVector D = BPos - Pos;
+	const double Along = FVector::DotProduct(D, F);
+	return Along > -CarLenCm && Along < 3000.0 + BV * 4.0 && FMath::Abs(FVector::DotProduct(D, Rot.GetRightVector()) - Lat) < LaneWidthCm;
+}
+
+// the player sat in front of this car through a green: honk after GreenHonkS of it, then
+// again every 7 s while they still sit
+bool GreenWaitHonk(float& Wait, bool bBlockedOnGreen, float Dt)
+{
+	Wait = bBlockedOnGreen ? Wait + Dt : 0.0f;
+	if (Wait < GreenHonkS)
+	{
+		return false;
+	}
+	Wait = -4.0f;
 	return true;
 }
 
@@ -748,6 +805,16 @@ void AODTrafficManager::BeginPlay()
 			IdleBed = S;
 		}
 	}
+	// one horn voice beside the pass-by engines, moved to whichever car honks
+	AgentHorn = NewObject<UODHornSynth>(this);
+	AgentHorn->SetupAttachment(RootComponent);
+	AgentHorn->bOverrideAttenuation = true;
+	AgentHorn->AttenuationOverrides.bAttenuate = true;
+	AgentHorn->AttenuationOverrides.bSpatialize = true;
+	AgentHorn->AttenuationOverrides.AttenuationShapeExtents = FVector(1000.0f, 0.0f, 0.0f);
+	AgentHorn->AttenuationOverrides.FalloffDistance = PassByRangeCm * 2.0f;
+	AgentHorn->RegisterComponent();
+	AgentHorn->Start();
 }
 
 void AODTrafficManager::EndPlay(const EEndPlayReason::Type Reason)
@@ -781,6 +848,7 @@ void AODTrafficManager::BuildModels()
 		const FBoxSphereBounds Bounds = Chassis->GetBounds();
 		M.BoundsOrigin = Bounds.Origin;
 		M.HalfExtent = Bounds.BoxExtent;
+		M.HornHash = GetTypeHash(Def->GetName());
 		auto MakeIsm = [&](UStaticMesh* Mesh, float CullCm, bool bShadow, bool bFar)
 		{
 			UInstancedStaticMeshComponent* Ism = NewObject<UInstancedStaticMeshComponent>(this);
@@ -1050,6 +1118,47 @@ bool AODTrafficManager::FindLeader(int32 Self, uint8 Lane, float& OutGap, float&
 				OutV = B.V;
 				return true;
 			}
+		}
+	}
+	return false;
+}
+
+bool AODTrafficManager::LaneFree(const FAgent& Ag, uint8 TL) const
+{
+	const FODTrafficGraph::FLink& L = Graph->Links[Ag.Link];
+	float LeadGap = 1.0e9f, FolGap = 1.0e9f, FolV = 0.0f, FolV0 = L.SpeedCmS;
+	const int32 End = SliceStart[Ag.Link] + SliceNum[Ag.Link];
+	for (int32 o = SliceStart[Ag.Link]; o < End; ++o)
+	{
+		const FAgent& B = Agents[Order[o]];
+		if (B.Link != Ag.Link || B.Lane != TL || &B == &Ag)
+		{
+			continue;
+		}
+		if (B.S >= Ag.S)
+		{
+			LeadGap = FMath::Min(LeadGap, B.S - Ag.S - CarLenCm);
+		}
+		else if (Ag.S - B.S - CarLenCm < FolGap)
+		{
+			FolGap = Ag.S - B.S - CarLenCm;
+			FolV = B.V;
+			FolV0 = B.V0Factor * L.SpeedCmS;
+		}
+	}
+	return LeadGap > IdmMinGap * 100.0f && FolGap > IdmMinGap * 100.0f
+		&& Idm(FolV, FolV0, FolGap, Ag.V) > -SafeDecel * 100.0f;
+}
+
+bool AODTrafficManager::OncomingNear(const FAgent& Ag, float Lat) const
+{
+	// ponytail: O(N) scan, only for the rare car about to dodge a parked player; use the
+	// Step's cell grid with a wider ring if that ever shows in the profile
+	for (const FAgent& B : Agents)
+	{
+		if (&B != &Ag && Oncoming(Ag.CurPos, Ag.CurRot, Lat, B.CurPos, B.CurRot, B.V))
+		{
+			return true;
 		}
 	}
 	return false;
@@ -1426,6 +1535,8 @@ void AODTrafficManager::Step(float Dt)
 {
 	SimTime += Dt;
 	const FODTrafficGraph& G = *Graph;
+	const int32 HornPresses = PendingHornPresses;   // horn presses since the last step
+	PendingHornPresses = 0;
 	RebuildOrder();
 	TArray<int32> Remove;
 	const double Despawn2 = (double)DespawnRadiusCm * DespawnRadiusCm;
@@ -1463,13 +1574,15 @@ void AODTrafficManager::Step(float Dt)
 		// the player, wrecks and any-link neighbours as leaders: in this lane's corridor, ahead
 		const FVector F = Ag.CurRot.GetForwardVector();
 		uint8 Why = 0;   // what binds: 0 lane leader / free, 1 any-link car, 2 player / wreck / bump, 3 stop line
-		auto Lead = [&](double Along, const FVector& Vel, uint8 W)
+		bool bPlayerLeads = false;
+		auto Lead = [&](double Along, const FVector& Vel, uint8 W, bool bPlayer = false)
 		{
 			if (Along - CarLenCm < Gap)
 			{
 				Gap = Along - CarLenCm;
 				LV = FMath::Max(0.0, FVector::DotProduct(Vel, F));
 				Why = W;
+				bPlayerLeads = bPlayer;
 			}
 		};
 		double Along;
@@ -1477,16 +1590,20 @@ void AODTrafficManager::Step(float Dt)
 		{
 			// a parked player: after a short wait, steer round it (the corridor test
 			// lets go once the player is 2.2 m to the side) instead of queuing forever
-			// (Summit, a capture with the car parked on the road). ponytail: no check
-			// for oncoming traffic in the lane it swings into.
+			// (Summit, a capture with the car parked on the road), once the lane it
+			// swings into has no oncoming car
 			if (Ag.Dodge == 0.0f && Ag.StillS > 2.0f && Along < 2000.0 && PlayerVel.SizeSquared2D() < 100.0 * 100.0)
 			{
 				const float Side = FVector::DotProduct(PlayerPos - Ag.CurPos, Ag.CurRot.GetRightVector());
-				Ag.Dodge = Side >= 0.0f ? Side - 260.0f : Side + 260.0f;
+				const float Dodge = Side >= 0.0f ? Side - 260.0f : Side + 260.0f;
+				if (!OncomingNear(Ag, Dodge))
+				{
+					Ag.Dodge = Dodge;
+				}
 			}
-			Lead(Along, PlayerVel, 2);
+			Lead(Along, PlayerVel, 2, true);
 		}
-		if (Ag.Dodge != 0.0f && FVector::DistSquared2D(Ag.CurPos, PlayerPos) > 3000.0 * 3000.0)
+		if (Ag.Dodge != 0.0f && FVector::DistSquared2D(Ag.CurPos, PlayerPos) > DodgeClearCm * DodgeClearCm)
 		{
 			Ag.Dodge = 0.0f;   // past it: back into the lane
 		}
@@ -1555,28 +1672,7 @@ void AODTrafficManager::Step(float Dt)
 		if (NL && Ag.Lane >= NL->Lanes && DistEnd < 30000.0f)
 		{
 			const uint8 TL = Ag.Lane - 1;
-			float LeadGap = 1.0e9f, FolGap = 1.0e9f, FolV = 0.0f, FolV0 = L.SpeedCmS;
-			const int32 End = SliceStart[Ag.Link] + SliceNum[Ag.Link];
-			for (int32 o = SliceStart[Ag.Link]; o < End; ++o)
-			{
-				const FAgent& B = Agents[Order[o]];
-				if (B.Link != Ag.Link || B.Lane != TL || &B == &Ag)
-				{
-					continue;
-				}
-				if (B.S >= Ag.S)
-				{
-					LeadGap = FMath::Min(LeadGap, B.S - Ag.S - CarLenCm);
-				}
-				else if (Ag.S - B.S - CarLenCm < FolGap)
-				{
-					FolGap = Ag.S - B.S - CarLenCm;
-					FolV = B.V;
-					FolV0 = B.V0Factor * L.SpeedCmS;
-				}
-			}
-			if (LeadGap > IdmMinGap * 100.0f && FolGap > IdmMinGap * 100.0f
-				&& Idm(FolV, FolV0, FolGap, Ag.V) > -SafeDecel * 100.0f)
+			if (LaneFree(Ag, TL))
 			{
 				Ag.Lane = TL;
 			}
@@ -1638,6 +1734,38 @@ void AODTrafficManager::Step(float Dt)
 			{
 				Ag.bCleared = true;   // priority approach / uncontrolled
 			}
+		}
+
+		// the player's horn: a car ahead in its cone moves over (once per press), and
+		// honks back if the player keeps at it
+		if ((HornPresses > 0 || bPlayerHorn) && InHornCone(PlayerPos, PlayerFwd, Ag.CurPos))
+		{
+			Ag.HonkHeat += HornPresses + (bPlayerHorn ? 1.5f * Dt : 0.0f);
+			if (HornPresses > 0)
+			{
+				const uint8 TL = Ag.Lane + 1;   // higher lane = further right
+				const bool bRight = TL < L.Lanes && (!NL || TL < NL->Lanes) && LaneFree(Ag, TL);
+				switch (HonkReact(Ag.V, Why, bRight))
+				{
+				case EHonkReact::LaneRight: Ag.Lane = TL; break;
+				// ponytail: blind to the kerb and parked cars; fine for 1.5 m
+				case EHonkReact::PullRight: Ag.Dodge = PullRightCm; break;
+				default: break;
+				}
+			}
+			if (Ag.HonkHeat >= HonkBackHeat)
+			{
+				Ag.HonkHeat = 0.0f;
+				Ag.HornUntil = SimTime + 0.5 + 0.5 * Unit(Ag.Seed ^ StepId);
+			}
+		}
+		Ag.HonkHeat = FMath::Max(0.0f, Ag.HonkHeat - 0.5f * Dt);
+		// and honks at a player who sits in front of it through a green
+		const bool bWastedGreen = bPlayerLeads && Ag.V < 50.0f && Gap < 1500.0f && PlayerVel.SizeSquared2D() < 100.0 * 100.0
+			&& L.EndControl == 1 && L.EndCluster >= 0 && SignalState(Ag.Link) == 0;
+		if (GreenWaitHonk(Ag.GreenWait, bWastedGreen, Dt))
+		{
+			Ag.HornUntil = SimTime + 0.35 + 0.4 * Unit(Ag.Seed ^ StepId);
 		}
 
 		Ag.A = Idm(Ag.V, V0, Gap, LV);
@@ -1896,6 +2024,10 @@ void AODTrafficManager::ProcessHits()
 		FAgent& Ag = Agents[i];
 		if (H.Value < WreckClosingCmS)
 		{
+			if (SimTime >= Ag.HoldUntil)
+			{
+				Ag.HornUntil = SimTime + 0.8;   // a fresh bump: the car honks at the player
+			}
 			Ag.HoldUntil = SimTime + BumpHoldS;   // a bump: the car stops, the player bounces off
 			continue;
 		}
@@ -1986,6 +2118,34 @@ void AODTrafficManager::UpdateAudio(float Alpha)
 		S->SetEngineState(Rpm, Throttle, Throttle);
 		S->SetVolumeScale(AudioVolume);
 	}
+	// the nearest honking car gets the horn voice
+	// ponytail: one AI horn at a time; a second voice if two honking cars ever matter
+	int32 Honker = -1;
+	double HonkD2 = 4.0 * PassByRangeCm * PassByRangeCm;
+	for (int32 i = 0; i < Agents.Num(); ++i)
+	{
+		const double D2 = FVector::DistSquared(Agents[i].CurPos, PlayerPos);
+		if (SimTime < Agents[i].HornUntil && D2 < HonkD2)
+		{
+			HonkD2 = D2;
+			Honker = i;
+		}
+	}
+	if (AgentHorn)
+	{
+		if (Honker >= 0)
+		{
+			const FAgent& Ag = Agents[Honker];
+			AgentHorn->SetWorldLocation(FMath::Lerp(Ag.PrevPos, Ag.CurPos, (double)Alpha));
+			if (Ag.Model != AgentHornModel)
+			{
+				AgentHornModel = Ag.Model;
+				AgentHorn->SetVoice(Models[Ag.Model].HornHash);
+			}
+		}
+		AgentHorn->SetOn(Honker >= 0);
+		AgentHorn->SetVolumeScale(AudioVolume);
+	}
 	if (IdleBed)
 	{
 		IdleBed->SetEngineState(650.0f, 0.05f, 0.05f);
@@ -2063,6 +2223,13 @@ void AODTrafficManager::Tick(float DeltaSeconds)
 	const FVector WasPos = PlayerPos;
 	PlayerPos = Pawn->GetActorLocation();
 	PlayerVel = Pawn->GetVelocity();
+	PlayerFwd = Pawn->GetActorForwardVector();
+	if (const AODVehiclePawn* Car = Cast<AODVehiclePawn>(Pawn))
+	{
+		PendingHornPresses += FMath::Max(0, Car->GetHornPresses() - HornPressesSeen);
+		HornPressesSeen = Car->GetHornPresses();
+		bPlayerHorn = Car->IsHornOn();
+	}
 	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	CamFwd = FVector2D(Cam ? Cam->GetCameraRotation().Vector() : Pawn->GetActorForwardVector()).GetSafeNormal();
 
@@ -2273,5 +2440,71 @@ bool FODTrafficCollisionCheck::RunTest(const FString& Parameters)
 	}
 	GEngine->DestroyWorldContext(World);
 	World->DestroyWorld(false);
+	return true;
+}
+
+// ---- horn reactions (fun-features #8a) ----
+// UnrealEditor-Cmd OpenDriveUE.uproject -ExecCmds="Automation RunTests OpenDrive.Traffic.Horn;Quit"
+// -unattended -nullrhi -testexit="Automation Test Queue Empty"
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FODTrafficHornCheck, "OpenDrive.Traffic.Horn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FODTrafficHornCheck::RunTest(const FString& Parameters)
+{
+	const FVector X(1, 0, 0);
+	// ---- who hears it: 40 m ahead, 30 degree cone ----
+	TestTrue(TEXT("car 20 m dead ahead"), InHornCone(FVector::ZeroVector, X, FVector(2000, 0, 0)));
+	TestTrue(TEXT("car 30 m ahead, 5 m over (an adjacent lane)"), InHornCone(FVector::ZeroVector, X, FVector(3000, 500, 0)));
+	TestFalse(TEXT("car 50 m ahead is out of range"), InHornCone(FVector::ZeroVector, X, FVector(5000, 0, 0)));
+	TestFalse(TEXT("car alongside"), InHornCone(FVector::ZeroVector, X, FVector(300, 400, 0)));
+	TestFalse(TEXT("car behind"), InHornCone(FVector::ZeroVector, X, FVector(-2000, 0, 0)));
+	TestTrue(TEXT("height ignored (a bridge ramp)"), InHornCone(FVector::ZeroVector, X, FVector(2000, 0, 800)));
+
+	// ---- what it does ----
+	TestTrue(TEXT("free lane to the right: takes it"), HonkReact(2000.0f, 0, true) == EHonkReact::LaneRight);
+	TestTrue(TEXT("stood in a single lane: pulls right"), HonkReact(0.0f, 2, false) == EHonkReact::PullRight);
+	TestTrue(TEXT("moving, no lane: carries on"), HonkReact(2000.0f, 0, false) == EHonkReact::None);
+	TestTrue(TEXT("held at a red: stays put"), HonkReact(0.0f, 3, false) == EHonkReact::None);
+	TestTrue(TEXT("held at a red: no lane change either"), HonkReact(0.0f, 3, true) == EHonkReact::None);
+
+	// ---- the dodge's oncoming check (dodge 2.6 m left into a two-way road's other lane) ----
+	const FQuat East = FQuat::Identity, West = FRotator(0, 180, 0).Quaternion();
+	const float Lat = -260.0f;
+	TestTrue(TEXT("oncoming car 40 m ahead in that lane"), Oncoming(FVector::ZeroVector, East, Lat, FVector(4000, -350, 0), West, 1500.0f));
+	TestFalse(TEXT("oncoming car 200 m ahead, 54 km/h: room to swing"), Oncoming(FVector::ZeroVector, East, Lat, FVector(20000, -350, 0), West, 1500.0f));
+	TestTrue(TEXT("fast oncoming car 140 m ahead (108 km/h)"), Oncoming(FVector::ZeroVector, East, Lat, FVector(14000, -350, 0), West, 3000.0f));
+	TestFalse(TEXT("same-direction car in the next lane"), Oncoming(FVector::ZeroVector, East, Lat, FVector(2000, -350, 0), East, 1500.0f));
+	TestFalse(TEXT("oncoming car already passed"), Oncoming(FVector::ZeroVector, East, Lat, FVector(-1500, -350, 0), West, 1500.0f));
+	TestFalse(TEXT("oncoming car two lanes over"), Oncoming(FVector::ZeroVector, East, Lat, FVector(3000, -1050, 0), West, 1500.0f));
+
+	// ---- green-light honk: same sim time at 20 Hz and 60 Hz steps (fixed step, not frame time) ----
+	auto FirstHonk = [](float Dt)
+	{
+		float Wait = 0.0f;
+		for (int32 k = 1; k * Dt < 20.0f; ++k)
+		{
+			if (GreenWaitHonk(Wait, true, Dt))
+			{
+				return k * Dt;
+			}
+		}
+		return -1.0f;
+	};
+	TestEqual(TEXT("honks after a 3 s wasted green (20 Hz)"), FirstHonk(StepS), GreenHonkS, StepS + 1e-3f);
+	TestEqual(TEXT("honks after a 3 s wasted green (60 Hz)"), FirstHonk(1.0f / 60.0f), GreenHonkS, 1.0f / 60.0f + 1e-3f);
+	float Wait = 0.0f;
+	int32 Honks = 0;
+	for (int32 k = 0; k < 240; ++k)   // 12 s sat in front of it
+	{
+		Honks += GreenWaitHonk(Wait, true, StepS) ? 1 : 0;
+	}
+	TestEqual(TEXT("12 s sat on a green: two honks (3 s, then 7 s later)"), Honks, 2);
+	Wait = 0.0f;
+	Honks = 0;
+	for (int32 k = 0; k < 200; ++k)   // the player moves off every 2 s
+	{
+		Honks += GreenWaitHonk(Wait, k % 40 < 39, StepS) ? 1 : 0;
+	}
+	TestEqual(TEXT("player that keeps moving off: no honk"), Honks, 0);
 	return true;
 }
