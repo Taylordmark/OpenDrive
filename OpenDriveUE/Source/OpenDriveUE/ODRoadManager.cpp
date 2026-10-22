@@ -4,6 +4,7 @@
 
 #include "ODBinSidecarUtil.h"
 #include "ODTileSource.h"
+#include "Algo/BinarySearch.h"
 #include "Algo/Reverse.h"
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -629,6 +630,8 @@ namespace
 constexpr float TurnLookCm = 2500.0f;    // heading sampled 25 m before/after a junction
 constexpr float TurnMinDeg = 35.0f;      // smaller bends at a junction = "continue"
 constexpr float TurnMergeCm = 3000.0f;   // junction nodes this close = one turn
+constexpr float TurnNameAheadCm = 4000.0f;   // a turn's street name: the label 40 m past it ...
+constexpr float TurnNameMaxCm = 5000.0f;     // ... within 50 m, else no name
 constexpr float OffRouteCm = 5000.0f;    // reroute past 50 m off the route line
 constexpr double RerouteCooldownS = 2.0;
 constexpr float ArriveCm = 3000.0f;
@@ -926,6 +929,13 @@ bool AODRoadManager::RecomputeRoute(const FVector2D& From)
 		}
 		RouteTurns.Add({RouteCum[k], Ang});
 	}
+	// street names (road trip, 2026-10-22): the label a little past each turn
+	// (labels are ~50 m apart along a road), so the junction's crossing road loses
+	for (FRouteTurn& Turn : RouteTurns)
+	{
+		const int32 m = Algo::LowerBound(RouteCum, Turn.Cum + TurnNameAheadCm);
+		Turn.Road = RoadLabelNear(RoutePts[FMath::Min(m, Num - 1)], TurnNameMaxCm);
+	}
 	RouteSeg = 0;
 	RouteProgressCm = 0.0f;
 	RouteRemainingCm = RouteCum.Last();
@@ -960,7 +970,7 @@ void AODRoadManager::ClearRoute()
 	RouteRemainingCm = 0.0f;
 }
 
-bool AODRoadManager::GetNextTurn(float& OutDistCm, float& OutAngleDeg) const
+bool AODRoadManager::GetNextTurn(float& OutDistCm, float& OutAngleDeg, FString* OutRoad) const
 {
 	for (const FRouteTurn& T : RouteTurns)
 	{
@@ -968,6 +978,10 @@ bool AODRoadManager::GetNextTurn(float& OutDistCm, float& OutAngleDeg) const
 		{
 			OutDistCm = T.Cum - RouteProgressCm;
 			OutAngleDeg = T.AngleDeg;
+			if (OutRoad)
+			{
+				*OutRoad = T.Road;
+			}
 			return true;
 		}
 	}
@@ -1098,6 +1112,22 @@ void AODRoadManager::LoadPlaceLabels()
 	UE_LOG(LogTemp, Display,
 		TEXT("ODRoadManager: loaded %d place label(s) from %s (generation id %s)"),
 		PlaceLabels.Num(), *BinPath, *LabelGenerationId);
+}
+
+FString AODRoadManager::RoadLabelNear(const FVector2D& P, float MaxCm) const
+{
+	// ponytail: linear scan (a few thousand labels) per turn per reroute; a grid if routes get long
+	double BestSq = FMath::Square((double)MaxCm);
+	const FPlaceLabel* Best = nullptr;
+	for (const FPlaceLabel& L : PlaceLabels)
+	{
+		if (const double D = FVector2D::DistSquared(P, L.Pos); D < BestSq)
+		{
+			BestSq = D;
+			Best = &L;
+		}
+	}
+	return Best ? Best->RoadLabel : FString();
 }
 
 void AODRoadManager::UpdateCurrentLabels(const FVector& PlayerLoc)

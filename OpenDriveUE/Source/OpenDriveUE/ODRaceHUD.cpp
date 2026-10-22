@@ -1,4 +1,5 @@
 #include "ODRaceHUD.h"
+#include "ODRoadTrip.h"
 
 #include "Application/SlateApplicationBase.h"
 #include "Components/InputComponent.h"
@@ -2591,7 +2592,8 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	// turn arrow: stem up from the bottom, then bent by the turn angle
 	// (+ = right = clockwise on screen); straight when no turn is coming
 	float TurnCm = 0.0f, TurnDeg = 0.0f;
-	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg);
+	FString TurnRoad;
+	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg, &TurnRoad);
 	const float A = FMath::DegreesToRadians(bTurn ? FMath::Clamp(TurnDeg, -135.0f, 135.0f) : 0.0f);
 	const FVector2D Knee(X + 48.0f * S, Y + 40.0f * S);
 	const FVector2D Dir(FMath::Sin(A), -FMath::Cos(A));
@@ -2615,7 +2617,8 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
 			Side2, *FormatNavDist(TurnCm, bMetric));
 	P.Text(Line1.ToUpper(), X + 92.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
-	P.Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
+	P.Text(FString::Printf(TEXT("%s%s  ·  %s"), bTurn && !TurnRoad.IsEmpty() ? *(TEXT("onto ") + TurnRoad + TEXT("  ·  ")) : TEXT(""),
+			*RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
 		X + 92.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol);
 }
 
@@ -3048,4 +3051,5 @@ void AODRaceHUD::DrawHUD()
 	// shared bottom-left toast stack if more cards land there
 	DrawNowPlayingCard(Canvas, MenuScale(), bShowMiniMap
 		? Canvas->SizeY - (MiniMapSize + 28.0f + 44.0f) * MenuScale() : Canvas->SizeY - 28.0f * MenuScale());
+	ODRoadTrip::DrawHUD(this, Canvas, MenuScale(), bMetric);   // ?oddest= start banner / arrival card
 }

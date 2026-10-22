@@ -268,6 +268,8 @@ private:
 	TArray<FODMenuPick> Picks;          // AreaIdx's rows
 	TArray<FVector2D> AreaMap;
 	FString TownPick;                   // Open Drive start, empty = the level's default spawn
+	int32 DestPick = INDEX_NONE;        // road trip: Picks index of the Start screen's Destination, none = free roam
+	const FODMenuPick* TripDest() const { return TrackPick.IsEmpty() && Picks.IsValidIndex(DestPick) ? &Picks[DestPick] : nullptr; }
 	TWeakObjectPtr<class AODMenuGlobe> Globe;
 	int32 FocusedPin = INDEX_NONE;
 	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
