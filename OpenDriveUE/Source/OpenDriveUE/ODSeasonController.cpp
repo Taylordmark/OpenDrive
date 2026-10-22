@@ -180,6 +180,7 @@ namespace
 AODSeasonController::AODSeasonController()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: Tick holds the clock while paused
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
 
@@ -291,6 +292,10 @@ void AODSeasonController::FindManagers()
 void AODSeasonController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	// fun #7: while paused the clock and flakes hold; the MID push keeps
+	// real time so a paused weather change still reaches the materials
+	const float RealDt = DeltaSeconds;
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;
 
 	// Late-bind managers: AODGameMode's Ensure* spawns run in BeginPlay order
 	// and this controller is spawned last (see EnsureSeasonController), but
@@ -313,7 +318,7 @@ void AODSeasonController::Tick(float DeltaSeconds)
 	const AODWeatherController* Weather = WeatherCtl.Get();
 	SnowfallIntensity = Weather ? Weather->PrecipIntensity * Weather->PrecipType : 0.0f;
 
-	PushAccumSeconds += DeltaSeconds;
+	PushAccumSeconds += RealDt;
 	const float PushInterval = ParamPushHz > 0.0f ? 1.0f / ParamPushHz : 0.0f;
 	if (PushAccumSeconds >= PushInterval)
 	{

@@ -9,6 +9,8 @@
 #include "RHIStats.h"
 #include "DynamicRHI.h"
 #include "ODBakeLink.h"
+#include "ODGhost.h"
+#include "ODReplay.h"
 #include "ODTileSource.h"
 #include "ODVisualStyle.h"
 #if PLATFORM_WINDOWS
@@ -190,6 +192,12 @@ class FOpenDriveUEModule : public FDefaultGameModuleImpl
 	{
 		ODTileSource::Init();
 		ODBakeLink::Init();   // car.json heartbeat + "ready to drive" alert (2026-10-21)
+		// -odselfcheck: pure-logic checks (no world), e.g. under any commandlet
+		if (FParse::Param(FCommandLine::Get(), TEXT("odselfcheck")))
+		{
+			FODGhostFile::SelfCheck();
+			FODReplayBuffer::SelfCheck();
+		}
 		int32 Perf = 1, GpuDump = 1;
 		FParse::Value(FCommandLine::Get(), TEXT("odperf="), Perf);
 		FParse::Value(FCommandLine::Get(), TEXT("odprofilegpu="), GpuDump);

@@ -155,6 +155,7 @@ TArray<FVector> AddBoltPath(TArray<FTransform>& Out, FRandomStream& R, FVector A
 AODAtmosphereController::AODAtmosphereController()
 {
 	PrimaryActorTick.bCanEverTick = true;   // Weather W2
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: paused scrubbing shows the sky; Tick zeroes Dt while paused
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));   // bolt + flash light attach here
 }
 
@@ -542,6 +543,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;   // visuals follow while paused, lightning clocks don't
 
 	if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
 	{

@@ -19,6 +19,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "EngineUtils.h"
 #include "ODInputConfig.h"
+#include "ODMedia.h"
 #include "ODRoadManager.h"
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -359,7 +360,7 @@ void AODVehiclePawn::SetVehicleByIndex(int32 Index)
 
 void AODVehiclePawn::CycleVehicle()
 {
-	if (Vehicles.Num() < 2)
+	if (Vehicles.Num() < 2 || bInReplay)
 	{
 		return;   // nothing to switch to
 	}
@@ -1077,6 +1078,7 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::CameraView, &AODVehiclePawn::CycleCameraView, nullptr},
 		{EODInputAction::ShiftUp, &AODVehiclePawn::KeyShiftUp, nullptr},
 		{EODInputAction::ShiftDown, &AODVehiclePawn::KeyShiftDown, nullptr},
+		{EODInputAction::Horn, &AODVehiclePawn::HornPressed, &AODVehiclePawn::HornReleased},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1099,6 +1101,13 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		Input->BindKey(GamepadHandbrakeKey, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
 		Input->BindKey(GamepadHandbrakeKey, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
 		LastODManagedKeys.AddUnique(GamepadHandbrakeKey);
+	}
+	const FKey GamepadHornKey = FODInputConfig::GetGamepadKey(EODInputAction::Horn);
+	if (GamepadHornKey.IsValid())
+	{
+		Input->BindKey(GamepadHornKey, IE_Pressed, this, &AODVehiclePawn::HornPressed);
+		Input->BindKey(GamepadHornKey, IE_Released, this, &AODVehiclePawn::HornReleased);
+		LastODManagedKeys.AddUnique(GamepadHornKey);
 	}
 	const FKey GamepadViewKey = FODInputConfig::GetGamepadKey(EODInputAction::CameraView);
 	if (GamepadViewKey.IsValid())
@@ -1297,6 +1306,9 @@ void AODVehiclePawn::TickWheel()
 	{
 		ResetVehicle();
 	}
+	if (Pressed(EODWheelButton::MediaPlayPause)) { ODMedia::PlayPause(); }
+	if (Pressed(EODWheelButton::MediaNext)) { ODMedia::Next(); }
+	if (Pressed(EODWheelButton::MediaPrev)) { ODMedia::Prev(); }
 	if (Movement->bManualGearbox)
 	{
 		if (Pressed(EODWheelButton::ShiftUp))
@@ -1784,7 +1796,11 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// their own final values (deadzone+curve applied in the Gamepad*Axis
 	// callbacks above; wheel is 1:1 below) - they do NOT go through
 	// SmSteer/SmThrottle/SmBrake, which stay exactly the keyboard path.
-	if (ActiveDevice == EODInputDevice::Gamepad)
+	if (bInReplay)
+	{
+		// AODReplay feeds Movement
+	}
+	else if (ActiveDevice == EODInputDevice::Gamepad)
 	{
 		// speed-sensitive stick lock (2026-09-25; keyboard has its own): a firm stick
 		// flick at 70 mph was ~24 deg of road wheel, enough to spin the car
@@ -1846,7 +1862,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		// frozen Omega spun the wheels nonstop (2026-10-09, Taylor: "why
 		// dont the tires just normally sit still ... spinning like crazy").
 		float SpinRadS = 0.0f;
-		if (Body->IsSimulatingPhysics())
+		if (Body->IsSimulatingPhysics() || bInReplay)
 		{
 			const float RadiusCm = Movement->GetWheelRadius(i);
 			const float RollRadS = Movement->GetForwardSpeed() / RadiusCm;
@@ -1858,7 +1874,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 			}
 		}
 		WheelSpinDeg[i] = FMath::Fmod(WheelSpinDeg[i]
-			+ FMath::RadiansToDegrees(SpinRadS) * DeltaSeconds, 360.0f);
+			+ FMath::RadiansToDegrees(SpinRadS) * DeltaSeconds * (bInReplay ? ReplaySpinScale : 1.0f), 360.0f);
 		const float S = Movement->GetWheelRadius(i) / ReferenceWheelMeshRadiusCm;
 		const float Width = i < 2
 			? Movement->FrontTireWidthScale : Movement->RearTireWidthScale;

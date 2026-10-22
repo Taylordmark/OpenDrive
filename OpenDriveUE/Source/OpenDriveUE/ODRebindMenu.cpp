@@ -112,6 +112,9 @@ FODWheelBind* AODRebindMenu::WheelBind(int32 Row, bool& bAxis) const
 	case EODInputAction::ResetVehicle: return &P.Buttons[static_cast<int32>(EODWheelButton::Reset)];
 	case EODInputAction::ShiftUp: return &P.Buttons[static_cast<int32>(EODWheelButton::ShiftUp)];
 	case EODInputAction::ShiftDown: return &P.Buttons[static_cast<int32>(EODWheelButton::ShiftDown)];
+	case EODInputAction::MediaPlayPause: return &P.Buttons[static_cast<int32>(EODWheelButton::MediaPlayPause)];
+	case EODInputAction::MediaNext: return &P.Buttons[static_cast<int32>(EODWheelButton::MediaNext)];
+	case EODInputAction::MediaPrev: return &P.Buttons[static_cast<int32>(EODWheelButton::MediaPrev)];
 	default: return nullptr;
 	}
 }

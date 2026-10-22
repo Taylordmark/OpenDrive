@@ -58,6 +58,12 @@ enum class EODInputAction : uint8
 	CameraView,   // cycle chase / far / near / cockpit / hood / bumper
 	ShiftUp,      // manual gearbox (Arc 6); ignored in automatic
 	ShiftDown,
+	PhotoMode,    // fun #4: pause into photo mode (or back out)
+	MediaPlayPause,   // music controls: OS media keys (ODMedia)
+	MediaNext,
+	MediaPrev,
+	Replay,      // #9 instant replay
+	Horn,         // fun-features #8a; traffic reacts (ODTrafficManager)
 	Count  // sentinel, not a real action
 };
 

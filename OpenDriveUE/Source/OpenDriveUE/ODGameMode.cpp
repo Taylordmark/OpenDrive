@@ -1,4 +1,5 @@
 #include "ODGameMode.h"
+#include "ODRoadTrip.h"
 #include "ODTileSource.h"
 #include "Async/Async.h"
 
@@ -22,6 +23,7 @@
 #include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
+#include "ODChallengeManager.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -32,6 +34,7 @@
 #include "ODWeatherController.h"
 #include "ODParkingManager.h"
 #include "ODWaterManager.h"
+#include "ODReplay.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -95,11 +98,27 @@ void AODGameMode::BeginPlay()
 	EnsureAtmosphereController();
 	EnsureSeasonController();
 	EnsureWeatherController();
+	if (GetWorld() && !AODReplay::Find(GetWorld()))
+	{
+		GetWorld()->SpawnActor<AODReplay>();   // #9 always-on 30 s replay buffer
+	}
 	// ponytail: one ambient-sound manager, the home area's zones only - a
 	// streamed area set plays home's zone grid (silent outside it). Spawn one
 	// per set (and crossfade) if the neighbouring areas sound wrong.
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
+
+	// road trip (2026-10-22): ?oddest=<x>,<y> from the menu's Destination pick;
+	// the trip routes there itself once the graph is loaded and the drive started
+	FVector2D Dest;
+	if (const TCHAR* D = GetWorld() ? GetWorld()->URL.GetOption(TEXT("oddest="), nullptr) : nullptr; D && AODRoadTrip::ParseDest(D, Dest))
+	{
+		GetWorld()->SpawnActor<AODRoadTrip>()->Dest = Dest;
+	}
+	else if (D)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODGameMode: bad ?oddest=%s (want <x>,<y> cm) - no road trip"), D);
+	}
 
 	// custom track (pipeline/build_track.py): the race manager reads
 	// -odtrack itself; open-world levels just don't place one
@@ -116,6 +135,14 @@ void AODGameMode::BeginPlay()
 		{
 			GetWorld()->SpawnActor<AODRaceManager>();
 		}
+	}
+	// free roam: speed traps/zones and landmark hunting (fun-features #2/#5)
+	if (!HomeArea.IsEmpty() && GetWorld() && !TActorIterator<AODRaceManager>(GetWorld()))
+	{
+		AODChallengeManager* Challenges = GetWorld()->SpawnActorDeferred<AODChallengeManager>(
+			AODChallengeManager::StaticClass(), FTransform::Identity);
+		Challenges->AreaKey = HomeArea;
+		Challenges->FinishSpawning(FTransform::Identity);
 	}
 }
 

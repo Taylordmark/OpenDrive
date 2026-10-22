@@ -276,6 +276,7 @@ namespace
 AODWeatherController::AODWeatherController()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: Tick holds the clock while paused
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 }
 
@@ -443,6 +444,9 @@ bool AODWeatherController::CanProduce(EODWeatherState S) const
 void AODWeatherController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	// fun #7: ticks while paused so a forced state reaches the visuals, but
+	// no clock (hold, ramp, wetness, snow) moves
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;
 
 	if (!bForced)
 	{

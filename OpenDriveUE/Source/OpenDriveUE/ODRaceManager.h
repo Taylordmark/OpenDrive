@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/SaveGame.h"
+#include "ODGhost.h"
 #include "ODRaceManager.generated.h"
 
 UCLASS()
@@ -27,6 +28,14 @@ public:
 	/** Elapsed time at each gate of the best run (sector splits). */
 	UPROPERTY()
 	TArray<float> BestGateTimes;
+
+	/** The best run's car (UODVehicleDef asset name) and its exported
+	 *  .odghost (#3) - replaced, not piled up, on the next best. */
+	UPROPERTY()
+	FString GhostCar;
+
+	UPROPERTY()
+	FString GhostFile;
 };
 
 /**
@@ -97,6 +106,13 @@ public:
 
 	void RespawnAtLastGate();
 
+	// --- shareable ghosts (#3): the pause menu's "Race against" row ---
+	/** Rescan Saved/Ghosts/ for files of this area + track (gate hash). */
+	void RescanGhosts();
+	/** "My best" or "<car> m:ss.mmm" of an imported file; empty with no race. */
+	FString GetGhostChoiceLabel() const;
+	void CycleGhost(int32 Dir);
+
 private:
 	FString SaveSlot() const;
 	void SaveBest();
@@ -108,7 +124,7 @@ private:
 	static constexpr float SampleInterval = 0.1f;
 	float NextSampleTime = 0.0f;
 	TArray<FVector> RecPositions;
-	TArray<FRotator> RecRotations;
+	TArray<FQuat> RecRotations;
 	TArray<float> RecGateTimes;
 	TArray<float> BestGateTimes;
 	/** Last Tick's pawn pose: gate times and ghost samples interpolate
@@ -118,4 +134,13 @@ private:
 	double PrevTime = -1.0;
 
 	TWeakObjectPtr<class AODGhost> Ghost;
+
+	FODGhostFile MyBest;              // from the save slot; Positions empty = none yet
+	TArray<FODGhostFile> Imported;    // matching files in Saved/Ghosts/, minus our own export
+	int32 GhostChoice = 0;            // 0 = MyBest, i = Imported[i - 1]
+	FString AreaKey() const;
+	FString CurrentCarId() const;
+	/** Point the ghost at File (spawning it if needed), in File's car when
+	 *  that car exists, else the player's. */
+	void ApplyGhost(const FODGhostFile& File);
 };

@@ -1,4 +1,5 @@
 #include "ODRaceHUD.h"
+#include "ODRoadTrip.h"
 
 #include "Application/SlateApplicationBase.h"
 #include "Components/InputComponent.h"
@@ -26,10 +27,14 @@
 #include "ODPauseMenu.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
+#include "ODChallengeManager.h"
 #include "ODRaceManager.h"
+#include "ODReplay.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
+#include "ODPhotoMode.h"
+#include "UnrealClient.h"
 #include "ODWeatherController.h"
 #include "ODHudStyle.h"
 #include "Rendering/SlateRenderer.h"
@@ -96,6 +101,11 @@ void AODRaceHUD::RefreshODManagedKeyBindings()
 		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn, false},
 		{EODInputAction::WorldMap, &AODRaceHUD::ToggleWorldMap, true},
 		{EODInputAction::ClearRoute, &AODRaceHUD::ClearRouteKey, true},
+		{EODInputAction::PhotoMode, &AODRaceHUD::TogglePhotoMode, true},
+		{EODInputAction::MediaPlayPause, &AODRaceHUD::MediaPlayPause, false},
+		{EODInputAction::MediaNext, &AODRaceHUD::MediaNext, false},
+		{EODInputAction::MediaPrev, &AODRaceHUD::MediaPrev, false},
+		{EODInputAction::Replay, &AODRaceHUD::ToggleReplay, false},
 	};
 	for (const FActionFn& B : Binds)
 	{
@@ -448,6 +458,12 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 		}
 	}
 
+	// speed traps/zones and landmark pins (fun-features #2/#5)
+	if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+	{
+		Challenges->DrawMapIcons(Canvas, UiS, ToMap, [&](const FVector2D& M) { return !bCircular || InPanel(M); });
+	}
+
 	// start/finish/next-gate markers and the PB ghost need actual checkpoint
 	// data - skipped entirely on route-only levels (no AODRaceManager)
 	if (bHaveGates)
@@ -543,6 +559,8 @@ constexpr float RowH = 54.0f;
 constexpr float FooterH = 58.0f;
 
 const FODMenuTab PauseTabs[] = {{TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume}};
+const FODMenuTab EnvTabs[] = {{TEXT("ENVIRONMENT"), 0, ODEnvironment::NumRows}};   // fun #7
+const FODMenuTab PhotoTabs[] = {{TEXT("PHOTO"), 0, AODPhotoMode::RowCapture}};      // fun #4
 
 // "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
 float ParsePercent(const FString& V)
@@ -1031,6 +1049,15 @@ void AODRaceHUD::DrawColorPicker(float X, float Y) const
 
 	PickerSV = FBox2D(FVector2D(X, Y), FVector2D(X + Sz, Y + Sz));
 	PickerHue = FBox2D(FVector2D(HX, Y), FVector2D(HX + HW, Y + Sz));
+}
+
+void AODRaceHUD::TogglePhotoMode()
+{
+	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+	{
+		It->TogglePhotoMode();
+		return;
+	}
 }
 
 void AODRaceHUD::HandleMenuMouse(AODPauseMenu* Menu)
@@ -2299,7 +2326,11 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		}
 		const int32 T = TownNear(S, 18.0f);
 		FVector2D Snap;
-		const bool bOk = T != INDEX_NONE
+		FString LandmarkName;
+		const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld());
+		const bool bOk = Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Snap, LandmarkName)
+			? RoadMgr->SetRouteDestination(Snap, LandmarkName)
+			: T != INDEX_NONE
 			? RoadMgr->SetRouteDestination(Towns[T].Pos, Towns[T].Name)
 			: RoadMgr->SnapToRouteGraph(ToWorld(S), Snap)
 				&& RoadMgr->SetRouteDestination(Snap, TEXT("Waypoint"));
@@ -2561,7 +2592,8 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 	// turn arrow: stem up from the bottom, then bent by the turn angle
 	// (+ = right = clockwise on screen); straight when no turn is coming
 	float TurnCm = 0.0f, TurnDeg = 0.0f;
-	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg);
+	FString TurnRoad;
+	const bool bTurn = RoadMgr->GetNextTurn(TurnCm, TurnDeg, &TurnRoad);
 	const float A = FMath::DegreesToRadians(bTurn ? FMath::Clamp(TurnDeg, -135.0f, 135.0f) : 0.0f);
 	const FVector2D Knee(X + 48.0f * S, Y + 40.0f * S);
 	const FVector2D Dir(FMath::Sin(A), -FMath::Cos(A));
@@ -2585,8 +2617,63 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 		: FString::Printf(TEXT("%s %s in %s"), Abs >= 120.0f ? TEXT("Sharp") : Abs >= 60.0f ? TEXT("Turn") : TEXT("Keep"),
 			Side2, *FormatNavDist(TurnCm, bMetric));
 	P.Text(Line1.ToUpper(), X + 92.0f * S, Y + 28.0f * S, 28.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
-	P.Text(FString::Printf(TEXT("%s  ·  %s"), *RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
+	P.Text(FString::Printf(TEXT("%s%s  ·  %s"), bTurn && !TurnRoad.IsEmpty() ? *(TEXT("onto ") + TurnRoad + TEXT("  ·  ")) : TEXT(""),
+			*RoadMgr->GetRouteName(), *FormatNavDist(RoadMgr->GetRouteRemainingCm(), bMetric)),
 		X + 92.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol);
+}
+
+// ---- now-playing card (fun-features #1 v2): bottom-left, slides in for a
+// few seconds on a track / play-state change and stays while the music is
+// paused. Bottom = the card's bottom edge in pixels.
+void DrawNowPlayingCard(UCanvas* C, float S, float Bottom)
+{
+	const ODMedia::FNowPlaying& NP = ODMedia::NowPlaying();
+	const double Now = FPlatformTime::Seconds();
+	const bool bShow = NP.bValid && !NP.Title.IsEmpty() && (!NP.bPlaying || Now - NP.ChangedAt < 4.0);
+	// eased toward shown/hidden; exp of real Dt, so the same at any fps
+	static float Shown = 0.0f;
+	Shown = FMath::Lerp(bShow ? 1.0f : 0.0f, Shown, FMath::Exp(-FApp::GetDeltaTime() / 0.12f));
+	if (Shown < 0.01f)
+	{
+		return;
+	}
+	const FMenuPaint P{C, S};
+	const float W = 380.0f * S, H = 84.0f * S, Pad = 10.0f * S, ArtSz = H - 2.0f * Pad;
+	const float X = FMath::Lerp(-W - 8.0f * S, 40.0f * S, FMath::SmoothStep(0.0f, 1.0f, Shown));
+	const float Y = Bottom - H;
+	P.Fade(X, X + W, Y, H, Ink, 0.82f, 0.55f);
+	P.Rect(X, Y, 4.0f * S, H, Accent);
+
+	float TX = X + 4.0f * S + Pad;
+	if (NP.Art && NP.Art->GetResource())
+	{
+		// centre-square crop: browsers publish 16:9 video thumbnails
+		const float Aspect = float(NP.Art->GetSizeX()) / FMath::Max(1, NP.Art->GetSizeY());
+		const float U = Aspect > 1.0f ? 0.5f * (1.0f - 1.0f / Aspect) : 0.0f;
+		const float V = Aspect < 1.0f ? 0.5f * (1.0f - Aspect) : 0.0f;
+		FCanvasTileItem T(FVector2D(TX, Y + Pad), NP.Art->GetResource(), FVector2D(ArtSz, ArtSz),
+			FVector2D(U, V), FVector2D(1.0f - U, 1.0f - V), FLinearColor::White);
+		C->DrawItem(T);
+		TX += ArtSz + Pad * 1.4f;
+	}
+	// clip long names with an ellipsis to the card's width
+	const float MaxW = X + W - Pad - TX;
+	auto Fit = [&P, MaxW](FString Str, float Size, EMenuWeight Wt)
+	{
+		if (P.Width(Str, Size, Wt) <= MaxW)
+		{
+			return Str;
+		}
+		while (Str.Len() > 1 && P.Width(Str + TEXT("..."), Size, Wt) > MaxW)
+		{
+			Str.LeftChopInline(1);
+		}
+		return Str + TEXT("...");
+	};
+	P.Text(NP.bPlaying ? TEXT("NOW PLAYING") : TEXT("PAUSED"), TX, Y + 18.0f * S, 13.0f, EMenuWeight::SemiBold,
+		NP.bPlaying ? DimCol : Accent, false, 80);
+	P.Text(Fit(NP.Title, 22.0f, EMenuWeight::Bold), TX, Y + 42.0f * S, 22.0f, EMenuWeight::Bold, FLinearColor::White);
+	P.Text(Fit(NP.Artist, 17.0f, EMenuWeight::Medium), TX, Y + 65.0f * S, 17.0f, EMenuWeight::Medium, TextCol);
 }
 
 void AODRaceHUD::DrawHUD()
@@ -2755,6 +2842,28 @@ void AODRaceHUD::DrawHUD()
 		{
 			break;
 		}
+		if (Menu->IsPhotoOpen())
+		{
+			// fun #4: the scene stays clear - no backdrop, H hides the panel, and
+			// the frame a screenshot reads back draws nothing
+			const AODPhotoMode* Photo = Menu->GetPhotoMode();
+			if (Photo && !Photo->IsUiHidden() && !FScreenshotRequest::IsScreenshotRequested())
+			{
+				DrawMenuPanel(Menu->GetTitle(), PhotoTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+					[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
+				const FMenuPaint P{Canvas, MenuScale()};
+				const float X = MenuX(false, ColW * P.S);
+				DrawHints(P, X, {{TEXT("WASD"), TEXT("Move")}, {TEXT("R/F"), TEXT("Up / Down")}, {TEXT("Right Drag"), TEXT("Look")},
+					{TEXT("Space"), TEXT("Photo")}, {TEXT("H"), TEXT("Hide")}, {TEXT("Esc"), TEXT("Back")}});
+				if (const FString Toast = Photo->GetToast(); !Toast.IsEmpty())
+				{
+					P.Text(Toast, X, Canvas->SizeY - 100.0f * P.S, 18.0f, EMenuWeight::SemiBold, Accent);
+				}
+				// right-drag looks, so the right button doesn't back out here
+				DispatchMenuMouse(Menu, GetOwningPlayerController(), MenuHits, LastMenuMouse, LastMenuMouseFrame, true, false);
+			}
+			return;
+		}
 		DrawMenuBackdrop(0.35f, false);
 		if (Menu->IsSettingsOpen())
 		{
@@ -2762,7 +2871,7 @@ void AODRaceHUD::DrawHUD()
 		}
 		else
 		{
-			DrawMenuPanel(Menu->GetTitle(), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+			DrawMenuPanel(Menu->GetTitle(), Menu->IsEnvOpen() ? EnvTabs : PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
 				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
 			const float S = MenuScale();
 			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),
@@ -2780,6 +2889,11 @@ void AODRaceHUD::DrawHUD()
 			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
 				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
 				0.55f, 0.0f, false, RoadMgr);
+			if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+			{
+				const float ListY = FullMapY + FullSize + 12.0f * S;
+				Challenges->DrawChecklist(Canvas, S, FullMapX, ListY, FullSize, Canvas->SizeY - ListY - 12.0f * S, bMetric);
+			}
 		}
 		HandleMenuMouse(Menu);
 		return;   // drawn instead of the in-game HUD, like the main menu
@@ -2790,7 +2904,15 @@ void AODRaceHUD::DrawHUD()
 	// race timer, warnings (2026-10-14): Rajdhani + the cluster palette,
 	// centred and scaled from 1080p like the menus
 	const FMenuPaint HP{Canvas, MenuScale()};
+	if (const AODReplay* Replay = AODReplay::Find(GetWorld()); Replay && Replay->IsActive())
+	{
+		Replay->DrawOverlay(Canvas, MenuScale());
+	}
 	const FLinearColor Go(0.3f, 1.0f, 0.4f);
+	if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+	{
+		Challenges->DrawToast(Canvas, HP.S, bMetric);
+	}
 
 	// ---- race timer / gate progress (needs an actual race)
 	if (Race)
@@ -2924,4 +3046,10 @@ void AODRaceHUD::DrawHUD()
 	{
 		DrawNavPanel(NavMgr);   // nearest area's road (2026-10-05, large world)
 	}
+
+	// ponytail: fixed offset above the mini-map + its place label; move into a
+	// shared bottom-left toast stack if more cards land there
+	DrawNowPlayingCard(Canvas, MenuScale(), bShowMiniMap
+		? Canvas->SizeY - (MiniMapSize + 28.0f + 44.0f) * MenuScale() : Canvas->SizeY - 28.0f * MenuScale());
+	ODRoadTrip::DrawHUD(this, Canvas, MenuScale(), bMetric);   // ?oddest= start banner / arrival card
 }
