@@ -39,6 +39,8 @@ public class OpenDriveUE : ModuleRules
 			"Json",
 			// ODTileSource: -ODTileServer live tile fetch.
 			"HTTP",
+			// FImage/CopyImage: area rasters decoded off the game thread (ODTerrainManager::PrewarmArea).
+			"ImageCore",
 			// ODBakeLink: "ready to drive" toast (FSlateNotificationManager, 2026-10-21).
 			"Slate"
 		});

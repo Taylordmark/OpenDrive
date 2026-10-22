@@ -616,10 +616,9 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	}
 	const double Now = GetWorld()->GetRealTimeSeconds();
 	AreaDraw.Poll(Now);   // coverage.json / status.json / pass-1 roads, when they change (1 Hz)
-	if (VistaAtFrame != 0 && GFrameCounter >= VistaAtFrame)
+	if (VistaStep >= 0)
 	{
-		VistaAtFrame = 0;
-		ShowStartVista(AreaIdx);
+		StepStartVista(Now);
 	}
 	if (DriveStart >= 0.0)
 	{
@@ -1221,10 +1220,10 @@ void AODMainMenu::PickPin(int32 Pin)
 	FocusArea(Area);
 	PickingPin = Pin;
 	FlyToArea(WorldPickSec);
-	// the vista (2026-10-16) streams during the fly-in and the turnout pick, but
-	// spawning it holds the game thread for seconds (livetest6: 6.1 s), so it
-	// waits two frames for the picked pin to reach the screen first (2026-10-22)
-	VistaAtFrame = GFrameCounter + 2;
+	// the vista (2026-10-16) streams during the fly-in and the turnout pick; its
+	// heavy setup runs on workers and its managers spawn one per frame (Tick,
+	// 2026-10-22, was one 6-8 s frame in livetest6-8)
+	ShowStartVista(AreaIdx);
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: pin picked -> %s"), *AreaKeys[AreaIdx]);
 }
 
@@ -2450,14 +2449,12 @@ void AODMainMenu::ShowStartVista(int32 Area)
 	bVistaDirty = true;
 	AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // Tick's vista-stream wait cap
 	AODWeatherController::LoadClimateFile(AreaKeys[Area] + TEXT("_test"), VistaSpot.Climate);
-	for (AActor* A : GM->SpawnVistaSet(AreaKeys[Area], VistaCarWorld() - VistaSpot.CarCm, VistaRegion()))
-	{
-		VistaActors.Add(A);
-		if (AODForestManager* Forest = Cast<AODForestManager>(A))
-		{
-			VistaSpot.Forest = Forest;
-		}
-	}
+	// the managers spawn in StepStartVista, once their area's textures and lake
+	// index are built off the game thread (AODGameMode::PrewarmArea)
+	VistaStep = 0;
+	VistaPickTime = AreaEnterTime;
+	VistaMaxFrameMs = 0.0;
+	GM->PrewarmArea(AreaKeys[Area]);
 	if (VistaSpot.bHasSea)
 	{
 		const FVector Car = VistaCarWorld();
@@ -2482,7 +2479,33 @@ void AODMainMenu::ShowStartVista(int32 Area)
 		bVistasSpawned = true;
 		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
 	}
-	SetWeatherClimate(Area);   // its climate; Auto rolls once here and holds for the visit
+}
+
+void AODMainMenu::StepStartVista(double Now)
+{
+	VistaMaxFrameMs = FMath::Max(VistaMaxFrameMs, double(FApp::GetDeltaTime()) * 1000.0);
+	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+	if (!GM || !AreaKeys.IsValidIndex(VistaArea) || !GM->PrewarmArea(AreaKeys[VistaArea]))
+	{
+		return;   // workers still decoding/indexing; the globe keeps animating
+	}
+	// one manager family per frame: each BeginPlay is now tens of ms, not seconds
+	for (AActor* A : GM->SpawnVistaSet(AreaKeys[VistaArea], VistaCarWorld() - VistaSpot.CarCm, VistaRegion(), VistaStep))
+	{
+		VistaActors.Add(A);
+		if (AODForestManager* Forest = Cast<AODForestManager>(A))
+		{
+			VistaSpot.Forest = Forest;
+		}
+	}
+	if (++VistaStep < AODGameMode::NumVistaSteps())
+	{
+		return;
+	}
+	VistaStep = -1;
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: area vista %s spawned %.2fs after pick, longest frame %.0f ms (%d actor(s))"),
+		*AreaKeys[VistaArea], Now - VistaPickTime, VistaMaxFrameMs, VistaActors.Num());
+	SetWeatherClimate(VistaArea);   // its climate (needs the forest copy); Auto rolls once here and holds for the visit
 }
 
 void AODMainMenu::ClearStartVista()
@@ -2496,6 +2519,7 @@ void AODMainMenu::ClearStartVista()
 	}
 	VistaActors.Reset();
 	VistaSpot.Forest = nullptr;
+	VistaStep = -1;
 	if (VistaArea != INDEX_NONE)
 	{
 		VistaArea = INDEX_NONE;
@@ -2521,7 +2545,7 @@ void AODMainMenu::DestroyVistas()
 
 bool AODMainMenu::IsStartVistaReady() const
 {
-	if (VistaArea == INDEX_NONE)
+	if (VistaArea == INDEX_NONE || VistaStep >= 0)
 	{
 		return false;
 	}

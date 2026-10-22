@@ -565,6 +565,7 @@ private:
 	static constexpr double SnapHitchFrameSec = 0.075;
 	static constexpr double SnapQuietSec = 0.75;
 	double LastHitchTime = 0.0;
+	float SnapFrameMaxSec = 0.0f;   // longest frame since spawn, for the physics-released log
 	float SnapFrameAvgSec = 0.0f;   // running frame time; a hitch is over 2x it (and SnapHitchFrameSec)
 
 	// 2026-09-03: one-shot nearby-asphalt nudge, tried once a spawn point has

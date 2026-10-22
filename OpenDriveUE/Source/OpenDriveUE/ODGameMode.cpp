@@ -119,9 +119,32 @@ void AODGameMode::BeginPlay()
 	}
 }
 
-TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region)
+// the families with a vista mode (FODVistaRegion), in SpawnAreaSet's order
+static const TArray<UClass*>& VistaClasses()
 {
-	return SpawnAreaSet(Area, FVector(Offset.X, Offset.Y, 0.0), &Region);
+	static const TArray<UClass*> Classes = {AODTerrainManager::StaticClass(), AODRoadManager::StaticClass(),
+		AODForestManager::StaticClass(), AODWaterManager::StaticClass(), AODGuardrailManager::StaticClass(),
+		AODFurnitureManager::StaticClass()};
+	return Classes;
+}
+
+TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region, int32 Step)
+{
+	return VistaClasses().IsValidIndex(Step)
+		? SpawnAreaSet(Area, FVector(Offset.X, Offset.Y, 0.0), &Region, VistaClasses()[Step]) : TArray<AActor*>();
+}
+
+int32 AODGameMode::NumVistaSteps()
+{
+	return VistaClasses().Num();
+}
+
+bool AODGameMode::PrewarmArea(const FString& Area)
+{
+	// both run every call: each starts its workers on the first one
+	const bool bTerrain = AODTerrainManager::PrewarmArea(FString::Printf(TEXT("terrain_%s_test"), *Area));
+	const bool bLakes = AODForestManager::PrewarmLakes(FString::Printf(TEXT("water_%s_test"), *Area));
+	return bTerrain && bLakes;
 }
 
 void AODGameMode::FreezeStreaming(bool bFreeze)
@@ -253,7 +276,7 @@ void AODGameMode::StartDrawnArea(const FString& Key)
 	}
 }
 
-TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Offset, const FODVistaRegion* Vista)
+TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Offset, const FODVistaRegion* Vista, UClass* Only)
 {
 	TArray<AActor*> Out;
 	UWorld* World = GetWorld();
@@ -285,9 +308,7 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 	// so for them this is equivalent to the old SpawnActor-then-assign.
 	auto Begin = [&](UClass* Cls, bool bLevelPlaced) -> AActor*
 	{
-		if (Vista && Cls != AODTerrainManager::StaticClass() && Cls != AODRoadManager::StaticClass()
-			&& Cls != AODForestManager::StaticClass() && Cls != AODWaterManager::StaticClass()
-			&& Cls != AODGuardrailManager::StaticClass() && Cls != AODFurnitureManager::StaticClass())
+		if ((Vista && !VistaClasses().Contains(Cls)) || (Only && Cls != Only))
 		{
 			return nullptr;
 		}
@@ -310,10 +331,11 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 		{
 			A->Tags.Add(ODVistaTag);
 		}
+		const double T0 = FPlatformTime::Seconds();
 		A->FinishSpawning(Xf);
 		Out.Add(A);
-		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned %s for area '%s'"),
-			*A->GetClass()->GetName(), *Area);
+		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned %s for area '%s' in %.0f ms"),
+			*A->GetClass()->GetName(), *Area, (FPlatformTime::Seconds() - T0) * 1000.0);
 	};
 
 	if (AODTerrainManager* Terrain = Cast<AODTerrainManager>(Begin(AODTerrainManager::StaticClass(), true)))

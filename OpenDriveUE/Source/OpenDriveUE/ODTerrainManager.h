@@ -416,6 +416,14 @@ public:
 	 *  a buffer. */
 	static bool ParseTerrainTileBytes(const TArray<uint8>& Bin, FParsedTerrainTile& Out);
 
+	/** Game thread (2026-10-22): decode TerrainPrefix's sat/pave/dem PNGs and
+	 *  build its horizon mesh on workers, then create one texture per call
+	 *  here, so the menu vista's terrain manager and the level's after
+	 *  LoadMap both reuse them instead of each spending 2-3 s in BeginPlay.
+	 *  Holds one area: another prefix drops (and un-roots) the old one.
+	 *  True once all of it is ready; call again to poll. */
+	static bool PrewarmArea(const FString& TerrainPrefix);
+
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);
 	// ParseRoadStationSidecarFile moved to ODBinSidecarUtil.h (2026-08-26) -

@@ -1,4 +1,5 @@
 #include "ODVehiclePawn.h"
+#include "Misc/App.h"
 #include "ODAssetDetail.h"
 #include "ODBakeLink.h"
 #include "ODVisualStyle.h"
@@ -648,6 +649,7 @@ void AODVehiclePawn::TrySnapToGround()
 	const float Dt = GetWorld()->GetDeltaSeconds();
 	const float Clamped = FMath::Min(Dt, 0.25f);
 	SnapFrameAvgSec = SnapFrameAvgSec > 0.0f ? FMath::Lerp(SnapFrameAvgSec, Clamped, 0.1f) : Clamped;
+	SnapFrameMaxSec = FMath::Max(SnapFrameMaxSec, float(FApp::GetDeltaTime()));   // undilated: the load's longest frame
 	if (Dt > FMath::Max(SnapHitchFrameSec, 2.0 * SnapFrameAvgSec))
 	{
 		LastHitchTime = GetWorld()->GetTimeSeconds();
@@ -994,8 +996,8 @@ void AODVehiclePawn::TrySnapToGround()
 		Movement->EngageParkHold();
 	}
 	bGroundSnapped = true;
-	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: physics released %.1fs after spawn (settle ready %.1fs, frame avg %.0f ms)"),
-		Now - SpawnTime, SnapReadyTime - SpawnTime, SnapFrameAvgSec * 1000.0f);
+	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: physics released %.1fs after spawn (settle ready %.1fs, frame avg %.0f ms, longest %.0f ms)"),
+		Now - SpawnTime, SnapReadyTime - SpawnTime, SnapFrameAvgSec * 1000.0f, SnapFrameMaxSec * 1000.0f);
 	ODBakeLink::SetTarget(nullptr);   // car.json: no longer waiting anywhere (2026-10-21)
 	bEverGroundSnapped = true;   // real-world snap completed - arms the warm
 	                              // settle for later mid-drive resets (NOT set

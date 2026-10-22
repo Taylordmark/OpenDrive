@@ -271,7 +271,10 @@ private:
 	TWeakObjectPtr<class AODMenuGlobe> Globe;
 	int32 FocusedPin = INDEX_NONE;
 	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
-	uint64 VistaAtFrame = 0;            // PickPin: ShowStartVista (a multi-second spawn) once the picked pin has drawn
+	int32 VistaStep = -1;               // next SpawnVistaSet step (StepStartVista per Tick), -1 = none pending
+	double VistaPickTime = 0.0;         // ShowStartVista's real time, for its spawned log
+	double VistaMaxFrameMs = 0.0;       // longest frame from ShowStartVista to the vista spawned
+	void StepStartVista(double Now);
 	int32 PinArea(int32 Pin) const;     // the area a pin picks: its cluster's last-picked area, else its own
 	// no hover preload of the area's level package (tried 2026-10-22, removed): a
 	// world package held from LoadPackageAsync makes -game LoadMap fail ("Failed
