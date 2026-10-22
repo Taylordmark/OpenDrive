@@ -10,6 +10,7 @@
 #include "DynamicRHI.h"
 #include "ODBakeLink.h"
 #include "ODGhost.h"
+#include "ODReplay.h"
 #include "ODTileSource.h"
 #include "ODVisualStyle.h"
 
@@ -136,6 +137,7 @@ class FOpenDriveUEModule : public FDefaultGameModuleImpl
 		if (FParse::Param(FCommandLine::Get(), TEXT("odselfcheck")))
 		{
 			FODGhostFile::SelfCheck();
+			FODReplayBuffer::SelfCheck();
 		}
 		int32 Perf = 1, GpuDump = 1;
 		FParse::Value(FCommandLine::Get(), TEXT("odperf="), Perf);

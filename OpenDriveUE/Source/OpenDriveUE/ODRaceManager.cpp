@@ -22,6 +22,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/MemoryWriter.h"
+#include "ODReplay.h"
 
 AODRaceManager::AODRaceManager()
 {
@@ -299,6 +300,13 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	const APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!Pawn || Checkpoints.Num() < 2 || NextGate >= Checkpoints.Num())
 	{
+		return;
+	}
+
+	// #9 replay teleports the car along its past: no gates, resync after
+	if (AODReplay::IsActiveIn(GetWorld()))
+	{
+		PrevTime = -1.0;
 		return;
 	}
 

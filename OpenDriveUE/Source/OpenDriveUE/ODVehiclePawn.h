@@ -233,6 +233,11 @@ public:
 	 *  RPM frozen-but-nonzero and the synth kept audibly idling/revving). */
 	bool IsInShowroom() const { return bInShowroom; }
 
+	/** #9 AODReplay: no driving input, wheels spin from the replayed Omega
+	 *  times the playback rate (0 = paused) while the body is kinematic. */
+	bool bInReplay = false;
+	float ReplaySpinScale = 1.0f;
+
 	/** Drop the car at a chosen road point (map spawn pick) and re-arm the
 	 *  existing PM_Asphalt ground-snap so TrySnapToGround settles it on the
 	 *  road - reuses the proven spawn placement, no new logic. */

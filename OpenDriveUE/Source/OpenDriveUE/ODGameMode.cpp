@@ -32,6 +32,7 @@
 #include "ODWeatherController.h"
 #include "ODParkingManager.h"
 #include "ODWaterManager.h"
+#include "ODReplay.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -95,6 +96,10 @@ void AODGameMode::BeginPlay()
 	EnsureAtmosphereController();
 	EnsureSeasonController();
 	EnsureWeatherController();
+	if (GetWorld() && !AODReplay::Find(GetWorld()))
+	{
+		GetWorld()->SpawnActor<AODReplay>();   // #9 always-on 30 s replay buffer
+	}
 	// ponytail: one ambient-sound manager, the home area's zones only - a
 	// streamed area set plays home's zone grid (silent outside it). Spawn one
 	// per set (and crossfade) if the neighbouring areas sound wrong.
