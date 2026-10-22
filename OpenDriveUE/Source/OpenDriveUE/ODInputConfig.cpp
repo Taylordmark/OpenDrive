@@ -30,6 +30,7 @@ const FActionMeta ActionTable[] = {
 	{EODInputAction::CameraView,  TEXT("CameraView"),   EKeys::C,         EKeys::Gamepad_FaceButton_Top},
 	{EODInputAction::ShiftUp,     TEXT("ShiftUp"),      EKeys::E,         FKey()},
 	{EODInputAction::ShiftDown,   TEXT("ShiftDown"),    EKeys::Q,         FKey()},
+	{EODInputAction::PhotoMode,   TEXT("PhotoMode"),    EKeys::F2,        FKey()},
 };
 static_assert(UE_ARRAY_COUNT(ActionTable) == FODInputConfig::NumActions,
 	"ActionTable must have one entry per EODInputAction");
