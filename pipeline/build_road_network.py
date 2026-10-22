@@ -50,6 +50,16 @@ MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
 JOB_REACH_M = CHUNK_STATIONS * STATION_SPACING + CARVE_MARGIN_M
 
 
+def sidecar_gen_id(path):
+    """The generation id in a station sidecar's header, or None."""
+    try:
+        b = path.read_bytes()[:64]
+        (n,) = struct.unpack_from("<I", b, 4)
+        return b[8:8 + n].decode("ascii")
+    except (OSError, struct.error, UnicodeDecodeError):
+        return None
+
+
 def write_station_sidecar(path, segment_geoms, gen_id_bytes):
     """Writes the ODS2 road-station sidecar (Arc 7 runtime-carve slice):
     every road station's final UE-world-frame (cm) position plus its
@@ -180,8 +190,14 @@ def main():
     gen_id = compute_generation_id()
     gen_id_bytes = pack_generation_id(gen_id)
     station_sidecar_path = MASKS_DIR / f"roadstations_{AREA_NAME}.bin"
-    n_stations = write_station_sidecar(station_sidecar_path, segment_geoms, gen_id_bytes)
-    print(f"station sidecar: {n_stations} stations -> {station_sidecar_path}")
+    if bake_pass() == "1" and sidecar_gen_id(station_sidecar_path) == gen_id:
+        # (2026-10-21) pass 1 re-runs on every --retry; the live sidecar holds
+        # the junction-pad patches of cells already baked, whose terrain is
+        # carved to them. Rewriting it left Deals Gap 0.8 m under the terrain.
+        print(f"station sidecar: same generation, kept (baked jobs' pad patches) -> {station_sidecar_path}")
+    else:
+        n_stations = write_station_sidecar(station_sidecar_path, segment_geoms, gen_id_bytes)
+        print(f"station sidecar: {n_stations} stations -> {station_sidecar_path}")
 
     # Player start near the CENTER of the built area, not just "the longest
     # segment's start" (that put a test spawn ~500 m past the bbox's edge

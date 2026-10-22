@@ -189,4 +189,12 @@ assert sorted(f.name for f in masks.iterdir()) == ["relief_u_d2.png", "terrain_u
 assert "u_d" not in br.world_frame.load_user_areas()["areas"]
 assert br.runner_lock()
 
+# pass 1 keeps a same-generation station sidecar (baked jobs' pad patches): header id round-trips
+import numpy as np
+import build_road_network as brn
+from generation_id import pack_generation_id
+sc = tmp / "roadstations_x.bin"
+brn.write_station_sidecar(sc, [(np.zeros(3), np.zeros(3), np.zeros(3), np.ones(3))], pack_generation_id("0123456789abcdef"))
+assert brn.sidecar_gen_id(sc) == "0123456789abcdef" and brn.sidecar_gen_id(tmp / "missing.bin") is None
+
 print("test_bake_request: all checks passed")
