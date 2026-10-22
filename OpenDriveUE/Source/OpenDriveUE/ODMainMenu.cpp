@@ -621,7 +621,6 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		VistaAtFrame = 0;
 		ShowStartVista(AreaIdx);
 	}
-	UpdatePreload(Now);
 	if (DriveStart >= 0.0)
 	{
 		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
@@ -1236,45 +1235,6 @@ int32 AODMainMenu::PinArea(int32 Pin) const
 	return Area != INDEX_NONE && ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area;
 }
 
-void AODMainMenu::UpdatePreload(double Now)
-{
-	const int32 Area = Screen == EODMenuScreen::World ? PinArea(FocusedPin)
-		: Screen == EODMenuScreen::AreaMap || Screen == EODMenuScreen::Start ? AreaIdx : INDEX_NONE;
-	const FString Want = Area != CurrentAreaIdx && AreaLevels.IsValidIndex(Area) ? AreaLevels[Area] : FString();
-	if (Want != PreloadWant)
-	{
-		PreloadWant = Want;
-		PreloadWantSince = Now;
-	}
-	if (PreloadName == PreloadWant || bPreloadInFlight)
-	{
-		return;   // held, or one still landing (it is released once it has)
-	}
-	if (!PreloadName.IsEmpty())
-	{
-		UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload released %s"), *PreloadName);
-		Preloaded.Reset();   // unreferenced now: the next GC drops it
-		PreloadName.Empty();
-	}
-	if (PreloadWant.IsEmpty() || Now - PreloadWantSince < PreloadDelaySec)
-	{
-		return;
-	}
-	PreloadName = PreloadWant;
-	PreloadStart = Now;
-	bPreloadInFlight = true;
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload start %s"), *PreloadName);
-	LoadPackageAsync(PreloadName, FLoadPackageAsyncDelegate::CreateWeakLambda(this,
-		[this](const FName& Name, UPackage* Package, EAsyncLoadingResult::Type Result)
-		{
-			bPreloadInFlight = false;
-			Preloaded.Reset(Result == EAsyncLoadingResult::Succeeded ? Package : nullptr);
-			UE_LOG(LogTemp, Display, TEXT("ODMainMenu: preload %s %s in %.2f s%s"), *Name.ToString(),
-				Preloaded ? TEXT("loaded") : TEXT("FAILED"), GetWorld()->GetRealTimeSeconds() - PreloadStart,
-				PreloadWant == PreloadName ? TEXT("") : TEXT(" (no longer wanted)"));
-		}));
-}
-
 void AODMainMenu::FlyToArea(float Seconds)
 {
 	if (!Globe.IsValid() || !AreaKeys.IsValidIndex(AreaIdx))
@@ -1587,8 +1547,7 @@ void AODMainMenu::DriveNow()
 	SavePicks();   // (Activate holds Drive until the cut, so no fade is pending here)
 	DriveStart = GetWorld()->GetRealTimeSeconds();   // Tick runs the ease / fade, then DriveGo
 	bDriveHere = !(AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx);
-	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s, level package %s)"), bDriveHere ? TEXT("here") : TEXT("open level"),
-		bDriveHere ? TEXT("n/a") : Preloaded ? TEXT("preloaded") : bPreloadInFlight ? TEXT("still loading") : TEXT("not preloaded"));
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s)"), bDriveHere ? TEXT("here") : TEXT("open level"));
 	const AODVehiclePawn* Pawn = FindPawn();
 	if (const UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr)
 	{

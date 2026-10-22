@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "UObject/StrongObjectPtr.h"
 #include "ODAreaDraw.h"
 #include "ODMenuTabs.h"
 #include "ODMenuVista.h"
@@ -274,18 +273,10 @@ private:
 	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
 	uint64 VistaAtFrame = 0;            // PickPin: ShowStartVista (a multi-second spawn) once the picked pin has drawn
 	int32 PinArea(int32 Pin) const;     // the area a pin picks: its cluster's last-picked area, else its own
-	// hover preload (2026-10-22): the focused pin's (World) or AreaIdx's (AreaMap,
-	// Start) level package, async-loaded once wanted for PreloadDelaySec and held
-	// until something else is wanted - one area at most, so a new request waits
-	// for an in-flight one to land rather than stacking a second
-	void UpdatePreload(double Now);
-	FString PreloadWant;                // package wanted now, empty = none
-	double PreloadWantSince = 0.0;
-	FString PreloadName;                // requested (in flight) or held
-	bool bPreloadInFlight = false;
-	double PreloadStart = 0.0;
-	TStrongObjectPtr<UPackage> Preloaded;
-	static constexpr double PreloadDelaySec = 0.3;   // sweeping across pins fires nothing
+	// no hover preload of the area's level package (tried 2026-10-22, removed): a
+	// world package held from LoadPackageAsync makes -game LoadMap fail ("Failed
+	// to load package"), bouncing to the menu and then crashing the audio mixer
+	// (livetest8), and the package is only ~0.35 s of LoadMap anyway
 	bool bGlobeView = false;            // the globe camera is (or is blending to) the view target
 	double AreaEnterTime = 0.0;         // real seconds, for the vista-stream wait cap
 	double FadeSwapAt = -1.0;           // real seconds: faded out, CutTo the vista then (Tick)
