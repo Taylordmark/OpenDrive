@@ -40,7 +40,7 @@ static_assert(ODBakeLink::TileCells(3, -2, 100000).J0 == 1 && ODBakeLink::TileCe
 
 namespace
 {
-	TSharedPtr<FJsonObject> ReadJson(const FString& Path)
+	TSharedPtr<FJsonObject> ReadBakeJson(const FString& Path)
 	{
 		FString Text;
 		TSharedPtr<FJsonObject> Root;
@@ -142,7 +142,7 @@ namespace
 			return S;
 		}
 		S.Stamp = Stamp;
-		const TSharedPtr<FJsonObject> Root = Stamp == FDateTime::MinValue() ? nullptr : ReadJson(Path);
+		const TSharedPtr<FJsonObject> Root = Stamp == FDateTime::MinValue() ? nullptr : ReadBakeJson(Path);
 		if (!Root.IsValid())
 		{
 			// half-written can't happen (atomic rename); gone = not baking
@@ -219,7 +219,7 @@ namespace
 		GKeysStamp = Stamp;
 		GDrawnKeys.Reset();
 		GDrawnTerrainTileCm.Reset();
-		const TSharedPtr<FJsonObject> Root = ReadJson(Path);
+		const TSharedPtr<FJsonObject> Root = ReadBakeJson(Path);
 		const TSharedPtr<FJsonObject>* Areas = nullptr;
 		if (Root.IsValid() && Root->TryGetObjectField(TEXT("areas"), Areas))
 		{
@@ -238,7 +238,7 @@ namespace
 		GDrawnKeys.Sort([](const FString& A, const FString& B) { return A.Len() > B.Len(); });
 	}
 
-	void WriteAtomic(const FString& Path, const FString& Text)
+	void WriteBakeAtomic(const FString& Path, const FString& Text)
 	{
 		const FString Tmp = Path + TEXT(".tmp");
 		if (!FFileHelper::SaveStringToFile(Text, *Tmp, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
@@ -282,7 +282,7 @@ namespace
 			*Quit, FDateTime::UtcNow().ToUnixTimestampDecimal());
 		const FString Dir = ODBakeLink::RepoRoot() / TEXT("data/bake");
 		IFileManager::Get().MakeDirectory(*Dir, true);
-		WriteAtomic(Dir / TEXT("car.json"), Text);
+		WriteBakeAtomic(Dir / TEXT("car.json"), Text);
 	}
 
 	void AlertReady(const FString& Key, const FString& Name)
@@ -324,7 +324,7 @@ namespace
 			bool& Seen = GReadySeen.FindOrAdd(Key, bReady);
 			if (bReady && !Seen)
 			{
-				const TSharedPtr<FJsonObject> Root = ReadJson(StatusPath(Key));
+				const TSharedPtr<FJsonObject> Root = ReadBakeJson(StatusPath(Key));
 				FString Name = Key;
 				if (Root.IsValid())
 				{
@@ -362,7 +362,7 @@ void ODBakeLink::Init()
 
 bool ODBakeLink::LoadUserArea(const FString& Key, FUserArea& Out)
 {
-	const TSharedPtr<FJsonObject> Root = ReadJson(RepoRoot() / TEXT("data/user_areas.json"));
+	const TSharedPtr<FJsonObject> Root = ReadBakeJson(RepoRoot() / TEXT("data/user_areas.json"));
 	const TSharedPtr<FJsonObject>* Areas = nullptr;
 	const TSharedPtr<FJsonObject>* Worlds = nullptr;
 	const TSharedPtr<FJsonObject>* Area = nullptr;
