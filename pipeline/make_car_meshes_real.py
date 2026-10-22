@@ -836,6 +836,7 @@ BULGE = 18.0     # nose/tail cap bulge: last ring set back this much, cap centre
 # points, for the end-cap Coons patches)
 CAP_FR = [0.86, 0.645, 0.43, 0.215, 0.0, -0.215, -0.43, -0.645, -0.86]
 PILLAR_W = 5.0   # A / C pillar strip (cm across the cap) beside the screens: the outer cap point slides out
+WRAP = 8.0       # screen wrap: its corners (and the pillars) sit this much further back (front) / forward (rear)
 
 
 def build_cage(car):
@@ -872,13 +873,16 @@ def build_cage(car):
         w1z = min(S["well"][i], Z[i, S["key"][4]] - 4.0)     # under the outer top (not a centre-line car's crest)
         ly = y0 - 2.0
         crown = 0.8 if car.center else float(S["crown"][i])
-        pts = [(x, Y[i, k], Z[i, k]) for k in range(ns)]
         fr = list(CAP_FR)
+        wrap = 0.0
         if ws[i]:
             fr[0] = max(fr[0], 1.0 - PILLAR_W / Y[i, -1])
             fr[-1] = -fr[0]
-        pts += [(x, f * Y[i, -1], zc[i] + crown * (1 - f * f)) for f in fr]
-        pts += [(x, -Y[i, k], Z[i, k]) for k in range(ns - 1, -1, -1)]
+            wrap = WRAP if x > 0.5 * (car.gs + car.ge) else -WRAP
+        xk = [x] * (ns - 1) + [x - wrap]                 # the screen's side edge (pillar) swept with its corners
+        pts = [(xk[k], Y[i, k], Z[i, k]) for k in range(ns)]
+        pts += [(x - wrap * f * f, f * Y[i, -1], zc[i] + crown * (1 - f * f)) for f in fr]
+        pts += [(xk[k], -Y[i, k], Z[i, k]) for k in range(ns - 1, -1, -1)]
         pts += [(x, -ly, w1z), (x, -w1y, w1z), (x, -w2y, zf), (x, -0.45 * w2y, zf), (x, 0.0, zf),
                 (x, 0.45 * w2y, zf), (x, w2y, zf), (x, w1y, w1z), (x, ly, w1z)]
         rings.append([part.v(p) for p in pts])
@@ -984,7 +988,7 @@ def face_cell_panel(car, S, i, xc, kind, b, side, in_cabin, pillar, steep, ns, n
             return cell, P_SHELL
     # top cap (and the crest band of centre-line cars)
     if kind == "cap" and in_cabin and steep and 1 <= b <= nc - 1:
-        return GLASS, p_glass(30 + car.seg_of(xc))
+        return GLASS, p_glass(30 if xc > 0.5 * (car.gs + car.ge) else 31)    # one pane per screen
     if xc > car.x_hf:
         return body, P_BUMF
     if xc < car.x_tr:
