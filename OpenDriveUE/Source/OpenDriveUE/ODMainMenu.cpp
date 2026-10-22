@@ -203,6 +203,7 @@ constexpr double WorldOverviewAlt = 1.7;
 constexpr float WorldShowSec = 0.9f;           // fly out to the overview on (re)entering World
 constexpr float WorldBrowseSec = 0.7f;         // arrows: fly to the next pin at 0.7 x overview
 constexpr double WorldPickAlt = 0.06;          // fly-in altitude for an area without a relief drape
+constexpr const TCHAR* DrawnAreaLevel = TEXT("/Game/Areas/OpenWorld_Template");   // (2026-10-21) + ?odarea=<key>
 constexpr float WorldPickSec = 1.8f;           // picked pin: fly down onto the drape, then the AreaMap screen
 constexpr float WorldBlendSec = 0.5f;          // view target blend onto the globe camera
 // AreaMap framing (2026-10-14): the drape fits the screen left of the rows
@@ -380,7 +381,10 @@ void AODMainMenu::BeginPlay()
 		Bind(EKeys::Gamepad_DPad_Right, &AODMainMenu::Right);
 		Bind(EKeys::Gamepad_FaceButton_Bottom, &AODMainMenu::Activate);
 		Bind(EKeys::Gamepad_FaceButton_Right, &AODMainMenu::Back);
+		Bind(EKeys::N, &AODMainMenu::NewAreaKey);   // (2026-10-21) World: + New Area
+		Bind(EKeys::Z, &AODMainMenu::UndoDraw);     // Ctrl+Z on New Area
 	}
+	AreaDraw.Load();   // the draft survives leaving the menu (2026-10-21)
 
 	// headless QA hooks (core ticker, like AODPauseMenu's -odmenu - world
 	// timers freeze once paused)
@@ -602,6 +606,7 @@ void AODMainMenu::Tick(float DeltaSeconds)
 		return;
 	}
 	const double Now = GetWorld()->GetRealTimeSeconds();
+	AreaDraw.Poll(Now);   // coverage.json / status.json / pass-1 roads, when they change (1 Hz)
 	if (DriveStart >= 0.0)
 	{
 		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
@@ -813,13 +818,15 @@ TArrayView<const FODMenuTab> AODMainMenu::GetTabs() const
 	case EODMenuScreen::Paint: return PaintTabs;
 	case EODMenuScreen::AreaMap: return AreaTabs;
 	case EODMenuScreen::Start: return ConditionsTabs;
+	case EODMenuScreen::NewArea: return AreaDraw.GetTabs();
 	default: return MainTabs;   // World draws no panel
 	}
 }
 
 int32 AODMainMenu::GetFooterRow() const
 {
-	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Start ? RowDrive : RowBack;
+	return Screen == EODMenuScreen::Main ? RowQuit : Screen == EODMenuScreen::Start ? RowDrive
+		: Screen == EODMenuScreen::NewArea ? AreaDraw.Footer() : RowBack;
 }
 
 FString AODMainMenu::GetScreenTitle() const
@@ -832,6 +839,7 @@ FString AODMainMenu::GetScreenTitle() const
 	case EODMenuScreen::World:
 	case EODMenuScreen::AreaMap: return bTrackMode ? TEXT("Track Select") : TEXT("Open Drive");
 	case EODMenuScreen::Start: return AreaNames.IsValidIndex(AreaIdx) ? AreaNames[AreaIdx] : TEXT("Conditions");
+	case EODMenuScreen::NewArea: return AreaDraw.Title();
 	default: return TEXT("OpenDrive");
 	}
 }
@@ -930,6 +938,19 @@ void AODMainMenu::Activate()
 		PickPin(FocusedPin);
 		return;
 	}
+	if (Stage == EODMenuStage::Menu && Screen == EODMenuScreen::NewArea)
+	{
+		if (const FString Key = AreaDraw.Activate(Selected); !Key.IsEmpty())
+		{
+			OpenDrawnArea(Key);
+		}
+		const FODMenuTab& Tab = GetTabs()[0];
+		if (Selected != GetFooterRow() && (Selected < Tab.First || Selected >= Tab.First + Tab.Count))
+		{
+			Selected = GetFooterRow();   // a sent draft became its card: its rows differ
+		}
+		return;
+	}
 	if (Stage == EODMenuStage::Menu && DriveStart < 0.0)
 	{
 		switch (Selected)
@@ -1024,6 +1045,12 @@ void AODMainMenu::Back()
 			}
 		}
 	}
+	else if (Screen == EODMenuScreen::NewArea)
+	{
+		AreaDraw.CloseNameBox();
+		AreaDraw.JobKey.Empty();   // back to the draft next time (kept in GameUserSettings)
+		ShowWorld();
+	}
 	else if (Screen == EODMenuScreen::AreaMap)
 	{
 		ClearStartVista();   // leaving the area
@@ -1093,6 +1120,64 @@ void AODMainMenu::ShowWorld()
 		Globe->FlyTo(Pins[Focus].Lat, Pins[Focus].Lng, WorldOverviewAlt, WorldShowSec);
 	}
 	ViewFrom(Globe.Get(), WorldBlendSec);
+}
+
+void AODMainMenu::NewAreaKey()
+{
+	if (Stage == EODMenuStage::Menu && Screen == EODMenuScreen::World && !bSettingsOpen && PickingPin == INDEX_NONE)
+	{
+		BeginNewArea();
+	}
+}
+
+void AODMainMenu::UndoDraw()
+{
+	const APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	if (Screen == EODMenuScreen::NewArea && PC && (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::RightControl)))
+	{
+		AreaDraw.Undo();
+	}
+}
+
+void AODMainMenu::BeginNewArea()
+{
+	// (2026-10-21) the draft over the globe: framed on its points, else zoomed in where the globe looks
+	AreaDraw.JobKey.Empty();
+	SetScreen(EODMenuScreen::NewArea, 0);
+	if (!Globe.IsValid())
+	{
+		return;
+	}
+	Globe->ClearDrape();
+	const TArray<FVector2D>& V = AreaDraw.Verts;
+	if (V.IsEmpty())
+	{
+		const FVector View = Globe->GetView();
+		Globe->FlyTo(View.X, View.Y, AODMenuGlobe::FitAltitude(120.0), WorldBrowseSec);
+		return;
+	}
+	FVector2D C = FVector2D::ZeroVector;
+	for (const FVector2D& P : V)
+	{
+		C += P / V.Num();
+	}
+	Globe->FlyTo(C.Y, C.X, AODMenuGlobe::FitAltitude(FMath::Max(ODAreaGeo::SidesKm(V).GetMax() * 2.0, 20.0)), WorldBrowseSec);
+}
+
+void AODMainMenu::OpenAreaCard(const FString& Key)
+{
+	if (Stage != EODMenuStage::Menu || PickingPin != INDEX_NONE)
+	{
+		return;
+	}
+	AreaDraw.OpenCard(Key);
+	SetScreen(EODMenuScreen::NewArea, AreaDraw.Footer());
+	const FODAreaDraw::FCovArea* A = AreaDraw.Coverage.FindByPredicate([&](const FODAreaDraw::FCovArea& C) { return C.Key == Key; });
+	if (Globe.IsValid() && A && !A->Outline.IsEmpty())
+	{
+		Globe->ClearDrape();
+		Globe->FlyTo(A->Centre.Y, A->Centre.X, AODMenuGlobe::FitAltitude(FMath::Max(ODAreaGeo::SidesKm(A->Outline).GetMax() * 1.6, 8.0)), WorldPickSec);
+	}
 }
 
 void AODMainMenu::SetFocusedPin(int32 Pin)
@@ -1593,6 +1678,11 @@ void AODMainMenu::Adjust(int32 Dir)
 	if (bSettingsOpen)
 	{
 		if (SettingsMenu) { SettingsMenu->AdjustSelected(Dir); }
+		return;
+	}
+	if (Screen == EODMenuScreen::NewArea)
+	{
+		AreaDraw.Adjust(Selected, Dir);
 		return;
 	}
 	switch (Selected)
@@ -2118,6 +2208,20 @@ void AODMainMenu::OpenArea()
 	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
 }
 
+void AODMainMenu::OpenDrawnArea(const FString& Key)
+{
+	// (2026-10-21) a drawn area has no level of its own: the template + ?odarea=<key>
+	// (AODGameMode / AODTileSource load it). Its own spawn, so no town / track carries over.
+	AreaDraw.CloseNameBox();
+	TownPick.Empty();
+	TrackPick.Empty();
+	SavePicks();
+	const FString Options = FString::Printf(TEXT("odengine=%d?oddrive=%d?odarea=%s"), EngineIdx, DriveIdx, *Key)
+		+ (FindPawn() ? FString::Printf(TEXT("?odvehidx=%d"), FindPawn()->GetVehicleIndex()) : FString());
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: drawn area -> %s (%s)"), DrawnAreaLevel, *Options);
+	UGameplayStatics::OpenLevel(this, FName(DrawnAreaLevel), true, Options);
+}
+
 // ---- garage-menu vistas (2026-10-05) ---------------------------------------
 
 void AODMainMenu::LoadTracks()
@@ -2501,6 +2605,11 @@ void AODMainMenu::GetLoadingProgress(int32& OutTerrainReady, int32& OutTerrainTo
 
 void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
+	if (Screen == EODMenuScreen::NewArea)
+	{
+		AreaDraw.GetRow(Row, OutLabel, OutValue);
+		return;
+	}
 	switch (Row)
 	{
 	case RowCar:

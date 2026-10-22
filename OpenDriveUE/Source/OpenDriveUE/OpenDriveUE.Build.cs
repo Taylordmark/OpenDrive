@@ -30,6 +30,8 @@ public class OpenDriveUE : ModuleRules
 			// FSlateFontInfo / GWhiteTexture - menu panel text at real pixel
 			// size and arrow triangles (ODRaceHUD::DrawTabbedPanel).
 			"SlateCore",
+			// SEditableTextBox - the New Area name field (ODAreaDraw, 2026-10-21)
+			"Slate",
 			"RenderCore",
 			// GNumDrawCallsRHI / RHIGetGPUFrameCycles (OpenDriveUE.cpp perf log).
 			"RHI",

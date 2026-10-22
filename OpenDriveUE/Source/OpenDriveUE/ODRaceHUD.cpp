@@ -696,7 +696,8 @@ void DrawHints(const FMenuPaint& P, float X, std::initializer_list<FMenuHint> Hi
 // mouse -> menu, shared by AODMainMenu and AODPauseMenu (same public API)
 template <typename TMenu>
 void DispatchMenuMouse(TMenu* Menu, APlayerController* PC, const TArray<FODMenuHit>& Hits,
-	FVector2D& LastMouse, uint64& LastFrame, bool bWheel = true)   // bWheel false: the caller owns the wheel
+	FVector2D& LastMouse, uint64& LastFrame, bool bWheel = true,   // bWheel false: the caller owns the wheel
+	bool bRightBack = true)                                           // false: the caller owns the right button (2026-10-21)
 {
 	float Mx = 0.0f, My = 0.0f;
 	if (!Menu || !PC || !PC->bShowMouseCursor || !PC->GetMousePosition(Mx, My))
@@ -742,7 +743,7 @@ void DispatchMenuMouse(TMenu* Menu, APlayerController* PC, const TArray<FODMenuH
 		default: Menu->SelectRow(H.Id, H.Col); Menu->Activate(); break;
 		}
 	}
-	else if (PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+	else if (bRightBack && PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
 	{
 		Menu->Back();
 	}
@@ -809,6 +810,17 @@ void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 			Menu->SetFocusedPin(Hover);
 		}
 		const bool bLeft = PC->WasInputKeyJustPressed(EKeys::LeftMouseButton);
+		// (2026-10-21) "+ New Area" and the drawn areas' pins
+		if (bLeft && NewAreaBtn.bIsValid && NewAreaBtn.IsInside(Mouse))
+		{
+			Menu->BeginNewArea();
+			return;
+		}
+		if (const int32 Drawn = bLeft && Hover == INDEX_NONE ? DrawnPinAt(Menu, Mouse) : INDEX_NONE; Drawn != INDEX_NONE)
+		{
+			Menu->OpenAreaCard(Menu->GetAreaDraw().Coverage[Drawn].Key);
+			return;
+		}
 		if (bLeft && Hover != INDEX_NONE)
 		{
 			Menu->PickPin(Hover);
@@ -840,6 +852,12 @@ void AODRaceHUD::HandleMenuMouse(AODMainMenu* Menu)
 	// pans the globe camera and the wheel there zooms it; AODMainMenu::
 	// ClampAreaView keeps it on the area. Over the panel the wheel selects.
 	float Mx = 0.0f, My = 0.0f;
+	if (Globe && Menu->GetScreen() == EODMenuScreen::NewArea && !Menu->IsSettingsOpen()
+		&& PC && PC->bShowMouseCursor && PC->GetMousePosition(Mx, My))
+	{
+		HandleNewAreaMouse(Menu, PC, FVector2D(Mx, My));
+		return;
+	}
 	if (Globe && Menu->GetScreen() == EODMenuScreen::AreaMap && !Menu->IsSettingsOpen()
 		&& PC && PC->bShowMouseCursor && PC->GetMousePosition(Mx, My))
 	{
@@ -1341,6 +1359,7 @@ void AODRaceHUD::DrawAreaMap(const AODMainMenu* Menu) const
 	{
 		return;
 	}
+	DrawCoverage(Menu, true);   // (2026-10-21) baked / pending / failed tiles under the roads
 	auto Line = [&](const TArray<FVector2D>& L, bool bLoop, const FLinearColor& Col, float Thick)
 	{
 		if (L.Num() < 2)
@@ -1424,6 +1443,16 @@ void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
 	P.Text(Menu->GetScreenTitle().ToUpper(), X, TitleY, 44.0f, EMenuWeight::Bold, FLinearColor::White, false, 60);
 	P.Rect(X, TitleY + 30.0f * S, 56.0f * S, 4.0f * S, Accent);
 
+	// (2026-10-21) "+ New Area" under the title
+	const FString NewLabel = TEXT("+  NEW AREA");
+	const float BW = P.Width(NewLabel, 18.0f, EMenuWeight::Bold, 40) + 36.0f * S, BY = TitleY + 52.0f * S;
+	NewAreaBtn = FBox2D(FVector2D(X, BY), FVector2D(X + BW, BY + 40.0f * S));
+	float Mx = 0.0f, My = 0.0f;
+	const bool bMouse = GetOwningPlayerController() && GetOwningPlayerController()->GetMousePosition(Mx, My);
+	const bool bBtnHot = bMouse && NewAreaBtn.IsInside(FVector2D(Mx, My));
+	P.Rect(X, BY, BW, 40.0f * S, bBtnHot ? Accent : FLinearColor(1, 1, 1, 0.12f));
+	P.Text(NewLabel, X + 18.0f * S, BY + 20.0f * S, 18.0f, EMenuWeight::Bold, bBtnHot ? Ink : TextCol, false, 40);
+
 	const AODMenuGlobe* Globe = Menu->GetGlobe();
 	const APlayerController* PC = GetOwningPlayerController();
 	if (Globe && PC)
@@ -1434,6 +1463,27 @@ void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
 			D.BlendMode = SE_BLEND_Translucent;
 			Canvas->DrawItem(D);
 		};
+		// (2026-10-21) every area's outline; drawn areas get a white pin (click: its card)
+		DrawCoverage(Menu, false);
+		const TArray<FODAreaDraw::FCovArea>& Cov = Menu->GetAreaDraw().Coverage;
+		const int32 HotDrawn = bMouse ? DrawnPinAt(Menu, FVector2D(Mx, My)) : INDEX_NONE;
+		for (int32 i = 0; i < Cov.Num(); ++i)
+		{
+			FVector2D Pt;
+			if (!Cov[i].bDrawn || !Globe->LatLngToScreen(PC, Cov[i].Centre.Y, Cov[i].Centre.X, Pt))
+			{
+				continue;
+			}
+			Disc(Pt, 7.0f * S, FLinearColor(0, 0, 0, 0.5f));
+			Disc(Pt, (i == HotDrawn ? 5.5f : 4.0f) * S, FLinearColor::White);
+			if (i == HotDrawn)
+			{
+				const FString Name = Cov[i].Name.IsEmpty() ? Cov[i].Key : Cov[i].Name;
+				P.Text(Name, Pt.X + 12.0f * S, Pt.Y - 7.0f * S, 16.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
+				P.Text(FString::Printf(TEXT("%.0f of %.0f km² baked"), Cov[i].BakedKm2, Cov[i].TotalKm2),
+					Pt.X + 12.0f * S, Pt.Y + 9.0f * S, 12.0f, EMenuWeight::SemiBold, DimCol);
+			}
+		}
 		const TArray<FODGlobePin>& Pins = Globe->GetPins();
 		const int32 Focus = Menu->GetFocusedPin();
 		auto DrawPin = [&](int32 i)
@@ -1472,7 +1522,346 @@ void AODRaceHUD::DrawGlobePins(const AODMainMenu* Menu) const
 		}
 	}
 	DrawHints(P, X, {{TEXT("Click"), TEXT("Pick")}, {TEXT("Drag"), TEXT("Spin")}, {TEXT("Wheel"), TEXT("Zoom")},
-		{TEXT("Arrows"), TEXT("Browse")}, {TEXT("Esc"), TEXT("Back")}});
+		{TEXT("Arrows"), TEXT("Browse")}, {TEXT("N"), TEXT("New Area")}, {TEXT("Esc"), TEXT("Back")}});
+}
+
+// ---- area picker (2026-10-21, docs/area-picker-contract.md) -----------------
+
+namespace
+{
+// lon/lat -> screen through the globe; false for a NaN break, behind the globe or off screen
+struct FGlobeLL
+{
+	const AODMenuGlobe* G;
+	const APlayerController* PC;
+	bool operator()(const FVector2D& LL, FVector2D& Out) const
+	{
+		return !FMath::IsNaN(LL.X) && G->LatLngToScreen(PC, LL.Y, LL.X, Out);
+	}
+};
+
+void Seg(UCanvas* C, const FVector2D& A, const FVector2D& B, const FLinearColor& Col, float Thick)
+{
+	FCanvasLineItem L(A, B);
+	L.SetColor(Col);
+	L.LineThickness = Thick;
+	C->DrawItem(L);
+}
+
+// a lon/lat polyline (NaN = break); dashed when Dash > 0 (px)
+void PolyLL(UCanvas* C, const FGlobeLL& ToS, const TArray<FVector2D>& L, bool bLoop, const FLinearColor& Col, float Thick, float Dash = 0.0f)
+{
+	FVector2D A = FVector2D::ZeroVector, B = FVector2D::ZeroVector;
+	bool bA = false;
+	for (int32 i = 0; L.Num() > 1 && i < L.Num() + (bLoop && L.Num() > 2 ? 1 : 0); ++i)
+	{
+		const bool bB = ToS(L[i % L.Num()], B);
+		if (bA && bB && Dash <= 0.0f)
+		{
+			Seg(C, A, B, Col, Thick);
+		}
+		else if (bA && bB)
+		{
+			const float Len = FVector2D::Distance(A, B);
+			for (float T = 0.0f; T < Len; T += 2.0f * Dash)
+			{
+				Seg(C, A + (B - A) * (T / Len), A + (B - A) * (FMath::Min(T + Dash, Len) / Len), Col, Thick);
+			}
+		}
+		A = B;
+		bA = bB;
+	}
+}
+
+// a filled screen quad (corners in order)
+void Quad(UCanvas* C, const FVector2D (&Q)[4], const FLinearColor& Col)
+{
+	TArray<FCanvasUVTri> Tris;
+	Tris.SetNum(2);
+	Tris[0].V0_Pos = Q[0]; Tris[0].V1_Pos = Q[1]; Tris[0].V2_Pos = Q[2];
+	Tris[1].V0_Pos = Q[0]; Tris[1].V1_Pos = Q[2]; Tris[1].V2_Pos = Q[3];
+	for (FCanvasUVTri& T : Tris)
+	{
+		T.V0_Color = T.V1_Color = T.V2_Color = Col;
+	}
+	FCanvasTriangleItem T(Tris, GWhiteTexture);
+	T.BlendMode = SE_BLEND_Translucent;
+	C->DrawItem(T);
+}
+
+void Dot(UCanvas* C, const FVector2D& P, float R, const FLinearColor& Col)
+{
+	FCanvasNGonItem D(P, FVector2D(R, R), 16, GWhiteTexture, Col);
+	D.BlendMode = SE_BLEND_Translucent;
+	C->DrawItem(D);
+}
+
+FLinearColor Alpha(const FLinearColor& C, float A)
+{
+	return FLinearColor(C.R, C.G, C.B, A);
+}
+
+// the corridor's ~1 km band around segment A-B, in lon/lat (local km plane at A)
+void CorridorOffsets(const FVector2D& A, const FVector2D& B, FVector2D& OutOff)
+{
+	const double KmLon = 111.320 * FMath::Cos(FMath::DegreesToRadians(A.Y)), KmLat = 110.574;
+	const FVector2D Dir = FVector2D((B.X - A.X) * KmLon, (B.Y - A.Y) * KmLat).GetSafeNormal();
+	OutOff = FVector2D(-Dir.Y * ODAreaGeo::CorridorHalfKm / KmLon, Dir.X * ODAreaGeo::CorridorHalfKm / KmLat);
+}
+}
+
+void AODRaceHUD::DrawCoverage(const AODMainMenu* Menu, bool bTiles) const
+{
+	const AODMenuGlobe* Globe = Menu->GetGlobe();
+	const APlayerController* PC = GetOwningPlayerController();
+	if (!Globe || !PC)
+	{
+		return;
+	}
+	const float S = MenuScale();
+	const FGlobeLL ToS{Globe, PC};
+	for (const FODAreaDraw::FCovArea& A : Menu->GetAreaDraw().Coverage)
+	{
+		for (int32 i = 0; bTiles && i < A.Tiles.Num(); ++i)
+		{
+			FVector2D Q[4];
+			if (!ToS(A.Tiles[i][0], Q[0]) || !ToS(A.Tiles[i][1], Q[1]) || !ToS(A.Tiles[i][2], Q[2]) || !ToS(A.Tiles[i][3], Q[3])
+				|| FVector2D::DistSquared(Q[0], Q[2]) < 4.0f)   // sub-pixel from far out
+			{
+				continue;
+			}
+			const uint8 St = A.TileState[i];
+			Quad(Canvas, Q, St == 0 ? Alpha(Accent, 0.25f) : St == 2 ? Alpha(Danger, 0.45f) : FLinearColor(1, 1, 1, 0.05f));
+			if (St == 1)
+			{
+				Seg(Canvas, Q[0], Q[2], FLinearColor(1, 1, 1, 0.3f), 1.0f);   // pending: hatched (the diagonals line up tile to tile)
+			}
+		}
+		PolyLL(Canvas, ToS, A.Outline, true, A.bDrawn ? Alpha(Accent, 0.9f) : FLinearColor(1, 1, 1, 0.45f), 1.5f * S);
+	}
+}
+
+int32 AODRaceHUD::DrawnPinAt(const AODMainMenu* Menu, const FVector2D& Mouse) const
+{
+	const AODMenuGlobe* Globe = Menu->GetGlobe();
+	const APlayerController* PC = GetOwningPlayerController();
+	const TArray<FODAreaDraw::FCovArea>& Cov = Menu->GetAreaDraw().Coverage;
+	int32 Best = INDEX_NONE;
+	float BestD2 = FMath::Square(14.0f * MenuScale());
+	for (int32 i = 0; Globe && PC && i < Cov.Num(); ++i)
+	{
+		FVector2D Pt;
+		if (Cov[i].bDrawn && Globe->LatLngToScreen(PC, Cov[i].Centre.Y, Cov[i].Centre.X, Pt) && FVector2D::DistSquared(Pt, Mouse) < BestD2)
+		{
+			BestD2 = FVector2D::DistSquared(Pt, Mouse);
+			Best = i;
+		}
+	}
+	return Best;
+}
+
+// New Area: the draft (polygon or corridor band, edges, midpoint handles,
+// vertices, start) or a drawn area's card (pass-1 roads, holes dashed, towns,
+// the snapped start), over the coverage tiles. Readout + hints: DrawMainMenu.
+void AODRaceHUD::DrawNewArea(AODMainMenu* Menu) const
+{
+	const FODAreaDraw& D = Menu->GetAreaDraw();
+	const AODMenuGlobe* Globe = Menu->GetGlobe();
+	const APlayerController* PC = GetOwningPlayerController();
+	if (!Globe || !PC)
+	{
+		return;
+	}
+	const FMenuPaint P{Canvas, MenuScale()};
+	const float S = P.S;
+	const FGlobeLL ToS{Globe, PC};
+	DrawCoverage(Menu, true);
+	FVector2D Pt;
+	auto StartPin = [&](const FVector2D& LL, const FString& Label)
+	{
+		if (ToS(LL, Pt))
+		{
+			Dot(Canvas, Pt, 10.0f * S, FLinearColor(0, 0, 0, 0.5f));
+			Dot(Canvas, Pt, 8.0f * S, Accent);
+			P.Text(Label, Pt.X + 16.0f * S, Pt.Y, 18.0f, EMenuWeight::Bold, FLinearColor::White, false, 40);
+		}
+	};
+	if (!D.CanEdit())
+	{
+		PolyLL(Canvas, ToS, D.RoadsLL, false, FLinearColor(1, 1, 1, 0.6f), 1.5f * S);
+		for (const TArray<FVector2D>& H : D.Holes)
+		{
+			PolyLL(Canvas, ToS, H, true, Danger, 1.5f * S, 5.0f * S);
+		}
+		if (const TArray<FVector2D>* O = D.JobOutline())
+		{
+			PolyLL(Canvas, ToS, *O, true, Accent, 2.5f * S);
+		}
+		for (int32 i = 0; i < D.TownLL.Num(); ++i)
+		{
+			if (ToS(D.TownLL[i], Pt))
+			{
+				Dot(Canvas, Pt, 3.5f * S, TextCol);
+				P.Text(D.TownNames[i], Pt.X + 8.0f * S, Pt.Y, 13.0f, EMenuWeight::SemiBold, DimCol);
+			}
+		}
+		if (D.Status.bSnapped)
+		{
+			StartPin(D.Status.SnappedLL, TEXT("START"));
+		}
+		return;
+	}
+	const TArray<FVector2D>& V = D.Verts;
+	const FLinearColor Edge = ODAreaGeo::Check(V, D.bCorridor).IsEmpty() ? Accent : Danger;
+	if (D.bCorridor && V.Num() >= 2)
+	{
+		// the ~1 km band the request bakes: a quad per segment + a disc per point
+		for (int32 i = 1; i < V.Num(); ++i)
+		{
+			FVector2D Off;
+			CorridorOffsets(V[i - 1], V[i], Off);
+			FVector2D Q[4];
+			if (ToS(V[i - 1] + Off, Q[0]) && ToS(V[i] + Off, Q[1]) && ToS(V[i] - Off, Q[2]) && ToS(V[i - 1] - Off, Q[3]))
+			{
+				Quad(Canvas, Q, Alpha(Edge, 0.18f));
+			}
+		}
+		for (const FVector2D& LL : V)
+		{
+			FVector2D Up;
+			if (ToS(LL, Pt) && ToS(LL + FVector2D(0.0, ODAreaGeo::CorridorHalfKm / 110.574), Up))
+			{
+				Dot(Canvas, Pt, FVector2D::Distance(Pt, Up), Alpha(Edge, 0.12f));
+			}
+		}
+	}
+	PolyLL(Canvas, ToS, V, D.bClosed && !D.bCorridor, Edge, 2.5f * S);
+	if (!D.bClosed && !D.bCorridor && V.Num() >= 3)
+	{
+		PolyLL(Canvas, ToS, {V.Last(), V[0]}, false, Alpha(Edge, 0.6f), 1.5f * S, 6.0f * S);   // where it will close
+	}
+	// midpoint handles: drag one to add a point there
+	const int32 NEdges = V.Num() < 2 ? 0 : V.Num() - (D.bClosed && !D.bCorridor ? 0 : 1);
+	for (int32 i = 0; i < NEdges; ++i)
+	{
+		if (ToS((V[i] + V[(i + 1) % V.Num()]) * 0.5, Pt))
+		{
+			Dot(Canvas, Pt, 4.0f * S, FLinearColor(0, 0, 0, 0.45f));
+			Dot(Canvas, Pt, 2.5f * S, FLinearColor(1, 1, 1, 0.7f));
+		}
+	}
+	for (int32 i = 0; i < V.Num(); ++i)
+	{
+		if (ToS(V[i], Pt))
+		{
+			const bool bCloser = i == 0 && !D.bClosed && !D.bCorridor && V.Num() >= 3;   // click it to close
+			Dot(Canvas, Pt, 7.0f * S, FLinearColor(0, 0, 0, 0.55f));
+			Dot(Canvas, Pt, 5.0f * S, bCloser ? Accent : FLinearColor::White);
+		}
+	}
+	if (D.bHasStart)
+	{
+		StartPin(D.Start, TEXT("START"));
+	}
+}
+
+void AODRaceHUD::HandleNewAreaMouse(AODMainMenu* Menu, APlayerController* PC, const FVector2D& Mouse)
+{
+	FODAreaDraw& D = Menu->GetAreaDraw();
+	AODMenuGlobe* Globe = Menu->GetGlobe();
+	const float S = MenuScale();
+	const FGlobeLL ToS{Globe, PC};
+	const FVector2D Prev = LastMenuMouse;
+	const bool bFresh = GFrameCounter - LastMenuMouseFrame <= 1;
+	const bool bOverMap = Mouse.X < MenuX(true, ColW * S) && !MenuHits.ContainsByPredicate(
+		[&](const FODMenuHit& H) { return Mouse.X >= H.X0 && Mouse.X < H.X1 && Mouse.Y >= H.Y0 && Mouse.Y < H.Y1; });
+	const double Now = FPlatformTime::Seconds();
+	TArray<FVector2D>& V = D.Verts;
+
+	// what's under the cursor: a vertex, else an edge's midpoint handle
+	int32 OnVert = INDEX_NONE, OnMid = INDEX_NONE;
+	const float Grab = FMath::Square(12.0f * S);
+	FVector2D Pt;
+	for (int32 i = 0; D.CanEdit() && bOverMap && i < V.Num() && OnVert == INDEX_NONE; ++i)
+	{
+		OnVert = ToS(V[i], Pt) && FVector2D::DistSquared(Pt, Mouse) < Grab ? i : INDEX_NONE;
+	}
+	const int32 NEdges = V.Num() < 2 ? 0 : V.Num() - (D.bClosed && !D.bCorridor ? 0 : 1);
+	for (int32 i = 0; D.CanEdit() && bOverMap && OnVert == INDEX_NONE && i < NEdges && OnMid == INDEX_NONE; ++i)
+	{
+		OnMid = ToS((V[i] + V[(i + 1) % V.Num()]) * 0.5, Pt) && FVector2D::DistSquared(Pt, Mouse) < Grab ? i : INDEX_NONE;
+	}
+
+	if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton) && bOverMap)
+	{
+		bAreaPress = true;
+		bAreaMoved = false;
+		AreaPressAt = Mouse;
+		AreaDragVert = OnVert;
+		AreaDragMid = OnMid;
+	}
+	else if (bAreaPress && PC->IsInputKeyDown(EKeys::LeftMouseButton))
+	{
+		if (!bAreaMoved && FVector2D::Distance(Mouse, AreaPressAt) > 4.0f * S)
+		{
+			bAreaMoved = true;
+			if (AreaDragVert != INDEX_NONE || AreaDragMid != INDEX_NONE)
+			{
+				D.Push();   // one undo step per drag
+			}
+			if (AreaDragMid != INDEX_NONE && V.Num() < ODAreaGeo::MaxVerts)
+			{
+				AreaDragVert = AreaDragMid + 1;
+				V.Insert((V[AreaDragMid] + V[(AreaDragMid + 1) % V.Num()]) * 0.5, AreaDragVert);
+			}
+			AreaDragMid = INDEX_NONE;
+		}
+		double Lat = 0.0, Lng = 0.0;
+		if (bAreaMoved && V.IsValidIndex(AreaDragVert))
+		{
+			if (Globe->ScreenToLatLng(PC, Mouse, Lat, Lng))
+			{
+				V[AreaDragVert] = FVector2D(Lng, Lat);
+			}
+		}
+		else if (bAreaMoved && bFresh)
+		{
+			Globe->Orbit(Mouse - Prev);   // empty space: spin, as on World
+		}
+	}
+	else if (bAreaPress)
+	{
+		// released
+		bAreaPress = false;
+		double Lat = 0.0, Lng = 0.0;
+		if (bAreaMoved && V.IsValidIndex(AreaDragVert))
+		{
+			D.Save();
+		}
+		else if (!bAreaMoved && V.IsValidIndex(AreaDragVert))
+		{
+			D.ClickVertex(AreaDragVert, Mouse, Now);
+		}
+		else if (!bAreaMoved && Globe->ScreenToLatLng(PC, Mouse, Lat, Lng))
+		{
+			D.Click(FVector2D(Lng, Lat), Mouse, Now);
+		}
+		AreaDragVert = AreaDragMid = INDEX_NONE;
+	}
+	if (bOverMap && OnVert != INDEX_NONE && PC->WasInputKeyJustPressed(EKeys::RightMouseButton))
+	{
+		D.DeleteVertex(OnVert);
+	}
+	if (bOverMap && PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))
+	{
+		Globe->Zoom(+1.0f);
+	}
+	else if (bOverMap && PC->WasInputKeyJustPressed(EKeys::MouseScrollDown))
+	{
+		Globe->Zoom(-1.0f);
+	}
+	// rows: as everywhere (right click backs out only over the panel)
+	DispatchMenuMouse(Menu, PC, MenuHits, LastMenuMouse, LastMenuMouseFrame, !bOverMap, !bOverMap);
 }
 
 // Loading screen (2026-10-14, "hold back until everything is up, no half-
@@ -1567,7 +1956,8 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		// (AreaMap: roads + start dots drawn over it first) or the live vista at
 		// the confirmed start shows to the left
 		const bool bAreaMap = Screen == EODMenuScreen::AreaMap;
-		const bool bVista = Menu->IsVistaShown() || bAreaMap || Screen == EODMenuScreen::Start;
+		const bool bNewArea = Screen == EODMenuScreen::NewArea;
+		const bool bVista = Menu->IsVistaShown() || bAreaMap || bNewArea || Screen == EODMenuScreen::Start;
 		DrawMenuBackdrop(bVista ? 0.0f : 0.2f, bVista);
 		if (Menu->IsSettingsOpen())
 		{
@@ -1581,6 +1971,10 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		{
 			DrawAreaMap(Menu);
 		}
+		else if (bNewArea)
+		{
+			DrawNewArea(Menu);
+		}
 		const float PanelBottom = DrawMenuPanel(Title, Tabs, Menu->GetTab(), Menu->GetFooterRow(), Menu->GetSelected(),
 			[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, bVista,
 			bAreaMap ? Menu->GetAreaBlurb() : FString());
@@ -1593,6 +1987,28 @@ void AODRaceHUD::DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Center
 		if (Screen == EODMenuScreen::Main)
 		{
 			DrawHints(P, HX, {{TEXT("Arrows"), TEXT("Select")}, {TEXT("Enter"), TEXT("Confirm")}});
+		}
+		else if (bNewArea)
+		{
+			// (2026-10-21) the live estimate / bake progress under the rows; hints at the left, under the map
+			TArray<FODAreaDraw::FLine> Lines;
+			Menu->GetAreaDraw().Readout(Lines);
+			for (int32 i = 0; i < Lines.Num(); ++i)
+			{
+				P.Text(Lines[i].Text, HX + 10.0f * S, PanelBottom + (30.0f + 26.0f * i) * S, 18.0f, EMenuWeight::SemiBold,
+					Lines[i].Kind == 2 ? Danger : Lines[i].Kind == 1 ? DimCol : TextCol);
+			}
+			if (Menu->GetAreaDraw().CanEdit())
+			{
+				DrawHints(P, MenuX(false, ColW * S), {{TEXT("Click"), TEXT("Add Point")}, {TEXT("Double-click"), TEXT("Finish")},
+					{TEXT("Drag"), TEXT("Move / Spin")}, {TEXT("Right-click"), TEXT("Delete Point")}, {TEXT("Ctrl+Z"), TEXT("Undo")},
+					{TEXT("Esc"), TEXT("World Map")}});
+			}
+			else
+			{
+				DrawHints(P, MenuX(false, ColW * S), {{TEXT("Arrows"), TEXT("Select / Change")}, {TEXT("Enter"), TEXT("Confirm")},
+					{TEXT("Esc"), TEXT("World Map")}});
+			}
 		}
 		else if (bAreaMap)
 		{
