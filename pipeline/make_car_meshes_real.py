@@ -416,8 +416,9 @@ class Car:
         self.well_clear = max(WELL_CLEAR, max(self.tyre_in) + 2.0)    # well inner wall inboard of the half track
         self.r_well = max(self.r_arch, sx + 3.0)                       # well roof x half-length
         self.has_tail = st["tail_z"] is not None
-        # a short nose (Concept) would put the last ring on the arch: shallower cap
+        # a short nose (Concept) or tail would put the last ring on the arch: shallower cap
         self.bulge = min(BULGE, self.x0 - self.fx - self.r_arch - 4.0)
+        self.tail_bulge = min(BULGE, self.rx - self.r_arch - 8.0 - self.x1) if self.has_tail else 0.0
         # panel layout: the bumper splits and door shuts of the stylized
         # material's GAPS lines, adjusted to the pillars
         self.xbf = min(self.fx + self.wr + 20.0, self.x0 - 15.0)
@@ -700,6 +701,15 @@ def sections(car, xs):
     u = np.clip((a0 - xs) / (a0 - a1), 0.0, 1.0)
     scallop = sh["scallop"] * wb * np.sin(np.pi * u ** 1.6) ** 2
     Y[0], Y[1] = Y[0] - 0.5 * scallop, Y[1] - scallop
+    # nose / tail corners: past the arch openings the flare cones give way to
+    # the stylized plan (its rounded tip), eased in over that overhang
+    ends = [(car.x0, car.fx + r + 10.0)] + ([(car.x1, car.rx - r - 10.0)] if car.has_tail else [])
+    for tip, edge in ends:
+        if abs(tip - edge) < 10.0:      # no overhang past the arch (Concept nose)
+            continue
+        u = np.clip((xs - edge) / (tip - edge), 0.0, 1.0)
+        f = 1.0 - u * u * (3.0 - 2.0 * u) * np.clip(1.0 - w / np.max(Y, axis=0), 0.0, None)
+        Y, wb = [y * f for y in Y], wb * f
     w = wb
     if car.center:
         # fender pods: over the arches the pod top reaches in past the
@@ -709,7 +719,7 @@ def sections(car, xs):
         Y.append(np.minimum(pchip(xs, cx, cw), Y[4] - 2.0))
         # the channel ramps up to the pod tops at the end rings, so their
         # outline only climbs (the end-cap patch folds over a dip)
-        end = np.minimum(car.x0 - car.bulge - xs, xs - car.x1 - (BULGE if car.has_tail else 0.0))
+        end = np.minimum(car.x0 - car.bulge - xs, xs - car.x1 - car.tail_bulge)
         Z.append(np.maximum(pchip(xs, cx, cz), Z[4] - HUMP_SLOPE * np.maximum(end, 0.0)))
     crease = {**CREASE, 2: sh["crease"]}
     Y, Z, key = densify(np.stack(Y, 1), np.stack(Z, 1), crease, sh["round"])
@@ -810,7 +820,7 @@ def stations(car):
         keys += [p - 5.0, p + 5.0]
     for ax in (car.fx, car.rx):
         keys += [ax - car.r_well, ax + car.r_well, ax - car.r_arch, ax + car.r_arch, ax, ax - 0.93 * car.r_arch, ax + 0.93 * car.r_arch]
-    nose, tail = car.x0 - car.bulge, car.x1 + (BULGE if car.has_tail else 0.0)
+    nose, tail = car.x0 - car.bulge, car.x1 + car.tail_bulge
     ks = []
     for k in sorted(keys, reverse=True):          # key lines, merged when < 1 cm apart
         if tail + 2.0 < k < nose - 2.0 and (not ks or ks[-1] - k > 1.0):
@@ -821,7 +831,7 @@ def stations(car):
     return np.array([nose] + sorted(free + ks, reverse=True) + [tail])
 
 
-BULGE = 10.0     # nose/tail cap bulge: last ring set back this much, cap centre at the old end
+BULGE = 18.0     # nose/tail cap bulge: last ring set back this much, cap centre at the old end
 # top-cap points, fraction of the cap half width (as many as the underside
 # points, for the end-cap Coons patches)
 CAP_FR = [0.86, 0.645, 0.43, 0.215, 0.0, -0.215, -0.43, -0.645, -0.86]
@@ -912,7 +922,7 @@ def build_cage(car):
         for v in range(nv + 1):
             grid[v][0], grid[v][nu] = leftc[v], rightc[v]
         P = lambda vv: np.array(vv.co)
-        bulge = car.bulge if sgn > 0 else (BULGE if car.has_tail else 0.0)
+        bulge = car.bulge if sgn > 0 else car.tail_bulge
         for v in range(1, nv):
             for u in range(1, nu):
                 s, t = u / nu, v / nv
@@ -1211,7 +1221,7 @@ def lamp_layout(car):
     st, out = car.style, []
     ends = [(+1, car.x0 - car.bulge, st["lamp_z"], st["lamp_y"])]
     if car.has_tail:
-        ends.append((-1, car.x1 + BULGE, st["tail_z"], st["tail_y"]))
+        ends.append((-1, car.x1 + car.tail_bulge, st["tail_z"], st["tail_y"]))
     for sgn, x, lz, ly in ends:
         S = sections(car, np.array([x]))
         lo, h, hw = float(S["zb"][0]), float(S["H"][0]), float(S["w"][0])
