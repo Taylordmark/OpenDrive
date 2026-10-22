@@ -3,7 +3,7 @@ AUDIT-RELIABILITY.md SS4.2 - the original verify_road_fit.py was deleted in
 a prior cleanup and never replaced; verify_terrain_fit.py's own docstring
 kept citing it for months after it was gone).
 
-Checks the ACTUAL road ODR2 tiles and ACTUAL terrain ODT1 tiles on disk in
+Checks the ACTUAL road ODR2 tiles and ACTUAL terrain ODT1/ODT2 tiles on disk in
 Content/OpenDrive/Masks/ (via bin_tile_io.py, which mirrors
 ODRoadManager.cpp's ParseRoadTileFile and ODTerrainManager.cpp's
 ParseTerrainTileFile byte-for-byte) against each other, at every non-excluded

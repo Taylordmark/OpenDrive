@@ -4,7 +4,7 @@
 Runs THREE separate, clearly-labeled checks:
 
   1. SHIPPED ARTIFACT CHECK (check_shipped_terrain_fit) - the primary gate.
-     Opens the ACTUAL ODT1 .bin files in Content/OpenDrive/Masks/ (the same
+     Opens the ACTUAL ODT1/ODT2 .bin files in Content/OpenDrive/Masks/ (the same
      files AODTerrainManager streams at runtime) via bin_tile_io.py, which
      mirrors ODTerrainManager.cpp's ParseTerrainTileFile byte-for-byte, and
      barycentric-samples the REAL parsed vertex/triangle data with
@@ -280,7 +280,7 @@ def _shipped_tile_heights(job):
 
 
 def check_shipped_terrain_fit():
-    """SHIPPED ARTIFACT CHECK - reads the actual ODT1 .bin tiles in
+    """SHIPPED ARTIFACT CHECK - reads the actual ODT1/ODT2 .bin tiles in
     Content/OpenDrive/Masks/ and samples the real parsed mesh, per this
     module's docstring section 1."""
     st_x_cm, st_y_cm, elev, fit_idx, tiles, tile_cm = _fit_station_data(shipped=True)

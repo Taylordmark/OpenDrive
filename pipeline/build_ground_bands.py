@@ -31,13 +31,13 @@ AODSeasonController (snow line sweep). Needs terrain tiles + climate.json.
     python pipeline/build_ground_bands.py --all             (every area with a climate.json)
 """
 import json
-import struct
 import sys
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bin_tile_io import parse_terrain_tile_bin  # noqa: E402
 from test_areas import AREA_NAME, AREAS  # noqa: E402
 from world_frame import WORLD_DATUM_M  # noqa: E402
 
@@ -126,11 +126,10 @@ def ref_elevation_m(area, origin_m):
         print(f"build_ground_bands: {area}: POWER cell elevation unavailable ({exc}) - terrain median")
     zs = []
     for p in MASKS.glob(f"terrain_coarse_{area}_test_tile_*.bin"):
-        d = p.read_bytes()
-        if d[:4] != b"ODT1":
+        t = parse_terrain_tile_bin(p)   # ODT1 or ODT2 (2026-10-21)
+        if t is None:
             continue
-        vc, _tc = struct.unpack_from("<II", d, 21)
-        zs.append(np.frombuffer(d, "<f4", vc * 3, 29)[2::3])
+        zs.append(np.asarray(t["verts"], np.float32)[2::3])
     if zs:
         return float(np.median(np.concatenate(zs))) / 100.0 + origin_m
     st = json.loads((ROOT / "data" / "road_tiles" / f"{area}_test" / "road_stations.json").read_text())
