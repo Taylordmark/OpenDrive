@@ -22,6 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 TILES = ROOT / "OpenDriveUE/Content/OpenDrive/MasksV2"
 OUT = ROOT / "OpenDriveUE/Content/OpenDrive/Masks" / f"padpts_{AREA_NAME}_test.bin"
 SAMPLE_M = 4.0   # well under the forest's 11.5 m PavementExclusionCm
+DEDUPE_M = 2.0   # one point per cell; the 2026-10-09 4 m cell left pad spots
+                 # ~5 m from any point, wider than the grass check reaches
+HEADER = ROOT / "OpenDriveUE/Source/OpenDriveUE/ODForestManager.h"
 
 
 def chunks(path):
@@ -59,23 +62,33 @@ def pad_points(verts, uvs, tris):
     return np.concatenate(out)
 
 
+def dedupe(pts):
+    return pts[np.unique(np.floor(pts / (DEDUPE_M * 100)).astype(np.int64), axis=0, return_index=True)[1]]
+
+
+def pad_reach_cm():
+    """GrassPadClearCm from the C++ header: grass/bush lattice corners within
+    it of a pad point stay bare, so every pad spot must be that near one."""
+    import re
+    return float(re.search(r"GrassPadClearCm = ([\d.]+)f", HEADER.read_text()).group(1))
+
+
 def self_test():
     # 3-vert ribbon stub (u 0/1) + a 40 m pad triangle
     v = np.array([[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [4000, 0, 0], [0, 4000, 0]], np.float32)
     uv = np.array([[0, 0], [1, 0], [0, 0], [.5, 0], [.5, 0], [.5, 0]], np.float32)
-    p = pad_points(v, uv, np.array([[0, 1, 2], [3, 4, 5]]))
-    g = np.mgrid[0:4000:200, 0:4000:200].reshape(2, -1).T
+    p = dedupe(pad_points(v, uv, np.array([[0, 1, 2], [3, 4, 5]])))
+    g = np.mgrid[0:4000:50, 0:4000:50].reshape(2, -1).T
     g = g[g.sum(1) <= 4000]
     d = np.hypot(*(g[:, None, :] - p[None]).transpose(2, 0, 1)).min(1)
-    assert d.max() <= SAMPLE_M * 100, "every point of the pad is near a sample"
+    assert d.max() < pad_reach_cm(), f"pad spot {d.max():.0f} cm from any point"
 
 
 def main():
     self_test()
     pts = [pad_points(*c) for p in sorted(TILES.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin")) for c in chunks(p)]
     pts = np.concatenate(pts) if pts else np.zeros((0, 2))
-    # one point per 4 m cell (still well inside the 11.5 m exclusion)
-    pts = pts[np.unique(np.floor(pts / 400.0).astype(np.int64), axis=0, return_index=True)[1]]
+    pts = dedupe(pts)
     with open(OUT, "wb") as f:
         f.write(b"ODC1")
         f.write(struct.pack("<I", len(pts)))
