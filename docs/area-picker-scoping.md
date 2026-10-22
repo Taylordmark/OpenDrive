@@ -692,6 +692,24 @@ and `AreaCmToScreen`/`ProjectPin` already convert map points to screen points.
 Fills are HUD canvas triangles (2 per tile) and outlines are HUD lines, projected
 through the globe camera each frame. That's code only, no new assets.
 
+## Round 10: quick wins (proposed, for Taylor to pick)
+Each one reuses something that already exists, and each is small.
+
+| # | Win | Built from | Size |
+|---|---|---|---|
+| 1 | **Road corridor tool.** Click along a road, and the line is buffered ~1 km each side into the polygon. For a driving game, a long thin corridor (Tail of the Dragon, a canyon road) is the most common thing to want, and it bakes far less area than a box around it. | shapely `buffer` on the drawn line | S |
+| 2 | **Live estimate while drawing:** km², time to first drive, total bake time, disk size. | Round 6's per-km² rates; the test bake calibrates them | S |
+| 3 | **Roads show up on the map before they're baked.** Pass 1 writes the whole polygon's map centerline in its first few minutes, and the AreaMap screen already draws `centerline_map` lines. The player sees the network and picks where to go next while cells bake. | existing AreaMap road drawing | S |
+| 4 | **Start point snaps to a road,** or is picked from the list of towns once pass 1 has the places and stations. That avoids a start in a field. | `StartAtTown` rows, road stations | S |
+| 5 | **Auto-name** from the biggest town inside the polygon ("Gatlinburg area"), editable. | osm_places from pass 1 | XS |
+| 6 | **Polygon editing basics:** double-click to close, drag an edge's midpoint to add a vertex, right-click to delete one, Ctrl+Z, and an unsent draft that survives leaving the menu. | menu input code | S |
+| 7 | **"Extend this area"** on a baked area's card. It starts a new polygon from that outline, and round 7's merge plus cell hash rebakes only the new ground. | coverage overlay + merge | S |
+| 8 | **"Ready to drive" alert** if the game is minimized or in another menu: a HUD toast plus a taskbar flash. | the status file, `FPlatformApplicationMisc`/window flash | XS |
+| 9 | **Paste a GeoJSON or KML polygon** (for example from Google My Maps or geojson.io) for exact outlines. | small parser, same validation | S |
+
+**Recommended set:** 1, 2, 3, 4 and 6. They change the most for the least work.
+5 and 8 are almost free, so add them too. 7 and 9 are nice-to-haves.
+
 ## Caveat
 
 The bake needs this repo's Python environment and the `pipeline/` folder. It's a
