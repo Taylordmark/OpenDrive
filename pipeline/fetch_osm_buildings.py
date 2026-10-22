@@ -48,6 +48,7 @@ import requests
 import shapely
 
 from build_water_tiles import assemble_outer_rings
+from bake_job import outline_ll
 from fetch_cache import cached_bytes, overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
@@ -107,7 +108,14 @@ def ms_footprints(bbox_snwe):
             x = sum(p[0] for p in ring) / len(ring)
             y = sum(p[1] for p in ring) / len(ring)
             if w <= x <= e and s <= y <= n_:
-                out.append((ring, f["properties"].get("height") or -1))
+                out.append((ring, f["properties"].get("height") or -1, x, y))
+    # (2026-10-21) a drawn area keeps the footprints whose centroid is inside
+    # its outline, like the OSM ones (fetch_cache.clip_osm)
+    poly = outline_ll()
+    if poly is not None and out:
+        keep = shapely.contains_xy(poly, [r[2] for r in out], [r[3] for r in out])
+        out = [r for r, k in zip(out, keep) if k]
+    out = [r[:2] for r in out]
     print(f"  {len(out)} Microsoft footprint(s) in the bbox")
     return out
 

@@ -2,7 +2,7 @@
 
 Terrain tiles are baked only within RENDER_DISTANCE_M (6 km) of a road and
 streamed within AODTerrainManager::VisualRadius, so past ~6 km the world
-just ended. This writes ONE low-res ODT1 mesh, horizon_<area>_test.bin,
+just ended. This writes ONE low-res ODT2 mesh, horizon_<area>_test.bin,
 covering the baked tile extent plus HORIZON_MARGIN_M (80 km) on every side:
 a 513x513 grid (~0.3-0.5 km) of zoom-10 Terrarium, RTIN-simplified, that
 AODTerrainManager::LoadHorizon draws once (no collision, no shadow) under
@@ -25,6 +25,7 @@ import numpy as np
 import requests
 
 import build_terrain_mesh_tiles as B
+from bake_job import outline_local
 from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_lonlat
 
@@ -36,10 +37,34 @@ HORIZON_MAX_ERROR_M = 10.0
 HORIZON_SINK_M = 15.0      # > HORIZON_MAX_ERROR_M: stays under every streamed tile
 EARTH_R_M = 6371000.0
 OUT_PATH = B.OUT_DIR / f"horizon_{AREA_NAME}_test.bin"
+# (2026-10-21) a drawn area's boundary curtain posts (AODBoundaryEffect) stand
+# on these ground heights until collision under them streams in
+CURTAIN_PATH = B.OUT_DIR / f"curtain_{AREA_NAME}_test.bin"
+CURTAIN_STEP_M = 25.0
+CURTAIN_ZOOM = 13          # ~15 m pixels: well inside the curtain's 50 m buried foot
+
+
+def curtain_points(outline, elev_fn, step_m=CURTAIN_STEP_M):
+    """(x_cm, y_cm, z_cm) UE points every step_m along a drawn outline (a
+    shapely Polygon in east/north metres), z from elev_fn(east, north)."""
+    ring = outline.exterior
+    pts = [ring.interpolate(d) for d in np.arange(0.0, ring.length, step_m)]
+    e, n = np.array([p.x for p in pts]), np.array([p.y for p in pts])
+    z = elev_fn(e, n)
+    return np.c_[e * 100.0, -n * 100.0, (z - ORIGIN_HEIGHT_M) * 100.0].astype(np.float32)
+
+
+def write_curtain(path, pts):
+    """'ODC1' + uint32 N (LE) + N * (float32 X_cm, Y_cm, Z_cm)."""
+    path.write_bytes(b"ODC1" + np.uint32(len(pts)).tobytes() + pts.astype("<f4").tobytes())
 
 
 def baked_extent_m():
     """(e0, n0, e1, n1) of every terrain tile on disk for this area (metres)."""
+    # (2026-10-21) a drawn area: its outline's extent - pass 1 builds the
+    # horizon before any terrain tile exists (scoping round 6)
+    if outline_local() is not None:
+        return outline_local().bounds
     keys = [tuple(map(int, re.search(r"_tile_(-?\d+)_(-?\d+)\.bin$", p).groups()))
             for p in glob.glob(str(B.OUT_DIR / f"terrain_{AREA_NAME}_test_tile_*.bin"))]
     if not keys:
@@ -56,7 +81,7 @@ def outside_dist_m(e, n, ext):
 
 
 def build(ext, elev_fn):
-    """elev_fn(east_m, north_m) -> metres MSL. Returns the ODT1 tile dict and stats."""
+    """elev_fn(east_m, north_m) -> metres MSL. Returns the terrain tile dict and stats."""
     e0, n0, e1, n1 = ext
     ce, cn = (e0 + e1) / 2, (n0 + n1) / 2
     half = max(e1 - e0, n1 - n0) / 2 + HORIZON_MARGIN_M
@@ -87,7 +112,10 @@ def build(ext, elev_fn):
     verts = verts[used]
     uvs = np.stack([gxi[used] / (n - 1), gyi[used] / (n - 1)], -1).astype(np.float32)
     tris = remap[tris].astype(np.uint32)
-    return ({"has_collision": False, "verts": verts, "uvs": uvs, "tris": tris},
+    # (2026-10-21) the grid spans x [ce-half, ce+half], UE y [-(cn+half), -(cn-half)],
+    # so the UVs above derive from position and the mesh writes as ODT2
+    uv_frame = ((ce - half) * 100.0, -(cn + half) * 100.0, 2 * half * 100.0)
+    return ({"has_collision": False, "verts": verts, "uvs": uvs, "tris": tris, "uv_frame": uv_frame},
             dict(half_km=half / 1000, cell_m=cell, verts=len(verts), tris=len(tris)))
 
 
@@ -100,6 +128,14 @@ def main():
         return B.sample_dem(lat.reshape(-1), lon.reshape(-1), HORIZON_ZOOM, sess, cache).reshape(e.shape).astype(np.float64)
 
     tile, st = build(ext, elev_fn)
+    outline = outline_local()
+    if outline is not None:
+        def curtain_elev(e, n):
+            lon, lat = to_lonlat(e, n)
+            return B.sample_dem(lat, lon, CURTAIN_ZOOM, sess, {}).astype(np.float64)
+        pts = curtain_points(outline, curtain_elev)
+        write_curtain(CURTAIN_PATH, pts)
+        print(f"curtain: {len(pts)} posts every {CURTAIN_STEP_M:.0f} m -> {CURTAIN_PATH}")
     B.write_tile_bin(OUT_PATH, tile, pack_generation_id(compute_generation_id()))
     print(f"horizon: baked extent {(ext[2] - ext[0]) / 1000:.0f} x {(ext[3] - ext[1]) / 1000:.0f} km, "
           f"mesh +-{st['half_km']:.0f} km at {st['cell_m']:.0f} m, {st['verts']} verts, {st['tris']} tris, "

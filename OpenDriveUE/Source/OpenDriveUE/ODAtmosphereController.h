@@ -112,6 +112,7 @@ private:
 	float BaseSunIntensity = 0.0f, BaseSkyLightIntensity = 0.0f, BaseSunAngle = 0.0f;
 
 	float LastFogW = -1.0f, LastCloudW = -1.0f, LastDustW = -1.0f, LastTintW = -1.0f, LastFlash = -1.0f;
+	float LastSkyWarm = -1.0f;   // od.SkyWarm last applied
 	float DiagAcc = 0.0f;   // ODAtmo diagnostic line every 10 s
 	float StrikeCountdown = 5.0f;
 	float FlashAge = -1.0f;   // < 0 = no flash running

@@ -10,10 +10,28 @@
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Dom/JsonObject.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "ODRoadManager.h"
+#include "ODSeasonController.h"
+#include "ODSolar.h"
 #include "ODVehicleMovement.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "ODVisualStyle.h"
+
+namespace
+{
+	// Areas whose clock isn't round(lon / 15) with US daylight time
+	struct FAreaZone { const TCHAR* Area; float UtcOffset; bool bDaylightTime; };
+	const FAreaZone AreaZones[] = {
+		{TEXT("deals_gap"), -5.0f, true},   // Eastern, though -84 deg rounds to Central
+		{TEXT("oahu"), -10.0f, false},      // Hawaii: no daylight time
+	};
+}
 
 AODDayNightController::AODDayNightController()
 {
@@ -30,7 +48,56 @@ void AODDayNightController::BeginPlay()
 	// without waiting out a full CycleSeconds run.
 	FParse::Value(FCommandLine::Get(), TEXT("odhour="), StartHour);
 	TimeOfDay = StartHour;
+	// -odcycle=<s> overrides CycleSeconds; 0 freezes the clock (lighting captures:
+	// at the default 1 h cycle a shot ~85 s after launch had drifted ~34 game min).
+	FParse::Value(FCommandLine::Get(), TEXT("odcycle="), CycleSeconds);
 	FParse::Value(FCommandLine::Get(), TEXT("odday="), StartDayOfWeek);
+	bPinnedDay = FParse::Value(FCommandLine::Get(), TEXT("oddoy="), DayOfYear);
+	for (TActorIterator<AODSeasonController> It(GetWorld()); It; ++It)
+	{
+		Season = *It;
+		break;
+	}
+
+	// the area's place: worldmap.json "areas": {"<area>": {"ll": [lon, lat]}}
+	// (pipeline/bake_world_map.py), area key from the road manager's centerline
+	FString Area;
+	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+	{
+		Area = It->GetAreaKey();
+		break;
+	}
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	const TSharedPtr<FJsonObject>* Areas = nullptr;
+	const TSharedPtr<FJsonObject>* A = nullptr;
+	const TArray<TSharedPtr<FJsonValue>>* LL = nullptr;
+	if (!Area.IsEmpty()
+		&& FFileHelper::LoadFileToString(Text, *(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/worldmap.json")))
+		&& FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root) && Root.IsValid()
+		&& Root->TryGetObjectField(TEXT("areas"), Areas) && (*Areas)->TryGetObjectField(Area, A)
+		&& (*A)->TryGetArrayField(TEXT("ll"), LL) && LL->Num() == 2)
+	{
+		Longitude = (*LL)[0]->AsNumber();
+		Latitude = (*LL)[1]->AsNumber();
+		UtcOffset = FMath::RoundToFloat(Longitude / 15.0);
+		bDaylightTime = true;
+		for (const FAreaZone& Z : AreaZones)
+		{
+			if (Area == Z.Area)
+			{
+				UtcOffset = Z.UtcOffset;
+				bDaylightTime = Z.bDaylightTime;
+			}
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODDayNightController: area '%s' not in Masks/worldmap.json - sun at the default %.3f, %.3f"),
+			*Area, Latitude, Longitude);
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODSun: area=%s lat=%.4f lon=%.4f utc=%+.0f dst=%d day=%s"), *Area, Latitude, Longitude,
+		UtcOffset, bDaylightTime, Season.IsValid() && !bPinnedDay ? TEXT("season clock") : *FString::SanitizeFloat(DayOfYear));
 	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
 	{
 		Sun = *It;
@@ -122,16 +189,39 @@ void AODDayNightController::BeginPlay()
 	}
 }
 
+float AODDayNightController::CurrentDayOfYear() const
+{
+	return Season.IsValid() && !bPinnedDay ? 1.0f + Season->MonthOfYear() * (365.0f / 12.0f) : DayOfYear;
+}
+
+float AODDayNightController::ClockUtcOffset(float Day) const
+{
+	return UtcOffset + (bDaylightTime && ODSolar::IsUSDaylightTime(Day) ? 1.0f : 0.0f);
+}
+
+float AODDayNightController::HourAtSunElevation(float ElevationDeg, bool bRising, float Fallback) const
+{
+	// the date live, not as of the last Tick: the menu's Season row sets it just before
+	const float Day = CurrentDayOfYear();
+	double Hour;
+	return ODSolar::HourAtElevation(Latitude, Longitude, Day, ClockUtcOffset(Day), ElevationDeg, bRising, Hour)
+		? (float)Hour : Fallback;
+}
+
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	const float NextHour = TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f;
+	const float NextHour = CycleSeconds > 0.0f ? TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f : TimeOfDay;
 	DayCount += NextHour >= 24.0f ? 1 : 0;
 	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
 
-	const float DayPhase = (TimeOfDay - 6.0f) / 12.0f * PI;  // 6h->0, 12h->pi/2
-	const float Elevation = FMath::Sin(DayPhase) * MaxElevation;
-	const float Azimuth = TimeOfDay * 15.0f + 90.0f;
+	DayOfYear = CurrentDayOfYear();
+	double ElevationDeg, CompassDeg;
+	ODSolar::SunPosition(Latitude, Longitude, DayOfYear, TimeOfDay, ClockUtcOffset(DayOfYear), ElevationDeg, CompassDeg);
+	const float Elevation = ElevationDeg;
+	// the light's yaw is where it shines TO: UE +X = east, +Y = south, so a sun
+	// at compass bearing B shines toward yaw B + 90 (east sun -> yaw 180)
+	const float Azimuth = CompassDeg + 90.0;
 
 	// The sun turns every frame. The 2026-10-16 perf pass turned it in 0.25 deg
 	// steps to keep the Virtual Shadow Map cache, but that cache is keyed on

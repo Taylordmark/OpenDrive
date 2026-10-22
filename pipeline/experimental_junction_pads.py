@@ -87,11 +87,12 @@ import numpy as np
 import build_forest_elevation
 import prune_unowned_tiles
 import build_terrain_mesh_tiles as btmt
+from bake_job import in_job, job_items, job_rect, tile_in_job
 from export_road_mesh_bin import write_tile
 from export_road_mesh_bin_v2 import write_tile as write_tile_v3
 from build_road_network import write_station_sidecar
-from generation_id import compute_generation_id, pack_generation_id
-from road_mesh_common import (ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
+from generation_id import _in_job, compute_generation_id, delete_stale_tiles, pack_generation_id
+from road_mesh_common import (CHUNK_STATIONS, ROAD_HALF_WIDTH, ROAD_LIFT, SKIRT_DROP, SKIRT_EXTRA,
                                STATION_SPACING, build_road_chunks,
                                half_width_for_stations, road_ue_z_m,
                                sample_mesh_height, sample_mesh_heights,
@@ -122,6 +123,27 @@ BANK_SCALE_PATH = SIDECAR_BACKUP_DIR / f"bank_scale_{AREA_NAME}.npz"
 # float64) without risking a false match to a different, merely-nearby
 # station (station spacing is 500cm, so anything under ~50cm is unambiguous).
 SIDECAR_MATCH_EPS_CM = 5.0
+
+# Pass-2 job rect (2026-10-21, area picker, docs/area-picker-contract.md):
+# with OD_JOB_RECT_M set this stage decides pads from the same shared
+# road_stations.json as every other job, but only around its rect, and writes
+# only the rect's tiles (and only its own stations' sidecar/bank entries). A
+# pad straddling a cut comes out the same from both jobs because every pass
+# below is local and keeps the stations' global order (find_crossings sorts
+# its candidates for exactly that), so a job that sees all of a pad's
+# neighbourhood makes the same decisions about it as the whole-area run.
+JOB_PAD_REACH_M = 450.0   # pads fused into chunks: one whose host chunk lands
+                          # in the rect sits within ~a half chunk (375 m) of it
+JOB_RIBBON_REACH_M = JOB_PAD_REACH_M + CHUNK_STATIONS * STATION_SPACING
+                          # ribbon runs rebuilt: every chunk a pad above could
+                          # fuse into instead, and every segment whose chunks
+                          # can bucket into the rect
+JOB_HALO_M = 150.0        # decisions see this far past every station of those
+                          # segments: crossing clusters, merges and blends
+                          # chain over tens of metres. ponytail: a merge chain
+                          # longer than this (a km-long braided carriageway)
+                          # can still split differently per job - grow it if a
+                          # seam audit ever finds one
 
 JUNCTION_SEARCH_RADIUS_M = 15.0    # broad-phase: how close two DIFFERENT
                                     # segments' stations must be to even try
@@ -591,7 +613,11 @@ def find_crossings(east, north, s_m, elev, seg_ids, structural):
     overlap2 = JUNCTION_OVERLAP_M ** 2
     crossings = []
     seen_xy = []
-    for ei, ej in candidate_edges:
+    # sorted (2026-10-21): a set's order depends on everything else in it,
+    # and the first edge pair to claim a 5 m spot below (and cluster_crossings'
+    # seeds after it) wins - a job rect's subset reordered them, so the same
+    # junction came out differently on each side of a cut
+    for ei, ej in sorted(candidate_edges):
         t, u, dist2, ix, iy = closest_segment_points(
             east[ei], north[ei], east[ei + 1], north[ei + 1],
             east[ej], north[ej], east[ej + 1], north[ej + 1])
@@ -2791,6 +2817,15 @@ def add_gate_coverage_fills(all_chunks, junctions, east, north, regraded, gate_e
     return len(misses)
 
 
+def backup_job_tiles(out_dir, backup_dir, pattern):
+    """A pass-2 job's baseline (2026-10-21): back up each of its rect's tiles
+    the first time any job patches it, never one already backed up."""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for p in out_dir.glob(pattern):
+        if _in_job(p.name) and not (backup_dir / p.name).exists():
+            (backup_dir / p.name).write_bytes(p.read_bytes())
+
+
 # ------------------------------------------------------------------ main
 def restore():
     if not BACKUP_DIR.exists():
@@ -3111,6 +3146,8 @@ def regrade_terrain_at_junctions(junctions, regraded_east, regraded_north, regra
         j["_terrain_tiles"] = {(tx, ty) for tx in range(tx0, tx1 + 1) for ty in range(ty0, ty1 + 1)}
 
     tiles_needed = set().union(*(j["_terrain_tiles"] for j in junctions)) if junctions else set()
+    # a pass-2 job re-carves only its own tiles (2026-10-21)
+    tiles_needed = {t for t in tiles_needed if tile_in_job(t[0], t[1], tile_cm)}
     if not tiles_needed:
         print("regrade_terrain: no junctions to re-carve terrain for")
         return
@@ -3190,7 +3227,8 @@ def match_sidecar(key_x, key_y, px_cm, py_cm):
     return out
 
 
-def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_east, new_north):
+def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_east, new_north,
+                          own=None):
     """Mirrors this script's road-tile patching (write_tile() over the
     backed-up originals) for the OTHER on-disk artifact the runtime terrain
     carve reads: roadstations_{AREA_NAME}.bin. Without this, the sidecar
@@ -3212,7 +3250,8 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_ea
     station arrays actually changed elevation; `orig_east`/`orig_north` are
     that same flat array's UNREGRADED positions (used as the match key) and
     `new_elev` its POST-regrade elevation (DEM-frame meters, same units
-    road_ue_z_m expects)."""
+    road_ue_z_m expects). `own` (a pass-2 job's stations, by original xy):
+    only their entries change, every other one keeps what earlier jobs wrote."""
     if not SIDECAR_PATH.exists():
         print(f"no station sidecar at {SIDECAR_PATH} - skipping sidecar patch "
               f"(older build_road_network.py run, or not yet generated)")
@@ -3236,6 +3275,14 @@ def patch_station_sidecar(regraded_mask, orig_east, orig_north, new_elev, new_ea
     # every station is matched (not just the regraded ones) so the one-to-one
     # assignment is the same one verify_road_fit's match_sidecar() call makes
     j = match_sidecar(sc_x, sc_y, orig_east * 100.0, -orig_north * 100.0)
+    if own is not None:
+        # (2026-10-21) one shared file across jobs: start from the current
+        # one, put this job's entries back to the baseline, then patch them
+        _g, cur_x, cur_y, cur_z, cur_hw = read_station_sidecar(SIDECAR_PATH)
+        mine = j[own & (j >= 0)]
+        cur_x[mine], cur_y[mine], cur_z[mine] = sc_x[mine], sc_y[mine], sc_z[mine]
+        sc_x, sc_y, sc_z, sc_hw = cur_x, cur_y, cur_z, cur_hw
+        regraded_mask = regraded_mask & own
     idxs = np.nonzero(regraded_mask & (j >= 0))[0]
     si = j[idxs]
     sc_z[si] = road_ue_z_m(new_elev[idxs], ROAD_LIFT, ORIGIN_HEIGHT_M) * 100.0
@@ -3303,6 +3350,8 @@ def drop_baseline():
                    (TERRAIN_BACKUP_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin"),
                    (SIDECAR_BACKUP_DIR, SIDECAR_PATH.name)):
         for p in d.glob(pat):
+            if not _in_job(p.name):   # a pass-2 job drops only its own tiles' (2026-10-21)
+                continue
             p.unlink()
             n += 1
     print(f"--fresh-baseline: dropped {n} backup file(s) for {AREA_NAME}")
@@ -3338,7 +3387,26 @@ def main():
         for seg in raw["segments"]])
     bounds = segment_bounds(seg_ids)
 
-    crossings = find_crossings(east, north, s_m, elev, seg_ids, structural)
+    # pass-2 job (see JOB_PAD_REACH_M): `strip` = whole segments whose ribbons
+    # this job rebuilds (a run's chunking starts at its pad, wherever along
+    # the segment that is), `ctx` = the stations decisions are made from
+    rect = job_rect()
+    strip = ctx = np.ones(len(east), dtype=bool)
+    if rect is not None:
+        strip = np.isin(seg_ids, seg_ids[in_job(east * 100.0, -north * 100.0, JOB_RIBBON_REACH_M)])
+        if not strip.any():
+            print(f"job rect {rect}: no road reaches it - nothing to pad")
+            return None
+        from scipy.spatial import cKDTree
+        ctx = cKDTree(np.c_[east[strip], north[strip]]).query(
+            np.c_[east, north], distance_upper_bound=JOB_HALO_M)[0] <= JOB_HALO_M
+        print(f"job rect {rect}: {int(strip.sum())} ribbon / {int(ctx.sum())} decision "
+              f"station(s) of {len(east)}")
+    own = in_job(east * 100.0, -north * 100.0) if rect is not None else None
+    near_rect = in_job(east * 100.0, -north * 100.0, JOB_PAD_REACH_M)
+
+    # stations outside ctx are invisible to the finders, like structural ones
+    crossings = find_crossings(east, north, s_m, elev, seg_ids, structural | ~ctx)
     print(f"found {len(crossings)} real at-grade centerline crossing(s)")
 
     clusters = cluster_crossings(crossings)
@@ -3456,7 +3524,7 @@ def main():
     # plus a small pad to paper over the T-seam where it meets the target
     # road (2026-08-25, Taylor: "I was on a road and it just ended...
     # supposed to be an intersection there").
-    snaps = find_dangling_endpoints(east, north, elev, seg_ids, structural, bounds, junctions)
+    snaps = find_dangling_endpoints(east, north, elev, seg_ids, structural | ~ctx, bounds, junctions)
     print(f"found {len(snaps)} dangling endpoint(s) within {ENDPOINT_SNAP_MAX_M:.0f}m "
           f"of another road - welding with a connector spur")
     spurs = []   # (gi, tgi, dist) - geometry from the FINAL grade, spur_geometry()
@@ -3680,7 +3748,7 @@ def main():
         # dangling-endpoint connector welds write into `regraded`), so the mask
         # below covers both.
         patch_station_sidecar((regraded != elev) | (regraded_east != east) | (regraded_north != north),
-                              east, north, regraded, regraded_east, regraded_north)
+                              east, north, regraded, regraded_east, regraded_north, own)
 
     if "--solo" in sys.argv:
         solo_xy = None
@@ -3799,7 +3867,7 @@ def main():
     # all. Discs far from any pad (mid-stretch near-parallel runs) are
     # untouched.
     prox_mask = np.zeros(len(east), dtype=bool)
-    for gi in range(len(east)):
+    for gi in np.flatnonzero(ctx):
         if overlaps_other_road(gi, int(seg_ids[gi])):
             prox_mask[gi] = True
     disc_cand = [int(gi) for gi in np.nonzero(prox_mask)[0]
@@ -3883,7 +3951,8 @@ def main():
         off += cnt
     # final (post-growth) footprints, for offline top-down verification
     # renders - same schema as --dump-pads
-    (btmt.STATIONS_PATH.parent / "junction_pads_final.json").write_text(json.dumps([{
+    pads_json = btmt.STATIONS_PATH.parent / "junction_pads_final.json"
+    final = [{
         "xy": [float(j["xy"][0]), float(j["xy"][1])],
         "ellipse": [float(v) for v in j["ellipse"]] if "ellipse" in j else None,
         "radius_m": float(j["radius_m"]), "elev": float(j["elev"]),
@@ -3892,7 +3961,13 @@ def main():
         "merged2": bool(j.get("merged2")),
         "n_roads": int(j["n_roads"]), "segs": sorted(int(s) for s in j["segs"]),
         "profile": j.get("profile"),
-    } for j in junctions], indent=1))
+    } for j in junctions]
+    if rect is not None:
+        # a job swaps in the pads centred in its rect, keeps the rest (2026-10-21)
+        mine = lambda d: bool(in_job(d["xy"][0] * 100.0, -d["xy"][1] * 100.0))
+        old = json.loads(pads_json.read_text()) if pads_json.exists() else []
+        final = [d for d in old if not mine(d)] + [d for d in final if mine(d)]
+    pads_json.write_text(json.dumps(final, indent=1))
 
     # after pad-swallow (2026-10-01): carving before it left every grown
     # pad's new lobes without rim anchors - terrain up to 4.4 m proud
@@ -3901,7 +3976,17 @@ def main():
     carve_and_patch(bank)
     # verify_road_fit checks banked edges against this same faded bank
     SIDECAR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    np.savez(BANK_SCALE_PATH, scale=bank, gen=read_station_sidecar(SIDECAR_PATH)[0])
+    gen = read_station_sidecar(SIDECAR_PATH)[0]
+    bank_out = bank
+    if rect is not None:
+        # one shared file across jobs: only this job's stations change (2026-10-21)
+        bank_out = np.c_[np.ones(len(bank)), np.zeros((len(bank), 2))]
+        if BANK_SCALE_PATH.exists():
+            with np.load(BANK_SCALE_PATH) as prev:
+                if prev["scale"].shape == bank.shape and str(prev["gen"]) == str(gen):
+                    bank_out = prev["scale"]
+        bank_out = np.where(own[:, None], bank, bank_out)
+    np.savez(BANK_SCALE_PATH, scale=bank_out, gen=gen)
 
     all_chunks = list(connector_chunks)
     total_km = 0.0
@@ -3914,6 +3999,9 @@ def main():
                           for j in junctions]).reshape(-1, 3)
     t0 = time.perf_counter()
     for si, seg in enumerate(raw["segments"]):
+        if not strip[goff]:   # a pass-2 job's ribbons only (2026-10-21)
+            goff += len(seg["east_m"])
+            continue
         s_full = np.array(seg["s_m"])
         e_full = np.array(seg["east_m"])
         n_full = np.array(seg["north_m"])
@@ -4040,7 +4128,10 @@ def main():
             sub_idx = 0
             for p1 in range(1, len(e) + 1):
                 if p1 == len(e) or inside[p1] != inside[p0]:
-                    if p1 - p0 >= 2 and not inside[p0]:
+                    # (2026-10-21) a pass-2 job skips sub-runs that can't reach its rect
+                    if p1 - p0 >= 2 and not inside[p0] and (
+                            rect is None or in_job(e[p0:p1] * 100.0, -nn[p0:p1] * 100.0,
+                                                   JOB_RIBBON_REACH_M).any()):
                         sub_name = name if len(e) == p1 - p0 else f"{name}_s{sub_idx:03d}"
                         s_r, e_r, n_r, z_r = s[p0:p1], e[p0:p1], nn[p0:p1], z[p0:p1]
                         hw_r = half_width_run[p0:p1] if half_width_run is not None else None
@@ -4128,6 +4219,8 @@ def main():
     from scipy.spatial import cKDTree
     rg_tree = cKDTree(np.c_[regraded_east, regraded_north])
     for name, xy, elev_m, gi in fill_pads:
+        if not near_rect[gi]:   # far from a pass-2 job's rect (2026-10-21)
+            continue
         pad = build_fill_disc(f"fillpad_{name}", xy, elev_m, FILL_RADIUS_M, gi, seg_ids,
                               regraded_east, regraded_north, regraded)
         conform_disc_to_roads(pad, rg_tree, regraded_east, regraded_north, regraded, seg_ids, gi)
@@ -4136,7 +4229,12 @@ def main():
         n_merged += merged
         n_standalone += not merged
 
+    # a pass-2 job fuses only the pads that can reach near its rect (2026-10-21)
+    pad_near = in_job(pad_bound[:, 0] * 100.0, -pad_bound[:, 1] * 100.0,
+                      JOB_PAD_REACH_M + pad_bound[:, 2])
     for k, j in enumerate(junctions):
+        if not pad_near[k]:
+            continue
         # every pad gets rings (not just molded ones) so conform_pad_to_ribbons
         # has vertices out where the ribbons tuck under it
         z_fn = lambda x, y, j=j: pad_plane_z(j, x, y)
@@ -4161,7 +4259,7 @@ def main():
     # only real structures skip the cap: terrain_exclude also holds every
     # wall-conflict station and left 246 Summit centerlines unpaved (2026-10-08)
     n_gate_fills = add_gate_coverage_fills(all_chunks, junctions, east, north,
-                                            regraded, structural, seg_ids)
+                                            regraded, structural | ~near_rect, seg_ids)
 
     print(f"gate-coverage in {time.perf_counter() - t0:.0f}s")
     buckets = defaultdict(list)
@@ -4169,10 +4267,15 @@ def main():
         cx, cy = chunk_centroid(chunk)
         tx, ty = int(cx // ROAD_TILE_SIZE_CM), int(cy // ROAD_TILE_SIZE_CM)
         buckets[(tx, ty)].append(chunk)
+    # a pass-2 job writes only its rect's tiles (2026-10-21)
+    buckets = dict(job_items(buckets, ROAD_TILE_SIZE_CM))
 
     # keyed on this area's files, not the dir: the dir is shared by every area
     # (2026-10-02, sf_russian_hill found summit's backups and skipped its own)
-    if not any(BACKUP_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin")):
+    if rect is not None:
+        # per tile, first job wins: the dir's other tiles are other jobs' (2026-10-21)
+        backup_job_tiles(OUT_DIR, BACKUP_DIR, f"road_{AREA_NAME}_test_tile_*.bin")
+    elif not any(BACKUP_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin")):
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         for p in OUT_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin"):
             (BACKUP_DIR / p.name).write_bytes(p.read_bytes())
@@ -4186,19 +4289,17 @@ def main():
         path = OUT_DIR / f"road_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(path, tile_chunks, gen_id_bytes)
         written.append(path)
-    n_stale = 0
-    written_set = {p.resolve() for p in written}
-    for p in OUT_DIR.glob(f"road_{AREA_NAME}_test_tile_*.bin"):
-        if p.resolve() not in written_set and p.parent != BACKUP_DIR:
-            p.unlink()
-            n_stale += 1
+    # job-scoped (2026-10-21): a pass-2 job never deletes another job's tiles
+    n_stale = delete_stale_tiles(OUT_DIR, f"road_{AREA_NAME}_test_tile_*.bin", written)
 
     # ODR3/MasksV2 mirror - same chunks, same buckets, same gen id (see
     # OUT_DIR_V2's comment: the game PREFERS roadv3_* tiles, so they must
     # carry the identical patched geometry or every regrade above is
     # silently overridden wherever a v3 tile exists).
     OUT_DIR_V2.mkdir(parents=True, exist_ok=True)
-    if not any(V3_BACKUP_DIR.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin")):
+    if rect is not None:
+        backup_job_tiles(OUT_DIR_V2, V3_BACKUP_DIR, f"roadv3_{AREA_NAME}_test_tile_*.bin")
+    elif not any(V3_BACKUP_DIR.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin")):
         V3_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
             (V3_BACKUP_DIR / p.name).write_bytes(p.read_bytes())
@@ -4210,12 +4311,7 @@ def main():
         path = OUT_DIR_V2 / f"roadv3_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile_v3(path, tile_chunks, gen_id_bytes)
         written_v3.append(path)
-    n_stale_v3 = 0
-    written_v3_set = {p.resolve() for p in written_v3}
-    for p in OUT_DIR_V2.glob(f"roadv3_{AREA_NAME}_test_tile_*.bin"):
-        if p.resolve() not in written_v3_set and p.parent != V3_BACKUP_DIR:
-            p.unlink()
-            n_stale_v3 += 1
+    n_stale_v3 = delete_stale_tiles(OUT_DIR_V2, f"roadv3_{AREA_NAME}_test_tile_*.bin", written_v3)
     print(f"ODR3 mirror: {len(written_v3)} MasksV2 tile(s) written, "
           f"{n_stale_v3} stale tile(s) removed")
 

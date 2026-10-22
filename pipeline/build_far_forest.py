@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
+from bake_job import in_outline
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, lonlat_bbox, owns, to_lonlat
 
 CELL_M = 20.0                        # WorldCover overview 1 pixel
@@ -204,7 +205,7 @@ def main():
         pos = np.array(parsed["verts"], dtype=np.float64).reshape(-1, 3)
         tri = np.array(parsed["tris"], dtype=np.int64).reshape(-1, 3)
         z = sample_mesh_heights(pos, tri, cx * 100.0, cy * 100.0)
-        ok = ~np.isnan(z)
+        ok = ~np.isnan(z) & in_outline(cx, -cy)   # (2026-10-21) a drawn area's cards stay inside its outline
         n_band += int(((flags[ok] & FLAG_BAND) > 0).sum())
         n_street += int(((flags[ok] & FLAG_STREET) > 0).sum())
         blocks.append(pack_tile(tx, ty, idx[ok], sjx[ok], sjy[ok], z[ok], flags[ok]))

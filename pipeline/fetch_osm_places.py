@@ -10,8 +10,10 @@ Outputs to  data/raw/<AREA_NAME>_test/ :
 """
 
 import json
+import re
 from pathlib import Path
 
+from bake_job import outline_ll
 from fetch_cache import overpass_json
 
 from test_areas import AREA_NAME, BBOX_SNWE
@@ -33,6 +35,12 @@ RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw" / f"{AREA_NAME
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def population(tags):
+    """OSM population= as an int ("1,234", "approx 500" -> 1234, 500), else None."""
+    m = re.search(r"\d[\d,]*", tags.get("population", ""))
+    return int(m[0].replace(",", "")) if m else None
+
+
 def fetch_osm_places():
     s, w, n_, e = BBOX_SNWE
     s, w, n_, e = s - MARGIN_DEG, w - MARGIN_DEG, n_ + MARGIN_DEG, e + MARGIN_DEG
@@ -44,9 +52,13 @@ def fetch_osm_places():
     print(f"Querying Overpass for named places in {AREA_NAME} bbox (+{MARGIN_DEG} deg margin) ...")
     data = overpass_json(query, HEADERS)
 
-    places = [{"name": el["tags"]["name"], "lat": el["lat"], "lon": el["lon"]}
+    # place + population (2026-10-21): the area picker names a drawn area
+    # after its biggest town
+    places = [{"name": el["tags"]["name"], "lat": el["lat"], "lon": el["lon"],
+               "place": el["tags"].get("place"), "population": population(el["tags"])}
               for el in data["elements"] if el["type"] == "node"]
-    if not places:
+    # a drawn area's outline (fetch_cache.clip_osm) may hold no named place
+    if not places and outline_ll() is None:
         raise SystemExit(f"No named places matched in the {AREA_NAME} bbox+margin.")
     (RAW_DIR / "osm_places.json").write_text(json.dumps(places), encoding="utf-8")
     print(f"  got {len(places)} place(s) -> {RAW_DIR / 'osm_places.json'}")

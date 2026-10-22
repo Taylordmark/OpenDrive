@@ -3,7 +3,7 @@ AUDIT-RELIABILITY.md SS4.2 - the original verify_road_fit.py was deleted in
 a prior cleanup and never replaced; verify_terrain_fit.py's own docstring
 kept citing it for months after it was gone).
 
-Checks the ACTUAL road ODR2 tiles and ACTUAL terrain ODT1 tiles on disk in
+Checks the ACTUAL road ODR2 tiles and ACTUAL terrain ODT1/ODT2 tiles on disk in
 Content/OpenDrive/Masks/ (via bin_tile_io.py, which mirrors
 ODRoadManager.cpp's ParseRoadTileFile and ODTerrainManager.cpp's
 ParseTerrainTileFile byte-for-byte) against each other, at every non-excluded
@@ -27,9 +27,12 @@ build_terrain_mesh_tiles.carve_grid_m):
 Road tiles are bucketed by CHUNK CENTROID (export_road_mesh_bin.py), not by
 station position, and a chunk (<=750m span) can straddle a tile boundary -
 so a station's own tile (by position) might not hold the chunk covering it.
-This script tries the station's own tile first, then its 8 neighbors, before
-counting a station as a miss - matching AODRoadManager's own load-radius
-padding for the same reason.
+This script samples every road tile within 2 of the station's own and keeps
+the TOPMOST hit (two tiles can both cover a point, e.g. one ribbon's skirt
+and another chunk's pavement), counting a station as a miss only if none
+cover it - matching AODRoadManager's own load-radius padding for the same
+reason. Terrain tiles only meet at seams (topmost moved no terrain sample
+by more than 9 mm on summit_county 2026-10-08), so terrain keeps first hit.
 
 Usage:  python verify_road_fit.py
 
@@ -64,7 +67,14 @@ import build_retaining_walls as brw
 from bin_tile_io import parse_road_tile_bin, parse_terrain_tile_bin
 from road_mesh_common import ROAD_LIFT, bake_map, bake_workers, sample_mesh_heights
 from build_terrain_mesh_tiles import TERRAIN_CARVE_DROP_M as CARVE_DROP_M
+from bake_job import in_job
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, ROAD_TILE_SIZE_CM, owns, to_local
+
+
+def owns(x_cm, y_cm, _owns=owns):
+    """(2026-10-21) owned, and inside a pass-2 job's rect: a job checks its own tiles."""
+    return _owns(x_cm, y_cm) & in_job(x_cm, y_cm)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 MASKS_DIR = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks"
@@ -158,21 +168,22 @@ def _sample_chunk(job):
     return _sample_serial(*job)
 
 
-def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1):
-    """_sample_serial, spread over the bake pool when the batch is big.
-    `loader` must pickle (a module-level function or a partial of one)."""
+def _sample_with_neighbors(loader, tx0, ty0, x_cm, y_cm, ring=1, topmost=False):
+    """_sample_serial (or _sample_topmost), spread over the bake pool when
+    the batch is big. `loader` must pickle (a module-level function or a
+    partial of one)."""
     n_workers = bake_workers(SAMPLE_WORKER_GB)
     if n_workers == 1 or len(x_cm) < PARALLEL_MIN_POINTS:
-        return _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring)
+        return _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring, topmost)
     parts = np.array_split(np.lexsort((ty0, tx0)), n_workers * CHUNKS_PER_WORKER)
     out = np.empty(len(x_cm))
-    jobs = [(loader, tx0[c], ty0[c], x_cm[c], y_cm[c], ring) for c in parts]
+    jobs = [(loader, tx0[c], ty0[c], x_cm[c], y_cm[c], ring, topmost) for c in parts]
     for c, h in zip(parts, bake_map(_sample_chunk, jobs, SAMPLE_WORKER_GB)):
         out[c] = h
     return out
 
 
-def _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring=1):
+def _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring=1, topmost=False):
     """Per point: tries its own tile (tx0,ty0) first, then its neighbors out
     to `ring` tiles, keeping the first hit (NaN = none) - see this module's
     docstring for why a station's own tile isn't guaranteed to hold the
@@ -182,6 +193,8 @@ def _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring=1):
     spacing), so a chunk centroid up to ~375 m from a covered station can
     land more than one 500 m tile away. Arrays in, batched per tile
     (2026-10-01: was one scalar sample per point, ~56 min a run)."""
+    if topmost:
+        return _sample_topmost(loader, tx0, ty0, x_cm, y_cm, ring)
     order = [(0, 0)] + [(dx, dy) for dy in range(-ring, ring + 1)
                         for dx in range(-ring, ring + 1) if not (dx == 0 and dy == 0)]
     out = np.full(len(x_cm), np.nan)
@@ -199,6 +212,33 @@ def _sample_serial(loader, tx0, ty0, x_cm, y_cm, ring=1):
             out[sel] = sample_mesh_heights(parsed["positions"], parsed["triangles"],
                                            x_cm[sel], y_cm[sel])
         pending = pending[np.isnan(out[pending])]
+    return out
+
+
+def _sample_topmost(loader, tx0, ty0, x_cm, y_cm, ring=1):
+    """Like _sample_serial, but the TOPMOST hit over every tile within
+    `ring` instead of the first (2026-10-08): road chunks straddle 500 m
+    tiles, so two tiles can both cover a point - e.g. Bridge Street station
+    190684 on summit_county read a ribbon's skirt (2953.17 m) in its own tile
+    while the pavement (2954.69 m) sat in a neighbour. Each tile that exists
+    is sampled once, only at the points inside its mesh's XY bounds."""
+    out = np.full(len(x_cm), np.nan)
+    offs = np.array([(dx, dy) for dy in range(-ring, ring + 1) for dx in range(-ring, ring + 1)])
+    tiles = np.unique((np.c_[tx0, ty0][:, None, :] + offs).reshape(-1, 2), axis=0)
+    for tx, ty in tiles:
+        parsed = loader(int(tx), int(ty))
+        if parsed is None or len(parsed["triangles"]) == 0:
+            continue
+        if "xy_bounds" not in parsed:   # padded past sample_mesh_heights' eps
+            xy = parsed["positions"][:, :2]
+            parsed["xy_bounds"] = (xy.min(0) - 10.0, xy.max(0) + 10.0)
+        lo, hi = parsed["xy_bounds"]
+        sel = np.where((np.abs(tx0 - tx) <= ring) & (np.abs(ty0 - ty) <= ring)
+                       & (x_cm >= lo[0]) & (x_cm <= hi[0])
+                       & (y_cm >= lo[1]) & (y_cm <= hi[1]))[0]
+        if len(sel):
+            out[sel] = np.fmax(out[sel], sample_mesh_heights(
+                parsed["positions"], parsed["triangles"], x_cm[sel], y_cm[sel]))
     return out
 
 
@@ -253,7 +293,7 @@ def check_road_vs_terrain_fit():
     rty_all = np.floor(st_y_cm / ROAD_TILE_SIZE_CM).astype(int)
 
     road_h = _sample_with_neighbors(_load_road_tile, rtx_all[road_idx], rty_all[road_idx],
-                                    st_x_cm[road_idx], st_y_cm[road_idx], ring=2)
+                                    st_x_cm[road_idx], st_y_cm[road_idx], ring=2, topmost=True)
     # A way-end station sits exactly on its ribbon's end edge, and float32 .bin
     # verts far from the origin (4 cm ulp at 650 km) can leave it a hair
     # outside - retry those within the format's own precision (far_gasquet: 4
@@ -265,7 +305,8 @@ def check_road_vs_terrain_fit():
         sel = road_idx[miss]
         road_h[miss] = _sample_with_neighbors(
             _load_road_tile, rtx_all[sel], rty_all[sel],
-            st_x_cm[sel] + 5.0 * np.cos(ang), st_y_cm[sel] + 5.0 * np.sin(ang), ring=2)
+            st_x_cm[sel] + 5.0 * np.cos(ang), st_y_cm[sel] + 5.0 * np.sin(ang), ring=2,
+            topmost=True)
         miss = miss[np.isnan(road_h[miss])]
     road_misses = int(np.isnan(road_h).sum())
     for i in road_idx[np.isnan(road_h)][:5]:
@@ -309,7 +350,7 @@ def check_road_vs_terrain_fit():
     else:
         if road_misses:
             print(f"FAIL: {road_misses} station(s) had no road tile/triangle "
-                  f"covering them in their tile or its 8 neighbors - missing or "
+                  f"covering them in their tile or its neighbors - missing or "
                   f"stale road_*.bin tiles.")
         if terrain_misses:
             print(f"FAIL: {terrain_misses} station(s) had no terrain tile/triangle "
@@ -389,9 +430,10 @@ def check_poke_through():
         misses = int(np.isnan(p).sum())
         p = p[~np.isnan(p)]
         bad = np.where(poke > POKE_TOL_M)[0]
+        stats = (f"terrain-minus-road median {np.median(p):+.2f}m, p99.9 {np.percentile(p, 99.9):+.2f}m, "
+                 f"max {p.max():+.2f}m; " if len(p) else "")
         print(f"poke-through [{label}]: {len(idx)} non-bridge/tunnel station(s), {misses} without terrain; "
-              f"terrain-minus-road median {np.median(p):+.2f}m, p99.9 {np.percentile(p, 99.9):+.2f}m, "
-              f"max {p.max():+.2f}m; {len(bad)} above {POKE_TOL_M}m")
+              f"{stats}{len(bad)} above {POKE_TOL_M}m")
         for i in bad[np.argsort(-poke[bad])][:10]:
             print(f"  station {i}: terrain {poke[i]:+.2f}m above road at "
                   f"({pe[i]:.0f}, {pn[i]:.0f}) m")

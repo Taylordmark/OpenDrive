@@ -50,6 +50,7 @@ from pathlib import Path
 
 import numpy as np
 
+from classify_settlements import SETTLEMENT_CELL_CM
 from road_mesh_common import road_ue_z_m
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM
 # Lake exclusion (2026-09-03, reviewer defect: a barrier/scenery wall run - and
@@ -170,8 +171,8 @@ def main():
             # its tile is a populated town - skip mask feeds BOTH the wall
             # (must be a genuinely continuous run, broken at every gap) and
             # the visual points below
-            tile_tx = (ox // TERRAIN_TILE_SIZE_CM).astype(int)
-            tile_ty = (oy // TERRAIN_TILE_SIZE_CM).astype(int)
+            tile_tx = (ox // SETTLEMENT_CELL_CM).astype(int)
+            tile_ty = (oy // SETTLEMENT_CELL_CM).astype(int)
             in_town = np.array([(tx, ty) in populated_tiles
                                  for tx, ty in zip(tile_tx, tile_ty)])
             # Lake exclusion (2026-09-03): same treatment as bridge/town -

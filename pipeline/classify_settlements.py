@@ -50,6 +50,10 @@ from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, to_local
 
 MIN_BUILDINGS_PER_TILE = 3   # below this, a tile isn't "populated" - just a
                               # stray footprint or two near town's edge
+# (2026-10-21) settlements are classified on a fixed 2 km grid whatever the
+# area's terrain tile size (drawn areas bake 1 km tiles), so the thresholds
+# below keep their tuned meaning and every area reads the same
+SETTLEMENT_CELL_CM = 200000.0
 CITY_DENSITY_PER_TILE = 150  # >= this many footprints in one 2 km tile reads
                               # as a real downtown block, not an ordinary town
 
@@ -120,8 +124,8 @@ def main():
         lat, lon = footprint_centroid(b["nodes"])
         east_m, north_m = to_local(lon, lat)
         x_cm, y_cm = east_m * 100.0, -north_m * 100.0
-        tx = int(x_cm // TERRAIN_TILE_SIZE_CM)
-        ty = int(y_cm // TERRAIN_TILE_SIZE_CM)
+        tx = int(x_cm // SETTLEMENT_CELL_CM)
+        ty = int(y_cm // SETTLEMENT_CELL_CM)
         counts[(tx, ty)] += 1
         if b.get("building_tag") in RESIDENTIAL_TAGS:
             residential_counts[(tx, ty)] += 1

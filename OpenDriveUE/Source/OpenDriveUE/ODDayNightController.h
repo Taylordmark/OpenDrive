@@ -13,8 +13,8 @@ class UStaticMeshComponent;
 
 /**
  * Day/night cycle (wishlist #2): drives the atmosphere sun through a full
- * cycle and gives every vehicle headlights that switch on around dusk.
- * "Real-time accurate" mode arrives with real-world georeferencing (Arc 7).
+ * cycle at the area's real latitude / longitude / date (ODSolar.h) and gives
+ * every vehicle headlights that switch on around dusk.
  */
 UCLASS()
 class OPENDRIVEUE_API AODDayNightController : public AActor
@@ -34,9 +34,22 @@ public:
 	UPROPERTY(EditAnywhere, Category = "DayNight")
 	float StartHour = 10.0f;
 
-	/** Max solar elevation at noon, degrees. */
+	/** Where the sun is computed for (ODSolar.h): BeginPlay takes the area's
+	 *  "ll" from Masks/worldmap.json; these Gasquet defaults stand in if the
+	 *  area isn't there. UtcOffset is standard time; US daylight time adds 1. */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float MaxElevation = 68.0f;
+	double Latitude = 41.8475;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	double Longitude = -123.965;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float UtcOffset = -8.0f;
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	bool bDaylightTime = true;
+
+	/** Date when there's no season clock (1 = Jan 1). AODSeasonController's
+	 *  MonthOfYear() drives it when present; -oddoy=<1..365> pins it. */
+	UPROPERTY(EditAnywhere, Category = "DayNight")
+	float DayOfYear = 172.0f;
 
 	/** Headlights turn on below this solar elevation (deg). */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
@@ -100,7 +113,7 @@ public:
 	float StarBrightness = 3.0f;
 
 	/** 0 by day .. 1 at night: smoothstep from sun elevation +2 deg to -6 deg
-	 *  (menu Dusk, 18.3 h, sits at -5.3 deg). Mirrored in
+	 *  (civil twilight ends at -6). Mirrored in
 	 *  pipeline/check_night_exposure.py. */
 	static float NightFactor(float ElevationDeg)
 	{
@@ -128,11 +141,19 @@ public:
 	/** NightFactor() as of the last Tick (0 before the first). */
 	float GetNight() const { return FMath::Max(LastNight, 0.0f); }
 
+	/** Clock hour today when the sun crosses ElevationDeg rising (or
+	 *  setting) here - menu presets like Dusk. Fallback if it never does. */
+	float HourAtSunElevation(float ElevationDeg, bool bRising, float Fallback) const;
+
 private:
 	void UpdateHeadlights(bool bOn);
 
 	TWeakObjectPtr<ADirectionalLight> Sun;
 	TWeakObjectPtr<ADirectionalLight> Moon;
+	TWeakObjectPtr<class AODSeasonController> Season;
+	bool bPinnedDay = false;   // -oddoy= given: ignore the season clock
+	float CurrentDayOfYear() const;
+	float ClockUtcOffset(float Day) const;
 	TWeakObjectPtr<APostProcessVolume> NightGrade;
 	UPROPERTY()
 	TObjectPtr<UStaticMeshComponent> StarDome;

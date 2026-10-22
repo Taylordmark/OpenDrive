@@ -67,6 +67,17 @@ constexpr float FlashSeconds = 0.35f;
 // overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
 // for capture sweeps; re-applied every Tick (one float write).
 TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
+// Volumetric cloud ray-march budget (2026-10-21, Green Valley 8-10 fps: CloudView
+// was 27-50 ms of a 105 ms frame). Cost scales with in-cloud samples, each of which
+// runs its own shadow march (10 steps at engine scale 1), and open horizons under
+// the material's world-space cloud layout fill the view with them; a low sun stretches
+// every shadow march along the layer and roughly doubles it. Halving view and shadow
+// samples halves that; tracing stops at 2 % transmittance instead of 0.5 % (invisible
+// behind an already-opaque cloud). Engine defaults are 1 / 1 / 0.005. Live-tunable
+// for A/B captures; re-applied in Tick when changed.
+TAutoConsoleVariable<float> CVarCloudViewScale(TEXT("od.CloudViewScale"), 0.5f, TEXT("VolumetricCloud ViewSampleCountScale (engine 1)."));
+TAutoConsoleVariable<float> CVarCloudShadowScale(TEXT("od.CloudShadowScale"), 0.5f, TEXT("VolumetricCloud ShadowViewSampleCountScale (engine 1)."));
+TAutoConsoleVariable<float> CVarCloudStopT(TEXT("od.CloudStopT"), 0.02f, TEXT("VolumetricCloud StopTracingTransmittanceThreshold (engine 0.005)."));
 // Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
 // black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
 // The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
@@ -76,6 +87,13 @@ constexpr float NightFilmToe = 0.55f;
 constexpr float DayFilmToe = 0.1f;
 constexpr float FullDayToeElevDeg = 15.0f;
 TAutoConsoleVariable<float> CVarFilmToe(TEXT("od.FilmToe"), -1.0f, TEXT("Grade volume FilmToe override (< 0 = follow sun elevation)."));
+// White balance sweep for the blue forest shade at 17:30 (audit Gap 3); unset = engine 6500 K.
+TAutoConsoleVariable<float> CVarWhiteTemp(TEXT("od.WhiteTemp"), -1.0f, TEXT("Grade volume WhiteTemp override in K (< 0 = engine default)."));
+// WhiteTemp 8500 only took the shade tint from +0.80 to +0.62 (photo is warm): the
+// light itself is blue. Sweep a warm sky light colour (lights the scene + Lumen's
+// sky term, not the visible sky). 0 = white = unchanged.
+const FLinearColor WarmSkyLightColor(1.0f, 0.8f, 0.6f);
+TAutoConsoleVariable<float> CVarSkyWarm(TEXT("od.SkyWarm"), 0.0f, TEXT("Sky light colour, 0 = white .. 1 = warm."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1: frames ran ~2/3 stop darker than the reference photos.
@@ -525,18 +543,38 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
+	{
+		// Setters dirty render state, so only on change.
+		const float ViewScale = CVarCloudViewScale.GetValueOnGameThread();
+		const float ShadowScale = CVarCloudShadowScale.GetValueOnGameThread();
+		const float StopT = CVarCloudStopT.GetValueOnGameThread();
+		if (CloudComp->ViewSampleCountScale != ViewScale) { CloudComp->SetViewSampleCountScale(ViewScale); }
+		if (CloudComp->ShadowViewSampleCountScale != ShadowScale) { CloudComp->SetShadowViewSampleCountScale(ShadowScale); }
+		if (CloudComp->StopTracingTransmittanceThreshold != StopT) { CloudComp->SetStopTracingTransmittanceThreshold(StopT); }
+	}
+
+	const UDirectionalLightComponent* SunLight = SunComp.Get();
+	const float SunElevDeg = SunLight ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-SunLight->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
 	if (APostProcessVolume* PPV = GradeVolume.Get())
 	{
 		PPV->Settings.LumenSkylightLeaking = CVarSkyLeak.GetValueOnGameThread();
 		float Toe = CVarFilmToe.GetValueOnGameThread();
 		if (Toe < 0.0f)
 		{
-			const UDirectionalLightComponent* Sun = SunComp.Get();
-			const float ElevDeg = Sun ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-Sun->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
-			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(ElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
+			Toe = FMath::Lerp(NightFilmToe, DayFilmToe, FMath::Clamp(SunElevDeg / FullDayToeElevDeg, 0.0f, 1.0f));
 		}
 		PPV->Settings.bOverride_FilmToe = true;
 		PPV->Settings.FilmToe = Toe;
+		const float WhiteTemp = CVarWhiteTemp.GetValueOnGameThread();
+		PPV->Settings.bOverride_WhiteTemp = WhiteTemp >= 0.0f;
+		PPV->Settings.WhiteTemp = WhiteTemp >= 0.0f ? WhiteTemp : 6500.0f;
+	}
+	const float SkyWarm = FMath::Clamp(CVarSkyWarm.GetValueOnGameThread(), 0.0f, 1.0f);
+	if (USkyLightComponent* SkyL = SkyLightComp.Get(); SkyL && SkyWarm != LastSkyWarm)
+	{
+		LastSkyWarm = SkyWarm;
+		SkyL->SetLightColor(FMath::Lerp(FLinearColor::White, WarmSkyLightColor, SkyWarm));
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
@@ -583,9 +621,9 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		DiagAcc = 0.0f;
 		const UDirectionalLightComponent* S = SunComp.Get();
 		const USkyLightComponent* K = SkyLightComp.Get();
-		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f | sky %.2f (base %.2f)"),
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f)"),
 			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
-			S ? S->LightSourceAngle : -1.0f, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
 	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when

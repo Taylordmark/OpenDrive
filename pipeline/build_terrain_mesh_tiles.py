@@ -12,7 +12,7 @@ Usage:  python build_terrain_mesh_tiles.py   (needs road_stations.json first)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json
 Writes  OpenDriveUE/Content/OpenDrive/Masks/terrain_<AREA_NAME>_test_tile_<tx>_<ty>.bin
-        (one ODT1 file per built tile; combines what a separate
+        (one ODT2 file per built tile; combines what a separate
         build+export pair does for roads into one script, since - unlike
         the road network - there's no intermediate JSON representation
         worth keeping around here)
@@ -38,7 +38,26 @@ bounds:
     missing file the runtime never retries" semantics AODRoadManager
     already relies on for MissingTiles).
 
-ODT1 format (Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin):
+ODT2 format (2026-10-21; Content/OpenDrive/Masks/terrain_<AREA>_test_tile_<tx>_<ty>.bin
+and terrain_coarse_..., written by bin_tile_io.write_terrain_tile_bin):
+    'O','D','T','2'                                   magic (4 bytes)
+    16 bytes   generation id (same bytes/offset as ODT1)
+    uint8      has_collision   (0 or 1)
+    uint8      flags           bit0: indices are uint16 (V <= 65536), else uint32
+    uint32 LE  vertex_count
+    uint32 LE  tri_count
+    float64 LE u0_cm, v0_cm, uv_size_cm   (tile min corner tx*size, ty*size; tile side)
+    uint32 LE  Z               zlib stream length (zlib.compress level 6)
+    Z bytes    zlib( vertex_count * (float32 x, y, z) cm, UE world frame
+                     + tri_count * 3 indices, uint16 or uint32 per flags )
+    UVs are not stored: uv = ((x - u0) / size, (y - v0) / size) in double
+    from the float32 x/y, then float32 - matches the old stored UVs within
+    2e-5. Positions and triangles are bit for bit what ODT1 held (~30% of
+    the ODT1 size). The writer checks its UVs derive this way (within 1e-4)
+    and falls back to ODT1 if not.
+
+ODT1 (legacy layout, still read by bin_tile_io and AODTerrainManager until
+an area is rebaked):
     'O','D','T','1'                                   magic (4 bytes)
     16 bytes   generation id (ASCII hex, pipeline/generation_id.py,
                2026-08-21 - see that module's docstring)
@@ -64,6 +83,8 @@ import requests
 from pymartini import Martini
 
 import test_areas
+from bake_job import job_rect, outline_local, outline_sdf_m
+from bin_tile_io import write_terrain_tile_bin as write_tile_bin   # ODT2 writer (2026-10-21)
 from generation_id import GENERATION_ID_BYTES, compute_generation_id, delete_stale_tiles, pack_generation_id
 from build_tunnels import cut_holes, load_tunnels
 from road_mesh_common import (ROAD_HALF_WIDTH, SKIRT_EXTRA, bank_slopes,
@@ -731,6 +752,7 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
     flat_x = gx_cm.reshape(-1)
     flat_y = gy_cm.reshape(-1)
     flat_z = z_cm.reshape(-1).copy()
+    beds = []
     touched = False
     for lake in lakes:
         bx0, bx1, by0, by1 = lake["bbox"]
@@ -748,7 +770,15 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             for hx, hy in lake.get("holes", ()):
                 d = np.minimum(d, _dist_to_ring(flat_x[ix], flat_y[ix], hx, hy))
             return d / 100.0
-        shore_z_cm = lake["z_cm"] + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
+        def water_z_cm(ix):
+            # a ribbon quad slopes downstream (tilt_ribbon_quad); a plane
+            # through its ring is exact, and flat (== z_cm) for a lake
+            rz = lake.get("ring_z")
+            if rz is None or np.ptp(rz) < 1.0:
+                return lake["z_cm"]
+            A = np.column_stack([lake["ring_x"], lake["ring_y"], np.ones(len(rz))])
+            p = np.linalg.lstsq(A, rz, rcond=None)[0]
+            return flat_x[ix] * p[0] + flat_y[ix] * p[1] + p[2]
 
         if inside.any():
             touched = True
@@ -756,9 +786,11 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             dist_m = ring_dist_m(idx)
             depth_m = WATER_BED_MIN_DEPTH_M + (WATER_BED_MAX_DEPTH_M - WATER_BED_MIN_DEPTH_M) * \
                 np.clip(dist_m / WATER_BED_FALLOFF_M, 0.0, 1.0)
-            bed_z = lake["z_cm"] - depth_m * 100.0
+            bed_z = water_z_cm(idx) - depth_m * 100.0
             pw = road_protect_w(idx, flat_x, flat_y)
-            flat_z[idx] = pw * flat_z[idx] + (1.0 - pw) * bed_z
+            # applied after every rim below: a touching ribbon quad's (or
+            # lake's) bank blend must not lift this bed back over the water
+            beds.append((idx, pw, bed_z))
 
         # Exterior rim band: blend raw terrain height down to shore_z_cm (the
         # SAME height the interior side starts at, at dist_m==0) as points
@@ -788,7 +820,10 @@ def apply_water_depression(gx_cm, gy_cm, z_cm, lakes,
             continue
         touched = True
         t = blend_t[blend_t > 0.0] * (1.0 - road_protect_w(rim_idx, flat_x, flat_y))
+        shore_z_cm = water_z_cm(rim_idx) + WATER_SHORE_RISE_M * 100.0   # exterior target at the ring
         flat_z[rim_idx] = flat_z[rim_idx] * (1.0 - t) + shore_z_cm * t
+    for idx, pw, bed_z in beds:
+        flat_z[idx] = pw * flat_z[idx] + (1.0 - pw) * bed_z
     return flat_z.reshape(z_cm.shape) if touched else z_cm
 
 
@@ -1391,7 +1426,7 @@ def build_seam_skirt(gx_cm, gy_cm, z_cm, n, drop_cm=None):
 def build_tile(tx, ty, is_near, station_data, session, caches):
     """Builds one tile's regular-grid mesh. Returns a dict with has_collision
     plus (verts Px3 cm, uvs Px2, tris Tx3) - the single production function
-    both main() (writes the ODT1 sidecar) and verify_terrain_fit.py (checks
+    both main() (writes the ODT2 sidecar) and verify_terrain_fit.py (checks
     the actual built mesh, not a reimplementation) call into."""
     st_x_cm, st_y_cm, st_elev, st_exclude, st_clamp_r, st_bank = station_data
     tile_cm = TERRAIN_TILE_SIZE_CM
@@ -1486,6 +1521,7 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # WATER_BED_MIN_DEPTH_M. Applied here (after road carve/downsample, on
     # the tile's FINAL grid) so it covers NEAR and FAR tiles identically,
     # before either triangulation branch below sees z_cm.
+    z_dry = z_cm
     z_cm = apply_water_depression(
         gx_cm, gy_cm, z_cm, _get_lake_beds(),
         st_east_m=st_x_cm[keep] / 100.0 if keep.any() else None,
@@ -1502,6 +1538,12 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     # additive, so the tolerance is unchanged.
     # Far tiles (T4): z x FAR_ROAD_ERROR_GAIN in the road zone so martini's
     # error there is judged 10x stricter; vertices still take the real z.
+    # Far tiles: water beds take the road zone's strict tolerance too - at
+    # 5 m RTIN smoothed a sloped ribbon's narrow bed away and buried it
+    # (Deals Gap 2026-10-21: 35% of far ribbon area under terrain).
+    if not is_near:
+        wet = np.abs(z_cm - z_dry) > 1.0
+        road_zone = wet if road_zone is None else road_zone | wet
     z_err = z_cm / 100.0 if road_zone is None else z_cm / 100.0 * np.where(road_zone, FAR_ROAD_ERROR_GAIN, 1.0)
     tile = _martini_for(n).create_tile(z_err.astype(np.float32))
     grid_verts, martini_tris = tile.get_mesh(MAX_ERROR_NEAR_M if is_near else MAX_ERROR_FAR_M)
@@ -1527,19 +1569,10 @@ def build_tile(tx, ty, is_near, station_data, session, caches):
     if is_near:
         verts, uvs, tris = cut_holes(verts, uvs, tris, _get_tunnels())
 
-    return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris}
-
-
-def write_tile_bin(path, tile, gen_id_bytes):
-    verts, uvs, tris = tile["verts"], tile["uvs"], tile["tris"]
-    with open(path, "wb") as f:
-        f.write(b"ODT1")
-        f.write(gen_id_bytes)
-        f.write(struct.pack("<BII", 1 if tile["has_collision"] else 0,
-                             len(verts), len(tris)))
-        f.write(struct.pack(f"<{verts.size}f", *verts.reshape(-1)))
-        f.write(struct.pack(f"<{uvs.size}f", *uvs.reshape(-1)))
-        f.write(struct.pack(f"<{tris.size}I", *tris.reshape(-1)))
+    # uv_frame (2026-10-21): the UVs above are (x - x0) / tile_cm etc., so
+    # ODT2 derives them instead of storing them (see the module docstring)
+    return {"has_collision": bool(is_near), "verts": verts, "uvs": uvs, "tris": tris,
+            "uv_frame": (x0_cm, y0_cm, tile_cm)}
 
 
 def background_bbox_tile_range():
@@ -1656,6 +1689,42 @@ def sample_built_tiles(jobs, station_data):
         yield from pool.map(_sample_one_tile, jobs, chunksize=4)
 
 
+OUTLINE_GRID_N = 65   # outline mask samples per tile side (15.6 m on a 1 km tile)
+
+
+def tile_touches_outline(tx, ty, tile_cm):
+    """True when UE tile (tx, ty) overlaps the drawn outline (always, for a hand area)."""
+    poly = outline_local()
+    if poly is None:
+        return True
+    import shapely
+    t = tile_cm / 100.0
+    return poly.intersects(shapely.box(tx * t, -(ty + 1) * t, (tx + 1) * t, -ty * t))
+
+
+def write_outline_masks(tiles, gen_id_bytes):
+    """(2026-10-21, scoping round 8) Per-tile signed distance to a drawn
+    area's outline, so the terrain material switches to the "unsynced" look
+    exactly at the drawn edge. Written only for tiles the outline crosses
+    (some sample outside); no file next to a terrain tile = wholly inside.
+    Format: docs/area-picker-contract.md "Outline mask"."""
+    if outline_local() is None:
+        return 0
+    n_out, t = 0, TERRAIN_TILE_SIZE_CM
+    ax = np.arange(OUTLINE_GRID_N) * (t / (OUTLINE_GRID_N - 1))
+    for tx, ty in tiles:
+        gx, gy = np.meshgrid(tx * t + ax, ty * t + ax)   # row = UE y, col = UE x
+        d = outline_sdf_m(gx.ravel() / 100.0, -gy.ravel() / 100.0).astype("<f4")
+        path = OUT_DIR / f"outline_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
+        if d.min() >= 0:
+            path.unlink(missing_ok=True)
+            continue
+        path.write_bytes(b"ODO1" + struct.pack("<I", len(gen_id_bytes)) + gen_id_bytes
+                         + struct.pack("<Ifff", OUTLINE_GRID_N, tx * t, ty * t, t) + d.tobytes())
+        n_out += 1
+    return n_out
+
+
 def main():
     # 2026-09-03: --lakes-only restricts the rebake to tiles that actually
     # touch a baked lake bbox (padded by the water-depression falloff/blend
@@ -1691,6 +1760,22 @@ def main():
                      or ty * tile_cm > by1 or (ty + 1) * tile_cm < by0)
         }
         print(f"--bbox-cm={bbox_cm}: {len(tiles)} tile(s) in scope")
+
+    # (2026-10-21, two-pass drawn-area bake) a pass-2 job bakes every tile in
+    # its rect that touches the drawn outline, near where classify_tiles says
+    # so, else far - not just those within RENDER_DISTANCE_M of a road
+    # (scoping round 5 #3). The carve reads every station, so a road just
+    # outside the rect still carves the job's edge tiles.
+    rect = job_rect()
+    if rect is not None:
+        tile_cm = TERRAIN_TILE_SIZE_CM
+        t_m = tile_cm / 100.0
+        x0, y0, x1, y1 = rect
+        tiles = {(tx, ty): tiles.get((tx, ty), False)
+                 for tx in range(math.floor(x0 / t_m), math.ceil(x1 / t_m))
+                 for ty in range(math.floor(-y1 / t_m), math.ceil(-y0 / t_m))
+                 if tile_touches_outline(tx, ty, tile_cm)}
+        print(f"job rect {rect}: {len(tiles)} tile(s) in scope")
 
     if lakes_only:
         lakes = _get_lake_beds()
@@ -1737,6 +1822,10 @@ def main():
                 print(f"  {i + 1}/{len(tiles)} tile(s) built")
     n_coarse_fallback = len(written_coarse_paths)
 
+    n_outline = write_outline_masks(tiles, gen_id_bytes)
+    if n_outline:
+        print(f"wrote {n_outline} outline mask(s) (tiles the drawn outline crosses)")
+
     if lakes_only or bbox_cm is not None or "--far-only" in sys.argv:
         print(f"--lakes-only/--bbox-cm: skipping delete_stale_tiles (only a subset of tiles was "
               f"rebuilt, the rest are intentionally left as-is)")
@@ -1746,6 +1835,8 @@ def main():
         n_stale_coarse = delete_stale_tiles(
             OUT_DIR, f"terrain_coarse_{AREA_NAME}_test_tile_*.bin", written_coarse_paths)
         print(f"deleted {n_stale_coarse} stale coarse-fallback tile(s) from a previous run")
+        delete_stale_tiles(OUT_DIR, f"outline_{AREA_NAME}_test_tile_*.bin",
+                           [OUT_DIR / f"outline_{AREA_NAME}_test_tile_{tx}_{ty}.bin" for tx, ty in tiles])
     print(f"Built {len(tiles)} terrain tile(s) ({n_coarse_fallback} with a coarse fallback), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 

@@ -123,7 +123,7 @@ ENTRY_RECT = (0.34, 0.66, 0.0, 0.74)    # ~1 x 2.1 m
 GARAGE_PANEL_M, GARAGE_GROOVE = 0.53, 0.06
 DOOR_COLORS = [(0.60, 0.60, 0.57), (0.45, 0.40, 0.32), (0.06, 0.05, 0.045), (0.28, 0.07, 0.05)]
 SHOP_DOOR_SHARE = 0.25   # storefront bays whose glass runs to the floor
-SHOP_LIT_FRACTION = 0.8  # shop windows lit at full night
+SHOP_LIT_FRACTION = 0.7  # shop windows lit at full night (0.8 lifted a shop street off the night exposure floor)
 FASCIA_V = (0.75, 0.95)  # sign band over the shopfront, ground-floor fraction
 SIGN_COLORS = [(0.03, 0.03, 0.03), (0.25, 0.03, 0.02), (0.02, 0.05, 0.14), (0.03, 0.11, 0.05),
                (0.55, 0.50, 0.40)]

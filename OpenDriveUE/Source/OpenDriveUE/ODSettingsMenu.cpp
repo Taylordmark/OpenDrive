@@ -86,20 +86,31 @@ enum ESettingsRow : int32
 {
 	RowResolution, RowWindowMode, RowQuality, RowUpscaling, RowRenderScale, RowVSync, RowAssetDetail, RowVisualStyle,
 	RowMaster, RowVehicle, RowAmbient,
-	RowTraction, RowAbs, RowMiniMap, RowUnits, RowTraffic, RowCredits,
+	RowTraction, RowAbs, RowMiniMap, RowUnits, RowTraffic, RowBakeQuit, RowCredits,
 	RowInputDevice, RowSteerDeadzone, RowSteerSensitivity, RowPedalDeadzone,
 	RowGearbox, RowWheelRotation, RowWheelLinearity, RowWheelDeadzone, RowFfbStrength, RowFfbDamping, RowFfbInvert,
 	RowBindings,
 	RowClose,
 	NumSettingsRows,
 };
-static_assert(NumSettingsRows == 30, "keep AODSettingsMenu::NumRows() in sync");
+static_assert(NumSettingsRows == 31, "keep AODSettingsMenu::NumRows() in sync");
 const FODMenuTab SettingsTabs[] = {
 	{TEXT("DISPLAY"), RowResolution, 8},
 	{TEXT("AUDIO"), RowMaster, 3},
-	{TEXT("GAME"), RowTraction, 6},
+	{TEXT("GAME"), RowTraction, 7},
 	{TEXT("CONTROLS"), RowInputDevice, 12},
 };
+
+// (2026-10-21) area picker: what a running bake does when the game quits;
+// the bake side reads [OpenDrive.Bake] BakeQuitBehaviour from GameUserSettings
+const TCHAR* BakeSection = TEXT("OpenDrive.Bake");
+const TCHAR* BakeQuitKey = TEXT("BakeQuitBehaviour");
+bool KeepBaking()
+{
+	FString V;
+	GConfig->GetString(BakeSection, BakeQuitKey, V, GGameUserSettingsIni);
+	return V == TEXT("keep_baking");   // default "stop_after_job"
+}
 
 FString Percent(float V)
 {
@@ -249,6 +260,10 @@ void AODSettingsMenu::AdjustSelected(int32 Dir)
 		break;
 	case RowTraffic:    // 3e: on / off only (D4: density follows the clock)
 		AODTrafficManager::SetEnabledSetting(!AODTrafficManager::IsEnabledSetting());
+		break;
+	case RowBakeQuit:
+		GConfig->SetString(BakeSection, BakeQuitKey, KeepBaking() ? TEXT("stop_after_job") : TEXT("keep_baking"), GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
 		break;
 	case RowInputDevice: ApplyInputDevice(Dir); break;
 	// wheel conditioning (Arc 6) - moved here from the Key Bindings screen
@@ -712,6 +727,10 @@ void AODSettingsMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) co
 	case RowTraffic:
 		OutLabel = TEXT("Traffic");
 		OutValue = AODTrafficManager::IsEnabledSetting() ? TEXT("On") : TEXT("Off");
+		break;
+	case RowBakeQuit:
+		OutLabel = TEXT("Area Bakes on Quit");
+		OutValue = KeepBaking() ? TEXT("Keep Baking in Background") : TEXT("Finish Current Job, Then Stop");
 		break;
 	case RowCredits:
 		OutLabel = TEXT("Credits");

@@ -42,6 +42,7 @@ from building_roofs import make_roof, obb
 from export_building_mesh_bin import pack_tile
 from fetch_cache import overpass_json
 from fetch_osm_buildings import HEADERS
+from bake_job import tile_in_job   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
 from road_mesh_common import road_ue_z_m
 from test_areas import AREA_NAME, BBOX_SNWE, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
@@ -285,7 +286,8 @@ def in_bbox(geom):
 
 def fetch_ways(ids):
     q = f"[out:json][timeout:120];way(id:{','.join(map(str, sorted(ids)))});out tags geom;"
-    return {w["id"]: w for w in overpass_json(q, HEADERS, timeout=200)["elements"]}
+    # unclipped: a lookup by id across every area, checked for deleted ways below
+    return {w["id"]: w for w in overpass_json(q, HEADERS, timeout=200, clip=False)["elements"]}
 
 
 def tile_of(x, y):
@@ -342,7 +344,7 @@ def main():
     gen_id = compute_generation_id()
     gen_id_bytes = pack_generation_id(gen_id)
     written = []
-    for tile in sorted(set(foot_tiles) | set(mesh_tiles)):
+    for tile in sorted(t for t in set(foot_tiles) | set(mesh_tiles) if tile_in_job(*t, TERRAIN_TILE_SIZE_CM)):
         path = OUT_DIR / f"landmarks_{AREA_NAME}_test_tile_{tile[0]}_{tile[1]}.bin"
         path.write_bytes(pack_landmark_tile(foot_tiles[tile], mesh_tiles[tile], gen_id_bytes))
         written.append(path)

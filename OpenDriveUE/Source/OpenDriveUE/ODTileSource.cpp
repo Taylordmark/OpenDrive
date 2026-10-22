@@ -1,4 +1,5 @@
 #include "ODTileSource.h"
+#include "ODBakeLink.h"
 
 #include "Engine/World.h"
 #include "HAL/Event.h"
@@ -36,6 +37,13 @@ void ODTileSource::Init()
 
 EODTileSource ODTileSource::Resolve(const FString& ContentPath, FString& OutReadPath)
 {
+	// a drawn area still baking (2026-10-21, area picker): its unbaked cells'
+	// tiles are "not yet", never "empty" - even if a pass-1 file is already
+	// there, pass 2 rewrites it
+	if (ODBakeLink::IsTilePending(ContentPath))
+	{
+		return EODTileSource::Pending;
+	}
 	IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
 	if (PF.FileExists(*ContentPath))
 	{

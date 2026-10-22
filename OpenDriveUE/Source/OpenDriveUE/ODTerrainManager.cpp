@@ -4,6 +4,7 @@
 
 #include "ODBinSidecarUtil.h"
 #include "ODTileSource.h"
+#include "ODBakeLink.h"
 #include "ODForestManager.h" // EODBiome only, for BiomeGroundTintTable below - no calls into AODForestManager itself
 #include "Async/Async.h"
 #include "Components/DynamicMeshComponent.h"
@@ -22,11 +23,15 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
+#include "TimerManager.h"
 #include "Misc/Paths.h"
+#include "Misc/AutomationTest.h"
+#include "Misc/Compression.h"
 
 using namespace UE::Geometry;
 
 static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed);
+static void TagOutsideOutline(FDynamicMesh3& Mesh, const FVector2D& Origin, const FString& MaskPath);
 
 // ---------------------------------------------------------------------
 // Runtime terrain carve (2026-08-26, Arc 7 rescope): a straight port of
@@ -283,6 +288,9 @@ void AODTerrainManager::BeginPlay()
 	// point-classified biome sidecar AODForestManager's BlendAt() reads, into
 	// this manager's OWN spatial hash - see LoadBiomeSidecar/ApplyBiomeTint.
 	LoadBiomeSidecar();
+	// drawn areas only use it (outline masks / ODBakeLink outline); a missing
+	// asset is the same silent no-op as TerrainMat (2026-10-21)
+	UnsyncedMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/OpenDrive/Materials/M_ODUnsynced.M_ODUnsynced"));
 	LoadHorizon();
 
 	// Diagnostic-only override (2026-08-25): lets a headless test bisect
@@ -322,8 +330,78 @@ void AODTerrainManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 bool AODTerrainManager::ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out)
 {
 	TArray<uint8> Bin;
-	if (!FFileHelper::LoadFileToArray(Bin, *Path) || Bin.Num() < 4 + GenerationIdBytes + 9
-		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'T' || Bin[3] != '1')
+	return FFileHelper::LoadFileToArray(Bin, *Path) && ParseTerrainTileBytes(Bin, Out);
+}
+
+// ODT2 (2026-10-21, pipeline map-area-picker session): same float32 verts and
+// triangles as ODT1, but UVs are dropped (derived from x/y below) and the
+// verts+indices payload is one zlib stream, indices uint16 when flags bit0 is
+// set. ~30% of the ODT1 size on the Tail of the Dragon tiles. Generation id
+// sits at bytes 4..20 in both, so nothing downstream can tell them apart.
+static bool ParseTerrainTileOdt2(const uint8* Cur, const uint8* End, FParsedTerrainTile& Out)
+{
+	// flags(1) V(4) T(4) u0/v0/uv_size float64(24) Z(4)
+	if (End - Cur < 37)
+	{
+		return false;
+	}
+	const bool bU16 = (Cur[0] & 1) != 0;
+	Cur += 1;
+	const uint32 VCount = ReadU32LE(Cur); Cur += 4;
+	const uint32 TCount = ReadU32LE(Cur); Cur += 4;
+	double U0, V0, UvSize;
+	FMemory::Memcpy(&U0, Cur, 8); Cur += 8;
+	FMemory::Memcpy(&V0, Cur, 8); Cur += 8;
+	FMemory::Memcpy(&UvSize, Cur, 8); Cur += 8;
+	const uint32 ZBytes = ReadU32LE(Cur); Cur += 4;
+
+	const int64 IdxBytes = bU16 ? 2 : 4;
+	const int64 RawBytes = (int64)VCount * 12 + (int64)TCount * 3 * IdxBytes;
+	// zlib can't expand past ~1032:1, so a bigger claim is a corrupt header -
+	// reject it before allocating rather than let a bad V/T ask for GBs
+	if (End - Cur < (int64)ZBytes || ZBytes == 0 || RawBytes > MAX_int32
+		|| RawBytes > (int64)ZBytes * 1032 || !(UvSize > 0.0))
+	{
+		return false;
+	}
+	TArray<uint8> Raw;
+	Raw.SetNumUninitialized((int32)RawBytes);
+	// UncompressMemory itself fails unless the stream inflates to exactly
+	// RawBytes; an empty tile (V=T=0, legal in ODT1 too) has nothing to inflate
+	if (RawBytes > 0 && !FCompression::UncompressMemory(NAME_Zlib, Raw.GetData(), RawBytes, Cur, ZBytes))
+	{
+		return false;
+	}
+
+	const uint8* VertsBase = Raw.GetData();
+	const uint8* TrisBase = VertsBase + (int64)VCount * 12;
+	Out.Verts.SetNumUninitialized(VCount * 3);
+	Out.Uvs.SetNumUninitialized(VCount * 2);
+	for (uint32 v = 0; v < VCount; ++v)
+	{
+		const float X = ReadF32LE(VertsBase + v * 12 + 0);
+		const float Y = ReadF32LE(VertsBase + v * 12 + 4);
+		Out.Verts[v * 3 + 0] = X;
+		Out.Verts[v * 3 + 1] = Y;
+		Out.Verts[v * 3 + 2] = ReadF32LE(VertsBase + v * 12 + 8);
+		// in double, then stored as float - the writer verified this matches
+		// its ODT1 UVs (within 2e-5) before choosing ODT2
+		Out.Uvs[v * 2 + 0] = (float)(((double)X - U0) / UvSize);
+		Out.Uvs[v * 2 + 1] = (float)(((double)Y - V0) / UvSize);
+	}
+	Out.Tris.SetNumUninitialized(TCount * 3);
+	for (uint32 i = 0; i < TCount * 3; ++i)
+	{
+		Out.Tris[i] = bU16 ? ((uint32)TrisBase[i * 2] | (uint32)TrisBase[i * 2 + 1] << 8)
+			: ReadU32LE(TrisBase + (int64)i * 4);
+	}
+	return true;
+}
+
+bool AODTerrainManager::ParseTerrainTileBytes(const TArray<uint8>& Bin, FParsedTerrainTile& Out)
+{
+	if (Bin.Num() < 4 + GenerationIdBytes + 9
+		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'T' || (Bin[3] != '1' && Bin[3] != '2'))
 	{
 		return false;
 	}
@@ -345,6 +423,11 @@ bool AODTerrainManager::ParseTerrainTileFile(const FString& Path, FParsedTerrain
 	}
 	Out.bHasCollision = (*Cur != 0);
 	Cur += 1;
+
+	if (Bin[3] == '2')
+	{
+		return ParseTerrainTileOdt2(Cur, End, Out);
+	}
 
 	if (Remaining() < 8)
 	{
@@ -1379,10 +1462,15 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 	const bool bTintEnabled = bEnableBiomeTint;
 	const float TintStrengthValue = BiomeTintStrength;
 
+	// drawn-area outline mask beside the terrain tile (2026-10-21), only read
+	// when the unsynced material exists to show it
+	const FString OutlinePath = UnsyncedMat && TerrainTilePrefix.StartsWith(TEXT("terrain_"))
+		? TerrainTileFilePath(TEXT("outline_") + TerrainTilePrefix.Mid(8), Key) : FString();
+
 	TWeakObjectPtr<AODTerrainManager> WeakThis(this);
 	Async(EAsyncExecution::ThreadPool, [WeakThis, Key, Fidelity, PrimaryPath, FallbackPath,
 		HashForCarve, bBuildRuntimeWalls, WallThresholdCm, CarveTileSizeCm, ClampMarginCm, bVerifyCarve, bRuntimeCarve,
-		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands]()
+		HashForTint, bTintEnabled, TintStrengthValue, Bands = GroundBands, OutlinePath]()
 	{
 		FParsedTerrainTile Parsed;
 		// Check existence first rather than just trying-then-falling-back -
@@ -1491,6 +1579,10 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 		{
 			Parsed.Mesh = MakeShared<FDynamicMesh3>();
 			FillTileMesh(*Parsed.Mesh, Parsed);
+			if (!OutlinePath.IsEmpty())
+			{
+				TagOutsideOutline(*Parsed.Mesh, FVector2D(Parsed.Verts[0], Parsed.Verts[1]), OutlinePath);
+			}
 		}
 
 		AsyncTask(ENamedThreads::GameThread,
@@ -1502,6 +1594,7 @@ void AODTerrainManager::RequestTileLoad(const FIntPoint& Key, ETileFidelity Fide
 				}
 				if (bPending)
 				{
+					WeakThis->WasPendingTiles.Add(Key);   // dissolves in when it lands (2026-10-21)
 					ODTileSource::RetryLater(WeakThis.Get(),
 						Fidelity == ETileFidelity::Near ? WeakThis->PendingNearTiles : WeakThis->PendingCoarseTiles, Key);
 					return;
@@ -1592,6 +1685,10 @@ void AODTerrainManager::ProcessPendingTileBuilds()
 
 		FTerrainTile NewTile;
 		BuildTile(NewTile, Build.Parsed, Build.TargetFidelity);
+		if (WasPendingTiles.Remove(Build.Key) > 0)
+		{
+			SpawnSyncIn(NewTile.Comp);
+		}
 		Tiles.Add(Build.Key, MoveTemp(NewTile));
 		++NumBuilt;
 
@@ -1676,6 +1773,63 @@ static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed)
 	// the "no grass, no floor" bug: exposure/material-load were both
 	// fine, the mesh just never had real normals).
 	FMeshNormals::InitializeOverlayToPerVertexNormals(Mesh.Attributes()->PrimaryNormals(), false);
+}
+
+// Outline mask (2026-10-21, area picker; docs/area-picker-contract.md
+// "Outline mask"): material ID 1 (UnsyncedMat) on every triangle whose
+// centroid samples below 0 in the tile's outline_* signed-distance grid. No
+// file = the tile is wholly inside (or a hand area) and nothing changes.
+// Parse thread - plain data only. Mesh verts are local to Origin.
+static void TagOutsideOutline(FDynamicMesh3& Mesh, const FVector2D& Origin, const FString& MaskPath)
+{
+	TArray<uint8> Bytes;
+	if (!FPlatformFileManager::Get().GetPlatformFile().FileExists(*MaskPath) || !FFileHelper::LoadFileToArray(Bytes, *MaskPath)
+		|| Bytes.Num() < 8 || FMemory::Memcmp(Bytes.GetData(), "ODO1", 4) != 0)
+	{
+		return;
+	}
+	int64 At = 4;
+	auto Read = [&](void* Out, int64 Size)
+	{
+		if (At + Size > Bytes.Num())
+		{
+			return false;
+		}
+		FMemory::Memcpy(Out, Bytes.GetData() + At, Size);
+		At += Size;
+		return true;
+	};
+	uint32 L = 0, N = 0;
+	float X0 = 0.0f, Y0 = 0.0f, Size = 0.0f;
+	if (!Read(&L, 4) || (At += L) > Bytes.Num() || !Read(&N, 4) || !Read(&X0, 4) || !Read(&Y0, 4) || !Read(&Size, 4)
+		|| N < 2 || Size <= 0.0f || At + (int64)N * N * 4 > Bytes.Num())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: bad outline mask %s"), *MaskPath);
+		return;
+	}
+	const uint8* D = Bytes.GetData() + At;
+	auto Cell = [&](int32 R, int32 C)
+	{
+		float V;
+		FMemory::Memcpy(&V, D + ((int64)R * N + C) * 4, 4);
+		return (double)V;
+	};
+	auto Sample = [&](double X, double Y)
+	{
+		const double C = FMath::Clamp((X - X0) / Size * (N - 1), 0.0, N - 1.001);
+		const double R = FMath::Clamp((Y - Y0) / Size * (N - 1), 0.0, N - 1.001);
+		const int32 C0 = (int32)C, R0 = (int32)R;
+		const double Fc = C - C0, Fr = R - R0;
+		return FMath::Lerp(FMath::Lerp(Cell(R0, C0), Cell(R0, C0 + 1), Fc),
+			FMath::Lerp(Cell(R0 + 1, C0), Cell(R0 + 1, C0 + 1), Fc), Fr);
+	};
+	Mesh.Attributes()->EnableMaterialID();
+	FDynamicMeshMaterialAttribute* Mat = Mesh.Attributes()->GetMaterialID();
+	for (const int32 Tid : Mesh.TriangleIndicesItr())
+	{
+		const FVector3d C = Mesh.GetTriCentroid(Tid);
+		Mat->SetValue(Tid, Sample(C.X + Origin.X, C.Y + Origin.Y) < 0.0 ? 1 : 0);
+	}
 }
 
 void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& Parsed, ETileFidelity Fidelity)
@@ -1767,6 +1921,10 @@ void AODTerrainManager::BuildTile(FTerrainTile& Tile, const FParsedTerrainTile& 
 	if (TerrainMID)
 	{
 		Comp->SetMaterial(0, TerrainMID);
+	}
+	if (UnsyncedMat)
+	{
+		Comp->SetMaterial(1, UnsyncedMat);   // TagOutsideOutline's triangles, if any
 	}
 	TMaterial = Lap(Clock);
 
@@ -1865,6 +2023,17 @@ void AODTerrainManager::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 
 	ProcessPendingTileBuilds();
+
+	if (HorizonComp && UnsyncedMat && GetWorld()->GetRealTimeSeconds() >= NextHorizonCheck)
+	{
+		NextHorizonCheck = GetWorld()->GetRealTimeSeconds() + 1.0;
+		const uint32 V = ODBakeLink::StatusVersion();
+		if (V != HorizonStatusVersion && ODBakeLink::ActiveOutline().IsValid())
+		{
+			HorizonStatusVersion = V;
+			RetagHorizon();
+		}
+	}
 
 	FVector Loc;
 	if (!Vista.StreamCenter(this, Loc))
@@ -2195,4 +2364,112 @@ void AODTerrainManager::LoadHorizon()
 	HorizonComp = Comp;
 	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms"),
 		Parsed.Verts.Num() / 3, Parsed.Tris.Num() / 3, (FPlatformTime::Seconds() - T0) * 1000.0);
+}
+
+void AODTerrainManager::RetagHorizon()
+{
+	// (2026-10-21, area picker) the horizon past a drawn area is never baked
+	// in detail: slot 1 (UnsyncedMat) outside the outline and over cells the
+	// runner hasn't baked yet. Re-run only when a status.json changed.
+	const TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> Outline = ODBakeLink::ActiveOutline();
+	if (!HorizonComp || !UnsyncedMat || !Outline.IsValid())
+	{
+		return;
+	}
+	const FVector2D Origin(HorizonComp->GetComponentLocation());
+	int32 NumOut = 0;
+	HorizonComp->EditMesh([&](FDynamicMesh3& Mesh)
+	{
+		Mesh.Attributes()->EnableMaterialID();
+		FDynamicMeshMaterialAttribute* Mat = Mesh.Attributes()->GetMaterialID();
+		for (const int32 Tid : Mesh.TriangleIndicesItr())
+		{
+			const FVector3d C = Mesh.GetTriCentroid(Tid);
+			const FVector2D P(C.X + Origin.X, C.Y + Origin.Y);
+			const bool bOut = ODBakeLink::SignedDistanceCm(*Outline, P) < 0.0 || ODBakeLink::IsPointPending(P);
+			Mat->SetValue(Tid, bOut ? 1 : 0);
+			NumOut += bOut ? 1 : 0;
+		}
+	});
+	HorizonComp->SetMaterial(1, UnsyncedMat);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon retag - %d unsynced tris"), NumOut);
+}
+
+void AODTerrainManager::SpawnSyncIn(const UDynamicMeshComponent* Src)
+{
+	// (2026-10-21) a tile that was Pending lands under a copy of itself in the
+	// unsynced look whose CustomPrimitiveData[0] = now makes M_ODUnsynced
+	// dissolve it away over ~2 s - the "sync-in". Render-only, self-destroying.
+	if (!UnsyncedMat || !Src || !GetWorld())
+	{
+		return;
+	}
+	auto* C = NewObject<UDynamicMeshComponent>(this);
+	C->SetupAttachment(RootComponent);
+	C->SetRelativeLocation(Src->GetRelativeLocation() + FVector(0.0, 0.0, 5.0));
+	C->SetCollisionProfileName(TEXT("NoCollision"));
+	C->SetCastShadow(false);
+	C->RegisterComponent();
+	C->SetMesh(FDynamicMesh3(*Src->GetMesh()));
+	C->SetMaterial(0, UnsyncedMat);
+	C->SetMaterial(1, UnsyncedMat);
+	C->SetCustomPrimitiveDataFloat(0, GetWorld()->GetTimeSeconds());
+	FTimerHandle Unused;
+	GetWorldTimerManager().SetTimer(Unused, FTimerDelegate::CreateWeakLambda(C, [C]() { C->DestroyComponent(); }), 2.2f, false);
+}
+
+// OpenDrive.Terrain.ODT2 (2026-10-21): a two-triangle ODT2 tile built in
+// memory parses to the verts/indices written and the derived UVs; a
+// truncated copy and a wrong index width are both refused.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FODTerrainOdt2Check, "OpenDrive.Terrain.ODT2",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FODTerrainOdt2Check::RunTest(const FString& Parameters)
+{
+	const float P[4][3] = {{100000, 200000, 5}, {200000, 200000, 6}, {200000, 300000, 7}, {150000, 250000, 8}};
+	const uint16 Idx[6] = {0, 1, 2, 0, 2, 3};
+	const double U0 = 100000.0, V0 = 200000.0, Size = 100000.0;
+	TArray<uint8> Raw;
+	Raw.Append(reinterpret_cast<const uint8*>(P), sizeof(P));
+	Raw.Append(reinterpret_cast<const uint8*>(Idx), sizeof(Idx));   // little-endian host, as the format
+	int64 ZBytes = 0;
+	FCompression::CompressMemoryBound(NAME_Zlib, ZBytes, Raw.Num());
+	TArray<uint8> Z;
+	Z.SetNumUninitialized((int32)ZBytes);
+	TestTrue(TEXT("compress"), FCompression::CompressMemory(NAME_Zlib, Z.GetData(), ZBytes, Raw.GetData(), Raw.Num()));
+
+	auto Put = [](TArray<uint8>& B, const void* Data, int32 N) { B.Append(static_cast<const uint8*>(Data), N); };
+	TArray<uint8> Bin;
+	Put(Bin, "ODT2", 4);
+	Put(Bin, "0123456789abcdef", GenerationIdBytes);
+	const uint8 Coll = 1, Flags = 1;
+	const uint32 V = 4, T = 2, Z32 = (uint32)ZBytes;
+	Put(Bin, &Coll, 1); Put(Bin, &Flags, 1); Put(Bin, &V, 4); Put(Bin, &T, 4);
+	Put(Bin, &U0, 8); Put(Bin, &V0, 8); Put(Bin, &Size, 8); Put(Bin, &Z32, 4);
+	Put(Bin, Z.GetData(), Z32);
+
+	FParsedTerrainTile Out;
+	if (!TestTrue(TEXT("parses"), AODTerrainManager::ParseTerrainTileBytes(Bin, Out)))
+	{
+		return false;
+	}
+	TestEqual(TEXT("gen id"), Out.GenerationId, FString(TEXT("0123456789abcdef")));
+	TestTrue(TEXT("collision"), Out.bHasCollision);
+	TestEqual(TEXT("verts"), Out.Verts.Num(), 12);
+	TestEqual(TEXT("vert 2 z"), Out.Verts[8], 7.0f);
+	TestEqual(TEXT("tris"), Out.Tris.Num(), 6);
+	TestEqual(TEXT("tri 5"), (int32)Out.Tris[5], 3);
+	TestEqual(TEXT("uv 2 u"), Out.Uvs[4], 1.0f);
+	TestEqual(TEXT("uv 2 v"), Out.Uvs[5], 1.0f);
+	TestEqual(TEXT("uv 3 u"), Out.Uvs[6], 0.5f);
+	TestEqual(TEXT("uv 3 v"), Out.Uvs[7], 0.5f);
+
+	TArray<uint8> Short = Bin;
+	Short.SetNum(Short.Num() - 1);
+	TestFalse(TEXT("truncated refused"), AODTerrainManager::ParseTerrainTileBytes(Short, Out));
+	TArray<uint8> Wide = Bin;
+	Wide[4 + GenerationIdBytes + 1] = 0;   // claims uint32 indices: inflated size no longer matches
+	AddExpectedError(TEXT("Failed to uncompress memory"), EAutomationExpectedErrorFlags::Contains, 1);   // UncompressMemory logs it
+	TestFalse(TEXT("index width mismatch refused"), AODTerrainManager::ParseTerrainTileBytes(Wide, Out));
+	return true;
 }

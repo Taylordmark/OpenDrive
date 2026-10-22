@@ -48,8 +48,9 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
+from bake_job import tile_in_job
 from building_roofs import clean_ring, make_roof, triangulate
-from classify_settlements import MIN_BUILDINGS_PER_TILE
+from classify_settlements import MIN_BUILDINGS_PER_TILE, SETTLEMENT_CELL_CM
 from road_mesh_common import ROAD_HALF_WIDTH, SKIRT_EXTRA, bake_map, half_width_for_stations, road_ue_z_m
 from test_areas import AREA_NAME, MAX_BUILDING_LEVELS, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_local
 
@@ -416,8 +417,8 @@ def build_chunk(chunk):
     known_tree, known_vals = S["known_tree"], S["known_vals"]
     out, stats = [], Counter()
     for b, ring_xy_cm, (cx_cm, cy_cm), levels in chunk:
-        tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
-        ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
+        tx = int(cx_cm // SETTLEMENT_CELL_CM)
+        ty = int(cy_cm // SETTLEMENT_CELL_CM)
         tile_key = f"{tx},{ty}"
         archetype_tile = S["settlement"].get(tile_key)
         if archetype_tile is None and S["tile_counts"][tile_key] >= MIN_BUILDINGS_PER_TILE:
@@ -533,7 +534,7 @@ def main():
     known_tree = cKDTree(centroids_cm[known_idx]) if len(known_idx) else None
     tile_counts = defaultdict(int)
     for cx, cy in centroids_cm:
-        tile_counts[f"{int(cx // TERRAIN_TILE_SIZE_CM)},{int(cy // TERRAIN_TILE_SIZE_CM)}"] += 1
+        tile_counts[f"{int(cx // SETTLEMENT_CELL_CM)},{int(cy // SETTLEMENT_CELL_CM)}"] += 1
 
     # buildings are independent: CHUNK_BUILDINGS at a time over bake_map
     # (2026-10-15), merged back in input order
@@ -542,6 +543,10 @@ def main():
               "tile_counts": tile_counts, "known_tree": known_tree,
               "known_vals": [known[i] for i in known_idx]}
     items = list(zip(buildings_raw, rings, centroids_cm.tolist(), known))
+    # (2026-10-21) a pass-2 job builds only the buildings its tiles own (by
+    # centroid tile, the tile export_building_mesh_bin.py files them under)
+    items = [it for it in items if tile_in_job(int(it[2][0] // TERRAIN_TILE_SIZE_CM),
+                                               int(it[2][1] // TERRAIN_TILE_SIZE_CM), TERRAIN_TILE_SIZE_CM)]
     chunks = [items[i:i + CHUNK_BUILDINGS] for i in range(0, len(items), CHUNK_BUILDINGS)]
     out, stats = [], Counter()
     for part, part_stats in bake_map(build_chunk, chunks, WORKER_GB, _init_shared, (shared,)):

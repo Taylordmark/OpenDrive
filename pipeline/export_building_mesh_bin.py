@@ -37,8 +37,9 @@ import struct
 from collections import defaultdict
 from pathlib import Path
 
+from bake_job import job_items   # (2026-10-21) a pass-2 job writes only its own tiles
 from generation_id import compute_generation_id, delete_stale_tiles, pack_generation_id
-from test_areas import AREA_NAME
+from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "building_mesh.json"
@@ -80,7 +81,7 @@ def main():
 
     total_verts = total_tris = 0
     written_paths = []
-    for (tx, ty), tile_buildings in buckets.items():
+    for (tx, ty), tile_buildings in job_items(buckets, TERRAIN_TILE_SIZE_CM):
         out_path = OUT_DIR / f"buildings_{AREA_NAME}_test_tile_{tx}_{ty}.bin"
         write_tile(out_path, tile_buildings, gen_id_bytes)
         written_paths.append(out_path)
@@ -96,7 +97,7 @@ def main():
     xs = [k[0] for k in buckets]
     ys = [k[1] for k in buckets]
     print(f"{len(buildings)} buildings -> {len(buckets)} tile(s) "
-          f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
+          f"(x[{min(xs, default=None)}..{max(xs, default=None)}] y[{min(ys, default=None)}..{max(ys, default=None)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
 

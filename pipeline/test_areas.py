@@ -20,7 +20,7 @@ To add an area:
 """
 import os
 
-from world_frame import WORLD_DATUM_M, WORLDS, lcc_forward, lcc_inverse
+from world_frame import WORLD_DATUM_M, WORLDS, lcc_forward, lcc_inverse, load_user_areas
 
 AREAS = {
     # Skagit Valley / North Cascades foothills, WA (2026-07-20 - 2026-07-26)
@@ -176,6 +176,19 @@ AREAS = {
     ),
 }
 
+# (2026-10-20) Areas drawn in-game (bake_request.py writes them; data/ is
+# per-machine, never hand-edited). A hand-written entry above wins a name clash.
+# (2026-10-21) Each is a member of a fixed zone world (world_frame.ZONES) with
+# drawn=True, name, polygon_ll, start_ll and terrain_tile_m=1000.
+for _k, _cfg in load_user_areas()["areas"].items():
+    AREAS.setdefault(_k, {**_cfg, "bbox_snwe": tuple(_cfg["bbox_snwe"])})
+
+
+def frame_lcc(cfg):
+    """An area entry's LCC (see FRAME_LCC below): its world's, else its own."""
+    s, w, n, e = cfg["bbox_snwe"]
+    return WORLDS[cfg["world"]] if "world" in cfg else (s, n, (s + n) / 2, (w + e) / 2)
+
 # The one switch. Everything below derives from this entry.
 # OD_AREA env var overrides it for a one-off bake of another area without
 # editing this file (2026-10-02: SF pad test next to summit_county).
@@ -202,9 +215,7 @@ BBOX_SNWE = _ACTIVE["bbox_snwe"]
 # axes, so it ran ~0.3% short east-west (at Gasquet); this is ellipsoid-true.
 # Meridians converge under LCC, so a lon/lat raster can't be mapped onto
 # this grid axis-aligned - sample it per point through to_lonlat().
-_S, _W, _N, _E = BBOX_SNWE
-FRAME_LCC = (WORLDS[_ACTIVE["world"]] if "world" in _ACTIVE
-             else (_S, _N, (_S + _N) / 2, (_W + _E) / 2))
+FRAME_LCC = frame_lcc(_ACTIVE)
 
 
 def to_local(lon, lat):
@@ -330,7 +341,9 @@ ROAD_TILE_SIZE_CM = 50000.0   # 500 m
 # AODTerrainManager::TileSizeCm's default in ODTerrainManager.h, same
 # mismatch caveat as above. Every other tiled stage (barrier/building/biome/
 # forest) keys off this one, so it stays at the original size deliberately.
-TERRAIN_TILE_SIZE_CM = 200000.0   # 2 km
+# (2026-10-21) Drawn areas bake 1 km tiles (terrain_tile_m, also in their
+# worlds.json entry so the runtime picks it up); hand areas stay 2 km.
+TERRAIN_TILE_SIZE_CM = _ACTIVE.get("terrain_tile_m", 2000) * 100.0
 
 # Absolute plausibility floor/ceiling (m) for raw DEM elevation samples, per
 # area (PLAN-RELIABILITY.md Phase 3 item 9: one shared constant used to

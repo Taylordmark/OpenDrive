@@ -40,7 +40,7 @@ struct FParsedTerrainTile
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
 
-	// pipeline/generation_id.py's per-run id, read from the ODT1 header
+	// pipeline/generation_id.py's per-run id, read from the ODT1/ODT2 header
 	// (2026-08-21) - see AODTerrainManager::OnTileParsed for the
 	// cross-tile mismatch check this feeds.
 	FString GenerationId;
@@ -410,6 +410,12 @@ public:
 	 *  AODSeasonController sweeps the snow line between. */
 	const FODGroundBands& GetGroundBandsWorld() const { return GroundBandsWorld; }
 
+	/** ParseTerrainTileFile's in-memory half: an ODT1 or ODT2 tile (2026-10-21,
+	 *  ODT2 = zlib payload + derived UVs) into the same FParsedTerrainTile.
+	 *  Public only so the OpenDrive.Terrain.ODT2 automation test can feed it
+	 *  a buffer. */
+	static bool ParseTerrainTileBytes(const TArray<uint8>& Bin, FParsedTerrainTile& Out);
+
 private:
 	static bool ParseTerrainTileFile(const FString& Path, FParsedTerrainTile& Out);
 	// ParseRoadStationSidecarFile moved to ODBinSidecarUtil.h (2026-08-26) -
@@ -497,6 +503,20 @@ private:
 	void LoadHorizon();
 	UPROPERTY()
 	TObjectPtr<UDynamicMeshComponent> HorizonComp;
+
+	/** Drawn-area boundary look (2026-10-21, area picker; ODBakeLink.h):
+	 *  M_ODUnsynced (unreal/apply_boundary_materials.py) on material slot 1 -
+	 *  near tiles' triangles outside the outline (Masks/outline_* SDF), the
+	 *  horizon's outside the outline or in a cell still baking. Tiles that came
+	 *  back Pending get a dissolving copy of themselves when they land. Null
+	 *  material (script not run) = none of it, the old look. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> UnsyncedMat;
+	TSet<FIntPoint> WasPendingTiles;
+	uint32 HorizonStatusVersion = 0;
+	double NextHorizonCheck = 0.0;
+	void RetagHorizon();
+	void SpawnSyncIn(const UDynamicMeshComponent* Src);
 
 	/** groundbands_<area>_test.json -> GroundBands (tile-local, for the tint)
 	 *  + GroundBandsWorld, and the TreelineLow/HighZCm + SeaLevelZCm params on TerrainMID. */

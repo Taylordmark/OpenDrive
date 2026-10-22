@@ -118,6 +118,46 @@ code { font-family: var(--mono); font-size: .86em; }
   </table></div>
   <figure><img src="img/diag_toe_night.jpg" alt="Night headlights at toe 0.55 and 0.1"><figcaption>Night at toe 0.55 · 0.1: the flat 0.1 lifts the forest to dusk (mean 23 → 37, sky 3 → 19)</figcaption></figure>
   <p>The shade wasn't missing light. The engine's 0.55 toe was crushing it to black. Toe 0.1 matches the photo at noon, but at night it lifts the dark forest to dusk and shows the low-LOD tree cards. So the toe now follows the sun: 0.55 with the sun at or below the horizon, easing to 0.1 by 15° of elevation (commit 1c068b7). <code>od.FilmToe</code> ≥ 0 still overrides it.</p>
+  <figure><img src="img/diag_toe_ramp.jpg" alt="Night and 17:30 before and after the sun-following toe"><figcaption>Built and re-shot: night before · after (top), 17:30 before · after (bottom)</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Sun-following toe, re-shot</th><th>mean</th><th>p5 / p50 / p95</th><th>black</th></tr>
+    <tr><td>Noon: toe 0.1 sweep · ramp</td><td class="n">90 · 90</td><td class="n">6/52/210 · 6/52/210</td><td class="n">.016 · .017</td></tr>
+    <tr><td>Night: before · ramp</td><td class="n">23 · 23</td><td class="n">0/4/155 · 0/4/152</td><td class="n">.51 · .53</td></tr>
+    <tr><td>17:30: before · ramp</td><td class="n">65 · 60</td><td class="n">0/43/192 · 6/46/141</td><td class="n">.13 · .02</td></tr>
+  </table></div>
+  <p>Noon matches the 0.1 sweep frame exactly, and night is unchanged. At 17:30 the shade is no longer crushed. The lower p95 there is the headlight pool: the lamps were on in the before shot and off in this one. The blue cast under the trees at 17:30 is still there; that's Gap 3, white balance.</p>
+  <h3>Gap 3: white balance doesn't warm the forest</h3>
+  <figure><img src="img/diag_wt_sweep.jpg" alt="Gasquet 17:30 at WhiteTemp 6500, 7500 and 8500"><figcaption>Gasquet 17:30 at <code>od.WhiteTemp</code> 6500 · 7500 · 8500 K (sun 7.7° up, from the new log line)</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet 17:30</th><th>shadow tint (B−R)/(B+R), + = blue</th><th>saturation</th></tr>
+    <tr><td>Before the toe change</td><td class="n">+0.60</td><td class="n">.61</td></tr>
+    <tr><td>Toe ramp, 6500 K</td><td class="n">+0.80</td><td class="n">.67</td></tr>
+    <tr><td>7500 K</td><td class="n">+0.70</td><td class="n">.59</td></tr>
+    <tr><td>8500 K</td><td class="n">+0.62</td><td class="n">.54</td></tr>
+  </table></div>
+  <p>Each 1000 K takes off about 0.09 of blue, and the shade stays clearly blue. The sunset photo's shade is warm. Lifting the toe made the blue more visible, because shade that used to be black now shows its colour. The cause is the light itself: with the sun behind the canopy, only blue sky light reaches the road. A camera setting can't add the warm canopy bounce and transmission that's missing. <code>od.WhiteTemp</code> stays unset (6500 K), so nothing changes. The next levers are the light colour: less saturated sky light at low sun (sky light tint or capture), or warm bounce under the trees (Gap 1B).</p>
+  <h3>Gap 3: the blue is all sky light, and "17:30" was sunset</h3>
+  <figure><img src="img/diag_skywarm_sweep.jpg" alt="Gasquet at od.SkyWarm 0, 0.5 and 1"><figcaption>Sky light colour <code>od.SkyWarm</code> 0 · 0.5 · 1 (white → 1, 0.8, 0.6)</figcaption></figure>
+  <figure><img src="img/diag_blue_source.jpg" alt="Normal, fog off, sky lighting off"><figcaption>Normal · height fog off · sky lighting off</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet "17:30"</th><th>shadow tint</th><th>saturation</th><th>mean</th></tr>
+    <tr><td>Normal</td><td class="n">+0.81</td><td class="n">.67</td><td class="n">74</td></tr>
+    <tr><td>SkyWarm 0.5</td><td class="n">+0.72</td><td class="n">.59</td><td class="n">77</td></tr>
+    <tr><td>SkyWarm 1</td><td class="n">+0.56</td><td class="n">.49</td><td class="n">80</td></tr>
+    <tr><td>Height fog off</td><td class="n">+0.82</td><td class="n">.68</td><td class="n">74</td></tr>
+    <tr><td>Sky lighting off</td><td class="n">−0.06</td><td class="n">.33</td><td class="n">–</td></tr>
+  </table></div>
+  <p>Sky lighting supplies all of the blue; fog supplies none. Fully warm sky light only takes the tint about halfway.</p>
+  <p><b>The day clock ran during every capture.</b> At the default 24 h per real hour, a shot about 85 s after launch was taken roughly 34 game minutes past its <code>-odhour</code>. The "17:30" shots went from sun 7.7° to 0.5° before the screenshot, so they were sunset shots, and the old sun model set at 18:00 all year. Comparisons between shots still hold, since they all drifted the same, but the golden-hour photo comparison didn't. Fixed: <code>-odcycle=0</code> freezes the clock, and captures now pass it. The sun now also follows the real path for each place, date and DST (the real-sun change). Golden hour gets re-shot on that build.</p>
+  <figure><img src="img/diag_realsun.jpg" alt="Old sunset shot, real sun 17:30, 20:00, 20:00 with warm sky light"><figcaption>Old "17:30" (really sunset) · real sun 17:30 (35°) · 20:00 (8°) · 20:00 with SkyWarm 1. Clock frozen.</figcaption></figure>
+  <div class="tbl"><table>
+    <tr><th>Gasquet</th><th>sun</th><th>shadow tint</th><th>saturation</th></tr>
+    <tr><td>Old "17:30"</td><td class="n">~0.5°</td><td class="n">+0.81</td><td class="n">.67</td></tr>
+    <tr><td>Real 17:30</td><td class="n">35°</td><td class="n">+0.19</td><td class="n">.28</td></tr>
+    <tr><td>Real 20:00</td><td class="n">8°</td><td class="n">+0.44</td><td class="n">.45</td></tr>
+    <tr><td>20:00, SkyWarm 1</td><td class="n">8°</td><td class="n">+0.25</td><td class="n">.33</td></tr>
+  </table></div>
+  <p><b>Gap 3 was mostly the clock.</b> At real golden hour (sun 8°) the sunlight comes through the trunks warm, with long shafts across the road, and the shade tint is about half what the sunset shot had. Some cool cast left in deep shade is real: open shade under a blue sky is blue. <code>od.SkyWarm</code> stays at 0, but it's there if a warmer look is wanted later. Taylor confirmed the in-game look.</p>
   <details><summary>All ten after-fix pairs</summary><div class="stack">
     <figure><img src="img/fix_01_gasquet_noon.jpg" alt=""></figure><figure><img src="img/fix_02_gasquet_morning.jpg" alt=""></figure>
     <figure><img src="img/fix_03_gasquet_golden.jpg" alt=""></figure><figure><img src="img/fix_04_gasquet_overcast.jpg" alt=""></figure>

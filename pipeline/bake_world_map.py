@@ -58,8 +58,13 @@ def main():
     for key, cfg in AREAS.items():
         s, w, n, e = cfg["bbox_snwe"]
         areas[key] = {"ll": [round((w + e) / 2, 4), round((s + n) / 2, 4)]}
+        # (2026-10-21) a drawn area (bake_request.py) is one area: one pin, at its
+        # start, shown even inside a hand area's bbox (it bakes its own copy)
+        if cfg.get("drawn"):
+            areas[key]["ll"] = [round(v, 4) for v in cfg["start_ll"]]
+            continue
         # (2026-10-14) a dev/test variant inside another area's bbox gets no globe pin
-        if any(o != key and inside(cfg["bbox_snwe"], c["bbox_snwe"]) and
+        if any(o != key and not c.get("drawn") and inside(cfg["bbox_snwe"], c["bbox_snwe"]) and
                (not inside(c["bbox_snwe"], cfg["bbox_snwe"]) or rank(o) < rank(key))
                for o, c in AREAS.items()):
             areas[key]["hidden"] = True
