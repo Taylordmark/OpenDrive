@@ -180,6 +180,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float TreesPerSqM = 0.05f;
 
+	/** Trees per m^2 inside WorldCover tree cells, used instead of
+	 *  TreesPerSqM x forest weight whenever the far-forest bin is loaded
+	 *  (2026-10-22, Taylor's Summit County drive: "a continuous line of trees
+	 *  each side of the road, very few anywhere else"). The road band planted
+	 *  ~330 trees/ha against the far cards' 25/ha (one per 20 m tree cell),
+	 *  a 13x wall at the band edge, and planted them in meadows too since the
+	 *  per-tile weight blends 300 m biome points. Now the near trees stand on
+	 *  the same tree cells as the cards, at FarCardsPerCell's density:
+	 *  3 cards / 400 m^2 = 0.0075. docs/forest_distribution/. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float ForestTreesPerSqM = 0.0075f;
+
+	/** Trees thin in from PavementExclusionCm to full density at this
+	 *  distance from the centerline (smoothstep) - a cleared verge rather
+	 *  than a wall at the exclusion edge. Landcover-gated trees only. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float RoadFadeCm = 4000.0f;   // 40 m
+
 	/** Max lateral distance (cm) from the road centerline a tree/bush may
 	 *  plant (2026-07-25). Trees are placed at their true height from the
 	 *  dense ground-truth elevation grid, which matches the carved near-tier
@@ -191,7 +209,7 @@ public:
 	 *  set (open-world levels); Tail of the Dragon leaves it unset and is
 	 *  unaffected. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
-	float ForestBandCm = 12000.0f;   // 120 m
+	float ForestBandCm = 13000.0f;   // 130 m = build_far_forest.py BAND_M, so band cards and near trees meet without a gap
 
 	/** Understory bushes per m^2 at forest weight 1. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
@@ -577,11 +595,18 @@ private:
 	struct FFarChunk
 	{
 		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;
-		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player, one per 200 m band square (FarBandSubCells)
+		TArray<FVector2D> BandCenters;   // parallel to BandHisms
 		TArray<FVector> Trunks;   // off-band cards + street trees (collision)
-		bool bBandVisible = true;
 	};
 	bool LoadFarForest();
+	/** WorldCover tree at this 20 m far-forest cell (bRing: or any of its 8
+	 *  neighbours) - the near trees' landcover gate. Reads a 2 km tile's
+	 *  records once, then cached. */
+	bool IsTreeCellAt(double WorldX, double WorldY, bool bRing) const;
+	/** Distance to the nearest centerline point, capped at ReachCm. */
+	float CenterlineDistanceCm(double WorldX, double WorldY, float ReachCm) const;
+	mutable TMap<FIntPoint, TBitArray<>> FarTreeCells;
 	void BuildFarChunk(const FIntPoint& Key);
 	void UpdateFarForest(const FVector& Loc);
 	UStaticMesh* MakeCardMesh(int32 AtlasRow, int32 AtlasCol);
