@@ -97,7 +97,7 @@ def main():
     xs = [k[0] for k in buckets]
     ys = [k[1] for k in buckets]
     print(f"{len(buildings)} buildings -> {len(buckets)} tile(s) "
-          f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
+          f"(x[{min(xs, default=None)}..{max(xs, default=None)}] y[{min(ys, default=None)}..{max(ys, default=None)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
 

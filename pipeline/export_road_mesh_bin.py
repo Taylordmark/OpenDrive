@@ -117,7 +117,7 @@ def main():
     n_stale = delete_stale_tiles(OUT_DIR, f"road_{AREA_NAME}_test_tile_*.bin", written_paths)
     print(f"deleted {n_stale} stale road tile(s) from a previous run")
     print(f"{len(chunks)} chunks -> {len(buckets)} tile(s) "
-          f"(x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]), "
+          f"(x[{min(xs, default=None)}..{max(xs, default=None)}] y[{min(ys, default=None)}..{max(ys, default=None)}]), "
           f"{total_verts} verts, {total_tris} tris -> {OUT_DIR}")
 
 
