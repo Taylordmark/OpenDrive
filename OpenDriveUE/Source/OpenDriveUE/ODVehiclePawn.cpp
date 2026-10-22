@@ -1078,6 +1078,7 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::CameraView, &AODVehiclePawn::CycleCameraView, nullptr},
 		{EODInputAction::ShiftUp, &AODVehiclePawn::KeyShiftUp, nullptr},
 		{EODInputAction::ShiftDown, &AODVehiclePawn::KeyShiftDown, nullptr},
+		{EODInputAction::Horn, &AODVehiclePawn::HornPressed, &AODVehiclePawn::HornReleased},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1100,6 +1101,13 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		Input->BindKey(GamepadHandbrakeKey, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
 		Input->BindKey(GamepadHandbrakeKey, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
 		LastODManagedKeys.AddUnique(GamepadHandbrakeKey);
+	}
+	const FKey GamepadHornKey = FODInputConfig::GetGamepadKey(EODInputAction::Horn);
+	if (GamepadHornKey.IsValid())
+	{
+		Input->BindKey(GamepadHornKey, IE_Pressed, this, &AODVehiclePawn::HornPressed);
+		Input->BindKey(GamepadHornKey, IE_Released, this, &AODVehiclePawn::HornReleased);
+		LastODManagedKeys.AddUnique(GamepadHornKey);
 	}
 	const FKey GamepadViewKey = FODInputConfig::GetGamepadKey(EODInputAction::CameraView);
 	if (GamepadViewKey.IsValid())

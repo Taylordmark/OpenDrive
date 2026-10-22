@@ -664,4 +664,14 @@ private:
 	void UpdateActiveInputDevice();
 	static void SaveInputDeviceMode(EODInputDevice Mode);
 	static EODInputDevice LoadInputDeviceMode();
+
+	// horn (fun-features #8a): AODVehicleAudio sounds it, AODTrafficManager reacts
+public:
+	bool IsHornOn() const { return bHornKey; }
+	int32 GetHornPresses() const { return HornPresses; }
+private:
+	void HornPressed() { bHornKey = true; ++HornPresses; }
+	void HornReleased() { bHornKey = false; }
+	bool bHornKey = false;
+	int32 HornPresses = 0;
 };

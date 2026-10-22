@@ -63,6 +63,7 @@ enum class EODInputAction : uint8
 	MediaNext,
 	MediaPrev,
 	Replay,      // #9 instant replay
+	Horn,         // fun-features #8a; traffic reacts (ODTrafficManager)
 	Count  // sentinel, not a real action
 };
 
