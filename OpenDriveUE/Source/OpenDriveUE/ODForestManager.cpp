@@ -1281,6 +1281,29 @@ bool AODForestManager::WithinCenterlineBand(double WorldX, double WorldY) const
 	return false;
 }
 
+float AODForestManager::CenterlineDistanceCm(double WorldX, double WorldY, float ReachCm) const
+{
+	const FVector2D Here(WorldX, WorldY);
+	const int32 CellX = FMath::FloorToInt(WorldX / CenterlineCellCm);
+	const int32 CellY = FMath::FloorToInt(WorldY / CenterlineCellCm);
+	const int32 Reach = FMath::CeilToInt(ReachCm / CenterlineCellCm);
+	float BestSq = FMath::Square(ReachCm);
+	for (int32 dy = -Reach; dy <= Reach; ++dy)
+	{
+		for (int32 dx = -Reach; dx <= Reach; ++dx)
+		{
+			if (const TArray<int32>* Bucket = CenterlineBuckets.Find(FIntPoint(CellX + dx, CellY + dy)))
+			{
+				for (int32 Idx : *Bucket)
+				{
+					BestSq = FMath::Min(BestSq, (float)FVector2D::DistSquared(RoadCenterline[Idx], Here));
+				}
+			}
+		}
+	}
+	return FMath::Sqrt(BestSq);
+}
+
 bool AODForestManager::IsNearBuilding(double WorldX, double WorldY) const
 {
 	const FVector2D Here(WorldX, WorldY);
@@ -1888,8 +1911,13 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	EODBiome DominantBiome;   // nearest classified point (or DefaultBiome) - for the ground-cover stat log only
 	BlendAt(X0 + TileSizeCm * 0.5, Y0 + TileSizeCm * 0.5, Recipe, TileForestWeight, DominantBiome);
 	const float TileSqM = FMath::Square(TileSizeCm / 100.0f);
-	const int32 NTrees =
-		FMath::RoundToInt(TileSqM * TreesPerSqM * Recipe.TreeDensityScale);
+	// Landcover gate (2026-10-22, see ForestTreesPerSqM): WorldCover tree
+	// cells decide where trees stand and the far cards set the density, so
+	// the biome's TreeDensityScale only applies without the far-forest bin.
+	const bool bLandcoverGate = FarTileRecs.Num() > 0;
+	const int32 NTrees = bLandcoverGate
+		? FMath::RoundToInt(TileSqM * ForestTreesPerSqM)
+		: FMath::RoundToInt(TileSqM * TreesPerSqM * Recipe.TreeDensityScale);
 	const int32 NBushes =
 		FMath::RoundToInt(TileSqM * BushesPerSqM * Recipe.BushDensityScale);
 
@@ -1931,8 +1959,28 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// FBiomeRecipe::AmbientVegFloor's comment. Max(), not a replacement,
 		// so real forest tiles (AmbientVegFloor == 0) are completely
 		// unaffected.
-		const float CanopyWeight = TileForestWeight >= 0.0f ? TileForestWeight : ForestWeightAt(Px, Py);
-		const float Weight = FMath::Max(CanopyWeight, Recipe.AmbientVegFloor);
+		float Weight;
+		if (bTree && bLandcoverGate)
+		{
+			// own tree cell plants; a neighbour's counts only inside the road
+			// fade, where the bake dropped cells <= 18 m off a station
+			const bool bOwn = IsTreeCellAt(Px, Py, false);
+			Weight = Recipe.AmbientVegFloor;
+			if (bOwn || Accept < Weight || IsTreeCellAt(Px, Py, true))
+			{
+				const float RoadCm = CenterlineDistanceCm(Px, Py, RoadFadeCm);
+				if (bOwn || RoadCm < RoadFadeCm)
+				{
+					Weight = 1.0f;
+				}
+				Weight *= FMath::SmoothStep(PavementExclusionCm, RoadFadeCm, RoadCm);
+			}
+		}
+		else
+		{
+			const float CanopyWeight = TileForestWeight >= 0.0f ? TileForestWeight : ForestWeightAt(Px, Py);
+			Weight = FMath::Max(CanopyWeight, Recipe.AmbientVegFloor);
+		}
 		if (Accept >= Weight)
 		{
 			continue;

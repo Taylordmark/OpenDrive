@@ -5,8 +5,11 @@
 // {uint16 cell = iy*100+ix, int8 jx, int8 jy (0.5 m), int16 z (dm), uint8 flags}).
 // Flags: 0x80 = inside the near scatter's road band, 0x40 = street tree
 // (low 6 bits = TreeMeshes species), else low bit = card type (0 needle,
-// 1 broadleaf). Streaming is distance-driven with a per-tick ms budget - no
-// per-frame Dt anywhere, so it behaves the same at any frame rate.
+// 1 broadleaf). Each tree cell stands FarCardsPerCell cards (2026-10-22): one
+// card per 20 m cell was 25 trees/ha, open savanna beside the near scatter's
+// ~330/ha - Taylor's "two lines of trees and nothing else". Streaming is
+// distance-driven with a per-tick ms budget - no per-frame Dt anywhere, so it
+// behaves the same at any frame rate.
 
 #include "ODForestManager.h"
 #include "ODTileSource.h"
@@ -27,6 +30,62 @@ constexpr double FarChunkCm = 100000.0;  // streamed chunk, 2x2 per tile
 constexpr int32 FarRecBytes = 7;
 constexpr uint8 FarFlagBand = 0x80, FarFlagStreet = 0x40;
 constexpr int32 FarDeciduousSpecies = 0;   // ODForestManager.cpp DeciduousSpeciesIndex
+// 3 x ~8 m crowns per 400 m^2 ~ 40% canopy; the near trees plant the same
+// (ForestTreesPerSqM = FarCardsPerCell / 400 m^2). Extra cards jitter inside
+// the cell and follow the slope fitted through the neighbour cells' heights.
+constexpr int32 FarCardsPerCell = 3;
+// Extra cards also sink this x slope x offset, so a fit across a convex ridge
+// buries them a little instead of floating them. Measured on the shipped
+// terrain (analyze_forest_distribution.py --zcheck): floating past the 1.5 m
+// sink 2.4% -> 0.6% (Summit County), 5.7% -> 1.2% (Deals Gap).
+constexpr double FarExtraSink = 0.25;
+// Band cards hide per 200 m square, not per 1 km chunk: hiding a whole chunk
+// once it touched SpawnRadius left the road corridor bare out to ~1.9 km
+// ahead, since the near trees stop at SpawnRadius.
+constexpr int32 FarBandSubCells = 10;                       // 200 m
+constexpr int32 FarBandSubs = FarCells / 2 / FarBandSubCells;   // 5 per chunk side
+}
+
+bool AODForestManager::IsTreeCellAt(double WorldX, double WorldY, bool bRing) const
+{
+	const int32 Gx = FMath::FloorToInt(WorldX / FarCellCm), Gy = FMath::FloorToInt(WorldY / FarCellCm);
+	const int32 R = bRing ? 1 : 0;
+	for (int32 dy = -R; dy <= R; ++dy)
+	{
+		for (int32 dx = -R; dx <= R; ++dx)
+		{
+			const int32 X = Gx + dx, Y = Gy + dy;
+			const FIntPoint Tile(FMath::FloorToInt(X / (double)FarCells), FMath::FloorToInt(Y / (double)FarCells));
+			const TBitArray<>* Bits = FarTreeCells.Find(Tile);
+			if (!Bits)
+			{
+				TBitArray<> New(false, FarCells * FarCells);
+				TArray<uint8> Bytes;
+				if (const TPair<int64, int32>* Recs = FarTileRecs.Find(Tile))
+				{
+					Bytes.SetNumUninitialized(Recs->Value * FarRecBytes);
+					if (!FarFile->Seek(Recs->Key) || !FarFile->Read(Bytes.GetData(), Bytes.Num()))
+					{
+						Bytes.Reset();
+					}
+				}
+				for (int32 o = 0; o + FarRecBytes <= Bytes.Num(); o += FarRecBytes)
+				{
+					const int32 Cell = Bytes[o] | Bytes[o + 1] << 8;
+					if (!(Bytes[o + 6] & FarFlagStreet) && Cell < FarCells * FarCells)
+					{
+						New[Cell] = true;
+					}
+				}
+				Bits = &FarTreeCells.Add(Tile, MoveTemp(New));
+			}
+			if ((*Bits)[(Y - Tile.Y * FarCells) * FarCells + (X - Tile.X * FarCells)])
+			{
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 bool AODForestManager::LoadFarForest()
@@ -153,14 +212,47 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 	}
 	const int32 Ix0 = (Key.X - Tile.X * 2) * (FarCells / 2), Iy0 = (Key.Y - Tile.Y * 2) * (FarCells / 2);
 
-	// batch key: mesh, band. Card meshes first, then street species.
-	TMap<TPair<UStaticMesh*, bool>, TArray<FTransform>> Batches;
+	// batch key: mesh, band square (-1 = off-band). Card meshes first, then street species.
+	TMap<TPair<UStaticMesh*, int32>, TArray<FTransform>> Batches;
 	TArray<uint8> Bytes;
 	Bytes.SetNumUninitialized(Recs->Value * FarRecBytes);
 	if (!FarFile->Seek(Recs->Key) || !FarFile->Read(Bytes.GetData(), Bytes.Num()))
 	{
 		return;
 	}
+	auto Decode = [&](const uint8* R)
+	{
+		const int32 Cell = R[0] | R[1] << 8;
+		const int16 Zdm = (int16)(R[4] | R[5] << 8);
+		return FVector(Tile.X * FarTileCm + (Cell % FarCells + 0.5) * FarCellCm + (int8)R[2] * 50.0,
+		               Tile.Y * FarTileCm + (Cell / FarCells + 0.5) * FarCellCm + (int8)R[3] * 50.0, Zdm * 10.0);
+	};
+	// card bases by cell, for the extra cards' slope fit
+	TArray<FVector> CellBase;
+	CellBase.SetNumUninitialized(FarCells * FarCells);
+	TBitArray<> HasCell(false, FarCells * FarCells);
+	for (int32 r = 0; r < Recs->Value; ++r)
+	{
+		const uint8* R = Bytes.GetData() + r * FarRecBytes;
+		const int32 Cell = R[0] | R[1] << 8;
+		if (!(R[6] & FarFlagStreet) && Cell < FarCells * FarCells)
+		{
+			CellBase[Cell] = Decode(R);
+			HasCell[Cell] = true;
+		}
+	}
+	// dZ/dx (Axis 0) or dZ/dy at a cell: across the neighbour cells that
+	// exist, one-sided at a gap, flat when the cell stands alone
+	auto Slope = [&](int32 Cell, const FVector& B, int32 Axis)
+	{
+		const int32 I = Axis == 0 ? Cell % FarCells : Cell / FarCells;
+		const int32 Step = Axis == 0 ? 1 : FarCells;
+		const FVector& A = I > 0 && HasCell[Cell - Step] ? CellBase[Cell - Step] : B;
+		const FVector& C = I < FarCells - 1 && HasCell[Cell + Step] ? CellBase[Cell + Step] : B;
+		const double Run = C[Axis] - A[Axis];
+		return FMath::Abs(Run) > 100.0 ? (C.Z - A.Z) / Run : 0.0;
+	};
+
 	const uint8* P = Bytes.GetData();
 	for (int32 r = 0; r < Recs->Value; ++r, P += FarRecBytes)
 	{
@@ -170,10 +262,8 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 		{
 			continue;
 		}
-		const int16 Zdm = (int16)(P[4] | P[5] << 8);
 		const uint8 Flags = P[6];
-		const FVector Base(Tile.X * FarTileCm + (Ix + 0.5) * FarCellCm + (int8)P[2] * 50.0,
-		                   Tile.Y * FarTileCm + (Iy + 0.5) * FarCellCm + (int8)P[3] * 50.0, Zdm * 10.0);
+		const FVector Base = Decode(P);
 		FRandomStream Rng((int32)HashCombine(GetTypeHash(Tile), (uint32)Cell));
 		const FRotator Yaw(0.0, Rng.FRandRange(0.0, 360.0), 0.0);
 		if (Flags & FarFlagStreet)
@@ -188,18 +278,32 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 			continue;
 		}
 		const bool bNeedle = (Flags & 1) == 0;
-		const double W = bNeedle ? Rng.FRandRange(700.0, 1000.0) : Rng.FRandRange(1100.0, 1700.0);
-		const double H = bNeedle ? Rng.FRandRange(1400.0, 2200.0) : Rng.FRandRange(1000.0, 1500.0);
 		const bool bBand = (Flags & FarFlagBand) != 0;
-		Batches.FindOrAdd({CardMeshes[bNeedle ? 0 : 1].Get(), bBand})
-			.Add(FTransform(Yaw, Base - FVector(0, 0, 150), FVector(W / 100.0, W / 100.0, H / 100.0)));
-		if (!bBand)
+		const int32 Sub = bBand ? (Iy - Iy0) / FarBandSubCells * FarBandSubs + (Ix - Ix0) / FarBandSubCells : -1;
+		const double Gx = Slope(Cell, Base, 0), Gy = Slope(Cell, Base, 1);
+		const FVector Center(Tile.X * FarTileCm + (Ix + 0.5) * FarCellCm, Tile.Y * FarTileCm + (Iy + 0.5) * FarCellCm, 0.0);
+		TArray<FTransform>& Batch = Batches.FindOrAdd({CardMeshes[bNeedle ? 0 : 1].Get(), Sub});
+		for (int32 k = 0; k < FarCardsPerCell; ++k)
 		{
-			Chunk.Trunks.Add(Base);
+			FVector At = Base;
+			if (k > 0)
+			{
+				At = Center + FVector(Rng.FRandRange(-0.45, 0.45), Rng.FRandRange(-0.45, 0.45), 0.0) * FarCellCm;
+				At.Z = Base.Z + Gx * (At.X - Base.X) + Gy * (At.Y - Base.Y)
+					- FarExtraSink * FMath::Sqrt(Gx * Gx + Gy * Gy) * FVector2D::Distance(FVector2D(At), FVector2D(Base));
+			}
+			const FRotator CardYaw = k == 0 ? Yaw : FRotator(0.0, Rng.FRandRange(0.0, 360.0), 0.0);
+			const double W = bNeedle ? Rng.FRandRange(700.0, 1000.0) : Rng.FRandRange(1100.0, 1700.0);
+			const double H = bNeedle ? Rng.FRandRange(1400.0, 2200.0) : Rng.FRandRange(1000.0, 1500.0);
+			Batch.Add(FTransform(CardYaw, At - FVector(0, 0, 150), FVector(W / 100.0, W / 100.0, H / 100.0)));
+			if (!bBand)
+			{
+				Chunk.Trunks.Add(At);
+			}
 		}
 	}
 
-	for (TPair<TPair<UStaticMesh*, bool>, TArray<FTransform>>& B : Batches)
+	for (TPair<TPair<UStaticMesh*, int32>, TArray<FTransform>>& B : Batches)
 	{
 		UStaticMesh* Mesh = B.Key.Key;
 		const bool bCard = CardMeshes.Contains(Mesh);
@@ -222,7 +326,15 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 		Hism->SetAffectDynamicIndirectLighting(false);
 		Hism->RegisterComponent();
 		Hism->AddInstances(B.Value, false, /*bWorldSpace*/false);   // actor-relative, same as BuildTile
-		(B.Key.Value ? Chunk.BandHisms : Chunk.Hisms).Add(Hism);
+		if (B.Key.Value < 0)
+		{
+			Chunk.Hisms.Add(Hism);
+			continue;
+		}
+		Hism->SetVisibility(false);   // UpdateFarForest shows it once the square is past the near scatter
+		Chunk.BandHisms.Add(Hism);
+		const FIntPoint Sq(B.Key.Value % FarBandSubs, B.Key.Value / FarBandSubs);
+		Chunk.BandCenters.Add(FVector2D(Key) * FarChunkCm + (FVector2D(Sq) + 0.5) * (FarBandSubCells * FarCellCm));
 	}
 }
 
@@ -264,8 +376,8 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 		}
 	}
 
-	// release beyond the radius (+1 chunk hysteresis); band cards hide while
-	// the near scatter (SpawnRadius) reaches into the chunk
+	// release beyond the radius (+1 chunk hysteresis); a band square's cards
+	// hide while its centre is inside the near scatter's SpawnRadius
 	TArray<FIntPoint> Gone;
 	for (TPair<FIntPoint, FFarChunk>& C : FarChunks)
 	{
@@ -276,13 +388,13 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 			Gone.Add(C.Key);
 			continue;
 		}
-		const bool bBand = D2 > FMath::Square(SpawnRadius + 5000.0);
-		if (bBand != C.Value.bBandVisible)
+		for (int32 i = 0; i < C.Value.BandHisms.Num(); ++i)
 		{
-			C.Value.bBandVisible = bBand;
-			for (auto& H : C.Value.BandHisms)
+			UHierarchicalInstancedStaticMeshComponent* H = C.Value.BandHisms[i];
+			const bool bShow = FVector2D::DistSquared(C.Value.BandCenters[i], FVector2D(Loc)) > FMath::Square(SpawnRadius);
+			if (H && H->IsVisible() != bShow)
 			{
-				if (H) { H->SetVisibility(bBand); }
+				H->SetVisibility(bShow);
 			}
 		}
 	}
@@ -305,7 +417,7 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 			}
 			for (const auto& H : C.Value.BandHisms)
 			{
-				if (H) { (C.Value.bBandVisible ? NumCards : NumBandHidden) += H->GetInstanceCount(); }
+				if (H) { (H->IsVisible() ? NumCards : NumBandHidden) += H->GetInstanceCount(); }
 			}
 		}
 		UE_LOG(LogTemp, Display,
