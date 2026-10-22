@@ -80,7 +80,7 @@ assert br.next_job({"0_0": "baked", "1_0": "failed"}, (0, 0)) is None
 
 # --- estimate (contract)
 e = br.estimate(100)
-assert (e["first_drive_s"], e["done_s"], e["disk_mb"]) == (500, 1700, 150), e
+assert (e["first_drive_s"], e["done_s"], e["disk_mb"]) == (500, 3500, 150), e
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory() as tmp:
           "pass1_done": True, "started": time.time()}
     br.write_status(tmp / "s" / "status.json", st)
     back = br.read_json(tmp / "s" / "status.json")
-    assert back["ready_to_drive"] and back["eta_first_drive_s"] == 0 and back["eta_done_s"] == 12.0, back
+    assert back["ready_to_drive"] and back["eta_first_drive_s"] == 0 and back["eta_done_s"] == 30.0, back
     assert not list((tmp / "s").glob("*.tmp")) and br.read_json(tmp / "nope.json") is None
 
     # --- coverage from a fake tile dir: 2 baked tiles, a pending and a failed cell,

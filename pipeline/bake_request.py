@@ -48,12 +48,13 @@ CAR_STALE_S = 30.0           # car.json older than this = the game is gone
 KEY_RE = re.compile(r"^u_[a-z0-9_]{1,40}$")   # the key names directories: keep it tame
 STAGE_RE = re.compile(r"^\[(\d+)/(\d+)\] (\S+?)(?:\.py)?\b")
 PLACE_RANK = {"city": 4, "town": 3, "village": 2, "hamlet": 1}
+DONE_S_PER_KM2 = 30          # (2026-10-21) Tail of the Dragon test: 28.8 km2 of jobs in 15 min (was 12)
 
 
 def estimate(km2):
     """Contract's live estimate (the menu shows the same numbers)."""
     first = 300 + 0.5 * km2 + 150
-    return {"first_drive_s": first, "done_s": first + 12 * km2, "disk_mb": 50 + 1.0 * km2}
+    return {"first_drive_s": first, "done_s": first + DONE_S_PER_KM2 * km2, "disk_mb": 50 + 1.0 * km2}
 
 
 def slug_key(name):
@@ -327,7 +328,7 @@ def write_status(path, status):
     status["ready_to_drive"] = status["pass1_done"] and cells.get(status["start_cell"]) == "baked"
     status["eta_first_drive_s"] = 0.0 if status["ready_to_drive"] else round(
         max(0.0, est["first_drive_s"] - (time.time() - status["started"])), 1)
-    status["eta_done_s"] = round(status["eta_first_drive_s"] + 12 * km2 * left, 1)
+    status["eta_done_s"] = round(status["eta_first_drive_s"] + DONE_S_PER_KM2 * km2 * left, 1)
     status["updated"] = time.time()
     write_json(path, status)
 

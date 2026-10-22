@@ -166,7 +166,7 @@ FEstimate Estimate(double Km2)
 	FEstimate E;
 	E.Km2 = Km2;
 	E.FirstDriveS = 300.0 + 0.5 * Km2 + 150.0;
-	E.DoneS = E.FirstDriveS + 12.0 * Km2;
+	E.DoneS = E.FirstDriveS + 30.0 * Km2;   // bake_request.DONE_S_PER_KM2
 	E.DiskMb = 50.0 + 1.0 * Km2;
 	return E;
 }
@@ -262,7 +262,7 @@ bool FODAreaGeoCheck::RunTest(const FString& Parameters)
 	TestTrue(TEXT("corridor sides padded"), Check({Sq[0], Sq[1]}, true).IsEmpty());
 	const FEstimate E = Estimate(100.0);
 	TestEqual(TEXT("first drive"), E.FirstDriveS, 500.0);
-	TestEqual(TEXT("done"), E.DoneS, 1700.0);
+	TestEqual(TEXT("done"), E.DoneS, 3500.0);
 	TestEqual(TEXT("disk"), E.DiskMb, 150.0);
 	const double Cal[4] = {34.0, 40.5, 37.25, -120.0};
 	const FVector2D O = LccInverse(0.0, 0.0, Cal);

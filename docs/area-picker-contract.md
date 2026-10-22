@@ -87,7 +87,7 @@ after each job.
 ```
 km2 = polygon area
 first_drive_s = 300 + 0.5 * km2 + 150
-done_s        = first_drive_s + 12 * km2
+done_s        = first_drive_s + 30 * km2    (2026-10-21 Tail of the Dragon test; was 12)
 disk_mb       = 50 + 1.0 * km2
 ```
 
