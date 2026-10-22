@@ -31,7 +31,7 @@ void TapKey(uint16 Vk)
 #endif
 }
 
-struct FPoll
+struct FSmtcPoll
 {
 	bool bValid = false;
 	bool bPlaying = false;
@@ -39,15 +39,15 @@ struct FPoll
 	TArray<uint8> Art;   // encoded image (png/jpg), empty = not fetched
 };
 
-ODMedia::FNowPlaying State;
+ODMedia::FNowPlaying NowPlayingState;
 double LastPollAt = -1.0e9;
 bool bPollInFlight = false;
 
 // Thread pool. Blocking .get() is fine off the game thread (it only asserts
 // on an STA); C++/WinRT initialises the MTA itself on first activation.
-FPoll QuerySmtc(const FString& PrevTitle, const FString& PrevArtist, bool bNeedArt)
+FSmtcPoll QuerySmtc(const FString& PrevTitle, const FString& PrevArtist, bool bNeedArt)
 {
-	FPoll R;
+	FSmtcPoll R;
 #if PLATFORM_WINDOWS
 	using namespace winrt::Windows::Media::Control;
 	using namespace winrt::Windows::Storage::Streams;
@@ -83,36 +83,36 @@ FPoll QuerySmtc(const FString& PrevTitle, const FString& PrevArtist, bool bNeedA
 	}
 	catch (...)
 	{
-		R = FPoll();   // no session manager (old Windows / server SKU) or the player went away mid-query
+		R = FSmtcPoll();   // no session manager (old Windows / server SKU) or the player went away mid-query
 	}
 #endif
 	return R;
 }
 
-void Apply(FPoll&& R)
+void ApplySmtcPoll(FSmtcPoll&& R)
 {
-	const bool bTrack = R.Title != State.Title || R.Artist != State.Artist;
-	if (bTrack || R.bPlaying != State.bPlaying || R.bValid != State.bValid)
+	const bool bTrack = R.Title != NowPlayingState.Title || R.Artist != NowPlayingState.Artist;
+	if (bTrack || R.bPlaying != NowPlayingState.bPlaying || R.bValid != NowPlayingState.bValid)
 	{
-		State.ChangedAt = FPlatformTime::Seconds();
+		NowPlayingState.ChangedAt = FPlatformTime::Seconds();
 	}
 	UTexture2D* NewArt = R.Art.Num() > 0 ? FImageUtils::ImportBufferAsTexture2D(R.Art) : nullptr;
 	if (NewArt || bTrack)
 	{
-		if (State.Art)
+		if (NowPlayingState.Art)
 		{
-			State.Art->RemoveFromRoot();
+			NowPlayingState.Art->RemoveFromRoot();
 		}
-		State.Art = NewArt;
+		NowPlayingState.Art = NewArt;
 		if (NewArt)
 		{
 			NewArt->AddToRoot();   // not TStrongObjectPtr: a static one would release after UObject shutdown
 		}
 	}
-	State.bValid = R.bValid;
-	State.bPlaying = R.bPlaying;
-	State.Title = MoveTemp(R.Title);
-	State.Artist = MoveTemp(R.Artist);
+	NowPlayingState.bValid = R.bValid;
+	NowPlayingState.bPlaying = R.bPlaying;
+	NowPlayingState.Title = MoveTemp(R.Title);
+	NowPlayingState.Artist = MoveTemp(R.Artist);
 }
 }
 
@@ -134,15 +134,15 @@ const ODMedia::FNowPlaying& ODMedia::NowPlaying()
 	{
 		LastPollAt = Now;
 		bPollInFlight = true;
-		Async(EAsyncExecution::ThreadPool, [Title = State.Title, Artist = State.Artist, bNeedArt = State.Art == nullptr]()
+		Async(EAsyncExecution::ThreadPool, [Title = NowPlayingState.Title, Artist = NowPlayingState.Artist, bNeedArt = NowPlayingState.Art == nullptr]()
 		{
-			FPoll R = QuerySmtc(Title, Artist, bNeedArt);
+			FSmtcPoll R = QuerySmtc(Title, Artist, bNeedArt);
 			AsyncTask(ENamedThreads::GameThread, [R = MoveTemp(R)]() mutable
 			{
-				Apply(MoveTemp(R));
+				ApplySmtcPoll(MoveTemp(R));
 				bPollInFlight = false;
 			});
 		});
 	}
-	return State;
+	return NowPlayingState;
 }
