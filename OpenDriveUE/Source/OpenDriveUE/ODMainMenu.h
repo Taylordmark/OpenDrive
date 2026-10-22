@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "UObject/StrongObjectPtr.h"
 #include "ODAreaDraw.h"
 #include "ODMenuTabs.h"
 #include "ODMenuVista.h"
@@ -156,6 +157,8 @@ public:
 	int32 GetFocusedPin() const { return FocusedPin; }
 	void SetFocusedPin(int32 Pin);   // HUD hover
 	void PickPin(int32 Pin);         // HUD click
+	/** The picked pin while the globe flies in (2026-10-22: drawn as picked, "Loading"), else INDEX_NONE. */
+	int32 GetPickingPin() const { return PickingPin; }
 	/** AreaMap (2026-10-14): area-local cm -> screen through the relief drape's
 	 *  corners (relief_<area>.json, bilinear) and the globe camera; false if hidden / off screen. */
 	bool AreaCmToScreen(const APlayerController* PC, const FVector2D& Cm, FVector2D& OutScreen) const;
@@ -269,6 +272,20 @@ private:
 	TWeakObjectPtr<class AODMenuGlobe> Globe;
 	int32 FocusedPin = INDEX_NONE;
 	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
+	uint64 VistaAtFrame = 0;            // PickPin: ShowStartVista (a multi-second spawn) once the picked pin has drawn
+	int32 PinArea(int32 Pin) const;     // the area a pin picks: its cluster's last-picked area, else its own
+	// hover preload (2026-10-22): the focused pin's (World) or AreaIdx's (AreaMap,
+	// Start) level package, async-loaded once wanted for PreloadDelaySec and held
+	// until something else is wanted - one area at most, so a new request waits
+	// for an in-flight one to land rather than stacking a second
+	void UpdatePreload(double Now);
+	FString PreloadWant;                // package wanted now, empty = none
+	double PreloadWantSince = 0.0;
+	FString PreloadName;                // requested (in flight) or held
+	bool bPreloadInFlight = false;
+	double PreloadStart = 0.0;
+	TStrongObjectPtr<UPackage> Preloaded;
+	static constexpr double PreloadDelaySec = 0.3;   // sweeping across pins fires nothing
 	bool bGlobeView = false;            // the globe camera is (or is blending to) the view target
 	double AreaEnterTime = 0.0;         // real seconds, for the vista-stream wait cap
 	double FadeSwapAt = -1.0;           // real seconds: faded out, CutTo the vista then (Tick)
