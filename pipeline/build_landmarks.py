@@ -36,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from build_building_mesh import FACADE_TILE_M, STATIONS_PATH, extrude_footprint, load_stations
+from build_building_mesh import FACADE_TILE_M, STATIONS_PATH, extrude_footprint, load_stations, merge
 import building_roofs
 from building_roofs import make_roof, obb
 from export_building_mesh_bin import pack_tile
@@ -217,14 +217,6 @@ def revolve(profile, seg, cx, cy, dx, dy, z0_cm):
     return verts, uvs, tris
 
 
-def append(mesh, piece):
-    verts, uvs, tris = mesh
-    b = len(verts)
-    verts.extend(piece[0])
-    uvs.extend(piece[1])
-    tris.extend((i + b, j + b, k + b) for i, j, k in piece[2])
-
-
 def extrude(ring, base_z_cm, h_m, roof):
     verts, uvs, tris = extrude_footprint(ring, base_z_cm, h_m * 100.0, 0)
     n_solid, shape = len(verts), "flat"
@@ -239,24 +231,23 @@ def extrude(ring, base_z_cm, h_m, roof):
         if roofed:
             verts, uvs, tris, n_solid = roofed
             shape = roof
-    return [verts, uvs, tris], n_solid, shape
+    return (verts, uvs, tris, n_solid), shape
 
 
 def build(lm, rings, ground_z_cm, road_xy_cm):
+    """Pieces (verts, uvs, tris, n_solid) merged windowed-first; revolved
+    pieces have n_solid 0 (no windows)."""
     ring = rings[lm["way"]]
     cx, cy, dx, dy, hl, _ = obb(ring)
-    shape, n_solid = "flat", 0
+    shape, pieces = "flat", []
     if lm["body"] == "extrude":
-        mesh, n_solid, shape = extrude(ring, ground_z_cm, lm["h"], lm["roof"])
+        piece, shape = extrude(ring, ground_z_cm, lm["h"], lm["roof"])
+        pieces.append(piece)
     elif lm["body"] == "parts":
-        mesh = [[], [], []]
         for way, h in lm["parts"]:
-            part, _, shape = extrude(rings[way], ground_z_cm, h, lm["roof"])
-            append(mesh, part)   # ponytail: end walls of every part get windows, a per-part n_solid split needs ODU5
-        n_solid = len(mesh[0])
-    else:
-        mesh = [[], [], []]
-    top_z = max((v[2] for v in mesh[0]), default=ground_z_cm)
+            piece, shape = extrude(rings[way], ground_z_cm, h, lm["roof"])
+            pieces.append(piece)
+    top_z = max((v[2] for p in pieces for v in p[0]), default=ground_z_cm)
     for p in lm.get("pieces", []):
         if p["at"] == "end":   # long-axis end nearest the road, set in a step from the gable
             ends = [(cx + s * (hl - 250) * dx, cy + s * (hl - 250) * dy) for s in (1, -1)]
@@ -265,8 +256,8 @@ def build(lm, rings, ground_z_cm, road_xy_cm):
             px = cx + 100 * (p["at"][0] * dx - p["at"][1] * dy)
             py = cy + 100 * (p["at"][0] * dy + p["at"][1] * dx)
         z0 = top_z if p["z"] == "top" else ground_z_cm + 100 * p["z"]
-        append(mesh, revolve(p["profile"], p["seg"], px, py, dx, dy, z0))
-    verts, uvs, tris = mesh
+        pieces.append((*revolve(p["profile"], p["seg"], px, py, dx, dy, z0), 0))
+    verts, uvs, tris, n_solid = merge(pieces)
     seed = paint_seed(lm["paint"]) if lm["wall"] in PAINTED_WALLS else 255
     return dict(name=f"landmark_{lm['way']}",
                 vertices=[round(c, 1) for v in verts for c in v],
