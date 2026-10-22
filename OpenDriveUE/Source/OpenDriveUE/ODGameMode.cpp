@@ -1,4 +1,5 @@
 #include "ODGameMode.h"
+#include "ODRoadTrip.h"
 #include "ODTileSource.h"
 #include "Async/Async.h"
 
@@ -100,6 +101,18 @@ void AODGameMode::BeginPlay()
 	// per set (and crossfade) if the neighbouring areas sound wrong.
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
+
+	// road trip (2026-10-22): ?oddest=<x>,<y> from the menu's Destination pick;
+	// the trip routes there itself once the graph is loaded and the drive started
+	FVector2D Dest;
+	if (const TCHAR* D = GetWorld() ? GetWorld()->URL.GetOption(TEXT("oddest="), nullptr) : nullptr; D && AODRoadTrip::ParseDest(D, Dest))
+	{
+		GetWorld()->SpawnActor<AODRoadTrip>()->Dest = Dest;
+	}
+	else if (D)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODGameMode: bad ?oddest=%s (want <x>,<y> cm) - no road trip"), D);
+	}
 
 	// custom track (pipeline/build_track.py): the race manager reads
 	// -odtrack itself; open-world levels just don't place one
