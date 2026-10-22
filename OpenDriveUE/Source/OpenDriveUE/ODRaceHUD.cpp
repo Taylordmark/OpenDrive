@@ -26,6 +26,7 @@
 #include "ODPauseMenu.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
+#include "ODChallengeManager.h"
 #include "ODRaceManager.h"
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
@@ -446,6 +447,12 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 			Dot(DestM, 6.0f, Accent);
 			Dot(DestM, 2.5f, FLinearColor::White);
 		}
+	}
+
+	// speed traps/zones and landmark pins (fun-features #2/#5)
+	if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+	{
+		Challenges->DrawMapIcons(Canvas, UiS, ToMap, [&](const FVector2D& M) { return !bCircular || InPanel(M); });
 	}
 
 	// start/finish/next-gate markers and the PB ghost need actual checkpoint
@@ -2299,7 +2306,11 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 		}
 		const int32 T = TownNear(S, 18.0f);
 		FVector2D Snap;
-		const bool bOk = T != INDEX_NONE
+		FString LandmarkName;
+		const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld());
+		const bool bOk = Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Snap, LandmarkName)
+			? RoadMgr->SetRouteDestination(Snap, LandmarkName)
+			: T != INDEX_NONE
 			? RoadMgr->SetRouteDestination(Towns[T].Pos, Towns[T].Name)
 			: RoadMgr->SnapToRouteGraph(ToWorld(S), Snap)
 				&& RoadMgr->SetRouteDestination(Snap, TEXT("Waypoint"));
@@ -2780,6 +2791,11 @@ void AODRaceHUD::DrawHUD()
 			DrawStageMap(MapCenterline, MapGates, Race && Race->bRunning,
 				Race ? Race->NextGate : INDEX_NONE, FullMapX, FullMapY, FullSize,
 				0.55f, 0.0f, false, RoadMgr);
+			if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+			{
+				const float ListY = FullMapY + FullSize + 12.0f * S;
+				Challenges->DrawChecklist(Canvas, S, FullMapX, ListY, FullSize, Canvas->SizeY - ListY - 12.0f * S, bMetric);
+			}
 		}
 		HandleMenuMouse(Menu);
 		return;   // drawn instead of the in-game HUD, like the main menu
@@ -2791,6 +2807,10 @@ void AODRaceHUD::DrawHUD()
 	// centred and scaled from 1080p like the menus
 	const FMenuPaint HP{Canvas, MenuScale()};
 	const FLinearColor Go(0.3f, 1.0f, 0.4f);
+	if (const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld()))
+	{
+		Challenges->DrawToast(Canvas, HP.S, bMetric);
+	}
 
 	// ---- race timer / gate progress (needs an actual race)
 	if (Race)

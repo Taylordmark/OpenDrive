@@ -22,6 +22,7 @@
 #include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
+#include "ODChallengeManager.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -116,6 +117,14 @@ void AODGameMode::BeginPlay()
 		{
 			GetWorld()->SpawnActor<AODRaceManager>();
 		}
+	}
+	// free roam: speed traps/zones and landmark hunting (fun-features #2/#5)
+	if (!HomeArea.IsEmpty() && GetWorld() && !TActorIterator<AODRaceManager>(GetWorld()))
+	{
+		AODChallengeManager* Challenges = GetWorld()->SpawnActorDeferred<AODChallengeManager>(
+			AODChallengeManager::StaticClass(), FTransform::Identity);
+		Challenges->AreaKey = HomeArea;
+		Challenges->FinishSpawning(FTransform::Identity);
 	}
 }
 
