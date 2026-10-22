@@ -67,6 +67,17 @@ constexpr float FlashSeconds = 0.35f;
 // overcast black 28/19/13 %, noon unchanged since there the sun dominates). Live-tunable
 // for capture sweeps; re-applied every Tick (one float write).
 TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade volume LumenSkylightLeaking (0..1)."));
+// Volumetric cloud ray-march budget (2026-10-21, Green Valley 8-10 fps: CloudView
+// was 27-50 ms of a 105 ms frame). Cost scales with in-cloud samples, each of which
+// runs its own shadow march (10 steps at engine scale 1), and open horizons under
+// the material's world-space cloud layout fill the view with them; a low sun stretches
+// every shadow march along the layer and roughly doubles it. Halving view and shadow
+// samples halves that; tracing stops at 2 % transmittance instead of 0.5 % (invisible
+// behind an already-opaque cloud). Engine defaults are 1 / 1 / 0.005. Live-tunable
+// for A/B captures; re-applied in Tick when changed.
+TAutoConsoleVariable<float> CVarCloudViewScale(TEXT("od.CloudViewScale"), 0.5f, TEXT("VolumetricCloud ViewSampleCountScale (engine 1)."));
+TAutoConsoleVariable<float> CVarCloudShadowScale(TEXT("od.CloudShadowScale"), 0.5f, TEXT("VolumetricCloud ShadowViewSampleCountScale (engine 1)."));
+TAutoConsoleVariable<float> CVarCloudStopT(TEXT("od.CloudStopT"), 0.02f, TEXT("VolumetricCloud StopTracingTransmittanceThreshold (engine 0.005)."));
 // Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
 // black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
 // The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
@@ -531,6 +542,17 @@ void AODAtmosphereController::SpawnGradeVolume()
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
+	{
+		// Setters dirty render state, so only on change.
+		const float ViewScale = CVarCloudViewScale.GetValueOnGameThread();
+		const float ShadowScale = CVarCloudShadowScale.GetValueOnGameThread();
+		const float StopT = CVarCloudStopT.GetValueOnGameThread();
+		if (CloudComp->ViewSampleCountScale != ViewScale) { CloudComp->SetViewSampleCountScale(ViewScale); }
+		if (CloudComp->ShadowViewSampleCountScale != ShadowScale) { CloudComp->SetShadowViewSampleCountScale(ShadowScale); }
+		if (CloudComp->StopTracingTransmittanceThreshold != StopT) { CloudComp->SetStopTracingTransmittanceThreshold(StopT); }
+	}
 
 	const UDirectionalLightComponent* SunLight = SunComp.Get();
 	const float SunElevDeg = SunLight ? (float)FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(-SunLight->GetForwardVector().Z, -1.0, 1.0))) : 90.0f;
