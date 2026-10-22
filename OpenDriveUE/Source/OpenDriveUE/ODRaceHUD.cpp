@@ -2592,6 +2592,60 @@ void AODRaceHUD::DrawNavPanel(const AODRoadManager* RoadMgr) const
 		X + 92.0f * S, Y + 58.0f * S, 18.0f, EMenuWeight::SemiBold, DimCol);
 }
 
+// ---- now-playing card (fun-features #1 v2): bottom-left, slides in for a
+// few seconds on a track / play-state change and stays while the music is
+// paused. Bottom = the card's bottom edge in pixels.
+void DrawNowPlayingCard(UCanvas* C, float S, float Bottom)
+{
+	const ODMedia::FNowPlaying& NP = ODMedia::NowPlaying();
+	const double Now = FPlatformTime::Seconds();
+	const bool bShow = NP.bValid && !NP.Title.IsEmpty() && (!NP.bPlaying || Now - NP.ChangedAt < 4.0);
+	// eased toward shown/hidden; exp of real Dt, so the same at any fps
+	static float Shown = 0.0f;
+	Shown = FMath::Lerp(bShow ? 1.0f : 0.0f, Shown, FMath::Exp(-FApp::GetDeltaTime() / 0.12f));
+	if (Shown < 0.01f)
+	{
+		return;
+	}
+	const FMenuPaint P{C, S};
+	const float W = 380.0f * S, H = 84.0f * S, Pad = 10.0f * S, ArtSz = H - 2.0f * Pad;
+	const float X = FMath::Lerp(-W - 8.0f * S, 40.0f * S, FMath::SmoothStep(0.0f, 1.0f, Shown));
+	const float Y = Bottom - H;
+	P.Fade(X, X + W, Y, H, Ink, 0.82f, 0.55f);
+	P.Rect(X, Y, 4.0f * S, H, Accent);
+
+	float TX = X + 4.0f * S + Pad;
+	if (NP.Art && NP.Art->GetResource())
+	{
+		// centre-square crop: browsers publish 16:9 video thumbnails
+		const float Aspect = float(NP.Art->GetSizeX()) / FMath::Max(1, NP.Art->GetSizeY());
+		const float U = Aspect > 1.0f ? 0.5f * (1.0f - 1.0f / Aspect) : 0.0f;
+		const float V = Aspect < 1.0f ? 0.5f * (1.0f - Aspect) : 0.0f;
+		FCanvasTileItem T(FVector2D(TX, Y + Pad), NP.Art->GetResource(), FVector2D(ArtSz, ArtSz),
+			FVector2D(U, V), FVector2D(1.0f - U, 1.0f - V), FLinearColor::White);
+		C->DrawItem(T);
+		TX += ArtSz + Pad * 1.4f;
+	}
+	// clip long names with an ellipsis to the card's width
+	const float MaxW = X + W - Pad - TX;
+	auto Fit = [&P, MaxW](FString Str, float Size, EMenuWeight Wt)
+	{
+		if (P.Width(Str, Size, Wt) <= MaxW)
+		{
+			return Str;
+		}
+		while (Str.Len() > 1 && P.Width(Str + TEXT("..."), Size, Wt) > MaxW)
+		{
+			Str.LeftChopInline(1);
+		}
+		return Str + TEXT("...");
+	};
+	P.Text(NP.bPlaying ? TEXT("NOW PLAYING") : TEXT("PAUSED"), TX, Y + 18.0f * S, 13.0f, EMenuWeight::SemiBold,
+		NP.bPlaying ? DimCol : Accent, false, 80);
+	P.Text(Fit(NP.Title, 22.0f, EMenuWeight::Bold), TX, Y + 42.0f * S, 22.0f, EMenuWeight::Bold, FLinearColor::White);
+	P.Text(Fit(NP.Artist, 17.0f, EMenuWeight::Medium), TX, Y + 65.0f * S, 17.0f, EMenuWeight::Medium, TextCol);
+}
+
 void AODRaceHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -2927,4 +2981,9 @@ void AODRaceHUD::DrawHUD()
 	{
 		DrawNavPanel(NavMgr);   // nearest area's road (2026-10-05, large world)
 	}
+
+	// ponytail: fixed offset above the mini-map + its place label; move into a
+	// shared bottom-left toast stack if more cards land there
+	DrawNowPlayingCard(Canvas, MenuScale(), bShowMiniMap
+		? Canvas->SizeY - (MiniMapSize + 28.0f + 44.0f) * MenuScale() : Canvas->SizeY - 28.0f * MenuScale());
 }

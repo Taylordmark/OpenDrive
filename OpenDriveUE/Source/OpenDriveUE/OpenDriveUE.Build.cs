@@ -47,6 +47,11 @@ public class OpenDriveUE : ModuleRules
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib" });
+			// ODMedia now-playing card: C++/WinRT SMTC (cppwinrt headers ship with the SDK; it throws on errors)
+			PublicSystemLibraries.Add("windowsapp.lib");
+			string SdkInc = System.IO.Path.Combine(Target.WindowsPlatform.WindowsSdkDir, "Include");
+			PublicSystemIncludePaths.Add(System.IO.Path.Combine(SdkInc, System.Linq.Enumerable.Max(System.IO.Directory.GetDirectories(SdkInc, "10.*")), "cppwinrt"));
+			bEnableExceptions = true;
 		}
 	}
 }
