@@ -153,6 +153,17 @@ private:
 	 *  screen's roads + start dots over the globe drape, DrawGlobePins the World screen's overlay (2026-10-14). */
 	void DrawAreaMap(const AODMainMenu* Menu) const;
 	void DrawGlobePins(const AODMainMenu* Menu) const;
+	/** Area picker (2026-10-21): coverage.json outlines (+ tiles: baked, pending
+	 *  hatched, failed red), the New Area draft / bake card, and its mouse. */
+	void DrawCoverage(const AODMainMenu* Menu, bool bTiles) const;
+	void DrawNewArea(AODMainMenu* Menu) const;
+	void HandleNewAreaMouse(AODMainMenu* Menu, APlayerController* PC, const FVector2D& Mouse);
+	int32 DrawnPinAt(const AODMainMenu* Menu, const FVector2D& Mouse) const;   // Coverage index of a drawn area's pin, or INDEX_NONE
+	mutable FBox2D NewAreaBtn = FBox2D(ForceInit);   // World's "+ New Area", this frame
+	int32 AreaDragVert = INDEX_NONE;   // pressed on this vertex ...
+	int32 AreaDragMid = INDEX_NONE;    // ... or on the midpoint after this vertex (inserts one when dragged)
+	FVector2D AreaPressAt = FVector2D::ZeroVector;
+	bool bAreaPress = false, bAreaMoved = false;
 	void DrawMainMenu(AODMainMenu* Menu, const TArray<FVector2D>* Centerline,
 		const TArray<FTransform>* Gates, AODRoadManager* RoadMgr) const;
 

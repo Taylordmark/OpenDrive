@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ODAreaDraw.h"
 #include "ODMenuTabs.h"
 #include "ODMenuVista.h"
 #include "ODWeatherController.h"
@@ -68,6 +69,7 @@ enum class EODMenuScreen : uint8
 	World,        // the in-engine globe (AODMenuGlobe) is the view target, pins drawn by the HUD
 	AreaMap,      // top-down on the globe, the area's relief draped; rows = starts or tracks, one tab per nearby area
 	Start,        // the picked start's live vista: Time of Day, Season, Weather, Drive
+	NewArea,      // (2026-10-21) draw an area on the globe, or a drawn area's bake card (FODAreaDraw)
 };
 
 /**
@@ -165,6 +167,12 @@ public:
 	int32 GetTab() const { return TabIdx; }
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
+	/** New Area screen + coverage (2026-10-21, area picker): the HUD draws and edits it. */
+	const FODAreaDraw& GetAreaDraw() const { return AreaDraw; }
+	FODAreaDraw& GetAreaDraw() { return AreaDraw; }
+	void BeginNewArea();                       // World's "+ New Area" (N): the draft over the globe
+	void OpenAreaCard(const FString& Key);     // a drawn area's pin: its bake card
+
 	bool IsSettingsOpen() const { return bSettingsOpen; }
 	AODSettingsMenu* GetSettingsMenu() const { return SettingsMenu; }
 
@@ -220,6 +228,8 @@ private:
 	void Left();
 	void Right();
 	void OnClick();      // left mouse (map select)
+	void NewAreaKey();   // N on the World screen
+	void UndoDraw();     // Ctrl+Z on New Area
 	bool BrowsePin(int32 Dir);       // World screen: arrows step the focused pin; false elsewhere
 	void PrevTab() { SwitchTab(-1); }   // Q / left shoulder
 	void NextTab() { SwitchTab(+1); }   // E / right shoulder
@@ -281,6 +291,9 @@ private:
 	// CurrentAreaIdx calls OpenArea().
 	void FindAreaLevels();
 	void OpenArea();             // OpenLevel(AreaLevels[AreaIdx]) carrying the car picks as URL options
+	// (2026-10-21) a drawn area: the template level + ?odarea=<key> (agent B's loader), no menu spot
+	void OpenDrawnArea(const FString& Key);
+	FODAreaDraw AreaDraw;
 	TArray<FString> AreaLevels;  // package paths, e.g. "/Game/Areas/OpenWorld_oahu"
 	TArray<FString> AreaNames;   // readable, parallel to AreaLevels
 	TArray<FString> AreaKeys;    // "<area>" as in the sidecar names / menu_spots.json, parallel too
