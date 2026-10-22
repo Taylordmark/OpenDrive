@@ -480,6 +480,104 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed, bay_m=None):
     return verts, uvs, tris
 
 
+# Parapets (building shaping phase 2, 2026-10-22): a flat roof gets a low
+# wall round its edge - the outer face continues the wall up, a coping top
+# (faces up, so the roof section draws it) and an inner face down to the
+# roof cap - and punched / storefront facades a cornice under the coping,
+# CORNICE_OUT_CM proud of the wall. All of it is window-free (merged after
+# n_solid). Height: the gap between a tagged height (OSM height=*, else
+# Microsoft's) and the whole-storey stack, clamped to PARAPET_MIN_M..
+# PARAPET_MAX_M, so the roof line lands on the real height; untagged
+# buildings take PARAPET_M by archetype (+- PARAPET_JITTER_M). A footprint
+# too thin or too sharp to offset (offset_ring None) keeps a bare roof edge.
+PARAPET_M = [0.9, 0.5, 1.0, 1.2, 1.1]   # by FACADE_* archetype
+PARAPET_JITTER_M = 0.15
+PARAPET_MIN_M, PARAPET_MAX_M = 0.3, 2.5
+PARAPET_THICK_CM = 25.0
+CORNICE_OUT_CM, CORNICE_H_CM = 15.0, 30.0
+CORNICE_FACADES = (FACADE_PUNCHED, FACADE_STOREFRONT)
+MITER_MAX = 3.0   # x the offset distance
+
+
+def offset_ring(ring, d):
+    """ring with every edge moved d cm to its left (inward on a CCW ring),
+    one vertex per corner where the moved edges meet; None if an edge is
+    under 1 cm, a corner's miter runs past MITER_MAX * |d|, an edge flips or
+    the result self-intersects."""
+    n, out = len(ring), []
+    for i in range(n):
+        (ax, ay), (px, py), (bx, by) = ring[i - 1], ring[i], ring[(i + 1) % n]
+        l0, l1 = math.hypot(px - ax, py - ay), math.hypot(bx - px, by - py)
+        if l0 < 1.0 or l1 < 1.0:
+            return None
+        n0 = (-(py - ay) / l0, (px - ax) / l0)
+        n1 = (-(by - py) / l1, (bx - px) / l1)
+        k = 1.0 + n0[0] * n1[0] + n0[1] * n1[1]
+        if k < 1e-6:
+            return None
+        mx, my = (n0[0] + n1[0]) / k * d, (n0[1] + n1[1]) / k * d
+        if math.hypot(mx, my) > MITER_MAX * abs(d):
+            return None
+        out.append((px + mx, py + my))
+    for i in range(n):
+        j = (i + 1) % n
+        if ((ring[j][0] - ring[i][0]) * (out[j][0] - out[i][0])
+                + (ring[j][1] - ring[i][1]) * (out[j][1] - out[i][1])) <= 0:
+            return None
+    return out if shapely.Polygon(out).is_valid else None
+
+
+def _quad(verts, uvs, tris, corners, quad_uvs, up=None):
+    """Append a quad (4 corners in order round it); up True/False winds it
+    to face up/down (CCW in x, y faces up, as the roof cap)."""
+    b = len(verts)
+    verts.extend(corners)
+    uvs.extend(quad_uvs)
+    (x0, y0, _), (x1, y1, _), (x2, y2, _) = corners[:3]
+    flip = up is not None and ((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0) > 0) != up
+    tris.extend([(b, b + 2, b + 1), (b, b + 3, b + 2)] if flip else [(b, b + 1, b + 2), (b, b + 2, b + 3)])
+
+
+def parapet(wall_verts, wall_uvs, n_edges, top_z_cm, h_cm, cornice):
+    """(verts, uvs, tris) of the parapet (and cornice) on the walls
+    extrude_footprint made (edge i = its vertices 4i..4i+3), or None (see
+    the block above)."""
+    ring = [wall_verts[4 * i][:2] for i in range(n_edges)]
+    area2 = sum(ring[i - 1][0] * ring[i][1] - ring[i][0] * ring[i - 1][1] for i in range(n_edges))
+    side = 1.0 if area2 > 0 else -1.0   # left of the edges = inside
+    inner = offset_ring(ring, side * PARAPET_THICK_CM)
+    outer = offset_ring(ring, -side * CORNICE_OUT_CM) if cornice else ring
+    if inner is None or outer is None:
+        return None
+    z0, z2 = top_z_cm, top_z_cm + h_cm
+    z1 = max(z0, z2 - CORNICE_H_CM) if cornice else z2   # wall face up to here, then the cornice
+    verts, uvs, tris = [], [], []
+    t = 100.0 * FACADE_TILE_M
+    base = wall_verts[0][2]   # wall V runs from the wall foot
+    v0, v1, v2 = ((z - base) / t for z in (z0, z1, z2))
+    s_in = 0.0
+    for i in range(n_edges):
+        j = (i + 1) % n_edges
+        (u0, _), (u1, _) = wall_uvs[4 * i], wall_uvs[4 * i + 1]
+        p0, p1, i0, i1, o0, o1 = ring[i], ring[j], inner[i], inner[j], outer[i], outer[j]
+        if z1 > z0:
+            _quad(verts, uvs, tris, [(*p0, z0), (*p1, z0), (*p1, z1), (*p0, z1)],
+                  [(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+        if cornice:
+            lo = math.dist(o0, o1) / t
+            _quad(verts, uvs, tris, [(*p0, z1), (*p1, z1), (*o1, z1), (*o0, z1)],
+                  [(u0, 0.0), (u1, 0.0), (u1, CORNICE_OUT_CM / t), (u0, CORNICE_OUT_CM / t)], up=False)
+            _quad(verts, uvs, tris, [(*o0, z1), (*o1, z1), (*o1, z2), (*o0, z2)],
+                  [(u0, v1), (u0 + lo, v1), (u0 + lo, v2), (u0, v2)])
+        _quad(verts, uvs, tris, [(*o0, z2), (*o1, z2), (*i1, z2), (*i0, z2)],
+              [(x / t, y / t) for x, y in (o0, o1, i1, i0)], up=True)
+        li = math.dist(i0, i1) / t
+        _quad(verts, uvs, tris, [(*i1, z0), (*i0, z0), (*i0, z2), (*i1, z2)],
+              [(s_in, v0), (s_in + li, v0), (s_in + li, v2), (s_in, v2)])
+        s_in += li
+    return verts, uvs, tris
+
+
 def merge(pieces):
     """[(verts, uvs, tris, n_solid)] -> one (verts, uvs, tris, n_solid): every
     piece's windowed vertices (below its own n_solid) first, then the rest,
@@ -609,6 +707,16 @@ def build_chunk(chunk):
                 verts, uvs, tris, n_solid = roofed
             else:
                 shape = "flat"
+        if shape == "flat":
+            tagged_m = b.get("height_m") or b.get("ms_height_m")
+            jitter = random.Random(b["way_id"] ^ 0x2C1B3C6D).uniform(-PARAPET_JITTER_M, PARAPET_JITTER_M)
+            parapet_m = (min(max(tagged_m - height_cm / 100.0, PARAPET_MIN_M), PARAPET_MAX_M) if tagged_m
+                         else PARAPET_M[archetype] + jitter)
+            par = parapet(verts, uvs, len(ring_xy_cm), ground_z_cm + height_cm, parapet_m * 100.0,
+                          archetype in CORNICE_FACADES and levels >= 2)
+            if par:
+                verts, uvs, tris, n_solid = merge([(verts, uvs, tris, n_solid), (*par, 0)])
+            stats["parapet", "tagged" if tagged_m else "default", "built" if par else "none"] += 1
         roof_set, roof_rgb = roof_look(b, shape, rng, REGION)
         stats["roof", (shape, roof_set)] += 1
         out.append({
@@ -695,6 +803,8 @@ def main():
     sq = {k[1]: v for k, v in stats.items() if k[0] == "square"}
     print(f"footprints: {stats['ring_verts', 'in']} -> {stats['ring_verts', 'out']} ring vertices; squared "
           + ", ".join(f"{k}={v}" for k, v in sorted(sq.items())))
+    print("parapets (height source, built): " + ", ".join(
+        f"{k[1]}/{k[2]}={v}" for k, v in sorted(stats.items(), key=str) if k[0] == "parapet"))
     print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
     n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
     print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "
