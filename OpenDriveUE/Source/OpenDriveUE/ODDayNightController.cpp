@@ -36,6 +36,7 @@ namespace
 AODDayNightController::AODDayNightController()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: Tick holds the clock while paused
 }
 
 void AODDayNightController::BeginPlay()
@@ -211,6 +212,7 @@ float AODDayNightController::HourAtSunElevation(float ElevationDeg, bool bRising
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;   // fun #7: sun follows a paused scrub, clock holds
 	const float NextHour = CycleSeconds > 0.0f ? TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f : TimeOfDay;
 	DayCount += NextHour >= 24.0f ? 1 : 0;
 	TimeOfDay = FMath::Fmod(NextHour, 24.0f);

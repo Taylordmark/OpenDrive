@@ -85,6 +85,7 @@ public:
 
 private:
 	void ToggleWorldMap() { if (bWorldMapOpen) { CloseWorldMap(); } else { OpenWorldMap(); } }
+	void TogglePhotoMode();   // fun #4: forwards to AODPauseMenu
 	void ClearRouteKey();
 	AODRoadManager* FindNavRoadMgr() const;
 	void SetMapCursor(bool bVisible);

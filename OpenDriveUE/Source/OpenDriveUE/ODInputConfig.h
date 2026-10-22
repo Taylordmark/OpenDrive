@@ -58,6 +58,7 @@ enum class EODInputAction : uint8
 	CameraView,   // cycle chase / far / near / cockpit / hood / bumper
 	ShiftUp,      // manual gearbox (Arc 6); ignored in automatic
 	ShiftDown,
+	PhotoMode,    // fun #4: pause into photo mode (or back out)
 	Count  // sentinel, not a real action
 };
 

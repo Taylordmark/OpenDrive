@@ -281,6 +281,7 @@ public:
 	 *  bInstant (garage menu, 2026-10-05): skip the ramp, road wetness
 	 *  jumps to match. */
 	bool ForceState(const FString& Name, bool bInstant = false);
+	bool IsForced() const { return bForced; }   // fun #7 Environment row: Auto vs a held state
 
 	/** Immediate re-roll (garage season lock changed) - no-op while forced. */
 	void Reroll();

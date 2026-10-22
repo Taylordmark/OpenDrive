@@ -30,6 +30,8 @@
 #include "ODRebindMenu.h"
 #include "ODRoadManager.h"
 #include "ODSettingsMenu.h"
+#include "ODPhotoMode.h"
+#include "UnrealClient.h"
 #include "ODWeatherController.h"
 #include "ODHudStyle.h"
 #include "Rendering/SlateRenderer.h"
@@ -96,6 +98,7 @@ void AODRaceHUD::RefreshODManagedKeyBindings()
 		{EODInputAction::ZoomMapIn, &AODRaceHUD::ZoomIn, false},
 		{EODInputAction::WorldMap, &AODRaceHUD::ToggleWorldMap, true},
 		{EODInputAction::ClearRoute, &AODRaceHUD::ClearRouteKey, true},
+		{EODInputAction::PhotoMode, &AODRaceHUD::TogglePhotoMode, true},
 	};
 	for (const FActionFn& B : Binds)
 	{
@@ -543,6 +546,8 @@ constexpr float RowH = 54.0f;
 constexpr float FooterH = 58.0f;
 
 const FODMenuTab PauseTabs[] = {{TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume}};
+const FODMenuTab EnvTabs[] = {{TEXT("ENVIRONMENT"), 0, ODEnvironment::NumRows}};   // fun #7
+const FODMenuTab PhotoTabs[] = {{TEXT("PHOTO"), 0, AODPhotoMode::RowCapture}};      // fun #4
 
 // "65%" -> 0.65, anything else -> -1 (not drawn as a slider)
 float ParsePercent(const FString& V)
@@ -1031,6 +1036,15 @@ void AODRaceHUD::DrawColorPicker(float X, float Y) const
 
 	PickerSV = FBox2D(FVector2D(X, Y), FVector2D(X + Sz, Y + Sz));
 	PickerHue = FBox2D(FVector2D(HX, Y), FVector2D(HX + HW, Y + Sz));
+}
+
+void AODRaceHUD::TogglePhotoMode()
+{
+	for (TActorIterator<AODPauseMenu> It(GetWorld()); It; ++It)
+	{
+		It->TogglePhotoMode();
+		return;
+	}
 }
 
 void AODRaceHUD::HandleMenuMouse(AODPauseMenu* Menu)
@@ -2755,6 +2769,28 @@ void AODRaceHUD::DrawHUD()
 		{
 			break;
 		}
+		if (Menu->IsPhotoOpen())
+		{
+			// fun #4: the scene stays clear - no backdrop, H hides the panel, and
+			// the frame a screenshot reads back draws nothing
+			const AODPhotoMode* Photo = Menu->GetPhotoMode();
+			if (Photo && !Photo->IsUiHidden() && !FScreenshotRequest::IsScreenshotRequested())
+			{
+				DrawMenuPanel(Menu->GetTitle(), PhotoTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+					[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
+				const FMenuPaint P{Canvas, MenuScale()};
+				const float X = MenuX(false, ColW * P.S);
+				DrawHints(P, X, {{TEXT("WASD"), TEXT("Move")}, {TEXT("R/F"), TEXT("Up / Down")}, {TEXT("Right Drag"), TEXT("Look")},
+					{TEXT("Space"), TEXT("Photo")}, {TEXT("H"), TEXT("Hide")}, {TEXT("Esc"), TEXT("Back")}});
+				if (const FString Toast = Photo->GetToast(); !Toast.IsEmpty())
+				{
+					P.Text(Toast, X, Canvas->SizeY - 100.0f * P.S, 18.0f, EMenuWeight::SemiBold, Accent);
+				}
+				// right-drag looks, so the right button doesn't back out here
+				DispatchMenuMouse(Menu, GetOwningPlayerController(), MenuHits, LastMenuMouse, LastMenuMouseFrame, true, false);
+			}
+			return;
+		}
 		DrawMenuBackdrop(0.35f, false);
 		if (Menu->IsSettingsOpen())
 		{
@@ -2762,7 +2798,7 @@ void AODRaceHUD::DrawHUD()
 		}
 		else
 		{
-			DrawMenuPanel(Menu->GetTitle(), PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
+			DrawMenuPanel(Menu->GetTitle(), Menu->IsEnvOpen() ? EnvTabs : PauseTabs, 0, Menu->GetFooterRow(), Menu->GetSelected(),
 				[Menu](int32 Row, FString& L, FString& V) { Menu->GetRow(Row, L, V); }, false);
 			const float S = MenuScale();
 			DrawHints(FMenuPaint{Canvas, S}, MenuX(false, ColW * S),

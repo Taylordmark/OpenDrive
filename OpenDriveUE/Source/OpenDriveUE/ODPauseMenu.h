@@ -3,10 +3,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "InputCoreTypes.h"
+#include "ODEnvironment.h"
 #include "ODPauseMenu.generated.h"
 
 class UODVehicleMovement;
 class AODSettingsMenu;
+class AODPhotoMode;
 
 /**
  * In-game pause menu (ESC / P). Rows (2026-10-09 menu redesign): World Map,
@@ -30,18 +32,29 @@ public:
 	AODPauseMenu();
 	virtual void BeginPlay() override;
 
-	enum : int32 { RowWorldMap, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
+	enum : int32 { RowWorldMap, RowEnvironment, RowPhoto, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
 
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
-	const TCHAR* GetTitle() const { return bWheelLost ? TEXT("Wheel disconnected") : TEXT("Paused"); }
+	const TCHAR* GetTitle() const
+	{
+		return bPhotoOpen ? TEXT("Photo Mode") : bEnvOpen ? TEXT("Environment") : bWheelLost ? TEXT("Wheel disconnected") : TEXT("Paused");
+	}
 
 	/** The driving wheel stopped answering: pause with that as the title.
 	 *  Opening rescans devices, so a replugged wheel works on Resume. */
 	void OpenForWheelLost();
 	int32 GetSelected() const { return Selected; }
-	int32 NumRows() const { return NumPauseRows; }
-	int32 GetFooterRow() const { return RowResume; }
+	// the Environment page (fun #7, ODEnvironment.h) swaps in its rows + a Back
+	// footer; photo mode (fun #4, AODPhotoMode) its rows + Take Photo
+	int32 NumRows() const;
+	int32 GetFooterRow() const;
+	bool IsEnvOpen() const { return bEnvOpen; }
+	bool IsPhotoOpen() const { return bPhotoOpen; }
+	AODPhotoMode* GetPhotoMode() const { return PhotoMode; }
+	/** PhotoMode action / pause row: pause if needed and enter photo mode;
+	 *  from photo mode, resume driving. */
+	void TogglePhotoMode();
 	void GetRow(int32 Row, FString& OutLabel, FString& OutValue) const;
 
 	bool IsSettingsOpen() const { return bSettingsOpen; }
@@ -49,7 +62,7 @@ public:
 
 	/** Drop the pause overlay WITHOUT unpausing - the world map (SS7.37)
 	 *  takes the screen over and owns the unpause when it closes. */
-	void HideForOverlay() { bOpen = false; bSettingsOpen = false; }
+	void HideForOverlay() { ExitPhoto(); bOpen = false; bSettingsOpen = false; bEnvOpen = false; }
 
 	// keyboard handlers, also the HUD's mouse entry points
 	void Up();
@@ -84,6 +97,7 @@ private:
 	void ApplyGearbox();
 
 	AODSettingsMenu* EnsureSettingsMenu();
+	void ExitPhoto();
 
 	bool bOpen = false;
 	bool bWheelLost = false;
@@ -91,6 +105,10 @@ private:
 	int32 GearboxIdx = 1;    // Sport (stage-1 shift defaults) - init only
 
 	bool bSettingsOpen = false;
+	bool bEnvOpen = false;
+	bool bPhotoOpen = false;
+	UPROPERTY()
+	TObjectPtr<AODPhotoMode> PhotoMode;
 	UPROPERTY()
 	TObjectPtr<AODSettingsMenu> SettingsMenu;
 };
