@@ -2,6 +2,8 @@
 
 #include "Components/InputComponent.h"
 #include "Containers/Ticker.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -12,6 +14,7 @@
 #include "ODMainMenu.h"
 #include "ODMenuTabs.h"
 #include "ODRaceHUD.h"
+#include "ODRaceManager.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
 #include "ODWheelDevice.h"
@@ -178,6 +181,10 @@ void AODPauseMenu::SetOpen(bool bInOpen)
 	if (bOpen)
 	{
 		FODWheelDevice::Rescan();   // the only device search besides startup and the input-type row
+		if (AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld()))
+		{
+			Race->RescanGhosts();   // picks up .odghost files dropped in since
+		}
 	}
 	UGameplayStatics::SetGamePaused(this, bOpen);
 	// before 2026-10-09 the cursor was never shown here, so the mouse did
@@ -313,6 +320,10 @@ void AODPauseMenu::Activate()
 			}
 		}
 		break;
+	case RowRaceAgainst:   // share = copy files in/out of this folder
+		IFileManager::Get().MakeDirectory(*FODGhostFile::Dir(), true);
+		FPlatformProcess::ExploreFolder(*FODGhostFile::Dir());
+		break;
 	case RowSettings:
 		bSettingsOpen = EnsureSettingsMenu() != nullptr;
 		break;
@@ -335,10 +346,16 @@ void AODPauseMenu::Activate()
 
 void AODPauseMenu::Adjust(int32 Dir)
 {
-	// only Settings has value rows now
 	if (bSettingsOpen && SettingsMenu)
 	{
 		SettingsMenu->AdjustSelected(Dir);
+	}
+	else if (bOpen && Selected == RowRaceAgainst)
+	{
+		if (AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld()))
+		{
+			Race->CycleGhost(Dir);
+		}
 	}
 }
 
@@ -365,9 +382,14 @@ void AODPauseMenu::ApplyGearbox()
 void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
 	static const TCHAR* const Labels[NumPauseRows] = {
-		TEXT("World Map"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
+		TEXT("World Map"), TEXT("Race against"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
 	OutLabel = (Row >= 0 && Row < NumPauseRows) ? Labels[Row] : TEXT("");
 	OutValue.Empty();
+	if (Row == RowRaceAgainst)
+	{
+		const AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld());
+		OutValue = Race ? Race->GetGhostChoiceLabel() : TEXT("No race");
+	}
 }
 
 AODSettingsMenu* AODPauseMenu::EnsureSettingsMenu()

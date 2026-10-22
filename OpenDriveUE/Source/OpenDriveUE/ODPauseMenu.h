@@ -30,7 +30,8 @@ public:
 	AODPauseMenu();
 	virtual void BeginPlay() override;
 
-	enum : int32 { RowWorldMap, RowSettings, RowMainMenu, RowQuit, RowResume, NumPauseRows };
+	// RowRaceAgainst (#3): left/right picks the ghost, Enter opens Saved/Ghosts/
+	enum : int32 { RowWorldMap, RowRaceAgainst, RowSettings,RowMainMenu, RowQuit, RowResume, NumPauseRows };
 
 	// --- HUD-facing ---
 	bool IsOpen() const { return bOpen; }
