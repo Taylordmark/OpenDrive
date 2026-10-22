@@ -617,12 +617,17 @@ def sections(car, xs):
     top_w = wb * (st["hood_top_frac"] + (roof - st["hood_top_frac"]) * ramp)
     hood = np.clip((xs - car.gs) / 20.0, 0.0, 1.0)
     crown = 0.0 if car.center else (0.06 + (car.hood_crown - 0.06) * hood) * top_w
-    Y = [wb * (0.82 + 0.17 * fl), wb * (0.93 + 0.07 * fl), wb, wb * (0.88 + 0.08 * hips), top_w]
+    # per-car section shape (SECTION): rocker tuck, lower flank, shoulder
+    # height (rising to the rear on a wedge), belt inset
+    sh = SECTION[car.name]
+    shoulder = sh["shoulder_z"] + sh["wedge"] * (np.clip((car.fx - xs) / (car.fx - car.rx), 0, 1) - 0.5)
+    Y = [wb * (sh["tuck"] + (1 - sh["tuck"]) * fl), wb * (sh["flank"] + (1 - sh["flank"]) * fl), wb,
+         wb * (sh["belt_in"] + 0.08 * hips), top_w]
     near = np.min([np.abs(xs - ax) for ax in (car.fx, car.rx)], axis=0)
     t = np.clip((r + 18.0 - near) / 18.0, 0.0, 1.0)
     t = t * t * (3.0 - 2.0 * t)
     t = t * np.clip(np.minimum(car.x0 - xs, xs - car.x1) / 8.0, 0.0, 1.0)    # no fender blade past a short nose
-    Z = [zb, zb + 0.32 * H, zb + 0.78 * H, belt, zt - 0.6 * crown]
+    Z = [zb, zb + sh["flank_z"] * H, zb + shoulder * H, belt, zt - 0.6 * crown]
     # fender flares: each section point stands FENDER_OUT outboard of every
     # setup's tyre point (tyre_sweep: static / bump stop, steered) that rises
     # above the lip near it in x and between its neighbours in z - widest at
@@ -638,6 +643,13 @@ def sections(car, xs):
                 req[i] = car.ht + m[:, 1].max() + FENDER_OUT
         req = np.max(req[None, :] - FLARE_TAPER * np.abs(xs[:, None] - xs[None, :]), axis=1)
         Y[k] = np.maximum(Y[k], req)
+    # side scallop: the lower flank pulled in from the front door shut to
+    # the rear arch opening, after the flares (their taper would fill it;
+    # it is zero at the opening, check_car_meshes_real holds the clearance)
+    a0, a1 = car.doors[0][0], car.rx + car.r_arch
+    u = np.clip((a0 - xs) / (a0 - a1), 0.0, 1.0)
+    scallop = sh["scallop"] * wb * np.sin(np.pi * u ** 1.6) ** 2
+    Y[0], Y[1] = Y[0] - 0.5 * scallop, Y[1] - scallop
     w = wb
     if car.center:
         # fender pods: over the arches the pod top reaches in past the
@@ -646,7 +658,8 @@ def sections(car, xs):
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
         Y.append(np.minimum(np.interp(xs, cx, cw), Y[4] - 2.0))
         Z.append(np.interp(xs, cx, cz))
-    Y, Z, key = densify(np.stack(Y, 1), np.stack(Z, 1))
+    crease = {**CREASE, 2: sh["crease"]}
+    Y, Z, key = densify(np.stack(Y, 1), np.stack(Z, 1), crease, sh["round"])
     if car.valley and not car.center:
         # hood / fender valley: the belt-to-top midpoint stands up as the
         # fender crest, the top edge (hood shut) is the gutter, the hood
@@ -654,34 +667,37 @@ def sections(car, xs):
         fade = hood * np.clip((car.x0 - car.bulge - xs) / 30.0, 0.0, 1.0)
         m = key[3] + 1
         Z[:, m] += fade * np.maximum(Z[:, key[4]] + car.valley - Z[:, m], 0.0)
-    return dict(Y=Y, Z=Z, key=key, zb=zb, zb_floor=zb_floor, w=w, belt=belt,
+    return dict(Y=Y, Z=Z, key=key, crease={key[k]: c for k, c in crease.items() if k < len(key)}, zb=zb, zb_floor=zb_floor, w=w, belt=belt,
                 cabin=cabin, H=H, crown=crown, well=well)
 
 
 SIDE_EXTRA = (1, 2, 1, 1)   # extra side points between key points S0..S4 (none up to a crest)
 
 
-def densify(Y, Z):
+def densify(Y, Z, crease, fullness):
     """Insert SIDE_EXTRA points per band on a Hermite curve through the key
-    section points (Catmull-Rom tangents, one-sided at hard creases so the
-    rocker / shoulder stay sharp; straight up the belt-to-top band, the side
-    glass), clamped inside each band's z range and never inboard of it. Returns dense Y, Z and the key points' indices."""
+    section points (Catmull-Rom tangents x fullness, one-sided at hard
+    creases so the rocker / shoulder stay sharp; straight up the belt-to-top
+    band, the side glass), clamped inside each band's z range, never inboard
+    of it nor outboard of the station's widest key point. Returns dense Y, Z
+    and the key points' indices."""
     P = np.stack([Y, Z], 2)
     nk = P.shape[1]
     T = np.empty_like(P)
-    T[:, 1:-1] = 0.5 * (P[:, 2:] - P[:, :-2])
+    T[:, 1:-1] = 0.5 * fullness * (P[:, 2:] - P[:, :-2])
     T[:, 0], T[:, -1] = P[:, 1] - P[:, 0], P[:, -1] - P[:, -2]
+    y_max = Y.max(1)
     out, key = [P[:, 0]], [0]
     for k in range(nk - 1):
         a, b = P[:, k], P[:, k + 1]
-        ta = b - a if k == 3 or CREASE.get(k, 0.0) >= 0.8 else T[:, k]
-        tb = b - a if k == 3 or CREASE.get(k + 1, 0.0) >= 0.8 else T[:, k + 1]
+        ta = b - a if k == 3 or crease.get(k, 0.0) >= 0.8 else T[:, k]
+        tb = b - a if k == 3 or crease.get(k + 1, 0.0) >= 0.8 else T[:, k + 1]
         m = SIDE_EXTRA[k] if k < len(SIDE_EXTRA) else 0
         for j in range(1, m + 1):
             s = j / (m + 1)
             p = ((2 * s ** 3 - 3 * s ** 2 + 1) * a + (s ** 3 - 2 * s ** 2 + s) * ta
                  + (3 * s ** 2 - 2 * s ** 3) * b + (s ** 3 - s ** 2) * tb)
-            p[:, 0] = np.maximum(p[:, 0], np.minimum(a[:, 0], b[:, 0]))
+            p[:, 0] = np.clip(p[:, 0], np.minimum(a[:, 0], b[:, 0]), y_max)
             p[:, 1] = np.clip(p[:, 1], np.minimum(a[:, 1], b[:, 1]), np.maximum(a[:, 1], b[:, 1]))
             out.append(p)
         out.append(b)
@@ -701,6 +717,35 @@ CHAR = {
     "Rally":   dict(taper=0.08, waist=0.06, flare=1.0, hips=0.4, tumble=0.05),
     "Concept": dict(taper=0.14, waist=0.07, flare=0.9, hips=0.5, tumble=0.06),
     "LMP":     dict(taper=0.12, waist=0.08, flare=1.0, hips=0.5, tumble=0.0),
+}
+
+# per-car side section (fractions of the body half width wb / of the
+# rocker-to-belt height H): rocker tuck, lower flank y and z, shoulder z
+# (the widest point; wedge = its rise front axle -> rear axle), belt inset
+# under the shoulder, shoulder crease, curve fullness between the points
+# (1 = Catmull-Rom; < 1 flatter, slab sides; > 1 rounder) and the side
+# scallop's depth (lower flank pulled in ahead of the rear arch)
+_SEC = dict(tuck=0.82, flank=0.93, flank_z=0.32, shoulder_z=0.78, wedge=0.0, belt_in=0.88,
+            crease=0.8, round=1.0, scallop=0.0)
+SECTION = {
+    # slab sides, a sharp high shoulder
+    "Muscle":  {**_SEC, "tuck": 0.86, "flank": 0.97, "flank_z": 0.30, "shoulder_z": 0.80, "belt_in": 0.86,
+                "crease": 1.0, "round": 0.7},
+    # wedge: shoulder line rising to the rear
+    "JDM":     {**_SEC, "tuck": 0.84, "flank": 0.95, "shoulder_z": 0.76, "wedge": 0.12, "belt_in": 0.89,
+                "crease": 0.85, "round": 0.9},
+    # deep side scallop into the intake
+    "Super":   {**_SEC, "flank": 0.92, "flank_z": 0.35, "shoulder_z": 0.80, "belt_in": 0.86, "scallop": 0.07},
+    # flat boxy sides, square shoulder
+    "Pickup":  {**_SEC, "tuck": 0.90, "flank": 0.98, "flank_z": 0.25, "shoulder_z": 0.85, "belt_in": 0.92,
+                "crease": 1.0, "round": 0.55},
+    # upright sides
+    "Rally":   {**_SEC, "tuck": 0.85, "flank": 0.96, "shoulder_z": 0.80, "belt_in": 0.90, "round": 0.8},
+    # round tumblehome, soft shoulder
+    "Concept": {**_SEC, "tuck": 0.78, "flank": 0.92, "flank_z": 0.38, "shoulder_z": 0.74, "belt_in": 0.84,
+                "crease": 0.45, "round": 1.3},
+    # the Super's scallop on the tub side
+    "LMP":     {**_SEC, "flank_z": 0.35, "scallop": 0.06},
 }
 
 
@@ -817,7 +862,7 @@ def build_cage(car):
                 part.f((grid[v][u], grid[v][u + 1], grid[v + 1][u + 1], grid[v + 1][u]),
                        PLASTIC if v == 0 else car.body_cell, pan)
     # character lines: creases along the key section points
-    crease = {S["key"][k]: c for k, c in CREASE.items() if k < len(S["key"])}
+    crease = S["crease"]
     for i in range(len(xs) - 1):
         for k in range(ns):
             c = crease.get(k, 0.0)
