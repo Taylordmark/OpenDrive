@@ -156,7 +156,7 @@ CATS = mcm.CATEGORY_ORDER
 R_REF = mcm.REF_WHEEL_RADIUS_CM
 
 # --------------------------------------------------------------- design knobs
-CAGE_SPACING = 7.8       # cm between loft stations in the cage
+CAGE_SPACING = 10.0      # cm between loft stations in the cage (key stations come on top)
 GAP = 0.5                # panel gap width, cm
 LIP = 1.2                # turned-in panel edge depth, cm
 TIER_RATIO = {"_ultra": 1.0, "_high": 0.5, "": 0.22}   # Decimate ratio per tier suffix (wheels)
@@ -164,7 +164,7 @@ TIER_RATIO = {"_ultra": 1.0, "_high": 0.5, "": 0.22}   # Decimate ratio per tier
 # once-subdivided build, not a decimated ultra (collapse faceted the curves
 # and chewed the panel gaps)
 CAR_TIERS = {2: {"_ultra": 1.0, "_high": 0.5}, 1: {"": 1.0}}
-CREASE = {0: 1.0, 1: 0.0, 2: 0.8, 3: 0.45, 4: 0.6, 5: 0.6}   # section point -> edge crease
+CREASE = {0: 1.0, 1: 0.0, 2: 0.8, 3: 0.45, 4: 0.6, 5: 0.6}   # key section point -> edge crease
 
 # panel ids (face attribute "panel"); 0 = never split
 P_NONE, P_SHELL, P_HOOD, P_TRUNK, P_BUMF, P_BUMR = 0, 1, 2, 3, 4, 5
@@ -393,6 +393,7 @@ class Car:
         self.profile, self.gs, self.ge = pr["profile"], pr["gs"], pr["ge"]
         self.sge = pr.get("sge", self.ge)             # side glass ends here (C-pillar / sail behind)
         self.belt_fr, self.hood_crown = pr["belt"], pr.get("hood_crown", 0.06)
+        self.valley = pr.get("valley", 0.0)            # fender crest over the hood gutter, cm
         # arches (module docstring): lip circles (centre z, radius), Street
         # first; the well roof clears the tyre at the bump stop
         self.zs = (0.0, 0.0)      # Street static wheel centres
@@ -515,35 +516,36 @@ def tyre_sweep(car):
 
 # per-car side silhouette (x, floor z, top z), glass start / end, where the
 # side glass stops, beltline (z at glass start, z at glass end: rising to the
-# rear) and hood crown (fraction of the hood half width; < 0 = fenders above
-# the hood). Ends and floor are the stylized ones (bbox), the rest is new.
+# rear), hood crown (fraction of the hood half width; < 0 = fenders above
+# the hood) and the fender crest's rise over the hood gutter (valley, cm).
+# Ends and floor are the stylized ones (bbox), the rest is new.
 PROFILE = {
     # long hood, slight power bulge, upright-ish screen, fastback, high ducktail
     "Muscle": dict(profile=[(236, -12, 38), (226, -20, 50), (190, -22, 55), (140, -22, 58), (60, -22, 62),
                             (20, -22, 99), (-45, -22, 102), (-120, -22, 72), (-165, -22, 66),
                             (-205, -18, 66), (-222, -12, 59)],
-                   gs=60.0, ge=-120.0, sge=-82.0, belt=(58.0, 64.0), hood_crown=0.10),
+                   gs=60.0, ge=-120.0, sge=-82.0, belt=(58.0, 64.0), hood_crown=0.10, valley=3.0),
     # long hood, short deck: fastback glass onto a short ducktail deck
     "JDM": dict(profile=[(214, -8, 22), (204, -18, 34), (160, -20, 44), (124, -20, 48), (56, -20, 53),
                          (16, -20, 89), (-35, -20, 95), (-75, -20, 85), (-122, -20, 62), (-190, -18, 59),
                          (-210, -12, 53)],
-                gs=56.0, ge=-122.0, sge=-78.0, belt=(50.0, 56.0)),
+                gs=56.0, ge=-122.0, sge=-78.0, belt=(50.0, 56.0), valley=2.5),
     # low sharp nose, hood falling to the splitter, cab back, fast rake,
     # buttressed roof onto a kammback tail
     "Super": dict(profile=[(212, -16, 5), (204, -22, 15), (185, -24, 27), (160, -24, 37), (140, -24, 43),
                            (118, -24, 45), (90, -24, 44), (62, -24, 44), (5, -24, 79), (-25, -24, 83),
                            (-60, -24, 78), (-95, -24, 67), (-130, -24, 60), (-170, -24, 57), (-200, -20, 54),
                            (-214, -14, 51)],
-                  gs=62.0, ge=-95.0, sge=-48.0, belt=(41.0, 50.0), hood_crown=0.02,
+                  gs=62.0, ge=-95.0, sge=-48.0, belt=(41.0, 50.0), hood_crown=0.02, valley=4.0,
                   intake=(-97.0, 22.0, 24.0, 22.0)),
     # cab forward over a tall flat hood; the bed is its own part
     "Pickup": dict(profile=[(268, 4, 66), (258, -6, 80), (230, -8, 86), (185, -8, 90), (130, -8, 97),
                             (86, -8, 148), (-30, -8, 152), (-38, -8, 146), (-44, -8, 92)],
-                   gs=130.0, ge=-36.0, belt=(93.0, 97.0), hood_crown=0.04),
+                   gs=130.0, ge=-36.0, belt=(93.0, 97.0), hood_crown=0.04, valley=1.5),
     # short-overhang hatch: rounded-off ends, tall cowl, near-vertical hatch
     "Rally": dict(profile=[(190, -4, 30), (182, -13, 41), (150, -18, 50), (112, -18, 55), (70, -18, 62),
                            (24, -18, 109), (-100, -18, 112), (-140, -18, 107), (-160, -16, 64), (-180, -10, 56)],
-                  gs=70.0, ge=-162.0, sge=-140.0, belt=(58.0, 64.0)),
+                  gs=70.0, ge=-162.0, sge=-140.0, belt=(58.0, 64.0), valley=2.0),
     # smooth teardrop: softened fender humps under the stylized canopy
     "Concept": dict(profile=[(176, -24, 14), (169, -28, 26), (154, -28, 42), (128, -28, 50), (100, -28, 48),
                              (78, -28, 45), (0, -28, 43), (-70, -28, 46), (-110, -28, 52), (-140, -28, 54),
@@ -644,8 +646,48 @@ def sections(car, xs):
         cx, cz, cw = (np.array(c) for c in zip(*sorted(car.center)))
         Y.append(np.minimum(np.interp(xs, cx, cw), Y[4] - 2.0))
         Z.append(np.interp(xs, cx, cz))
-    return dict(Y=np.stack(Y, 1), Z=np.stack(Z, 1), zb=zb, zb_floor=zb_floor, w=w, belt=belt,
+    Y, Z, key = densify(np.stack(Y, 1), np.stack(Z, 1))
+    if car.valley and not car.center:
+        # hood / fender valley: the belt-to-top midpoint stands up as the
+        # fender crest, the top edge (hood shut) is the gutter, the hood
+        # crowns again inboard; faded out over the last 30 cm to the nose
+        fade = hood * np.clip((car.x0 - car.bulge - xs) / 30.0, 0.0, 1.0)
+        m = key[3] + 1
+        Z[:, m] += fade * np.maximum(Z[:, key[4]] + car.valley - Z[:, m], 0.0)
+    return dict(Y=Y, Z=Z, key=key, zb=zb, zb_floor=zb_floor, w=w, belt=belt,
                 cabin=cabin, H=H, crown=crown, well=well)
+
+
+SIDE_EXTRA = (1, 2, 1, 1)   # extra side points between key points S0..S4 (none up to a crest)
+
+
+def densify(Y, Z):
+    """Insert SIDE_EXTRA points per band on a Hermite curve through the key
+    section points (Catmull-Rom tangents, one-sided at hard creases so the
+    rocker / shoulder stay sharp; straight up the belt-to-top band, the side
+    glass), clamped inside each band's z range and never inboard of it. Returns dense Y, Z and the key points' indices."""
+    P = np.stack([Y, Z], 2)
+    nk = P.shape[1]
+    T = np.empty_like(P)
+    T[:, 1:-1] = 0.5 * (P[:, 2:] - P[:, :-2])
+    T[:, 0], T[:, -1] = P[:, 1] - P[:, 0], P[:, -1] - P[:, -2]
+    out, key = [P[:, 0]], [0]
+    for k in range(nk - 1):
+        a, b = P[:, k], P[:, k + 1]
+        ta = b - a if k == 3 or CREASE.get(k, 0.0) >= 0.8 else T[:, k]
+        tb = b - a if k == 3 or CREASE.get(k + 1, 0.0) >= 0.8 else T[:, k + 1]
+        m = SIDE_EXTRA[k] if k < len(SIDE_EXTRA) else 0
+        for j in range(1, m + 1):
+            s = j / (m + 1)
+            p = ((2 * s ** 3 - 3 * s ** 2 + 1) * a + (s ** 3 - 2 * s ** 2 + s) * ta
+                 + (3 * s ** 2 - 2 * s ** 3) * b + (s ** 3 - s ** 2) * tb)
+            p[:, 0] = np.maximum(p[:, 0], np.minimum(a[:, 0], b[:, 0]))
+            p[:, 1] = np.clip(p[:, 1], np.minimum(a[:, 1], b[:, 1]), np.maximum(a[:, 1], b[:, 1]))
+            out.append(p)
+        out.append(b)
+        key.append(len(out) - 1)
+    D = np.stack(out, 1)
+    return D[..., 0], D[..., 1], key
 
 
 # per-car body character (sections): plan taper at nose/tail, waist between
@@ -711,7 +753,7 @@ def build_cage(car):
     for i, x in enumerate(xs):
         y0, zf = Y[i, 0], S["zb_floor"][i]
         w1y, w2y = min(0.93 * y0, w_in), min(0.86 * y0, w_in - 4.0)
-        w1z = min(S["well"][i], Z[i, 4] - 4.0)     # under the outer top (not a centre-line car's crest)
+        w1z = min(S["well"][i], Z[i, S["key"][4]] - 4.0)     # under the outer top (not a centre-line car's crest)
         ly = y0 - 2.0
         crown = 0.8 if car.center else float(S["crown"][i])
         pts = [(x, Y[i, k], Z[i, k]) for k in range(ns)]
@@ -774,10 +816,11 @@ def build_cage(car):
             for u in range(nu):
                 part.f((grid[v][u], grid[v][u + 1], grid[v + 1][u + 1], grid[v + 1][u]),
                        PLASTIC if v == 0 else car.body_cell, pan)
-    # character lines: creases along the section points
+    # character lines: creases along the key section points
+    crease = {S["key"][k]: c for k, c in CREASE.items() if k < len(S["key"])}
     for i in range(len(xs) - 1):
         for k in range(ns):
-            c = CREASE.get(k, 0.0)
+            c = crease.get(k, 0.0)
             for idx in (k, 2 * ns + nc - 1 - k):
                 e = part.bm.edges.get((rings[i][idx], rings[i + 1][idx]))
                 if e and c:
@@ -797,25 +840,26 @@ def face_cell_panel(car, S, i, xc, kind, b, side, in_cabin, pillar, steep, ns, n
     if kind in ("floor", "well"):
         return PLASTIC, P_FLOOR
     reg = car.region(xc)
+    key = S["key"]
     if kind == "side":
-        is_crest = car.center is not None and b == ns - 2
+        is_crest = car.center is not None and b >= key[4]
         if in_cabin and not pillar and xc > car.sge:
             if car.center is not None:
                 glass = is_crest and min(S["Z"][i, -1] - S["Z"][i, -2],
                                          S["Z"][i + 1, -1] - S["Z"][i + 1, -2]) > 3.0
             else:
-                glass = b == 3
+                glass = key[3] <= b < key[4]
             if glass:
                 return GLASS, p_glass(10 * (side > 0) + car.seg_of(xc))
         if not is_crest:
-            cell = dark if b == 0 else body
+            cell = dark if b < key[1] else body
             if reg == "bf":
                 return cell, P_BUMF
             if reg == "br":
                 return cell, P_BUMR
             if reg == "front":
                 return cell, p_fender(side)
-            if isinstance(reg, int) and b >= 1:
+            if isinstance(reg, int) and b >= key[1]:
                 return cell, p_door(reg, side)
             return cell, P_SHELL
     # top cap (and the crest band of centre-line cars)
@@ -1295,7 +1339,7 @@ def build_parts(car):
             x += car.dgs                                 # stays at the A-pillar foot
             Sm = sections(car, np.array([x]))
             belt = float(Sm["belt"][0])
-            y = float(Sm["Y"][0, 3]) - 1.0               # on the shaped belt line,
+            y = float(Sm["Y"][0, Sm["key"][3]]) - 1.0               # on the shaped belt line,
             y = min(y, max(w for _, w in car.plan) - 18.0)   # inside the stylized width over a flared fender
             for s in (1, -1):
                 ya, yb = sorted((s * (y + 6), s * (y + 20)))
