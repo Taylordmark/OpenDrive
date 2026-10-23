@@ -999,6 +999,8 @@ private:
 	// a modest fraction here reliably catches "this tile ran way too early".
 	static constexpr float TileRetryDeferralRatio = 0.5f;
 	static constexpr double TileBuildGiveUpAfterSec = 10.0;
+	// candidates a retry looks at before deciding to wait (see BuildTile)
+	static constexpr int32 TileProbeAttempts = 24;
 	mutable int32 TileRetryCount = 0;
 	mutable int32 TileGiveUpCount = 0;
 

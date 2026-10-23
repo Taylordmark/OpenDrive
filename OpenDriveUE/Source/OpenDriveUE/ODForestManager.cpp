@@ -1,4 +1,5 @@
 #include "ODForestManager.h"
+#include "ODTickMeter.h"
 #include "ODBakeLink.h"
 #include "ODTileSource.h"
 #include "ODAssetDetail.h"
@@ -2012,6 +2013,28 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	constexpr int32 NumBatches = ScrubBatchIdx + 1;
 	TArray<FTransform> Batches[NumBatches];
 
+	// Retry probe (2026-10-22, livetest8's 80-160 ms frames after the vista
+	// spawned): a held-back tile is retried every frame, and each retry used
+	// to re-run every candidate's ground raycast before the gate at the
+	// bottom discarded it - one such tile per Tick (the loop always builds
+	// one) was the whole frame. Now the first TileProbeAttempts candidates
+	// decide; a tile that passes still runs the full gate below.
+	const double Now = GetWorld()->GetTimeSeconds();
+	const double* FirstTry = TileFirstBuildAttemptTime.Find(Key);
+	const bool bCanHoldBack = bUseElevationGrid
+		&& (!FirstTry || Now - *FirstTry < TileBuildGiveUpAfterSec);
+	auto ProbeSaysWait = [&]()
+	{
+		return bCanHoldBack && GroundAttempts == TileProbeAttempts
+			&& GroundDeferred > TileProbeAttempts * TileRetryDeferralRatio;
+	};
+	auto HoldBack = [&]()
+	{
+		TileFirstBuildAttemptTime.FindOrAdd(Key, Now);
+		++TileRetryCount;
+		return false;   // key stays out of Tiles - Tick() retries it next frame
+	};
+
 	for (int32 i = 0; i < NTrees + NBushes; ++i)
 	{
 		const bool bTree = i < NTrees;
@@ -2066,12 +2089,14 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		FVector Ground;
 		bool bDeferred = false;
 		++GroundAttempts;
-		if (!GroundAt(Px, Py, Player, Ground, &bDeferred))
+		const bool bHit = GroundAt(Px, Py, Player, Ground, &bDeferred);
+		GroundDeferred += bDeferred;
+		if (ProbeSaysWait())
 		{
-			if (bDeferred)
-			{
-				++GroundDeferred;
-			}
+			return HoldBack();
+		}
+		if (!bHit)
+		{
 			continue;
 		}
 		int32 MeshIdx;
@@ -2151,12 +2176,14 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 			FVector Ground;
 			bool bDeferred = false;
 			++GroundAttempts;
-			if (!GroundAt(Px, Py, Player, Ground, &bDeferred))
+			const bool bHit = GroundAt(Px, Py, Player, Ground, &bDeferred);
+			GroundDeferred += bDeferred;
+			if (ProbeSaysWait())
 			{
-				if (bDeferred)
-				{
-					++GroundDeferred;
-				}
+				return HoldBack();
+			}
+			if (!bHit)
+			{
 				continue;
 			}
 			// Base-pivot correction (2026-08-27, see RockMeshBaseOffsetCm's
@@ -2214,12 +2241,10 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	if (bUseElevationGrid && GroundAttempts > 0
 		&& (float)GroundDeferred / GroundAttempts > TileRetryDeferralRatio)
 	{
-		const double Now = GetWorld()->GetTimeSeconds();
 		const double FirstAttempt = TileFirstBuildAttemptTime.FindOrAdd(Key, Now);
 		if (Now - FirstAttempt < TileBuildGiveUpAfterSec)
 		{
-			++TileRetryCount;
-			return false;   // key stays out of Tiles - Tick() retries it next frame
+			return HoldBack();
 		}
 		++TileGiveUpCount;
 		UE_LOG(LogTemp, Warning,
@@ -2379,7 +2404,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	// RockyFoothill/AlpineBare/CanyonBadlands).
 	if (bEnableGroundCover)
 	{
-		if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastGroundCoverLogTime > 5.0)
+		if (Now - LastGroundCoverLogTime > 5.0)
 		{
 			LastGroundCoverLogTime = Now;
 			UE_LOG(LogTemp, Display,
@@ -2397,7 +2422,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	// (nonzero max offset) rather than a silently-zero bounding-box read, and
 	// gives a rough sense of scale (should track ~half the largest scaled
 	// rock's height, given RockMinScale/RockMaxScale).
-	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastGroundCoverOffsetLogTime > 5.0)
+	if (Now - LastGroundCoverOffsetLogTime > 5.0)
 	{
 		LastGroundCoverOffsetLogTime = Now;
 		UE_LOG(LogTemp, Display,
@@ -2408,7 +2433,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		GroundCoverMaxOffsetAppliedCm = 0.0f;
 	}
 
-	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastElevationCorrectionLogTime > 5.0
+	if (Now - LastElevationCorrectionLogTime > 5.0
 		&& (TileRetryCount > 0 || TileGiveUpCount > 0))
 	{
 		// piggybacks on the same 5s gate as the per-candidate elevation log
@@ -2834,6 +2859,8 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 void AODForestManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODForestManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 	if (!bReady)
 	{
 		return;

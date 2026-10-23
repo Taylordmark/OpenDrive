@@ -1,4 +1,5 @@
 #include "ODTerrainManager.h"
+#include "ODTickMeter.h"
 #include "UObject/Package.h" // ODVisualStyle.h uses UPackage (non-unity builds)
 #include "ODVisualStyle.h"
 
@@ -2179,6 +2180,8 @@ void AODTerrainManager::ReleaseTile(const FIntPoint& Key)
 void AODTerrainManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODTerrainManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	ProcessPendingTileBuilds();
 

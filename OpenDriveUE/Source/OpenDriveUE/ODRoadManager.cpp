@@ -1,4 +1,5 @@
 #include "ODRoadManager.h"
+#include "ODTickMeter.h"
 #include "ODVisualStyle.h"
 #include "ODRoadDecals.h"
 
@@ -2121,6 +2122,8 @@ void AODRoadManager::RunSeamCheck()
 void AODRoadManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODRoadManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	// Runs before this tick's new builds so every component gets at least
 	// one full tick registered before its forced destroy-and-rebuild pass -
