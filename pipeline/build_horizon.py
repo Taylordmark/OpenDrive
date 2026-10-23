@@ -9,7 +9,9 @@ AODTerrainManager::LoadHorizon draws once (no collision, no shadow) under
 the streamed tiles.
 
 It must never poke through a loaded tile, so inside the baked extent each
-vertex takes the MIN over its footprint and the whole mesh sits
+vertex takes the MIN over its footprint - of the DEM and of every baked
+tile vertex within 1.5 cells, since zoom 10 misses narrow valley floors by
+up to 170 m (Calderwood, 2026-10-22) - and the whole mesh sits
 HORIZON_SINK_M (> the RTIN error) below that; outside it (never covered by
 tiles) the footprint MEAN keeps ridgelines honest. Earth curvature drops it
 d^2/2R past the baked extent (500 m at 80 km), and open sea (all three
@@ -26,6 +28,7 @@ import requests
 
 import build_terrain_mesh_tiles as B
 from bake_job import outline_local
+from bin_tile_io import parse_terrain_tile_bin
 from generation_id import compute_generation_id, pack_generation_id
 from test_areas import AREA_NAME, ORIGIN_HEIGHT_M, TERRAIN_TILE_SIZE_CM, to_lonlat
 
@@ -80,8 +83,17 @@ def outside_dist_m(e, n, ext):
     return np.hypot(np.maximum(0, np.maximum(e0 - e, e - e1)), np.maximum(0, np.maximum(n0 - n, n - n1)))
 
 
-def build(ext, elev_fn):
-    """elev_fn(east_m, north_m) -> metres MSL. Returns the terrain tile dict and stats."""
+def tile_verts_cm():
+    """(N, 3) UE cm of every baked terrain tile vertex (near and coarse twins,
+    skirts included), or None before any tile exists (a drawn area's pass 1)."""
+    paths = glob.glob(str(B.OUT_DIR / f"terrain_{AREA_NAME}_test_tile_*.bin")) +         glob.glob(str(B.OUT_DIR / f"terrain_coarse_{AREA_NAME}_test_tile_*.bin"))
+    vs = [np.asarray(t["verts"], np.float32).reshape(-1, 3) for t in map(parse_terrain_tile_bin, paths) if t]
+    return np.concatenate(vs) if vs else None
+
+
+def build(ext, elev_fn, tile_verts=None):
+    """elev_fn(east_m, north_m) -> metres MSL; tile_verts: tile_verts_cm().
+    Returns the terrain tile dict and stats."""
     e0, n0, e1, n1 = ext
     ce, cn = (e0 + e1) / 2, (n0 + n1) / 2
     half = max(e1 - e0, n1 - n0) / 2 + HORIZON_MARGIN_M
@@ -97,7 +109,18 @@ def build(ext, elev_fn):
     cell = 2 * half / (n - 1)
     elev = np.where(d <= cell, mn, mean)
     sea = elev <= 0.0
-    z_cm = (B.road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M) - HORIZON_SINK_M - d * d / (2 * EARTH_R_M)) * 100.0
+    z_m = B.road_ue_z_m(elev, 0.0, ORIGIN_HEIGHT_M)
+    if tile_verts is not None:
+        # (2026-10-22) zoom-10 Terrarium stands 40-170 m over the Calderwood
+        # gorge floor, so its footprint MIN poked a slab through the tiles.
+        # Each vertex also takes the lowest tile vertex within 1.5 cells
+        # (nearest-vertex bins, then 3x3), covering its whole one-ring.
+        col = np.clip(np.rint((tile_verts[:, 0] / 100.0 - (ce - half)) / cell).astype(np.int64), 0, n - 1)
+        row = np.clip(np.rint(((cn + half) + tile_verts[:, 1] / 100.0) / cell).astype(np.int64), 0, n - 1)
+        low = np.full((n + 2, n + 2), np.inf)
+        np.minimum.at(low, (row + 1, col + 1), tile_verts[:, 2] / 100.0)
+        z_m = np.minimum(z_m, np.min([low[a:a + n, b:b + n] for a in range(3) for b in range(3)], axis=0))
+    z_cm = (z_m - HORIZON_SINK_M - d * d / (2 * EARTH_R_M)) * 100.0
 
     tile = B._martini_for(n).create_tile((z_cm / 100.0).astype(np.float32))
     gv, tris = tile.get_mesh(HORIZON_MAX_ERROR_M)
@@ -127,7 +150,7 @@ def main():
         lon, lat = to_lonlat(e, n)
         return B.sample_dem(lat.reshape(-1), lon.reshape(-1), HORIZON_ZOOM, sess, cache).reshape(e.shape).astype(np.float64)
 
-    tile, st = build(ext, elev_fn)
+    tile, st = build(ext, elev_fn, tile_verts_cm())
     outline = outline_local()
     if outline is not None:
         def curtain_elev(e, n):

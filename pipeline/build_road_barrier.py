@@ -49,6 +49,7 @@ import zlib
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from classify_settlements import SETTLEMENT_CELL_CM
 from road_mesh_common import road_ue_z_m
@@ -76,6 +77,11 @@ LAKE_SHORE_EXCLUSION_MARGIN_M = WATER_SHORE_BLEND_M + 3.0
 
 BARRIER_SPACING_M = 2.5      # tree/bush visual placement spacing
 BARRIER_OFFSET_M = 13.0      # just outside PavementExclusionCm (11.5 m)
+# (2026-10-22, Taylor: trees in the Copp Circle junction at Calderwood) each
+# road's 13 m offset row ran straight across every road it meets and over
+# the junction pads. A point this near ANY road station or pad point is
+# open, the forest's own PavementExclusionCm rule.
+BARRIER_ROAD_CLEAR_M = 11.5
 WALL_CHUNK_STATIONS = 80     # ~200 m per run at BARRIER_SPACING_M spacing (tile-bucketing granularity)
 # Wall HEIGHT is no longer decided here - AODBarrierManager::WallHeightM (C++)
 # extrudes each run's station points into the vertical ribbon at runtime now.
@@ -84,6 +90,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIONS_PATH = ROOT / "data" / "road_tiles" / f"{AREA_NAME}_test" / "road_stations.json"
 SETTLEMENT_PATH = STATIONS_PATH.parent / "settlement_tiles.json"
 OUT_PATH = STATIONS_PATH.parent / "road_barrier.json"
+PADPTS_PATH = ROOT / "OpenDriveUE" / "Content" / "OpenDrive" / "Masks" / f"padpts_{AREA_NAME}_test.bin"
 
 
 def load_settlement_tiles():
@@ -91,6 +98,18 @@ def load_settlement_tiles():
         return set()
     tiles = json.loads(SETTLEMENT_PATH.read_text())["tiles"]
     return {tuple(int(p) for p in k.split(",")) for k in tiles}
+
+
+def road_tree(segments, padpts_path=PADPTS_PATH):
+    """KD tree (UE cm) over every road station and, when baked
+    (export_pad_points_bin.py runs first), every junction-pad point."""
+    xy = [np.c_[np.array(seg["east_m"]) * 100.0, -np.array(seg["north_m"]) * 100.0] for seg in segments]
+    if padpts_path.is_file():
+        b = padpts_path.read_bytes()
+        xy.append(np.frombuffer(b, "<f4", int.from_bytes(b[4:8], "little") * 2, 8).reshape(-1, 2))
+    else:
+        print(f"no {padpts_path.name} - junction pads not kept clear")
+    return cKDTree(np.concatenate(xy))
 
 
 def contiguous_runs(mask):
@@ -132,9 +151,11 @@ def main():
         print(f"{len(lakes)} lake bed(s) loaded - barrier wall/scenery points over "
               f"open water will be skipped")
 
+    roads = road_tree(data["segments"])
+
     points = []
     wall_runs = []
-    n_skipped_bridge = n_skipped_town = n_skipped_lake = 0
+    n_skipped_bridge = n_skipped_town = n_skipped_lake = n_skipped_road = 0
     for seg in data["segments"]:
         east = np.array(seg["east_m"])
         north = np.array(seg["north_m"])
@@ -192,7 +213,8 @@ def main():
                 dist_cm = _dist_to_ring(ox[idx], oy[idx], lake["ring_x"], lake["ring_y"])
                 in_lake[idx] |= inside | (dist_cm <= margin_cm)
 
-            open_mask = bridge_f | in_town | in_lake
+            on_road = roads.query(np.c_[ox, oy], distance_upper_bound=BARRIER_ROAD_CLEAR_M * 100.0)[0] < np.inf
+            open_mask = bridge_f | in_town | in_lake | on_road
             keep_mask = ~open_mask
 
             for run_start, run_end in contiguous_runs(keep_mask):
@@ -207,6 +229,8 @@ def main():
                         n_skipped_bridge += 1
                     elif in_lake[i]:
                         n_skipped_lake += 1
+                    elif on_road[i]:
+                        n_skipped_road += 1
                     else:
                         n_skipped_town += 1
                     continue
@@ -226,7 +250,8 @@ def main():
           f"({total_stations} station(s)) "
           f"({n_skipped_bridge} station-sides skipped near bridges/tunnels, "
           f"{n_skipped_town} skipped inside populated tiles, "
-          f"{n_skipped_lake} skipped over open water) -> {OUT_PATH}")
+          f"{n_skipped_lake} skipped over open water, "
+          f"{n_skipped_road} within {BARRIER_ROAD_CLEAR_M} m of a road or pad) -> {OUT_PATH}")
 
 
 if __name__ == "__main__":

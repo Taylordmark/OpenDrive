@@ -40,6 +40,27 @@ def test_horizon():
     assert (c[:, 0] < 40000.0 + st["cell_m"]).all()
 
 
+def test_horizon_under_tiles():
+    """(2026-10-22) the DEM it samples misses a gorge the tiles have
+    (Calderwood: zoom 10 is 40-170 m over the floor): it must sink to the tiles."""
+    H.HORIZON_N, H.HORIZON_SUPERSAMPLE, H.HORIZON_MARGIN_M = 129, 4, 30000.0
+    ext = (0.0, 0.0, 20000.0, 20000.0)
+    e, n = np.meshgrid(np.arange(0.0, 20000.0, 50.0), np.arange(0.0, 20000.0, 50.0))
+    gorge = np.abs(e - 10000.0) < 100.0
+    z_tile = road_ue_z_m(ground(e, n) - 150.0 * gorge, 0.0, ORIGIN_HEIGHT_M)
+    tv = np.c_[e.ravel() * 100, -n.ravel() * 100, z_tile.ravel() * 100].astype(np.float32)
+    from matplotlib.tri import LinearTriInterpolator, Triangulation
+
+    def over_tiles(tile):   # horizon surface minus tile Z at every tile vertex (m)
+        v = tile["verts"].astype(np.float64) / 100.0
+        tri = Triangulation(v[:, 0], v[:, 1], tile["tris"].astype(np.int64))
+        return LinearTriInterpolator(tri, v[:, 2])(tv[:, 0] / 100, tv[:, 1] / 100) - tv[:, 2] / 100
+
+    assert over_tiles(H.build(ext, ground)[0]).max() > 0     # DEM alone pokes through
+    assert over_tiles(H.build(ext, ground, tv)[0]).max() < 0
+
+
 if __name__ == "__main__":
     test_horizon()
+    test_horizon_under_tiles()
     print("ok")
