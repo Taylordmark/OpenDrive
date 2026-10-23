@@ -71,6 +71,46 @@ bool QueryVram(float& UsedMb, float& BudgetMb, float& SharedMb)
 	return false;
 }
 
+/**
+ * Low-VRAM settings (2026-10-22, 4 GB pass): with Ollama holding ~3.8 GB of
+ * the 8 GB card the OS budget is ~4.3 GB, the scene spills ~300 MB to shared
+ * memory and Lumen / VSM / texture passes run 20-50x slower (85-210 ms GPU vs
+ * 22 ms when it fits). Under LowVramBudgetMb these free ~0.4-0.6 GB (est.):
+ * Lumen surface cache 4096^2 -> 2048^2, VSM pool 4096 -> 2048 pages (the
+ * engine's own High default; VSM dynamic res lowers resolution before the
+ * pool overflows), texture streaming pool 1000 -> 700 MB. All three are read
+ * at run time (Lumen reallocates its atlas, VSM resizes its pool, streaming
+ * re-reads the pool size), so this applies mid-session too, e.g. when Ollama
+ * starts. Set by code, so a later scalability change won't undo them; once
+ * applied they stay. Success metric: the ODPerf line's "shared" MB near 0.
+ * -odlowvram=1 forces on, -odlowvram=0 off; default checks every 5 s.
+ */
+constexpr float LowVramBudgetMb = 5000.0f;
+
+bool LowVramTick(int32 Mode)
+{
+	float UsedMb = -1.0f, BudgetMb = -1.0f, SharedMb = -1.0f;
+	const bool bHave = QueryVram(UsedMb, BudgetMb, SharedMb);
+	if (Mode < 0 && !(bHave && BudgetMb < LowVramBudgetMb))
+	{
+		return true;   // keep checking
+	}
+	static const TCHAR* const Cvars[][2] = {
+		{ TEXT("r.LumenScene.SurfaceCache.AtlasSize"), TEXT("2048") },
+		{ TEXT("r.Shadow.Virtual.MaxPhysicalPages"), TEXT("2048") },
+		{ TEXT("r.Streaming.PoolSize"), TEXT("700") } };
+	for (const auto& Kv : Cvars)
+	{
+		if (IConsoleVariable* V = IConsoleManager::Get().FindConsoleVariable(Kv[0]))
+		{
+			V->Set(Kv[1], ECVF_SetByCode);
+		}
+	}
+	UE_LOG(LogTemp, Display, TEXT("ODLowVram: applied (%s, VRAM budget %.0f MB, used %.0f MB, shared %.0f MB): Lumen atlas 2048, VSM pages 2048, streaming pool 700 MB - watch ODPerf 'shared' MB fall toward 0"),
+		Mode > 0 ? TEXT("-odlowvram=1") : TEXT("budget under 5000 MB"), BudgetMb, UsedMb, SharedMb);
+	return false;   // applied once, never reverted
+}
+
 
 /**
  * `stat unit` in the log (2026-10-16, perf pass): every 5 s one ODPerf line
@@ -197,6 +237,13 @@ class FOpenDriveUEModule : public FDefaultGameModuleImpl
 		{
 			FODGhostFile::SelfCheck();
 			FODReplayBuffer::SelfCheck();
+		}
+		// checks every 5 s (the ODPerf window), first in the main loop with the RHI up
+		int32 LowVram = -1;
+		FParse::Value(FCommandLine::Get(), TEXT("odlowvram="), LowVram);
+		if (LowVram != 0 && !IsRunningCommandlet())
+		{
+			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([LowVram](float) { return LowVramTick(LowVram); }), 5.0f);
 		}
 		int32 Perf = 1, GpuDump = 1;
 		FParse::Value(FCommandLine::Get(), TEXT("odperf="), Perf);
