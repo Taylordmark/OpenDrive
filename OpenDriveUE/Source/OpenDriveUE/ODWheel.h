@@ -43,6 +43,7 @@ enum class EODWheelButton : uint8
 	Reset,
 	Gear1, Gear2, Gear3, Gear4, Gear5, Gear6, Gear7,
 	GearR,
+	MediaPlayPause, MediaNext, MediaPrev,
 	Count
 };
 

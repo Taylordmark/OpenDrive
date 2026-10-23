@@ -47,6 +47,7 @@ from PIL import Image
 from scipy import ndimage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # -I drops the script dir
+from bake_job import outline_tiles  # noqa: E402
 from fetch_cache import cached_bytes  # noqa: E402
 from test_areas import AREA_NAME, TERRAIN_TILE_SIZE_CM, to_lonlat  # noqa: E402
 
@@ -166,9 +167,10 @@ class Cog:
 
 # ---------------------------------------------------------------- extent
 def terrain_extent_cm():
-    """UE-cm rect (x0, y0, x1, y1) of the area's baked near/far terrain tiles."""
-    keys = [tuple(map(int, p.stem.rsplit("_", 2)[1:]))
-            for p in MASKS.glob(f"terrain_{AREA_NAME}_test_tile_*.bin")]
+    """UE-cm rect (x0, y0, x1, y1) of the area's baked near/far terrain tiles
+    (a drawn area's planned ones: pass 1 runs before any is baked)."""
+    keys = outline_tiles(TERRAIN_TILE_SIZE_CM) or [
+        tuple(map(int, p.stem.rsplit("_", 2)[1:])) for p in MASKS.glob(f"terrain_{AREA_NAME}_test_tile_*.bin")]
     if not keys:
         raise SystemExit(f"no terrain tiles for {AREA_NAME} in {MASKS}")
     tx, ty = np.array(keys).T

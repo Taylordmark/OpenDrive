@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GenericPlatform/GenericPlatformFile.h" // IFileHandle (far forest)
+#include "Tasks/Task.h"
 #include "ODBinSidecarUtil.h" // FRoadStation/FStationSpatialHash/ParseRoadStationSidecarFile
 #include "ODMenuVista.h"
 #include "ODGroundCover.h"
@@ -99,6 +100,17 @@ struct FBiomeRecipe
 	float AmbientVegFloor = 0.f;
 };
 
+/** One area's worker-built T (AODForestManager::PrewarmArea), defined in
+ *  ODForestManager.cpp. Game thread only. */
+template <typename T>
+struct TODAreaCache
+{
+	FString Key;   // prefix + ODBakeLink status version: a drawn area's re-bake misses
+	UE::Tasks::TTask<TSharedPtr<const T>> Task;
+	bool Prewarm(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&));   // true once built
+	TSharedPtr<const T> Get(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&), const TCHAR* What);   // waits, logs
+};
+
 /**
  * Runtime forest (replaces landscape-grass trees, 2026-07-15): deterministic
  * seeded scatter of trees + understory bushes on 96 m tiles around the player,
@@ -171,14 +183,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float FarForestRadius = 500000.0f;
 
-	/** Game-thread ms per tick for far chunk builds (at least one per tick). */
+	/** Game-thread ms per tick for all forest streaming: grass cells, near
+	 *  tile scatter + HISM commit, far chunk HISMs (2026-10-22, livetest10:
+	 *  one tile plus one far chunk per frame, each forced through whole, made
+	 *  60 ms frames). Checked between ~1 ms work units, so a frame's forest
+	 *  work stays near this; streaming just takes more frames. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
-	float FarBuildMsBudget = 2.0f;
+	float StreamMsBudget = 6.0f;
 
 	/** Trees per m^2 at forest weight 1. Thinned 0.075 -> 0.05 (2026-07-25) so
 	 *  the roadside canopy reads as forest, not a wall right over the camera. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float TreesPerSqM = 0.05f;
+
+	/** Trees per m^2 inside WorldCover tree cells, used instead of
+	 *  TreesPerSqM x forest weight whenever the far-forest bin is loaded
+	 *  (2026-10-22, Taylor's Summit County drive: "a continuous line of trees
+	 *  each side of the road, very few anywhere else"). The road band planted
+	 *  ~330 trees/ha against the far cards' 25/ha (one per 20 m tree cell),
+	 *  a 13x wall at the band edge, and planted them in meadows too since the
+	 *  per-tile weight blends 300 m biome points. Now the near trees stand on
+	 *  the same tree cells as the cards, at FarCardsPerCell's density:
+	 *  3 cards / 400 m^2 = 0.0075. docs/forest_distribution/. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float ForestTreesPerSqM = 0.0075f;
+
+	/** Trees thin in from PavementExclusionCm to full density at this
+	 *  distance from the centerline (smoothstep) - a cleared verge rather
+	 *  than a wall at the exclusion edge. Landcover-gated trees only. */
+	UPROPERTY(EditAnywhere, Category = "Forest")
+	float RoadFadeCm = 4000.0f;   // 40 m
 
 	/** Max lateral distance (cm) from the road centerline a tree/bush may
 	 *  plant (2026-07-25). Trees are placed at their true height from the
@@ -191,7 +225,7 @@ public:
 	 *  set (open-world levels); Tail of the Dragon leaves it unset and is
 	 *  unaffected. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
-	float ForestBandCm = 12000.0f;   // 120 m
+	float ForestBandCm = 13000.0f;   // 130 m = build_far_forest.py BAND_M, so band cards and near trees meet without a gap
 
 	/** Understory bushes per m^2 at forest weight 1. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
@@ -472,6 +506,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	FString WaterTilePrefix;
 
+	/** Game thread (2026-10-22): start building an area's lakes (WaterPrefix),
+	 *  elevation grid and far-forest index (ElevPrefix, elev_<area>_test) on
+	 *  workers, so the vista's and then the level's forest manager both pick
+	 *  them up instead of each spending 1-5 s in BeginPlay (livetest7: lakes
+	 *  4.7 s, 518 files; elevation 0.27 s, 1.65M points; far forest 0.22 s).
+	 *  Holds one area: another prefix drops the old one. True once built;
+	 *  call again to poll. */
+	static bool PrewarmArea(const FString& WaterPrefix, const FString& ElevPrefix);
+
 	// --- trunk collision (moved from the retired ODForestCollisionManager) ---
 	UPROPERTY(EditAnywhere, Category = "Collision")
 	int32 PoolSize = 96;   // trunks + rocks share it (2026-10-09, was 48 trunks only)
@@ -492,7 +535,34 @@ private:
 		TArray<FVector> Trunks;        // world tree positions (collision)
 		TArray<float> TrunkScales;
 		TArray<FVector4> Rocks;        // rock collision spheres: xyz centre, w radius (cm)
+		TArray<TArray<FTransform>> Batches;   // per mesh batch, HISMs not made yet (CommitTile)
+		int32 NextBatch = 0;
 	};
+	/** A near tile's scatter in progress (2026-10-22): BuildTile stops when
+	 *  StreamDeadline passes and Tick resumes it next frame. Same RNG stream,
+	 *  so the layout doesn't depend on where it paused. */
+	struct FTileScatter
+	{
+		FIntPoint Key;
+		FTile Tile;
+		FRandomStream Rng;
+		FBiomeRecipe Recipe;
+		float TileForestWeight = -1.0f;
+		EODBiome DominantBiome = EODBiome::DeciduousForest;
+		int32 NTrees = 0, NBushes = 0, NRocks = 0, NScrub = 0, Next = 0;
+		int32 GroundAttempts = 0, GroundDeferred = 0, NRocksPlaced = 0, NScrubPlaced = 0;
+	};
+	TOptional<FTileScatter> Scatter;
+	TOptional<FIntPoint> CommittingTile;   // in Tiles, HISMs still pending
+	enum class ETileBuild : uint8 { Done, HeldBack, Busy };   // Busy = out of time, resume next tick
+	/** Makes T's pending HISMs while StreamDeadline lasts (bForce: at least
+	 *  one). True when none are left. */
+	bool CommitTile(FTile& T, bool bForce);
+	double StreamDeadline = 0.0;   // FPlatformTime::Seconds() this tick's streaming stops at
+	bool StreamTimeLeft() const { return FPlatformTime::Seconds() < StreamDeadline; }
+	bool bFarBusy = false;   // last UpdateFarForest started or still commits a chunk
+	double StreamLogAt = 0.0;
+	double StreamMaxMs[3] = {};   // longest grass / near tiles / far forest tick part, last 5 s
 
 	bool LoadMask();
 	bool LoadBiomePoints();
@@ -535,7 +605,7 @@ private:
 	                          FVector& OutHit) const;
 	bool HeightOnlyAt(double WorldX, double WorldY, float& OutZ) const;
 	bool SlopeAt(double WorldX, double WorldY, float& OutSlopeRatio) const;
-	/** Returns false if the tile's own scatter was mostly deferred (real
+	/** Returns HeldBack if the tile's own scatter was mostly deferred (real
 	 *  terrain collision not resolvable yet at most candidate points - see
 	 *  RaycastRuntimeGround) rather than committed sparse/empty - Tick()
 	 *  leaves the key out of Tiles in that case so its own `!Tiles.Contains`
@@ -550,7 +620,7 @@ private:
 	 *  5285 elevation-grid candidates) - without this, the tiles NEAREST the
 	 *  player (built first, in ring order) would each get permanently
 	 *  committed near-empty, since a committed tile is never revisited. */
-	bool BuildTile(const FIntPoint& Key, const AActor* Player);
+	ETileBuild BuildTile(FIntPoint Key, const AActor* Player);   // by value: Tick passes Scatter->Key, which a finished build resets
 	bool BuildGrassCell(const FIntPoint& Key, const AActor* Player);
 	void UpdateGrass(const FVector& Loc, const AActor* Player);
 	void UseSeasonFoliage(UMeshComponent* Comp) const;
@@ -577,16 +647,34 @@ private:
 	struct FFarChunk
 	{
 		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> Hisms;
-		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player
+		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player, one per 200 m band square (FarBandSubCells)
+		TArray<FVector2D> BandCenters;   // parallel to BandHisms
 		TArray<FVector> Trunks;   // off-band cards + street trees (collision)
-		bool bBandVisible = true;
+		TArray<TPair<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>>> Pending;   // batches without a HISM yet
 	};
+	void CommitFarBatch(const FIntPoint& Key, FFarChunk& Chunk);
 	bool LoadFarForest();
+	/** WorldCover tree at this 20 m far-forest cell (bRing: or any of its 8
+	 *  neighbours) - the near trees' landcover gate. Reads a 2 km tile's
+	 *  records once, then cached. */
+	bool IsTreeCellAt(double WorldX, double WorldY, bool bRing) const;
+	/** Distance to the nearest centerline point, capped at ReachCm. */
+	float CenterlineDistanceCm(double WorldX, double WorldY, float ReachCm) const;
+	mutable TMap<FIntPoint, TBitArray<>> FarTreeCells;
 	void BuildFarChunk(const FIntPoint& Key);
 	void UpdateFarForest(const FVector& Loc);
 	UStaticMesh* MakeCardMesh(int32 AtlasRow, int32 AtlasCol);
 	TUniquePtr<IFileHandle> FarFile;
 	TMap<FIntPoint, TPair<int64, int32>> FarTileRecs;   // 2 km tile -> (record byte offset, count)
+	/** farforest_*.bin's tile index, scanned on a worker (PrewarmArea). */
+	struct FFarIndex
+	{
+		FString Path;
+		TMap<FIntPoint, TPair<int64, int32>> TileRecs;
+		int64 NRecs = 0, Size = 0;
+	};
+	static TSharedPtr<const FFarIndex> LoadFarIndex(const FString& ElevPrefix);   // any thread, null when none
+	static TODAreaCache<FFarIndex>& FarCache();
 	TMap<FIntPoint, FFarChunk> FarChunks;
 	UPROPERTY()
 	TArray<TObjectPtr<UStaticMesh>> CardMeshes;   // [0] needle (pine cell), [1] broadleaf (aspen cell)
@@ -762,16 +850,24 @@ private:
 		FVector2D WorldXY;   // cm
 		float Z = 0.0f;      // cm
 	};
-	TArray<FGroundPoint> ElevationGrid;
-	TMap<FIntPoint, TArray<int32>> ElevationBuckets;
+	/** Built on a worker, shared read-only (2026-10-22, PrewarmArea). The
+	 *  vista keeps the whole grid now (was its wedge only): Vista.WantsTile
+	 *  already limits what it plants. */
+	struct FElevData
+	{
+		TArray<FGroundPoint> Grid;
+		TMap<FIntPoint, TArray<int32>> Buckets;
+		// XY bounds of Grid (2026-10-05, large world): Tick() skips tiles
+		// outside it, so two area sets' forest managers don't both plant every
+		// tile (BlendAt falls back to DefaultBiome, it never says "not mine").
+		// ponytail: AABB only - neighbouring areas still double-plant where their
+		// boxes overlap; switch to the area's own rect from worlds.json if visible.
+		FBox2D Bounds = FBox2D(ForceInit);
+	};
+	TSharedPtr<const FElevData> Elev;
+	static TSharedPtr<const FElevData> LoadElevation(const FString& ElevPrefix);   // any thread, null when none
 	bool bUseElevationGrid = false;
 	static constexpr float ElevationCellCm = 6000.0f;   // 60 m, > the grid's own ~30 m spacing
-	// XY bounds of ElevationGrid (2026-10-05, large world): Tick() skips tiles
-	// outside it, so two area sets' forest managers don't both plant every
-	// tile (BlendAt falls back to DefaultBiome, it never says "not mine").
-	// ponytail: AABB only - neighbouring areas still double-plant where their
-	// boxes overlap; switch to the area's own rect from worlds.json if visible.
-	FBox2D ElevationBounds = FBox2D(ForceInit);
 
 	TArray<FVector2D> RoadCenterline;
 	TMap<FIntPoint, TArray<int32>> CenterlineBuckets;
@@ -800,18 +896,28 @@ private:
 		// and even-odd parity runs over all of them so the island stays dry.
 		int32 Feature = 0;
 	};
-	TArray<FLakeRing> LakeRings;
 
-	// Segment index over LakeRings (2026-09-29): not "a handful of lakes" -
-	// summit_county loads 45k rings (mostly river ribbons), and the old
-	// per-candidate scan over all of them was 20-57 ms forest ticks
+	// Segment index over a lake ring list (2026-09-29): not "a handful of
+	// lakes" - summit_county loads 45k rings (mostly river ribbons), and the
+	// old per-candidate scan over all of them was 20-57 ms forest ticks
 	// (Insights trace, forest.utrace). Segment I runs Ring[I] -> Ring[I-1].
 	struct FLakeSeg { int32 Ring; int32 I; };
 	static constexpr double LakeGridCellCm = 5000.0;
-	TMap<FIntPoint, TArray<FLakeSeg>> LakeSegCells;   // segments within shore margin of each cell
-	TMap<int32, TArray<FLakeSeg>> LakeSegRows;         // segments whose Y-span overlaps each row, grouped by ring
-	void BuildLakeIndex();
-	bool IsInsideLakeBruteForce(double WorldX, double WorldY) const;
+	/** Plain data, built on a worker and shared read-only by every forest
+	 *  manager of the area (2026-10-22, LoadLakes/PrewarmArea). */
+	struct FLakeData
+	{
+		TArray<FLakeRing> Rings;
+		TMap<FIntPoint, TArray<FLakeSeg>> SegCells;   // segments within shore margin of each cell
+		TMap<int32, TArray<FLakeSeg>> SegRows;         // segments whose Y-span overlaps each row, grouped by ring
+		void BuildIndex();
+		bool IsInside(double WorldX, double WorldY) const;
+		bool IsInsideBruteForce(double WorldX, double WorldY) const;
+	};
+	TSharedPtr<const FLakeData> Lakes;
+	static TSharedPtr<const FLakeData> LoadLakes(const FString& WaterPrefix);   // any thread, null when none
+	static TODAreaCache<FLakeData>& LakeCache();
+	static TODAreaCache<FElevData>& ElevCache();
 	bool bUseWaterExclusion = false;
 
 	// Road-station exclusion (2026-08-26) - see RoadStationFilePrefix's
@@ -926,6 +1032,8 @@ private:
 	// a modest fraction here reliably catches "this tile ran way too early".
 	static constexpr float TileRetryDeferralRatio = 0.5f;
 	static constexpr double TileBuildGiveUpAfterSec = 10.0;
+	// candidates a retry looks at before deciding to wait (see BuildTile)
+	static constexpr int32 TileProbeAttempts = 24;
 	mutable int32 TileRetryCount = 0;
 	mutable int32 TileGiveUpCount = 0;
 
@@ -987,5 +1095,7 @@ private:
 	// even at highway speed, and the budget clears several tiles per
 	// SECOND at 60 fps).
 	static constexpr int32 TilesPerTick = 40;
-	static constexpr double TileBuildMsBudget = 2.5;
+	// 2026-10-22: the "at least one tile" floor made each tile a ~10 ms
+	// frame on its own (livetest10); TileBuildMsBudget is now the shared
+	// StreamMsBudget, and a tile pauses mid-scatter instead.
 };

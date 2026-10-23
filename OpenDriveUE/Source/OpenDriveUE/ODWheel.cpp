@@ -157,7 +157,7 @@ const TCHAR* FODRacingWheel::ButtonName(EODWheelButton B)
 {
 	static const TCHAR* Names[] = {TEXT("ShiftUp"), TEXT("ShiftDown"), TEXT("Handbrake"), TEXT("Reset"),
 		TEXT("Gear1"), TEXT("Gear2"), TEXT("Gear3"), TEXT("Gear4"), TEXT("Gear5"), TEXT("Gear6"), TEXT("Gear7"),
-		TEXT("GearR")};
+		TEXT("GearR"), TEXT("MediaPlayPause"), TEXT("MediaNext"), TEXT("MediaPrev")};
 	static_assert(UE_ARRAY_COUNT(Names) == static_cast<int32>(EODWheelButton::Count), "ButtonName table");
 	return Names[static_cast<int32>(B)];
 }

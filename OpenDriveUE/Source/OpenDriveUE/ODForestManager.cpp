@@ -1,4 +1,6 @@
 #include "ODForestManager.h"
+#include "ODTickMeter.h"
+#include "ODBakeLink.h"
 #include "ODTileSource.h"
 #include "ODAssetDetail.h"
 #include "ODVisualStyle.h"
@@ -66,6 +68,17 @@ const TCHAR* ShrubMeshPaths[] = {
 	TEXT("/Game/OpenDrive/Trees/sagebrush.sagebrush"),
 };
 constexpr int32 NumShrubSpecies = UE_ARRAY_COUNT(ShrubMeshPaths);
+// BuildTile's batches, one per mesh: NumTreeSpecies trees + NumShrubSpecies
+// shrubs (bush, sagebrush) + RockMeshes.Num() rock variants (4 procedural
+// boulder meshes, see RockMeshes' declaration) + scrub (grass_tuft).
+// Extended 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock
+// + scrub) alongside FBiomeRecipe's species-mix extension; rock count
+// bumped 2 -> 4 (2026-09-03, see RockMeshes' header comment).
+constexpr int32 BushBatchBase = NumTreeSpecies;                 // shrub batches start here
+constexpr int32 RockBatchBase = BushBatchBase + NumShrubSpecies; // then rock variants
+constexpr int32 NumRockVariants = 4;
+constexpr int32 ScrubBatchIdx = RockBatchBase + NumRockVariants; // then ground scrub
+constexpr int32 NumBatches = ScrubBatchIdx + 1;
 
 /** Indexed by EODBiome - order MUST match the enum in ODForestManager.h.
  *  FBiomeRecipe itself lives in the header (RecipeAt()/BlendAt() need the
@@ -228,6 +241,7 @@ const FBiomeRecipe& AODForestManager::RecipeForBiome(EODBiome Biome)
 void AODForestManager::BeginPlay()
 {
 	Super::BeginPlay();
+	const double BeginT0 = FPlatformTime::Seconds();
 
 	// ExtendedTreeMeshPaths, not the shared TreeMeshPaths[3] - see that
 	// array's own comment for why ODForestManager keeps its own superset.
@@ -339,6 +353,7 @@ void AODForestManager::BeginPlay()
 		Pool.Add(Cap);
 	}
 	PoolAt.Init(FVector(UE_BIG_NUMBER), PoolSize);
+	const double AssetsMs = (FPlatformTime::Seconds() - BeginT0) * 1000.0;   // LoadObject + MIDs + pool: game thread by nature
 
 	// ground-truth elevation grid + road centerline (open-world levels,
 	// 2026-07-20) - independent of the biome/mask path below, loaded
@@ -357,6 +372,8 @@ void AODForestManager::BeginPlay()
 	bUsePointBiomes = LoadBiomePoints();
 	bReady = bUsePointBiomes || LoadMask();
 	LoadFarForest();   // realism T3 far canopy cards + street trees (ODFarForest.cpp)
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: BeginPlay %.0f ms on the game thread (assets/pool %.0f ms)"),
+		(FPlatformTime::Seconds() - BeginT0) * 1000.0, AssetsMs);
 	if (!bReady)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -504,15 +521,22 @@ bool AODForestManager::LoadElevationGrid()
 	{
 		return false;   // Tail of the Dragon's actor instance - unaffected
 	}
+	Elev = ElevCache().Get(ElevationFilePrefix, &LoadElevation, TEXT("elevation"));
+	return Elev.IsValid();
+}
+
+TSharedPtr<const AODForestManager::FElevData> AODForestManager::LoadElevation(const FString& ElevPrefix)
+{
+	const double T0 = FPlatformTime::Seconds();
 	// 'ODE1', uint32 LE N, N * (float32 X_cm, float32 Y_cm, float32 Z_cm) -
 	// pipeline/build_forest_elevation.py
 	TArray<uint8> Bin;
 	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin")));
+		/ TEXT("OpenDrive/Masks") / (ElevPrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'E' || Bin[3] != '1')
 	{
-		return false;
+		return nullptr;
 	}
 	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
 		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
@@ -522,10 +546,10 @@ bool AODForestManager::LoadElevationGrid()
 		UE_LOG(LogTemp, Warning,
 			TEXT("ODForestManager: %s truncated/corrupt (N=%d, %lld bytes)"),
 			*BinPath, N, Bin.Num());
-		return false;
+		return nullptr;
 	}
-	// menu vista (2026-10-05): keep only the points near the wedge
-	ElevationGrid.Reserve(Vista.bActive ? 0 : N);
+	const TSharedRef<FElevData> D = MakeShared<FElevData>();
+	D->Grid.SetNumUninitialized(N);
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
@@ -533,22 +557,17 @@ bool AODForestManager::LoadElevationGrid()
 		FMemory::Memcpy(&X, P, 4);
 		FMemory::Memcpy(&Y, P + 4, 4);
 		FMemory::Memcpy(&Z, P + 8, 4);
-		if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
-		{
-			continue;
-		}
-		const int32 Idx = ElevationGrid.AddUninitialized();
-		ElevationGrid[Idx].WorldXY = FVector2D(X, Y);
-		ElevationGrid[Idx].Z = Z;
-		ElevationBounds += FVector2D(X, Y);
+		D->Grid[i].WorldXY = FVector2D(X, Y);
+		D->Grid[i].Z = Z;
+		D->Bounds += FVector2D(X, Y);
 		const int32 CellX = FMath::FloorToInt(X / ElevationCellCm);
 		const int32 CellY = FMath::FloorToInt(Y / ElevationCellCm);
-		ElevationBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
+		D->Buckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(i);
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("ODForestManager: loaded %d elevation grid point(s) from %s"),
-		ElevationGrid.Num(), *BinPath);
-	return true;
+		TEXT("ODForestManager: loaded %d elevation grid point(s) from %s in %.0f ms on a worker"),
+		N, *BinPath, (FPlatformTime::Seconds() - T0) * 1000.0);
+	return D;
 }
 
 bool AODForestManager::LoadCenterline()
@@ -705,6 +724,68 @@ bool AODForestManager::LoadWaterLakes()
 	{
 		return false;   // no baked water for this area/actor instance - unaffected
 	}
+	Lakes = LakeCache().Get(WaterTilePrefix, &LoadLakes, TEXT("lakes"));   // no wait once the menu's pin pick prewarmed it
+	return Lakes.IsValid();
+}
+
+template <typename T>
+bool TODAreaCache<T>::Prewarm(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&))
+{
+	check(IsInGameThread());
+	const FString NewKey = FString::Printf(TEXT("%s@%u"), *Prefix, ODBakeLink::StatusVersion());
+	if (Key != NewKey || !Task.IsValid())
+	{
+		Key = NewKey;
+		Task = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Prefix, Load]() { return Load(Prefix); });
+	}
+	return Task.IsCompleted();
+}
+
+template <typename T>
+TSharedPtr<const T> TODAreaCache<T>::Get(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&), const TCHAR* What)
+{
+	const double T0 = FPlatformTime::Seconds();
+	Prewarm(Prefix, Load);
+	TSharedPtr<const T> Out = Task.GetResult();
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: %s '%s' waited %.0f ms on the game thread (%s)"),
+		What, *Prefix, (FPlatformTime::Seconds() - T0) * 1000.0, Out.IsValid() ? TEXT("found") : TEXT("none"));
+	return Out;
+}
+
+TODAreaCache<AODForestManager::FLakeData>& AODForestManager::LakeCache()
+{
+	static TODAreaCache<FLakeData> Cache;
+	return Cache;
+}
+
+TODAreaCache<AODForestManager::FElevData>& AODForestManager::ElevCache()
+{
+	static TODAreaCache<FElevData> Cache;
+	return Cache;
+}
+
+TODAreaCache<AODForestManager::FFarIndex>& AODForestManager::FarCache()
+{
+	static TODAreaCache<FFarIndex> Cache;
+	return Cache;
+}
+
+// Get() is only called from ODFarForest.cpp, which can't see the template body.
+template struct TODAreaCache<AODForestManager::FFarIndex>;
+
+bool AODForestManager::PrewarmArea(const FString& WaterPrefix, const FString& ElevPrefix)
+{
+	// all three every call: each starts its worker on the first one
+	const bool bLakes = LakeCache().Prewarm(WaterPrefix, &LoadLakes);
+	const bool bElev = ElevCache().Prewarm(ElevPrefix, &LoadElevation);
+	const bool bFar = FarCache().Prewarm(ElevPrefix, &LoadFarIndex);
+	return bLakes && bElev && bFar;
+}
+
+TSharedPtr<const AODForestManager::FLakeData> AODForestManager::LoadLakes(const FString& WaterPrefix)
+{
+	const double T0 = FPlatformTime::Seconds();
+	const TSharedRef<FLakeData> D = MakeShared<FLakeData>();
 	// Same ODL1 tile sidecars AODWaterManager streams
 	// (Content/OpenDrive/Masks/<WaterTilePrefix>_tile_<tx>_<ty>.bin,
 	// pipeline/build_water_tiles.py) - read back ALL of them up front here
@@ -725,7 +806,7 @@ bool AODForestManager::LoadWaterLakes()
 			AllBin.AddUnique(FileName);
 		}
 	}
-	const FString TileMatch = WaterTilePrefix + TEXT("_tile_");
+	const FString TileMatch = WaterPrefix + TEXT("_tile_");
 
 	int32 TileFileCount = 0;
 	int32 FeatureCount = 0;   // FLakeRing::Feature
@@ -948,7 +1029,7 @@ bool AODForestManager::LoadWaterLakes()
 					}
 					else
 					{
-						FLakeRing& LR = LakeRings.AddDefaulted_GetRef();
+						FLakeRing& LR = D->Rings.AddDefaulted_GetRef();
 						LR.Ring.Reserve(RingIdx.Num());
 						LR.MinX = MinX; LR.MaxX = MaxX; LR.MinY = MinY; LR.MaxY = MaxY;
 						LR.Feature = FeatureCount;
@@ -964,20 +1045,20 @@ bool AODForestManager::LoadWaterLakes()
 		}
 	}
 
-	if (LakeRings.Num() == 0)
+	if (D->Rings.Num() == 0)
 	{
 		UE_LOG(LogTemp, Display,
 			TEXT("ODForestManager: no baked lake tiles found for WaterTilePrefix='%s' "
 			     "(%d tile file(s) scanned) - no water exclusion"),
-			*WaterTilePrefix, TileFileCount);
-		return false;
+			*WaterPrefix, TileFileCount);
+		return nullptr;
 	}
-	BuildLakeIndex();
+	D->BuildIndex();
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: loaded %d lake boundary ring(s) from %d water tile file(s) "
-		     "(WaterTilePrefix='%s') - trees/bushes/rocks/scrub excluded from open water"),
-		LakeRings.Num(), TileFileCount, *WaterTilePrefix);
-	return true;
+		     "(WaterTilePrefix='%s') in %.0f ms on a worker - trees/bushes/rocks/scrub excluded from open water"),
+		D->Rings.Num(), TileFileCount, *WaterPrefix, (FPlatformTime::Seconds() - T0) * 1000.0);
+	return D;
 }
 
 // Matches pipeline/build_terrain_mesh_tiles.py's WATER_SHORE_BLEND_M (12 m,
@@ -1003,14 +1084,14 @@ static double DistPointToSegment2D(double Px, double Py, double Ax, double Ay, d
 	return FMath::Sqrt((Px - CX) * (Px - CX) + (Py - CY) * (Py - CY));
 }
 
-void AODForestManager::BuildLakeIndex()
+void AODForestManager::FLakeData::BuildIndex()
 {
-	LakeSegCells.Reset();
-	LakeSegRows.Reset();
+	SegCells.Reset();
+	SegRows.Reset();
 	const double M = LakeShoreExclusionMarginCm;
-	for (int32 r = 0; r < LakeRings.Num(); ++r)   // ring order keeps each row's segments grouped by ring
+	for (int32 r = 0; r < Rings.Num(); ++r)   // ring order keeps each row's segments grouped by ring
 	{
-		const TArray<FVector2D>& Ring = LakeRings[r].Ring;
+		const TArray<FVector2D>& Ring = Rings[r].Ring;
 		for (int32 i = 0, j = Ring.Num() - 1; i < Ring.Num(); j = i++)
 		{
 			const FLakeSeg Seg{r, i};
@@ -1020,12 +1101,12 @@ void AODForestManager::BuildLakeIndex()
 			{
 				for (int32 cx = FMath::FloorToInt32((X0 - M) / LakeGridCellCm); cx <= FMath::FloorToInt32((X1 + M) / LakeGridCellCm); ++cx)
 				{
-					LakeSegCells.FindOrAdd(FIntPoint(cx, cy)).Add(Seg);
+					SegCells.FindOrAdd(FIntPoint(cx, cy)).Add(Seg);
 				}
 			}
 			for (int32 row = FMath::FloorToInt32(Y0 / LakeGridCellCm); row <= FMath::FloorToInt32(Y1 / LakeGridCellCm); ++row)
 			{
-				LakeSegRows.FindOrAdd(row).Add(Seg);
+				SegRows.FindOrAdd(row).Add(Seg);
 			}
 		}
 	}
@@ -1038,24 +1119,29 @@ void AODForestManager::BuildLakeIndex()
 	constexpr int32 NumChecks = 500;
 	for (int32 k = 0; k < NumChecks; ++k)
 	{
-		const FLakeRing& LR = LakeRings[Rng.RandRange(0, LakeRings.Num() - 1)];
+		const FLakeRing& LR = Rings[Rng.RandRange(0, Rings.Num() - 1)];
 		const double X = Rng.FRandRange(LR.MinX - 2.0 * M, LR.MaxX + 2.0 * M);
 		const double Y = Rng.FRandRange(LR.MinY - 2.0 * M, LR.MaxY + 2.0 * M);
-		const bool bBrute = IsInsideLakeBruteForce(X, Y);
+		const bool bBrute = IsInsideBruteForce(X, Y);
 		Inside += bBrute;
-		Mismatches += (bBrute != IsInsideLake(X, Y));
+		Mismatches += (bBrute != IsInside(X, Y));
 	}
 	UE_LOG(LogTemp, Display,
 		TEXT("ODForestManager: lake index %d cell(s), %d row(s); self-check %d/%d mismatch(es) vs brute force (%d inside)"),
-		LakeSegCells.Num(), LakeSegRows.Num(), Mismatches, NumChecks, Inside);
+		SegCells.Num(), SegRows.Num(), Mismatches, NumChecks, Inside);
 #endif
 }
 
 bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 {
+	return Lakes.IsValid() && Lakes->IsInside(WorldX, WorldY);
+}
+
+bool AODForestManager::FLakeData::IsInside(double WorldX, double WorldY) const
+{
 	auto SegEnds = [this](const FLakeSeg& S, const FVector2D*& Pi, const FVector2D*& Pj)
 	{
-		const TArray<FVector2D>& Ring = LakeRings[S.Ring].Ring;
+		const TArray<FVector2D>& Ring = Rings[S.Ring].Ring;
 		Pi = &Ring[S.I];
 		Pj = &Ring[S.I == 0 ? Ring.Num() - 1 : S.I - 1];
 	};
@@ -1063,7 +1149,7 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	const FVector2D* Pj;
 
 	// Shore band: any segment within the margin of this point is in this cell.
-	if (const TArray<FLakeSeg>* Near = LakeSegCells.Find(FIntPoint(
+	if (const TArray<FLakeSeg>* Near = SegCells.Find(FIntPoint(
 			FMath::FloorToInt32(WorldX / LakeGridCellCm), FMath::FloorToInt32(WorldY / LakeGridCellCm))))
 	{
 		for (const FLakeSeg& S : *Near)
@@ -1080,7 +1166,7 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	// whose Y-span covers this row (a crossing segment must). Row lists are
 	// grouped by ring and a feature's rings are consecutive, so parity resets
 	// whenever the feature changes - an island ring flips it back to dry.
-	const TArray<FLakeSeg>* Row = LakeSegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
+	const TArray<FLakeSeg>* Row = SegRows.Find(FMath::FloorToInt32(WorldY / LakeGridCellCm));
 	if (!Row)
 	{
 		return false;
@@ -1089,13 +1175,13 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	bool bInside = false;
 	for (const FLakeSeg& S : *Row)
 	{
-		if (LakeRings[S.Ring].Feature != CurFeature)
+		if (Rings[S.Ring].Feature != CurFeature)
 		{
 			if (bInside)
 			{
 				return true;
 			}
-			CurFeature = LakeRings[S.Ring].Feature;
+			CurFeature = Rings[S.Ring].Feature;
 		}
 		SegEnds(S, Pi, Pj);
 		if (((Pi->Y > WorldY) != (Pj->Y > WorldY)) &&
@@ -1107,11 +1193,11 @@ bool AODForestManager::IsInsideLake(double WorldX, double WorldY) const
 	return bInside;
 }
 
-bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) const
+bool AODForestManager::FLakeData::IsInsideBruteForce(double WorldX, double WorldY) const
 {
 	int32 CurFeature = INDEX_NONE;
 	bool bInside = false;   // parity over the current feature's rings
-	for (const FLakeRing& LR : LakeRings)
+	for (const FLakeRing& LR : Rings)
 	{
 		if (LR.Feature != CurFeature)
 		{
@@ -1150,6 +1236,10 @@ bool AODForestManager::IsInsideLakeBruteForce(double WorldX, double WorldY) cons
 
 bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const
 {
+	if (!Elev.IsValid())
+	{
+		return false;
+	}
 	const FVector2D Here(WorldX, WorldY);
 	const int32 CellX = FMath::FloorToInt(WorldX / ElevationCellCm);
 	const int32 CellY = FMath::FloorToInt(WorldY / ElevationCellCm);
@@ -1161,14 +1251,14 @@ bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float
 	{
 		for (int32 dx = -1; dx <= 1; ++dx)
 		{
-			const TArray<int32>* Bucket = ElevationBuckets.Find(FIntPoint(CellX + dx, CellY + dy));
+			const TArray<int32>* Bucket = Elev->Buckets.Find(FIntPoint(CellX + dx, CellY + dy));
 			if (!Bucket)
 			{
 				continue;
 			}
 			for (int32 Idx : *Bucket)
 			{
-				const FGroundPoint& Pt = ElevationGrid[Idx];
+				const FGroundPoint& Pt = Elev->Grid[Idx];
 				const float D2 = FVector2D::DistSquared(Pt.WorldXY, Here);
 				bFoundAny = true;
 				if (D2 < BestD2)
@@ -1279,6 +1369,29 @@ bool AODForestManager::WithinCenterlineBand(double WorldX, double WorldY) const
 		}
 	}
 	return false;
+}
+
+float AODForestManager::CenterlineDistanceCm(double WorldX, double WorldY, float ReachCm) const
+{
+	const FVector2D Here(WorldX, WorldY);
+	const int32 CellX = FMath::FloorToInt(WorldX / CenterlineCellCm);
+	const int32 CellY = FMath::FloorToInt(WorldY / CenterlineCellCm);
+	const int32 Reach = FMath::CeilToInt(ReachCm / CenterlineCellCm);
+	float BestSq = FMath::Square(ReachCm);
+	for (int32 dy = -Reach; dy <= Reach; ++dy)
+	{
+		for (int32 dx = -Reach; dx <= Reach; ++dx)
+		{
+			if (const TArray<int32>* Bucket = CenterlineBuckets.Find(FIntPoint(CellX + dx, CellY + dy)))
+			{
+				for (int32 Idx : *Bucket)
+				{
+					BestSq = FMath::Min(BestSq, (float)FVector2D::DistSquared(RoadCenterline[Idx], Here));
+				}
+			}
+		}
+	}
+	return FMath::Sqrt(BestSq);
 }
 
 bool AODForestManager::IsNearBuilding(double WorldX, double WorldY) const
@@ -1871,43 +1984,86 @@ bool AODForestManager::SlopeAt(double WorldX, double WorldY, float& OutSlopeRati
 	return true;
 }
 
-bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
+AODForestManager::ETileBuild AODForestManager::BuildTile(FIntPoint Key, const AActor* Player)
 {
 	// Local until we decide to commit - see this function's header comment:
 	// a tile whose scatter mostly deferred (real terrain not resolvable yet)
 	// is discarded rather than added to Tiles, so it isn't permanently
-	// stuck sparse.
-	FTile Tile;
-	FRandomStream Rng(HashCombine(GetTypeHash(Key), (uint32)RandomSeed));
-	int32 GroundAttempts = 0, GroundDeferred = 0;
-
+	// stuck sparse. Lives in Scatter (2026-10-22) so it can pause when the
+	// tick's StreamDeadline passes and resume next frame.
 	const double X0 = Key.X * (double)TileSizeCm;
 	const double Y0 = Key.Y * (double)TileSizeCm;
-	FBiomeRecipe Recipe;
-	float TileForestWeight;   // -1 = no point data for this tile; fall back to raster ForestWeightAt() per candidate
-	EODBiome DominantBiome;   // nearest classified point (or DefaultBiome) - for the ground-cover stat log only
-	BlendAt(X0 + TileSizeCm * 0.5, Y0 + TileSizeCm * 0.5, Recipe, TileForestWeight, DominantBiome);
 	const float TileSqM = FMath::Square(TileSizeCm / 100.0f);
-	const int32 NTrees =
-		FMath::RoundToInt(TileSqM * TreesPerSqM * Recipe.TreeDensityScale);
-	const int32 NBushes =
-		FMath::RoundToInt(TileSqM * BushesPerSqM * Recipe.BushDensityScale);
-
-	// one transform batch per mesh: NumTreeSpecies trees + NumShrubSpecies
-	// shrubs (bush, sagebrush) + RockMeshes.Num() rock variants (4 procedural
-	// boulder meshes, see RockMeshes' declaration) + scrub (grass_tuft).
-	// Extended 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock
-	// + scrub) alongside FBiomeRecipe's species-mix extension; rock count
-	// bumped 2 -> 4 (2026-09-03, see RockMeshes' header comment).
-	constexpr int32 BushBatchBase = NumTreeSpecies;                 // shrub batches start here
-	constexpr int32 RockBatchBase = BushBatchBase + NumShrubSpecies; // then rock variants
-	constexpr int32 NumRockVariants = 4;
-	constexpr int32 ScrubBatchIdx = RockBatchBase + NumRockVariants; // then ground scrub
-	constexpr int32 NumBatches = ScrubBatchIdx + 1;
-	TArray<FTransform> Batches[NumBatches];
-
-	for (int32 i = 0; i < NTrees + NBushes; ++i)
+	// Landcover gate (2026-10-22, see ForestTreesPerSqM): WorldCover tree
+	// cells decide where trees stand and the far cards set the density, so
+	// the biome's TreeDensityScale only applies without the far-forest bin.
+	const bool bLandcoverGate = FarTileRecs.Num() > 0;
+	if (!Scatter || Scatter->Key != Key)
 	{
+		FTileScatter& N = Scatter.Emplace();
+		N.Key = Key;
+		N.Rng = FRandomStream(HashCombine(GetTypeHash(Key), (uint32)RandomSeed));
+		N.Tile.Batches.SetNum(NumBatches);
+		// TileForestWeight -1 = no point data for this tile; fall back to raster
+		// ForestWeightAt() per candidate. DominantBiome: nearest classified point
+		// (or DefaultBiome) - for the ground-cover stat log only.
+		BlendAt(X0 + TileSizeCm * 0.5, Y0 + TileSizeCm * 0.5, N.Recipe, N.TileForestWeight, N.DominantBiome);
+		N.NTrees = bLandcoverGate
+			? FMath::RoundToInt(TileSqM * ForestTreesPerSqM)
+			: FMath::RoundToInt(TileSqM * TreesPerSqM * N.Recipe.TreeDensityScale);
+		N.NBushes = FMath::RoundToInt(TileSqM * BushesPerSqM * N.Recipe.BushDensityScale);
+		if (bEnableGroundCover)
+		{
+			N.NRocks = FMath::RoundToInt(
+				TileSqM * RocksPerSqM * N.Recipe.RockDensityScale * GroundCoverDensityScale);
+			N.NScrub = FMath::RoundToInt(
+				TileSqM * ScrubPerSqM * N.Recipe.ScrubDensityScale * GroundCoverDensityScale);
+		}
+	}
+	FTileScatter& S = *Scatter;
+	FTile& Tile = S.Tile;
+	FRandomStream& Rng = S.Rng;
+	const FBiomeRecipe& Recipe = S.Recipe;
+	const float TileForestWeight = S.TileForestWeight;
+	const EODBiome DominantBiome = S.DominantBiome;
+	const int32 NTrees = S.NTrees, NBushes = S.NBushes;
+	int32& GroundAttempts = S.GroundAttempts;
+	int32& GroundDeferred = S.GroundDeferred;
+	TArray<TArray<FTransform>>& Batches = Tile.Batches;
+	// at least one candidate per call, so a resumed tile always advances
+	const int32 StartNext = S.Next;
+	auto OutOfTime = [&]() { return S.Next > StartNext && !StreamTimeLeft(); };
+
+	// Retry probe (2026-10-22, livetest8's 80-160 ms frames after the vista
+	// spawned): a held-back tile is retried every frame, and each retry used
+	// to re-run every candidate's ground raycast before the gate at the
+	// bottom discarded it - one such tile per Tick (the loop always builds
+	// one) was the whole frame. Now the first TileProbeAttempts candidates
+	// decide; a tile that passes still runs the full gate below.
+	const double Now = GetWorld()->GetTimeSeconds();
+	const double* FirstTry = TileFirstBuildAttemptTime.Find(Key);
+	const bool bCanHoldBack = bUseElevationGrid
+		&& (!FirstTry || Now - *FirstTry < TileBuildGiveUpAfterSec);
+	auto ProbeSaysWait = [&]()
+	{
+		return bCanHoldBack && GroundAttempts == TileProbeAttempts
+			&& GroundDeferred > TileProbeAttempts * TileRetryDeferralRatio;
+	};
+	auto HoldBack = [&]()
+	{
+		TileFirstBuildAttemptTime.FindOrAdd(Key, Now);
+		++TileRetryCount;
+		Scatter.Reset();
+		return ETileBuild::HeldBack;   // key stays out of Tiles - Tick() retries it next frame
+	};
+
+	for (; S.Next < NTrees + NBushes; ++S.Next)
+	{
+		if (OutOfTime())
+		{
+			return ETileBuild::Busy;
+		}
+		const int32 i = S.Next;
 		const bool bTree = i < NTrees;
 		const double Px = X0 + Rng.FRand() * TileSizeCm;
 		const double Py = Y0 + Rng.FRand() * TileSizeCm;
@@ -1931,8 +2087,28 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// FBiomeRecipe::AmbientVegFloor's comment. Max(), not a replacement,
 		// so real forest tiles (AmbientVegFloor == 0) are completely
 		// unaffected.
-		const float CanopyWeight = TileForestWeight >= 0.0f ? TileForestWeight : ForestWeightAt(Px, Py);
-		const float Weight = FMath::Max(CanopyWeight, Recipe.AmbientVegFloor);
+		float Weight;
+		if (bTree && bLandcoverGate)
+		{
+			// own tree cell plants; a neighbour's counts only inside the road
+			// fade, where the bake dropped cells <= 18 m off a station
+			const bool bOwn = IsTreeCellAt(Px, Py, false);
+			Weight = Recipe.AmbientVegFloor;
+			if (bOwn || Accept < Weight || IsTreeCellAt(Px, Py, true))
+			{
+				const float RoadCm = CenterlineDistanceCm(Px, Py, RoadFadeCm);
+				if (bOwn || RoadCm < RoadFadeCm)
+				{
+					Weight = 1.0f;
+				}
+				Weight *= FMath::SmoothStep(PavementExclusionCm, RoadFadeCm, RoadCm);
+			}
+		}
+		else
+		{
+			const float CanopyWeight = TileForestWeight >= 0.0f ? TileForestWeight : ForestWeightAt(Px, Py);
+			Weight = FMath::Max(CanopyWeight, Recipe.AmbientVegFloor);
+		}
 		if (Accept >= Weight)
 		{
 			continue;
@@ -1940,12 +2116,14 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		FVector Ground;
 		bool bDeferred = false;
 		++GroundAttempts;
-		if (!GroundAt(Px, Py, Player, Ground, &bDeferred))
+		const bool bHit = GroundAt(Px, Py, Player, Ground, &bDeferred);
+		GroundDeferred += bDeferred;
+		if (ProbeSaysWait())
 		{
-			if (bDeferred)
-			{
-				++GroundDeferred;
-			}
+			return HoldBack();
+		}
+		if (!bHit)
+		{
 			continue;
 		}
 		int32 MeshIdx;
@@ -1969,16 +2147,17 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	// tile-seeded/deterministic) + extra low scrub (forest-weight-gated,
 	// same convention as bushes). Runs alongside trees/bushes in the same
 	// BuildTile() call, so it shares the tile's lifetime/teardown for free.
-	int32 NRocksPlaced = 0, NScrubPlaced = 0;
-	if (bEnableGroundCover)
+	int32& NRocksPlaced = S.NRocksPlaced;
+	int32& NScrubPlaced = S.NScrubPlaced;
 	{
-		const int32 NRocks = FMath::RoundToInt(
-			TileSqM * RocksPerSqM * Recipe.RockDensityScale * GroundCoverDensityScale);
-		const int32 NScrub = FMath::RoundToInt(
-			TileSqM * ScrubPerSqM * Recipe.ScrubDensityScale * GroundCoverDensityScale);
-
-		for (int32 i = 0; i < NRocks + NScrub; ++i)
+		const int32 NRocks = S.NRocks, NScrub = S.NScrub;   // 0 without bEnableGroundCover
+		for (; S.Next < NTrees + NBushes + NRocks + NScrub; ++S.Next)
 		{
+			if (OutOfTime())
+			{
+				return ETileBuild::Busy;
+			}
+			const int32 i = S.Next - (NTrees + NBushes);
 			const bool bRock = i < NRocks;
 			const double Px = X0 + Rng.FRand() * TileSizeCm;
 			const double Py = Y0 + Rng.FRand() * TileSizeCm;
@@ -2025,12 +2204,14 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 			FVector Ground;
 			bool bDeferred = false;
 			++GroundAttempts;
-			if (!GroundAt(Px, Py, Player, Ground, &bDeferred))
+			const bool bHit = GroundAt(Px, Py, Player, Ground, &bDeferred);
+			GroundDeferred += bDeferred;
+			if (ProbeSaysWait())
 			{
-				if (bDeferred)
-				{
-					++GroundDeferred;
-				}
+				return HoldBack();
+			}
+			if (!bHit)
+			{
 				continue;
 			}
 			// Base-pivot correction (2026-08-27, see RockMeshBaseOffsetCm's
@@ -2088,12 +2269,10 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	if (bUseElevationGrid && GroundAttempts > 0
 		&& (float)GroundDeferred / GroundAttempts > TileRetryDeferralRatio)
 	{
-		const double Now = GetWorld()->GetTimeSeconds();
 		const double FirstAttempt = TileFirstBuildAttemptTime.FindOrAdd(Key, Now);
 		if (Now - FirstAttempt < TileBuildGiveUpAfterSec)
 		{
-			++TileRetryCount;
-			return false;   // key stays out of Tiles - Tick() retries it next frame
+			return HoldBack();
 		}
 		++TileGiveUpCount;
 		UE_LOG(LogTemp, Warning,
@@ -2105,18 +2284,112 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	TileFirstBuildAttemptTime.Remove(Key);
 
 	// Per-species instance counts (2026-08-27 verification instrumentation,
-	// see the gated stat log below) - filled in as each batch is turned into
-	// a HISM so the log can show the actual species mix a tile spawned, not
-	// just the recipe's target weights.
+	// see the gated stat log below) - the actual species mix a tile spawned,
+	// not just the recipe's target weights.
 	int32 SpeciesInstanceCounts[NumTreeSpecies] = {};
 	int32 ShrubInstanceCounts[NumShrubSpecies] = {};
+	for (int32 m = 0; m < NumTreeSpecies; ++m) SpeciesInstanceCounts[m] = Batches[m].Num();
+	for (int32 m = 0; m < NumShrubSpecies; ++m) ShrubInstanceCounts[m] = Batches[BushBatchBase + m].Num();
 
-	for (int32 m = 0; m < NumBatches; ++m)
+	// Per-biome species-mix verification log (2026-08-27, "chaparral isn't
+	// working and all the trees are the same" fix) - deliberately
+	// UNGATED (unlike the ground-cover stat log just below): almost every
+	// tile in the initial fill burst builds within the same
+	// GetTimeSeconds() frame (up to TilesPerTick=40 per Tick()), so a 5 s
+	// time-gate here would only ever capture one tile's mix out of the
+	// whole disc - useless for confirming per-biome variation across tiles.
+	// BuildTile() is only called for NEW tiles entering the radius (a
+	// committed tile is never rebuilt), so this stays cheap after the
+	// initial fill settles. Instance counts are per-TILE, not a running
+	// total.
 	{
-		if (Batches[m].Num() == 0)
+		// Verbose since 2026-09-07 (was Display): during a fill burst this
+		// fired once per built tile - dozens of formatted lines in single
+		// frames, a real cost stacked on top of the scatter itself. Flip
+		// LogTemp to Verbose to get the per-tile mix back.
+		UE_LOG(LogTemp, Verbose,
+			TEXT("ODForestManager: tile (%d,%d) biome=%s species blob=%d olive=%d "
+			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d palm=%d fern=%d broadleaf=%d giant=%d | "
+			     "shrub bush=%d sagebrush=%d"),
+			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
+			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
+			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
+			SpeciesInstanceCounts[6], SpeciesInstanceCounts[7], SpeciesInstanceCounts[8],
+			SpeciesInstanceCounts[9], SpeciesInstanceCounts[10], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
+	}
+
+	// gated stat log (2026-08-26) - same 5 s cadence as UpdateCollision()'s
+	// diag log, proving the scatter runs with real per-biome variation as
+	// the player crosses biomes (rock/scrub counts should visibly shift with
+	// dominant biome, e.g. near-zero rocks in DeciduousForest vs heavy in
+	// RockyFoothill/AlpineBare/CanyonBadlands).
+	if (bEnableGroundCover)
+	{
+		if (Now - LastGroundCoverLogTime > 5.0)
+		{
+			LastGroundCoverLogTime = Now;
+			UE_LOG(LogTemp, Display,
+				TEXT("ODForestManager: tile (%d,%d) biome=%s groundcover rocks=%d "
+				     "scrub=%d rockDensity=%.2f scrubDensity=%.2f"),
+				Key.X, Key.Y,
+				*StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
+				NRocksPlaced, NScrubPlaced,
+				Recipe.RockDensityScale, Recipe.ScrubDensityScale);
+		}
+	}
+
+	// Base-pivot correction summary (2026-08-27, see RockMeshBaseOffsetCm's
+	// header comment) - confirms the correction is actually doing something
+	// (nonzero max offset) rather than a silently-zero bounding-box read, and
+	// gives a rough sense of scale (should track ~half the largest scaled
+	// rock's height, given RockMinScale/RockMaxScale).
+	if (Now - LastGroundCoverOffsetLogTime > 5.0)
+	{
+		LastGroundCoverOffsetLogTime = Now;
+		UE_LOG(LogTemp, Display,
+			TEXT("ODForestManager: groundcover base-pivot correction - %d instance(s) "
+			     "placed, max |Z correction| = %.1f cm in the last 5s"),
+			GroundCoverOffsetInstanceCount, GroundCoverMaxOffsetAppliedCm);
+		GroundCoverOffsetInstanceCount = 0;
+		GroundCoverMaxOffsetAppliedCm = 0.0f;
+	}
+
+	if (Now - LastElevationCorrectionLogTime > 5.0
+		&& (TileRetryCount > 0 || TileGiveUpCount > 0))
+	{
+		// piggybacks on the same 5s gate as the per-candidate elevation log
+		// above rather than a new timer - both describe the same fix.
+		UE_LOG(LogTemp, Display,
+			TEXT("ODForestManager: tile retry-until-terrain-ready - %d tile(s) "
+			     "held back for retry, %d gave up and committed as-is (last 5s)"),
+			TileRetryCount, TileGiveUpCount);
+		TileRetryCount = 0;
+		TileGiveUpCount = 0;
+	}
+
+	// in Tiles now (collision + release), its HISMs made within this tick's
+	// budget and then Tick()'s CommittingTile
+	FTile& Added = Tiles.Add(Key, MoveTemp(Tile));
+	Scatter.Reset();
+	if (CommitTile(Added, false))
+	{
+		return ETileBuild::Done;
+	}
+	CommittingTile = Key;
+	return ETileBuild::Busy;
+}
+
+bool AODForestManager::CommitTile(FTile& T, bool bForce)
+{
+	for (; T.NextBatch < T.Batches.Num() && (bForce || StreamTimeLeft()); ++T.NextBatch)
+	{
+		const int32 m = T.NextBatch;
+		TArray<FTransform>& Batch = T.Batches[m];
+		if (Batch.Num() == 0)
 		{
 			continue;
 		}
+		bForce = false;
 		UStaticMesh* Mesh;
 		const bool bIsTree = m < NumTreeSpecies;
 		const bool bIsShrub = !bIsTree && m < RockBatchBase;
@@ -2128,8 +2401,6 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		{
 			continue;
 		}
-		if (bIsTree) SpeciesInstanceCounts[m] = Batches[m].Num();
-		else if (bIsShrub) ShrubInstanceCounts[m - BushBatchBase] = Batches[m].Num();
 		const bool bLowVeg = bIsShrub || m == ScrubBatchIdx;   // bush/sagebrush/scrub: closer cull, no shadow
 		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
 		Hism->SetupAttachment(RootComponent);
@@ -2194,8 +2465,9 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		// Low veg and rocks stay out - small, many, little bounce.
 		Hism->SetAffectDynamicIndirectLighting(bIsTree);
 		Hism->RegisterComponent();
-		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
-		Tile.Hisms.Add(Hism);
+		Hism->AddInstances(Batch, false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
+		T.Hisms.Add(Hism);
+		Batch.Empty();
 
 		// One-time proof-of-fix readback (2026-08-27, "hitting a bush stops/
 		// damages the car" live-drive report) - see bLoggedBushCollisionCheck's
@@ -2219,84 +2491,7 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		}
 	}
 
-	// Per-biome species-mix verification log (2026-08-27, "chaparral isn't
-	// working and all the trees are the same" fix) - deliberately
-	// UNGATED (unlike the ground-cover stat log just below): almost every
-	// tile in the initial fill burst builds within the same
-	// GetTimeSeconds() frame (up to TilesPerTick=40 per Tick()), so a 5 s
-	// time-gate here would only ever capture one tile's mix out of the
-	// whole disc - useless for confirming per-biome variation across tiles.
-	// BuildTile() is only called for NEW tiles entering the radius (a
-	// committed tile is never rebuilt), so this stays cheap after the
-	// initial fill settles. Instance counts are per-TILE, not a running
-	// total.
-	{
-		// Verbose since 2026-09-07 (was Display): during a fill burst this
-		// fired once per built tile - dozens of formatted lines in single
-		// frames, a real cost stacked on top of the scatter itself. Flip
-		// LogTemp to Verbose to get the per-tile mix back.
-		UE_LOG(LogTemp, Verbose,
-			TEXT("ODForestManager: tile (%d,%d) biome=%s species blob=%d olive=%d "
-			     "conifer=%d scrubOak=%d manzanita=%d yucca=%d canyonOak=%d palm=%d fern=%d broadleaf=%d giant=%d | "
-			     "shrub bush=%d sagebrush=%d"),
-			Key.X, Key.Y, *StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
-			SpeciesInstanceCounts[0], SpeciesInstanceCounts[1], SpeciesInstanceCounts[2],
-			SpeciesInstanceCounts[3], SpeciesInstanceCounts[4], SpeciesInstanceCounts[5],
-			SpeciesInstanceCounts[6], SpeciesInstanceCounts[7], SpeciesInstanceCounts[8],
-			SpeciesInstanceCounts[9], SpeciesInstanceCounts[10], ShrubInstanceCounts[0], ShrubInstanceCounts[1]);
-	}
-
-	// gated stat log (2026-08-26) - same 5 s cadence as UpdateCollision()'s
-	// diag log, proving the scatter runs with real per-biome variation as
-	// the player crosses biomes (rock/scrub counts should visibly shift with
-	// dominant biome, e.g. near-zero rocks in DeciduousForest vs heavy in
-	// RockyFoothill/AlpineBare/CanyonBadlands).
-	if (bEnableGroundCover)
-	{
-		if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastGroundCoverLogTime > 5.0)
-		{
-			LastGroundCoverLogTime = Now;
-			UE_LOG(LogTemp, Display,
-				TEXT("ODForestManager: tile (%d,%d) biome=%s groundcover rocks=%d "
-				     "scrub=%d rockDensity=%.2f scrubDensity=%.2f"),
-				Key.X, Key.Y,
-				*StaticEnum<EODBiome>()->GetNameStringByValue((int64)DominantBiome),
-				NRocksPlaced, NScrubPlaced,
-				Recipe.RockDensityScale, Recipe.ScrubDensityScale);
-		}
-	}
-
-	// Base-pivot correction summary (2026-08-27, see RockMeshBaseOffsetCm's
-	// header comment) - confirms the correction is actually doing something
-	// (nonzero max offset) rather than a silently-zero bounding-box read, and
-	// gives a rough sense of scale (should track ~half the largest scaled
-	// rock's height, given RockMinScale/RockMaxScale).
-	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastGroundCoverOffsetLogTime > 5.0)
-	{
-		LastGroundCoverOffsetLogTime = Now;
-		UE_LOG(LogTemp, Display,
-			TEXT("ODForestManager: groundcover base-pivot correction - %d instance(s) "
-			     "placed, max |Z correction| = %.1f cm in the last 5s"),
-			GroundCoverOffsetInstanceCount, GroundCoverMaxOffsetAppliedCm);
-		GroundCoverOffsetInstanceCount = 0;
-		GroundCoverMaxOffsetAppliedCm = 0.0f;
-	}
-
-	if (const double Now = GetWorld()->GetTimeSeconds(); Now - LastElevationCorrectionLogTime > 5.0
-		&& (TileRetryCount > 0 || TileGiveUpCount > 0))
-	{
-		// piggybacks on the same 5s gate as the per-candidate elevation log
-		// above rather than a new timer - both describe the same fix.
-		UE_LOG(LogTemp, Display,
-			TEXT("ODForestManager: tile retry-until-terrain-ready - %d tile(s) "
-			     "held back for retry, %d gave up and committed as-is (last 5s)"),
-			TileRetryCount, TileGiveUpCount);
-		TileRetryCount = 0;
-		TileGiveUpCount = 0;
-	}
-
-	Tiles.Add(Key, MoveTemp(Tile));
-	return true;
+	return T.NextBatch >= T.Batches.Num();
 }
 
 bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player)
@@ -2534,7 +2729,8 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 		}
 	}
 	Want.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B) { return A.Key < B.Key; });
-	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick); ++i)
+	// the nearest always (it's under the car), more only within StreamMsBudget
+	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick) && (i == 0 || StreamTimeLeft()); ++i)
 	{
 		BuildGrassCell(Want[i].Value, Player);
 	}
@@ -2708,6 +2904,8 @@ void AODForestManager::UpdateCollision(const FVector& PlayerLoc)
 void AODForestManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODForestManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 	if (!bReady)
 	{
 		return;
@@ -2771,51 +2969,99 @@ void AODForestManager::Tick(float DeltaSeconds)
 		}
 	}
 
+	// One streaming budget for the whole tick (2026-10-22, livetest10: 99
+	// frames over 8 ms, longest 59.6 ms in one 5 s window). Each streamer
+	// used to force a whole unit through per frame - one near tile (~10 ms
+	// of ground traces + up to 17 HISMs), one far chunk (up to 25 ms of
+	// HISMs), two grass cells - on top of its own budget. Now grass, near
+	// tiles and far chunks share StreamMsBudget, checked between ~1 ms
+	// units (a scatter candidate, one HISM), and an unfinished tile/chunk
+	// resumes next tick. Grass first: it's the cells under the car. While
+	// the far forest has work, near tiles leave it a third of the budget.
+	const double StreamStart = FPlatformTime::Seconds();
+	const double BudgetS = StreamMsBudget / 1000.0;
+	double PartStart = StreamStart;
+	auto EndPart = [&](int32 Part)
+	{
+		const double T = FPlatformTime::Seconds();
+		StreamMaxMs[Part] = FMath::Max(StreamMaxMs[Part], (T - PartStart) * 1000.0);
+		PartStart = T;
+	};
+	StreamDeadline = StreamStart + BudgetS;
+	if (!Vista.bActive && bEnableGrass && bEnableGroundCover)
+	{
+		UpdateGrass(Loc, Player);
+	}
+	EndPart(0);
+
 	// spawn missing tiles nearest-first, a few per tick - capped by BOTH the
-	// TilesPerTick count ceiling and TileBuildMsBudget of actual frame time
-	// (2026-09-07, see TileBuildMsBudget's header comment: 40 unbudgeted
-	// tiles in one frame was a measured hitch source, not the assumed
-	// "cheap" burst). bBudgetSpent is checked AFTER each build so at least
-	// one tile always completes per tick and the fill can never stall.
+	// TilesPerTick count ceiling and the streaming budget (2026-09-07: 40
+	// unbudgeted tiles in one frame was a measured hitch source, not the
+	// assumed "cheap" burst). The tile in flight (Scatter / CommittingTile)
+	// always advances first, so the fill can never stall.
+	StreamDeadline = StreamStart + BudgetS * (bFarBusy ? 2.0 / 3.0 : 1.0);
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 	const int32 Reach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
-	const double BuildStart = FPlatformTime::Seconds();
-	bool bBudgetSpent = false;
-	int32 Built = 0;
-	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick && !bBudgetSpent; ++Ring)
+	auto WantsTile = [&](const FIntPoint& Key)
 	{
-		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dy)
+		// not this area's tile (2026-10-05, large world) - see FElevData::Bounds
+		return FMath::Max(FMath::Abs(Key.X - Center.X), FMath::Abs(Key.Y - Center.Y)) <= Reach
+			&& !(bUseElevationGrid && !Elev->Bounds.Intersect(FBox2D(
+				FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
+				FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
+			&& Vista.WantsTile(Key, TileSizeCm);
+	};
+	bool bBusy = false;
+	if (CommittingTile)
+	{
+		FTile* T = Tiles.Find(*CommittingTile);   // gone = released mid-commit
+		bBusy = T && !CommitTile(*T, true);
+		if (!bBusy)
 		{
-			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dx)
+			CommittingTile.Reset();
+		}
+	}
+	if (!bBusy && Scatter)
+	{
+		if (WantsTile(Scatter->Key))
+		{
+			bBusy = BuildTile(Scatter->Key, Player) == ETileBuild::Busy;
+		}
+		else
+		{
+			Scatter.Reset();   // drove away from it - nothing made yet
+		}
+	}
+	int32 Built = 0;
+	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++Ring)
+	{
+		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++dy)
+		{
+			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++dx)
 			{
 				if (FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring)
 				{
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				// not this area's tile (2026-10-05, large world) - see ElevationBounds
-				if ((bUseElevationGrid && !ElevationBounds.Intersect(FBox2D(
-						FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
-						FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
-					|| !Vista.WantsTile(Key, TileSizeCm))
+				if (!WantsTile(Key))
 				{
 					continue;
 				}
 				if (!Tiles.Contains(Key))
 				{
-					// BuildTile() returning false (see its own comment) leaves
-					// Key out of Tiles - it's still "missing" next Tick(), so
-					// this same nearest-first loop retries it automatically
-					// with no extra bookkeeping here.
-					BuildTile(Key, Player);
+					// a HeldBack tile (see BuildTile's comment) stays out of
+					// Tiles - it's still "missing" next Tick(), so this same
+					// nearest-first loop retries it automatically with no
+					// extra bookkeeping here.
+					bBusy = BuildTile(Key, Player) == ETileBuild::Busy;
 					++Built;
-					bBudgetSpent = (FPlatformTime::Seconds() - BuildStart) * 1000.0
-						> TileBuildMsBudget;
 				}
 			}
 		}
 	}
+	EndPart(1);
 
 	// retire tiles far outside the radius (hysteresis: +2 tiles)
 	TArray<FIntPoint> Gone;
@@ -2832,18 +3078,25 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
-	const int32 FarBefore = FarChunks.Num();
+	StreamDeadline = StreamStart + BudgetS;
 	UpdateFarForest(Loc);   // vista too: the backdrop's hills are what it shows
-	bSettled = Built == 0 && FarChunks.Num() == FarBefore;
+	EndPart(2);
+	bSettled = Built == 0 && !bBusy && !Scatter && !CommittingTile && !bFarBusy;
+	if (const double Now = FPlatformTime::Seconds(); Now - StreamLogAt > 5.0)
+	{
+		if (StreamLogAt > 0.0)
+		{
+			UE_LOG(LogTemp, Display, TEXT("ODForestManager: stream 5s longest - grass %.1f ms, near tiles %.1f ms, far %.1f ms (budget %.1f ms)"),
+				StreamMaxMs[0], StreamMaxMs[1], StreamMaxMs[2], StreamMsBudget);
+		}
+		StreamLogAt = Now;
+		FMemory::Memzero(StreamMaxMs);
+	}
 	if (Vista.bActive)
 	{
 		return;
 	}
 	UpdateCollision(Loc);
-	if (bEnableGrass && bEnableGroundCover)
-	{
-		UpdateGrass(Loc, Player);
-	}
 
 	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot.
 	// ShotAt/bShotParsed/bShotDone are instance members (see ODForestManager.h)

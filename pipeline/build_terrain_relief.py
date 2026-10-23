@@ -38,6 +38,7 @@ from scipy import ndimage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # -I drops the script dir
 import build_sat_albedo as sat  # noqa: E402
+from bake_job import bake_pass, job_rect  # noqa: E402
 from terrain_common import terrarium_to_elevation  # noqa: E402
 from test_areas import AREA_NAME, to_local, to_lonlat  # noqa: E402
 
@@ -108,15 +109,14 @@ def bin_tiles(z, root, x0, y0, t, W, H, lon, lat):
 
 
 def relief(E, conf, texel_m):
-    """(H, W) elevation (m) -> RGBA float (linear) per the module docstring."""
+    """(H, W) elevation (m) -> RGBA float (linear) per the module docstring,
+    minus the border zeroing (that's the whole texture's edge, see main)."""
     gy, gx = np.gradient(E, texel_m)            # axis 0 = UE +y (south), axis 1 = UE +x (east)
     s = HP_SIGMA_M / texel_m
     gx_hp, gy_hp = gx - ndimage.gaussian_filter(gx, s), gy - ndimage.gaussian_filter(gy, s)
     tpi = ndimage.gaussian_filter(E, TPI_SIGMA_M / texel_m) - E
     enc = lambda g: np.clip(0.5 + g / (2.0 * GRAD_RANGE), 0.0, 1.0)
-    a = conf.astype(np.float64).copy()
-    a[0, :] = a[-1, :] = a[:, 0] = a[:, -1] = 0.0
-    return np.dstack([enc(gx_hp), enc(gy_hp), 0.5 + 0.5 * np.tanh(tpi / TPI_RANGE_M), a])
+    return np.dstack([enc(gx_hp), enc(gy_hp), 0.5 + 0.5 * np.tanh(tpi / TPI_RANGE_M), conf.astype(np.float64)])
 
 
 def to_srgb8(lin):
@@ -124,16 +124,11 @@ def to_srgb8(lin):
     return (s * 255.0 + 0.5).clip(0, 255).astype(np.uint8)
 
 
-def main():
-    t0 = time.time()
-    x0, y0, x1, y1 = sat.terrain_extent_cm()
+def bake(root, x0, y0, W, H):
+    """RGBA float relief of the W x H texel window whose corner is UE (x0, y0) cm."""
     t = TEXEL_M * 100.0
-    W, H = int(round((x1 - x0) / t)), int(round((y1 - y0) / t))
     X, Y = np.meshgrid(x0 + (np.arange(W) + 0.5) * t, y0 + (np.arange(H) + 0.5) * t)
     lon, lat = to_lonlat(X / 100.0, -Y / 100.0)
-    root = main_or_here("data/cache/terrarium")
-    print(f"{AREA_NAME}: {W}x{H} texels @ {TEXEL_M:.0f} m from {root}")
-
     acc, cnt, n15 = bin_tiles(Z_FINE, root, x0, y0, t, W, H, lon, lat)
     fine = cnt > 0
     E = np.where(fine, acc / np.maximum(cnt, 1), np.nan)
@@ -152,22 +147,72 @@ def main():
         E, conf = E[ri, ci], np.where(far, 0.0, np.where(have, conf, Z_FALLBACK_CONF))
     else:
         print(f"  z15: {n15} tiles, 100% of texels")
+    return relief(E, conf, TEXEL_M)
 
-    rgba = relief(E, conf, TEXEL_M)
+
+# Per-job bake (pass 2): a texel reads the DEM up to 4 gaussian sigmas (+1
+# for the gradient) away, so a job recomputes its rect grown by JOB_PAD
+# texels from a window grown by 2 x JOB_PAD, and the last job near a texel
+# leaves it exactly as a whole-area bake would.
+JOB_PAD = math.ceil(4 * max(HP_SIGMA_M, TPI_SIGMA_M) / TEXEL_M) + 1
+
+
+def main():
+    t0 = time.time()
+    x0, y0, x1, y1 = sat.terrain_extent_cm()
+    t = TEXEL_M * 100.0
+    W, H = int(round((x1 - x0) / t)), int(round((y1 - y0) / t))
+    root = main_or_here("data/cache/terrarium")
     out = MASKS / f"dem_{AREA_NAME}_test.png"
-    Image.fromarray(to_srgb8(rgba), "RGBA").save(out, optimize=True)
+    meta_path = MASKS / f"dem_{AREA_NAME}_test.json"
     meta = {"x_min_cm": x0, "y_min_cm": y0, "size_x_cm": x1 - x0, "size_y_cm": y1 - y0,
             "texel_m": TEXEL_M, "width": W, "height": H,
             "grad_range": GRAD_RANGE, "tpi_range_m": TPI_RANGE_M,
             "attribution": "Terrain: Mapzen Terrarium (AWS Open Data), incl. USGS 3DEP (public domain)"}
-    (MASKS / f"dem_{AREA_NAME}_test.json").write_text(json.dumps(meta, indent=1))
-    b = rgba[..., 2][rgba[..., 3] > 0]
-    print(f"  wrote {out.name} {out.stat().st_size / 1e6:.2f} MB; gully (B>0.6) {(b > 0.6).mean() * 100:.1f}%, "
-          f"ridge (B<0.4) {(b < 0.4).mean() * 100:.1f}%, total {time.time() - t0:.0f} s")
+    print(f"{AREA_NAME}: {W}x{H} texels @ {TEXEL_M:.0f} m from {root}")
+
+    # Drawn-area bake (2026-10-22): pass 1 lays out the planned extent with
+    # "no data" (A = 0) and keeps whatever an earlier bake left on the same
+    # grid (a redrawn outline keeps its baked cells); each pass-2 job then
+    # fills its own rect. No pass = the whole area at once, as before.
+    if bake_pass() is None:
+        rgba = bake(root, x0, y0, W, H)
+        img = to_srgb8(rgba)
+        b = rgba[1:-1, 1:-1, 2]
+        print(f"  gully (B>0.6) {(b > 0.6).mean() * 100:.1f}%, ridge (B<0.4) {(b < 0.4).mean() * 100:.1f}%")
+    else:
+        img = np.zeros((H, W, 4), np.uint8)
+        img[..., :3] = to_srgb8(np.float64(0.5))
+        if out.exists() and meta_path.exists():
+            old = json.loads(meta_path.read_text())
+            ox, oy = round((old["x_min_cm"] - x0) / t), round((old["y_min_cm"] - y0) / t)
+            prev = np.asarray(Image.open(out).convert("RGBA"))
+            r0, c0 = max(oy, 0), max(ox, 0)
+            r1, c1 = min(oy + prev.shape[0], H), min(ox + prev.shape[1], W)
+            if r1 > r0 and c1 > c0:
+                img[r0:r1, c0:c1] = prev[r0 - oy:r1 - oy, c0 - ox:c1 - ox]
+        rect = job_rect()
+        if rect is not None:
+            # job rect (east/north m) -> texel rows/cols, grown and clipped
+            ca, cb = (np.array([rect[0], rect[2]]) * 100.0 - x0) / t
+            ra, rb = (np.array([-rect[3], -rect[1]]) * 100.0 - y0) / t
+            ca, ra, cb, rb = math.floor(ca), math.floor(ra), math.ceil(cb), math.ceil(rb)
+            box = lambda pad: (max(ra - pad, 0), max(ca - pad, 0), min(rb + pad, H), min(cb + pad, W))
+            wr0, wc0, wr1, wc1 = box(JOB_PAD)
+            br0, bc0, br1, bc1 = box(2 * JOB_PAD)
+            if wr1 > wr0 and wc1 > wc0:
+                win = bake(root, x0 + bc0 * t, y0 + br0 * t, bc1 - bc0, br1 - br0)
+                img[wr0:wr1, wc0:wc1] = to_srgb8(win[wr0 - br0:wr1 - br0, wc0 - bc0:wc1 - bc0])
+            print(f"  job rect {rect}: texels rows {wr0}-{wr1}, cols {wc0}-{wc1}")
+    img[0, :, 3] = img[-1, :, 3] = img[:, 0, 3] = img[:, -1, 3] = 0   # clamped sampler reads "no data"
+
+    Image.fromarray(img, "RGBA").save(out, optimize=True)
+    meta_path.write_text(json.dumps(meta, indent=1))
+    print(f"  wrote {out.name} {out.stat().st_size / 1e6:.2f} MB; total {time.time() - t0:.0f} s")
     if "--preview" in sys.argv:
         d = Path(sys.argv[sys.argv.index("--preview") + 1])
         d.mkdir(parents=True, exist_ok=True)
-        Image.fromarray((rgba[..., 2] * 255).astype(np.uint8)).save(d / f"dem_{AREA_NAME}_tpi.png")
+        Image.fromarray(img[..., 2]).save(d / f"dem_{AREA_NAME}_tpi.png")   # sRGB-coded B
 
 
 if __name__ == "__main__":

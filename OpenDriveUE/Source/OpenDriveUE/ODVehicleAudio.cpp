@@ -5,6 +5,8 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "ODEngineSynth.h"
+#include "ODHornSynth.h"
+#include "ODVehicleDef.h"
 #include "ODRoadNoiseSynth.h"
 #include "ODVehicleMovement.h"
 #include "ODVehiclePawn.h"
@@ -40,11 +42,18 @@ void AODVehicleAudio::EnsureSynths(APawn* Car)
 	Road->RegisterComponent();
 	Road->Start();
 
+	Horn = NewObject<UODHornSynth>(Car);
+	Horn->SetupAttachment(Car->GetRootComponent());
+	Horn->RegisterComponent();
+	Horn->Start();
+	HornVehicleIdx = -1;
+
 	// re-apply the player's volume setting to the freshly created pair - see
 	// SetVehicleVolumeScale()'s comment (a car swap would otherwise silently
 	// reset both synths back to their 1.0 default).
 	Engine->SetVolumeScale(CachedVehicleVolumeScale);
 	Road->SetVolumeScale(CachedVehicleVolumeScale);
+	Horn->SetVolumeScale(CachedVehicleVolumeScale);
 
 	if (auto* Root = Cast<UPrimitiveComponent>(Car->GetRootComponent()))
 	{
@@ -64,6 +73,10 @@ void AODVehicleAudio::SetVehicleVolumeScale(float Scale)
 	if (Road)
 	{
 		Road->SetVolumeScale(CachedVehicleVolumeScale);
+	}
+	if (Horn)
+	{
+		Horn->SetVolumeScale(CachedVehicleVolumeScale);
 	}
 }
 
@@ -120,6 +133,16 @@ void AODVehicleAudio::Tick(float DeltaSeconds)
 	Engine->SetEngineState(Rpm, bParked ? 0.0f : Move->GetEffectiveThrottle(),
 		bParked ? 0.0f : Move->GetLoad());
 	Engine->SetIgnitionCut(bParked ? false : Move->IsIgnitionCut());   // hard edge, unsmoothed
+	if (VehiclePawn)
+	{
+		const int32 Idx = VehiclePawn->GetVehicleIndex();
+		if (Idx != HornVehicleIdx && VehiclePawn->GetVehicleDefs().IsValidIndex(Idx))
+		{
+			HornVehicleIdx = Idx;   // each car model its own horn (traffic uses the same hash)
+			Horn->SetVoice(GetTypeHash(VehiclePawn->GetVehicleDefs()[Idx]->GetName()));
+		}
+		Horn->SetOn(!bParked && VehiclePawn->IsHornOn());
+	}
 
 	// surface color from the first grounded wheel's contact material
 	float Cutoff = 3200.0f;                 // asphalt hiss default

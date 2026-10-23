@@ -1,4 +1,5 @@
 #include "ODWaterManager.h"
+#include "ODTickMeter.h"
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
@@ -302,6 +303,8 @@ void AODWaterManager::ReleaseTile(const FIntPoint& Key)
 void AODWaterManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODWaterManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	FVector Loc;
 	if (!Vista.StreamCenter(this, Loc))

@@ -1,4 +1,5 @@
 #include "ODGuardrailManager.h"
+#include "ODTickMeter.h"
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
@@ -416,6 +417,8 @@ void AODGuardrailManager::ReleaseTile(const FIntPoint& Key)
 void AODGuardrailManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODGuardrailManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	FVector Loc;
 	if (!Vista.StreamCenter(this, Loc))

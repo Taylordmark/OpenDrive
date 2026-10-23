@@ -156,6 +156,8 @@ public:
 	int32 GetFocusedPin() const { return FocusedPin; }
 	void SetFocusedPin(int32 Pin);   // HUD hover
 	void PickPin(int32 Pin);         // HUD click
+	/** The picked pin while the globe flies in (2026-10-22: drawn as picked, "Loading"), else INDEX_NONE. */
+	int32 GetPickingPin() const { return PickingPin; }
 	/** AreaMap (2026-10-14): area-local cm -> screen through the relief drape's
 	 *  corners (relief_<area>.json, bilinear) and the globe camera; false if hidden / off screen. */
 	bool AreaCmToScreen(const APlayerController* PC, const FVector2D& Cm, FVector2D& OutScreen) const;
@@ -266,9 +268,20 @@ private:
 	TArray<FODMenuPick> Picks;          // AreaIdx's rows
 	TArray<FVector2D> AreaMap;
 	FString TownPick;                   // Open Drive start, empty = the level's default spawn
+	int32 DestPick = INDEX_NONE;        // road trip: Picks index of the Start screen's Destination, none = free roam
+	const FODMenuPick* TripDest() const { return TrackPick.IsEmpty() && Picks.IsValidIndex(DestPick) ? &Picks[DestPick] : nullptr; }
 	TWeakObjectPtr<class AODMenuGlobe> Globe;
 	int32 FocusedPin = INDEX_NONE;
 	int32 PickingPin = INDEX_NONE;      // flying in; Tick enters its area once the globe lands
+	int32 VistaStep = -1;               // next SpawnVistaSet step (StepStartVista per Tick), -1 = none pending
+	double VistaPickTime = 0.0;         // ShowStartVista's real time, for its spawned log
+	double VistaMaxFrameMs = 0.0;       // longest frame from ShowStartVista to the vista spawned
+	void StepStartVista(double Now);
+	int32 PinArea(int32 Pin) const;     // the area a pin picks: its cluster's last-picked area, else its own
+	// no hover preload of the area's level package (tried 2026-10-22, removed): a
+	// world package held from LoadPackageAsync makes -game LoadMap fail ("Failed
+	// to load package"), bouncing to the menu and then crashing the audio mixer
+	// (livetest8), and the package is only ~0.35 s of LoadMap anyway
 	bool bGlobeView = false;            // the globe camera is (or is blending to) the view target
 	double AreaEnterTime = 0.0;         // real seconds, for the vista-stream wait cap
 	double FadeSwapAt = -1.0;           // real seconds: faded out, CutTo the vista then (Tick)

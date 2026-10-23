@@ -1,4 +1,5 @@
 #include "ODMainMenu.h"
+#include "ODRoadTrip.h"
 
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -231,7 +232,7 @@ enum ERow : int32
 	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound, RowPaint,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
 	RowColor, RowFinish, RowPattern, RowAccent, RowRims,   // Paint (from Garage)
-	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
+	RowTime, RowSeason, RowWeather, RowDest,                             // Conditions: season before the weather it allows; road trip
 	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
 	RowPick,                                                             // AreaMap: RowPick + i = Picks[i]
@@ -240,7 +241,7 @@ const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // foo
 const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 7}};            // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
 const FODMenuTab PaintTabs[] = {{TEXT("PAINT"), RowColor, 5}};            // footer Back
-const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
+const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 4}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
 // and the AreaMap screen gets a tab per area (green_valley / oahu / ...)
 constexpr double ClusterDeg = 0.5;
@@ -616,6 +617,10 @@ void AODMainMenu::Tick(float DeltaSeconds)
 	}
 	const double Now = GetWorld()->GetRealTimeSeconds();
 	AreaDraw.Poll(Now);   // coverage.json / status.json / pass-1 roads, when they change (1 Hz)
+	if (VistaStep >= 0)
+	{
+		StepStartVista(Now);
+	}
 	if (DriveStart >= 0.0)
 	{
 		// Drive (2026-10-14): ease the vista camera onto the car's chase spot
@@ -994,6 +999,7 @@ void AODMainMenu::Activate()
 			{
 				TownPick = Picks[Pick].Town;     // one of the two is always empty:
 				TrackPick = Picks[Pick].Track;   // Open Drive is free roam, a track starts at its line
+				DestPick = INDEX_NONE;
 				ShowStartVista(AreaIdx);   // no-op when preloaded; the globe holds until it streams (Tick)
 				AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // the cap counts from here, reused set or not
 				SetScreen(EODMenuScreen::Start, RowDrive);
@@ -1206,18 +1212,28 @@ void AODMainMenu::PickPin(int32 Pin)
 	{
 		return;
 	}
-	const int32 Area = AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key);
+	const int32 Area = PinArea(Pin);
 	if (Area == INDEX_NONE)
 	{
 		return;
 	}
 	SetFocusedPin(Pin);
-	// the cluster's last-picked area if it is in it, else the pin's own
-	// (2026-10-14): drape its relief and fly down onto it; Tick enters AreaMap once landed
-	FocusArea(ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area);
+	// drape its relief and fly down onto it (2026-10-14); Tick enters AreaMap once landed
+	FocusArea(Area);
 	PickingPin = Pin;
 	FlyToArea(WorldPickSec);
-	ShowStartVista(AreaIdx);   // preload (2026-10-16): streams during the fly-in and the turnout pick
+	// the vista (2026-10-16) streams during the fly-in and the turnout pick; its
+	// heavy setup runs on workers and its managers spawn one per frame (Tick,
+	// 2026-10-22, was one 6-8 s frame in livetest6-8)
+	ShowStartVista(AreaIdx);
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: pin picked -> %s"), *AreaKeys[AreaIdx]);
+}
+
+int32 AODMainMenu::PinArea(int32 Pin) const
+{
+	const int32 Area = Globe.IsValid() && Globe->GetPins().IsValidIndex(Pin)
+		? AreaKeys.IndexOfByKey(Globe->GetPins()[Pin].Key) : INDEX_NONE;
+	return Area != INDEX_NONE && ClusterOf(Area).Contains(AreaIdx) ? AreaIdx : Area;
 }
 
 void AODMainMenu::FlyToArea(float Seconds)
@@ -1532,6 +1548,7 @@ void AODMainMenu::DriveNow()
 	SavePicks();   // (Activate holds Drive until the cut, so no fade is pending here)
 	DriveStart = GetWorld()->GetRealTimeSeconds();   // Tick runs the ease / fade, then DriveGo
 	bDriveHere = !(AreaLevels.IsValidIndex(AreaIdx) && AreaIdx != CurrentAreaIdx);
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Drive pressed (%s)"), bDriveHere ? TEXT("here") : TEXT("open level"));
 	const AODVehiclePawn* Pawn = FindPawn();
 	if (const UCameraComponent* Cam = Pawn ? Pawn->FindComponentByClass<UCameraComponent>() : nullptr)
 	{
@@ -1553,6 +1570,10 @@ void AODMainMenu::DriveGo()
 	}
 	ApplyTrack();
 	StartAtTown(TownPick);
+	if (const FODMenuPick* Dest = TripDest())
+	{
+		GetWorld()->SpawnActor<AODRoadTrip>()->Dest = Dest->Pos;   // same as ?oddest=, this level
+	}
 }
 
 void AODMainMenu::StartAtTown(const FString& Town)
@@ -1781,6 +1802,17 @@ void AODMainMenu::Adjust(int32 Dir)
 		ApplyTimeOfDay();
 		GConfig->SetInt(TimeConfigSection, TEXT("TimeIdx"), TimeIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
+		break;
+	case RowDest:
+		// road trip (2026-10-22): free roam, then each other named turnout (towns only, v1)
+		for (int32 n = 0; n <= Picks.Num() && TrackPick.IsEmpty(); ++n)
+		{
+			DestPick = (DestPick + 1 + Dir + Picks.Num() + 1) % (Picks.Num() + 1) - 1;
+			if (DestPick == INDEX_NONE || (Picks[DestPick].bHasPos && !Picks[DestPick].Town.IsEmpty() && Picks[DestPick].Town != TownPick))
+			{
+				break;
+			}
+		}
 		break;
 	case RowWeather:
 		// only states the active climate can produce (2026-10-05) in the picked
@@ -2239,6 +2271,10 @@ void AODMainMenu::OpenArea()
 	{
 		Options += FString::Printf(TEXT("?odweather=%d"), (int32)Weather->State);   // StartAtTown resumes Auto from it
 	}
+	if (const FODMenuPick* Dest = TripDest())
+	{
+		Options += FString::Printf(TEXT("?oddest=%.0f,%.0f"), Dest->Pos.X, Dest->Pos.Y);   // AODGameMode -> AODRoadTrip
+	}
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Area -> %s (%s)"), *AreaLevels[AreaIdx], *Options);
 	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
 }
@@ -2434,14 +2470,12 @@ void AODMainMenu::ShowStartVista(int32 Area)
 	bVistaDirty = true;
 	AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // Tick's vista-stream wait cap
 	AODWeatherController::LoadClimateFile(AreaKeys[Area] + TEXT("_test"), VistaSpot.Climate);
-	for (AActor* A : GM->SpawnVistaSet(AreaKeys[Area], VistaCarWorld() - VistaSpot.CarCm, VistaRegion()))
-	{
-		VistaActors.Add(A);
-		if (AODForestManager* Forest = Cast<AODForestManager>(A))
-		{
-			VistaSpot.Forest = Forest;
-		}
-	}
+	// the managers spawn in StepStartVista, once their area's textures and lake
+	// index are built off the game thread (AODGameMode::PrewarmArea)
+	VistaStep = 0;
+	VistaPickTime = AreaEnterTime;
+	VistaMaxFrameMs = 0.0;
+	GM->PrewarmArea(AreaKeys[Area]);
 	if (VistaSpot.bHasSea)
 	{
 		const FVector Car = VistaCarWorld();
@@ -2466,7 +2500,33 @@ void AODMainMenu::ShowStartVista(int32 Area)
 		bVistasSpawned = true;
 		GM->FreezeStreaming(true);   // the car leaves the real world while a vista shows
 	}
-	SetWeatherClimate(Area);   // its climate; Auto rolls once here and holds for the visit
+}
+
+void AODMainMenu::StepStartVista(double Now)
+{
+	VistaMaxFrameMs = FMath::Max(VistaMaxFrameMs, double(FApp::GetDeltaTime()) * 1000.0);
+	AODGameMode* GM = GetWorld()->GetAuthGameMode<AODGameMode>();
+	if (!GM || !AreaKeys.IsValidIndex(VistaArea) || !GM->PrewarmArea(AreaKeys[VistaArea]))
+	{
+		return;   // workers still decoding/indexing; the globe keeps animating
+	}
+	// one manager family per frame: each BeginPlay is now tens of ms, not seconds
+	for (AActor* A : GM->SpawnVistaSet(AreaKeys[VistaArea], VistaCarWorld() - VistaSpot.CarCm, VistaRegion(), VistaStep))
+	{
+		VistaActors.Add(A);
+		if (AODForestManager* Forest = Cast<AODForestManager>(A))
+		{
+			VistaSpot.Forest = Forest;
+		}
+	}
+	if (++VistaStep < AODGameMode::NumVistaSteps())
+	{
+		return;
+	}
+	VistaStep = -1;
+	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: area vista %s spawned %.2fs after pick, longest frame %.0f ms (%d actor(s))"),
+		*AreaKeys[VistaArea], Now - VistaPickTime, VistaMaxFrameMs, VistaActors.Num());
+	SetWeatherClimate(VistaArea);   // its climate (needs the forest copy); Auto rolls once here and holds for the visit
 }
 
 void AODMainMenu::ClearStartVista()
@@ -2480,6 +2540,7 @@ void AODMainMenu::ClearStartVista()
 	}
 	VistaActors.Reset();
 	VistaSpot.Forest = nullptr;
+	VistaStep = -1;
 	if (VistaArea != INDEX_NONE)
 	{
 		VistaArea = INDEX_NONE;
@@ -2505,7 +2566,7 @@ void AODMainMenu::DestroyVistas()
 
 bool AODMainMenu::IsStartVistaReady() const
 {
-	if (VistaArea == INDEX_NONE)
+	if (VistaArea == INDEX_NONE || VistaStep >= 0)
 	{
 		return false;
 	}
@@ -2740,6 +2801,10 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 	case RowWeather:
 		OutLabel = TEXT("Weather");
 		OutValue = FName::NameToDisplayString(WeatherNames[WeatherIdx], false);   // "HeavyRain" -> "Heavy Rain"
+		break;
+	case RowDest:
+		OutLabel = TEXT("Destination");
+		OutValue = !TrackPick.IsEmpty() ? TEXT("-") : Picks.IsValidIndex(DestPick) ? Picks[DestPick].Label : TEXT("Free Roam");
 		break;
 	case RowOpenDrive:
 		OutLabel = TEXT("Open Drive");

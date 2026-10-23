@@ -1,4 +1,5 @@
 #include "ODVehiclePawn.h"
+#include "Misc/App.h"
 #include "ODAssetDetail.h"
 #include "ODBakeLink.h"
 #include "ODVisualStyle.h"
@@ -18,6 +19,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "EngineUtils.h"
 #include "ODInputConfig.h"
+#include "ODMedia.h"
 #include "ODRoadManager.h"
 #include "ODRoadNoiseSynth.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -358,7 +360,7 @@ void AODVehiclePawn::SetVehicleByIndex(int32 Index)
 
 void AODVehiclePawn::CycleVehicle()
 {
-	if (Vehicles.Num() < 2)
+	if (Vehicles.Num() < 2 || bInReplay)
 	{
 		return;   // nothing to switch to
 	}
@@ -639,8 +641,17 @@ void AODVehiclePawn::BeginPlay()
 void AODVehiclePawn::TrySnapToGround()
 {
 	// sample every tick (not just post-settle) so hitches during the settle
-	// window already count against the quiet period
-	if (GetWorld()->GetDeltaSeconds() > SnapHitchFrameSec)
+	// window already count against the quiet period. A hitch is a frame well
+	// over the running frame time (2026-10-22): against the flat 75 ms alone, a
+	// GPU-bound area at a steady ~73 ms/frame (livetest6, Summit County) held
+	// the release ~7.5 s past its settle for no gain - the car drives at that
+	// frame rate anyway. The running time ignores the frame's own excess over
+	// 0.25 s so one load frame doesn't blind it to the next burst.
+	const float Dt = GetWorld()->GetDeltaSeconds();
+	const float Clamped = FMath::Min(Dt, 0.25f);
+	SnapFrameAvgSec = SnapFrameAvgSec > 0.0f ? FMath::Lerp(SnapFrameAvgSec, Clamped, 0.1f) : Clamped;
+	SnapFrameMaxSec = FMath::Max(SnapFrameMaxSec, float(FApp::GetDeltaTime()));   // undilated: the load's longest frame
+	if (Dt > FMath::Max(SnapHitchFrameSec, 2.0 * SnapFrameAvgSec))
 	{
 		LastHitchTime = GetWorld()->GetTimeSeconds();
 	}
@@ -986,6 +997,8 @@ void AODVehiclePawn::TrySnapToGround()
 		Movement->EngageParkHold();
 	}
 	bGroundSnapped = true;
+	UE_LOG(LogTemp, Display, TEXT("ODVehiclePawn: physics released %.1fs after spawn (settle ready %.1fs, frame avg %.0f ms, longest %.0f ms)"),
+		Now - SpawnTime, SnapReadyTime - SpawnTime, SnapFrameAvgSec * 1000.0f, SnapFrameMaxSec * 1000.0f);
 	ODBakeLink::SetTarget(nullptr);   // car.json: no longer waiting anywhere (2026-10-21)
 	bEverGroundSnapped = true;   // real-world snap completed - arms the warm
 	                              // settle for later mid-drive resets (NOT set
@@ -1065,6 +1078,10 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::CameraView, &AODVehiclePawn::CycleCameraView, nullptr},
 		{EODInputAction::ShiftUp, &AODVehiclePawn::KeyShiftUp, nullptr},
 		{EODInputAction::ShiftDown, &AODVehiclePawn::KeyShiftDown, nullptr},
+		{EODInputAction::Horn, &AODVehiclePawn::HornPressed, &AODVehiclePawn::HornReleased},
+		{EODInputAction::IndicatorLeft, &AODVehiclePawn::IndicatorLeftPressed, nullptr},
+		{EODInputAction::IndicatorRight, &AODVehiclePawn::IndicatorRightPressed, nullptr},
+		{EODInputAction::Hazards, &AODVehiclePawn::HazardsPressed, nullptr},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1087,6 +1104,13 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		Input->BindKey(GamepadHandbrakeKey, IE_Pressed, this, &AODVehiclePawn::GamepadHandbrakePressed);
 		Input->BindKey(GamepadHandbrakeKey, IE_Released, this, &AODVehiclePawn::GamepadHandbrakeReleased);
 		LastODManagedKeys.AddUnique(GamepadHandbrakeKey);
+	}
+	const FKey GamepadHornKey = FODInputConfig::GetGamepadKey(EODInputAction::Horn);
+	if (GamepadHornKey.IsValid())
+	{
+		Input->BindKey(GamepadHornKey, IE_Pressed, this, &AODVehiclePawn::HornPressed);
+		Input->BindKey(GamepadHornKey, IE_Released, this, &AODVehiclePawn::HornReleased);
+		LastODManagedKeys.AddUnique(GamepadHornKey);
 	}
 	const FKey GamepadViewKey = FODInputConfig::GetGamepadKey(EODInputAction::CameraView);
 	if (GamepadViewKey.IsValid())
@@ -1285,6 +1309,9 @@ void AODVehiclePawn::TickWheel()
 	{
 		ResetVehicle();
 	}
+	if (Pressed(EODWheelButton::MediaPlayPause)) { ODMedia::PlayPause(); }
+	if (Pressed(EODWheelButton::MediaNext)) { ODMedia::Next(); }
+	if (Pressed(EODWheelButton::MediaPrev)) { ODMedia::Prev(); }
 	if (Movement->bManualGearbox)
 	{
 		if (Pressed(EODWheelButton::ShiftUp))
@@ -1772,7 +1799,11 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 	// their own final values (deadzone+curve applied in the Gamepad*Axis
 	// callbacks above; wheel is 1:1 below) - they do NOT go through
 	// SmSteer/SmThrottle/SmBrake, which stay exactly the keyboard path.
-	if (ActiveDevice == EODInputDevice::Gamepad)
+	if (bInReplay)
+	{
+		// AODReplay feeds Movement
+	}
+	else if (ActiveDevice == EODInputDevice::Gamepad)
 	{
 		// speed-sensitive stick lock (2026-09-25; keyboard has its own): a firm stick
 		// flick at 70 mph was ~24 deg of road wheel, enough to spin the car
@@ -1820,6 +1851,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		Movement->SetBrakeInput(0.0f);
 		Movement->SetHandbrakeInput(false);
 	}
+	Indicator.UpdateCancel(Movement->GetSteeringInput());
 
 	// wheel visuals: suspension travel + steer + spin from our sim, plus the
 	// garage setup's tire diameter/width and camber (the wheel mesh - in
@@ -1834,7 +1866,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		// frozen Omega spun the wheels nonstop (2026-10-09, Taylor: "why
 		// dont the tires just normally sit still ... spinning like crazy").
 		float SpinRadS = 0.0f;
-		if (Body->IsSimulatingPhysics())
+		if (Body->IsSimulatingPhysics() || bInReplay)
 		{
 			const float RadiusCm = Movement->GetWheelRadius(i);
 			const float RollRadS = Movement->GetForwardSpeed() / RadiusCm;
@@ -1846,7 +1878,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 			}
 		}
 		WheelSpinDeg[i] = FMath::Fmod(WheelSpinDeg[i]
-			+ FMath::RadiansToDegrees(SpinRadS) * DeltaSeconds, 360.0f);
+			+ FMath::RadiansToDegrees(SpinRadS) * DeltaSeconds * (bInReplay ? ReplaySpinScale : 1.0f), 360.0f);
 		const float S = Movement->GetWheelRadius(i) / ReferenceWheelMeshRadiusCm;
 		const float Width = i < 2
 			? Movement->FrontTireWidthScale : Movement->RearTireWidthScale;

@@ -36,13 +36,22 @@ class OPENDRIVEUE_API AODGameMode : public AGameModeBase
 public:
 	AODGameMode();
 
+	virtual void StartPlay() override;   // HomeArea + area prewarm, before the level's BeginPlays
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
 	/** Garage-menu vista (2026-10-05): one area's terrain/road/forest/water/
 	 *  guardrail managers, translated by Offset (XY only) and streaming just
-	 *  Region (area-local). Tagged ODVistaTag. Caller owns/destroys them. */
-	TArray<AActor*> SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region);
+	 *  Region (area-local). Tagged ODVistaTag. Caller owns/destroys them.
+	 *  Step (2026-10-22) spawns only the Step-th of NumVistaSteps() families,
+	 *  so the menu can spread the set over frames. */
+	TArray<AActor*> SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region, int32 Step);
+	static int32 NumVistaSteps();
+
+	/** Game thread (2026-10-22): starts Area's heavy manager setup on workers
+	 *  (terrain rasters + horizon mesh, forest lakes), cached for the vista
+	 *  and then the level's managers. True once ready; call again to poll. */
+	static bool PrewarmArea(const FString& Area);
 
 	/** Pauses every non-vista area manager's Tick and the area-set streamer
 	 *  while the menu parks the car at a far vista offset, so the real
@@ -59,7 +68,7 @@ private:
 	 *  one already exists. Any other area gets the whole set. Returns what
 	 *  it spawned. */
 	TArray<AActor*> SpawnAreaSet(const FString& Area, const FVector& Offset = FVector::ZeroVector,
-		const FODVistaRegion* Vista = nullptr);
+		const FODVistaRegion* Vista = nullptr, UClass* Only = nullptr);
 
 	/** Reads Content/OpenDrive/Masks/worlds.json once into StreamAreas: the
 	 *  other members of the world HomeArea belongs to. Absent file or home

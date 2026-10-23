@@ -70,11 +70,11 @@ def parse_levels(tags):
     return None
 
 
-def parse_height(tags):
-    """height=* in m (often "45 m"), or None; build_building_mesh turns it
-    into storeys (levels_from_height)."""
+def parse_height(tags, key="height"):
+    """height=* (or roof:height=*) in m (often "45 m"), or None;
+    build_building_mesh turns height into storeys (levels_from_height)."""
     try:
-        h = float(tags["height"].split()[0])
+        h = float(tags[key].split()[0])
     except (KeyError, ValueError, IndexError):
         return None
     return h if h > 0 else None
@@ -196,6 +196,7 @@ LOOK_TAGS = ("roof:shape", "roof:colour", "roof:material", "building:colour", "b
 
 def building_entry(ring, tags, way_id):
     return {"nodes": ring, "levels": parse_levels(tags), "height_m": parse_height(tags), "way_id": way_id,
+            **({"roof_height_m": parse_height(tags, "roof:height")} if "roof:height" in tags else {}),
             "building_tag": tags.get("building", "yes"), **{k: tags[k] for k in LOOK_TAGS if k in tags}}
 
 

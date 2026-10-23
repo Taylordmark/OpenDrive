@@ -8,6 +8,7 @@ class UBoxComponent;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class UODEngineSynth;
+class UODHornSynth;
 class UStaticMesh;
 class UStaticMeshComponent;
 class AODRoadManager;
@@ -104,8 +105,12 @@ private:
 		float Dodge = 0.0f;       // lateral bias (cm) to pass a parked player
 		double GhostUntil = 0.0;  // deadlock breaker: ignores other-link cars until this sim time
 		double HoldUntil = 0.0;   // bumped by the player: stands until this sim time
+		double HornUntil = 0.0;   // honking until this sim time
+		float HonkHeat = 0.0f;    // how hard the player has been honking at it (decays)
+		float GreenWait = 0.0f;   // seconds the player has sat in front of it on a green
 		uint32 Seed = 0;
 		uint8 Lane = 0;           // 0 = kerb lane
+		int8 Signal = 0;          // indicator: -1 left, +1 right (fun-features #8b)
 		uint8 Model = 0;
 		bool bCleared = false;    // may enter the junction at the link end
 		FVector PrevPos = FVector::ZeroVector, CurPos = FVector::ZeroVector;
@@ -131,6 +136,7 @@ private:
 		float FrontX = 132.0f, RearX = -128.0f, HalfTrack = 84.0f, WheelR = 34.0f;
 		FVector BoundsOrigin = FVector::ZeroVector;
 		FVector HalfExtent = FVector(230.0f, 95.0f, 70.0f);
+		uint32 HornHash = 0;           // UODHornSynth::SetVoice, from the def name (the player's car hashes the same)
 	};
 
 	struct FWreck
@@ -169,6 +175,8 @@ private:
 	bool JunctionClear(int32 Cluster, int32 SelfLink) const;
 	int32 SignalState(int32 Link) const;   // 0 green, 1 yellow, 2 red
 	bool FindLeader(int32 Self, uint8 Lane, float& OutGap, float& OutV) const;
+	bool LaneFree(const FAgent& Ag, uint8 Lane) const;   // MOBIL safety test for a move into Lane
+	bool OncomingNear(const FAgent& Ag, float Lat) const;
 	void ClockHourDow(int32& OutHour, int32& OutDow) const;
 	bool TrafficWanted();
 	bool Noticed(const FVector& P) const;   // a car appearing or vanishing here would be seen
@@ -194,6 +202,10 @@ private:
 	FVector RangeCenter = FVector(1.0e12);
 	FVector PlayerPos = FVector::ZeroVector;
 	FVector PlayerVel = FVector::ZeroVector;
+	FVector PlayerFwd = FVector::ForwardVector;
+	int32 HornPressesSeen = 0;      // the pawn's running press count
+	int32 PendingHornPresses = 0;   // presses not yet seen by a Step
+	bool bPlayerHorn = false;
 	FVector2D CamFwd = FVector2D(1.0, 0.0);
 	uint32 TopUpSalt = 0;
 
@@ -212,6 +224,9 @@ private:
 	TArray<FModel> Models;
 	TArray<TArray<FTransform>> BodyXf, BrakeXf, WheelXf;
 	TArray<TArray<FTransform>> BodyPrevXf, BrakePrevXf, WheelPrevXf;
+	// indicator custom data per (model, tier) slot: 2 floats an instance, and what each ISM shows
+	TArray<TArray<float>> BodyCd, BrakeCd, BodyCdShown, BrakeCdShown;
+	float IndicatorGlow = 400.0f;   // UpdateLights: brake-lamp strength
 	bool bNightLights = false;
 	bool bLightsSet = false;
 
@@ -226,6 +241,9 @@ private:
 	TArray<TObjectPtr<UODEngineSynth>> PassBy;
 	UPROPERTY()
 	TObjectPtr<UODEngineSynth> IdleBed;
+	UPROPERTY()
+	TObjectPtr<UODHornSynth> AgentHorn;   // the nearest honking car's horn
+	int32 AgentHornModel = -1;
 	float AudioVolume = 1.0f;
 	double LastVolumeRead = -100.0;
 

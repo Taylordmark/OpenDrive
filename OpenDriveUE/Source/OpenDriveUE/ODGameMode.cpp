@@ -1,4 +1,5 @@
 #include "ODGameMode.h"
+#include "ODRoadTrip.h"
 #include "ODTileSource.h"
 #include "Async/Async.h"
 
@@ -22,6 +23,7 @@
 #include "ODFurnitureManager.h"
 #include "ODGuardrailManager.h"
 #include "ODRaceHUD.h"
+#include "ODChallengeManager.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
 #include "ODSeasonController.h"
@@ -32,6 +34,7 @@
 #include "ODWeatherController.h"
 #include "ODParkingManager.h"
 #include "ODWaterManager.h"
+#include "ODReplay.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -44,10 +47,8 @@ AODGameMode::AODGameMode()
 	PrimaryActorTick.bCanEverTick = true;
 }
 
-void AODGameMode::BeginPlay()
+void AODGameMode::StartPlay()
 {
-	Super::BeginPlay();
-
 	// AODRoadManager is the same actor ODMainMenu's -odpick hook reads
 	// (GetTownNodes()) and is placed once per open-world map with its
 	// RoadTilePrefix already baked in for whichever area that map currently
@@ -74,6 +75,22 @@ void AODGameMode::BeginPlay()
 			break;
 		}
 	}
+	// Before any level actor's BeginPlay (2026-10-22): a direct level launch
+	// (-odpick, no menu pin) never prewarmed, so the level-placed forest
+	// waited 2294 ms on its lake index (livetest10). Kicked here, the
+	// workers run under the terrain/road BeginPlays; from the menu it's a
+	// cache hit.
+	if (!HomeArea.IsEmpty())
+	{
+		PrewarmArea(HomeArea);
+	}
+	Super::StartPlay();
+}
+
+void AODGameMode::BeginPlay()
+{
+	Super::BeginPlay();
+
 	// ?odarea=<key> (2026-10-21): the area template level, no road manager of its own
 	const TCHAR* DrawnKey = GetWorld() ? GetWorld()->URL.GetOption(TEXT("odarea="), nullptr) : nullptr;
 	if (HomeArea.IsEmpty() && DrawnKey && *DrawnKey)
@@ -95,11 +112,27 @@ void AODGameMode::BeginPlay()
 	EnsureAtmosphereController();
 	EnsureSeasonController();
 	EnsureWeatherController();
+	if (GetWorld() && !AODReplay::Find(GetWorld()))
+	{
+		GetWorld()->SpawnActor<AODReplay>();   // #9 always-on 30 s replay buffer
+	}
 	// ponytail: one ambient-sound manager, the home area's zones only - a
 	// streamed area set plays home's zone grid (silent outside it). Spawn one
 	// per set (and crossfade) if the neighbouring areas sound wrong.
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
+
+	// road trip (2026-10-22): ?oddest=<x>,<y> from the menu's Destination pick;
+	// the trip routes there itself once the graph is loaded and the drive started
+	FVector2D Dest;
+	if (const TCHAR* D = GetWorld() ? GetWorld()->URL.GetOption(TEXT("oddest="), nullptr) : nullptr; D && AODRoadTrip::ParseDest(D, Dest))
+	{
+		GetWorld()->SpawnActor<AODRoadTrip>()->Dest = Dest;
+	}
+	else if (D)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODGameMode: bad ?oddest=%s (want <x>,<y> cm) - no road trip"), D);
+	}
 
 	// custom track (pipeline/build_track.py): the race manager reads
 	// -odtrack itself; open-world levels just don't place one
@@ -117,11 +150,43 @@ void AODGameMode::BeginPlay()
 			GetWorld()->SpawnActor<AODRaceManager>();
 		}
 	}
+	// free roam: speed traps/zones and landmark hunting (fun-features #2/#5)
+	if (!HomeArea.IsEmpty() && GetWorld() && !TActorIterator<AODRaceManager>(GetWorld()))
+	{
+		AODChallengeManager* Challenges = GetWorld()->SpawnActorDeferred<AODChallengeManager>(
+			AODChallengeManager::StaticClass(), FTransform::Identity);
+		Challenges->AreaKey = HomeArea;
+		Challenges->FinishSpawning(FTransform::Identity);
+	}
 }
 
-TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region)
+// the families with a vista mode (FODVistaRegion), in SpawnAreaSet's order
+static const TArray<UClass*>& VistaClasses()
 {
-	return SpawnAreaSet(Area, FVector(Offset.X, Offset.Y, 0.0), &Region);
+	static const TArray<UClass*> Classes = {AODTerrainManager::StaticClass(), AODRoadManager::StaticClass(),
+		AODForestManager::StaticClass(), AODWaterManager::StaticClass(), AODGuardrailManager::StaticClass(),
+		AODFurnitureManager::StaticClass()};
+	return Classes;
+}
+
+TArray<AActor*> AODGameMode::SpawnVistaSet(const FString& Area, const FVector& Offset, const FODVistaRegion& Region, int32 Step)
+{
+	return VistaClasses().IsValidIndex(Step)
+		? SpawnAreaSet(Area, FVector(Offset.X, Offset.Y, 0.0), &Region, VistaClasses()[Step]) : TArray<AActor*>();
+}
+
+int32 AODGameMode::NumVistaSteps()
+{
+	return VistaClasses().Num();
+}
+
+bool AODGameMode::PrewarmArea(const FString& Area)
+{
+	// both run every call: each starts its workers on the first one
+	const bool bTerrain = AODTerrainManager::PrewarmArea(FString::Printf(TEXT("terrain_%s_test"), *Area));
+	const bool bForest = AODForestManager::PrewarmArea(FString::Printf(TEXT("water_%s_test"), *Area),
+		FString::Printf(TEXT("elev_%s_test"), *Area));
+	return bTerrain && bForest;
 }
 
 void AODGameMode::FreezeStreaming(bool bFreeze)
@@ -253,7 +318,7 @@ void AODGameMode::StartDrawnArea(const FString& Key)
 	}
 }
 
-TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Offset, const FODVistaRegion* Vista)
+TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Offset, const FODVistaRegion* Vista, UClass* Only)
 {
 	TArray<AActor*> Out;
 	UWorld* World = GetWorld();
@@ -285,9 +350,7 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 	// so for them this is equivalent to the old SpawnActor-then-assign.
 	auto Begin = [&](UClass* Cls, bool bLevelPlaced) -> AActor*
 	{
-		if (Vista && Cls != AODTerrainManager::StaticClass() && Cls != AODRoadManager::StaticClass()
-			&& Cls != AODForestManager::StaticClass() && Cls != AODWaterManager::StaticClass()
-			&& Cls != AODGuardrailManager::StaticClass() && Cls != AODFurnitureManager::StaticClass())
+		if ((Vista && !VistaClasses().Contains(Cls)) || (Only && Cls != Only))
 		{
 			return nullptr;
 		}
@@ -310,10 +373,11 @@ TArray<AActor*> AODGameMode::SpawnAreaSet(const FString& Area, const FVector& Of
 		{
 			A->Tags.Add(ODVistaTag);
 		}
+		const double T0 = FPlatformTime::Seconds();
 		A->FinishSpawning(Xf);
 		Out.Add(A);
-		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned %s for area '%s'"),
-			*A->GetClass()->GetName(), *Area);
+		UE_LOG(LogTemp, Display, TEXT("ODGameMode: spawned %s for area '%s' in %.0f ms"),
+			*A->GetClass()->GetName(), *Area, (FPlatformTime::Seconds() - T0) * 1000.0);
 	};
 
 	if (AODTerrainManager* Terrain = Cast<AODTerrainManager>(Begin(AODTerrainManager::StaticClass(), true)))

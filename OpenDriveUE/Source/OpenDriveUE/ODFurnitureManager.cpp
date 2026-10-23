@@ -1,4 +1,5 @@
 #include "ODFurnitureManager.h"
+#include "ODTickMeter.h"
 #include "ODVisualStyle.h"
 
 #include "ODBinSidecarUtil.h"
@@ -251,6 +252,8 @@ void AODFurnitureManager::UpdateLamps()
 void AODFurnitureManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODFurnitureManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	const double Now = GetWorld()->GetTimeSeconds();
 	if (Now - LastLampCheck > 1.0)

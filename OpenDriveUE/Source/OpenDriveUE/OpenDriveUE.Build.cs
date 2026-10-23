@@ -39,6 +39,8 @@ public class OpenDriveUE : ModuleRules
 			"Json",
 			// ODTileSource: -ODTileServer live tile fetch.
 			"HTTP",
+			// FImage/CopyImage: area rasters decoded off the game thread (ODTerrainManager::PrewarmArea).
+			"ImageCore",
 			// ODBakeLink: "ready to drive" toast (FSlateNotificationManager, 2026-10-21).
 			"Slate"
 		});
@@ -46,7 +48,12 @@ public class OpenDriveUE : ModuleRules
 		// ODWheelDevice: racing wheel input + force feedback (Arc 6)
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
-			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib" });
+			PublicSystemLibraries.AddRange(new string[] { "dinput8.lib", "dxguid.lib", "dxgi.lib" });
+			// ODMedia now-playing card: C++/WinRT SMTC (cppwinrt headers ship with the SDK; it throws on errors)
+			PublicSystemLibraries.Add("windowsapp.lib");
+			string SdkInc = System.IO.Path.Combine(Target.WindowsPlatform.WindowsSdkDir, "Include");
+			PublicSystemIncludePaths.Add(System.IO.Path.Combine(SdkInc, System.Linq.Enumerable.Max(System.IO.Directory.GetDirectories(SdkInc, "10.*")), "cppwinrt"));
+			bEnableExceptions = true;
 		}
 	}
 }

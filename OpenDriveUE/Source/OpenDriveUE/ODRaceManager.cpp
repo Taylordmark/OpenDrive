@@ -5,7 +5,6 @@
 #include "Components/InputComponent.h"
 #include "Dom/JsonObject.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "DrawDebugHelpers.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -14,10 +13,16 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
-#include "ODGhost.h"
+#include "EngineUtils.h"
+#include "HAL/FileManager.h"
+#include "ODMarkers.h"
+#include "ODRoadManager.h"
+#include "ODVehicleDef.h"
+#include "ODVehiclePawn.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/MemoryWriter.h"
+#include "ODReplay.h"
 
 AODRaceManager::AODRaceManager()
 {
@@ -224,27 +229,32 @@ void AODRaceManager::BeginPlay()
 	{
 		LoadCenterline();
 	}
+	// a gantry on every gate: start green, finish blue, the rest yellow
+	if (Checkpoints.Num() >= 2)
+	{
+		const TArrayView<const FTransform> G(Checkpoints);
+		ODMarkers::AddGantries(this, G.Left(1), FLinearColor::Green, GateRadius * 0.5f);
+		ODMarkers::AddGantries(this, G.Slice(1, G.Num() - 2), FLinearColor::Yellow, GateRadius * 0.5f);
+		ODMarkers::AddGantries(this, G.Right(1), FLinearColor::Blue, GateRadius * 0.5f);
+	}
 
 	if (const UODRaceSave* Save = Cast<UODRaceSave>(
 			UGameplayStatics::LoadGameFromSlot(SaveSlot(), 0)))
 	{
 		BestTime = Save->BestTime;
 		BestGateTimes = Save->BestGateTimes;
-		if (Save->GhostPositions.Num() >= 2)
+		MyBest.Time = Save->BestTime;
+		MyBest.SampleInterval = Save->SampleInterval;
+		MyBest.CarId = Save->GhostCar;
+		MyBest.Path = Save->GhostFile;
+		MyBest.Positions = Save->GhostPositions;
+		for (const FRotator& R : Save->GhostRotations)
 		{
-			AODGhost* G = GetWorld()->SpawnActor<AODGhost>();
-			G->SampleInterval = Save->SampleInterval;
-			G->Positions = Save->GhostPositions;
-			G->Rotations = Save->GhostRotations;
-			if (const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0))
-			{
-				if (const auto* Mesh =
-						Cast<UStaticMeshComponent>(Car->GetRootComponent()))
-				{
-					G->Init(Mesh->GetStaticMesh());
-				}
-			}
-			Ghost = G;
+			MyBest.Rotations.Add(R.Quaternion());
+		}
+		if (MyBest.Rotations.Num() == MyBest.Positions.Num())
+		{
+			ApplyGhost(MyBest);
 		}
 	}
 
@@ -301,14 +311,17 @@ void AODRaceManager::Tick(float DeltaSeconds)
 		return;
 	}
 
+	// #9 replay teleports the car along its past: no gates, resync after
+	if (AODReplay::IsActiveIn(GetWorld()))
+	{
+		PrevTime = -1.0;
+		return;
+	}
+
 	// pawn can spawn after our BeginPlay; give the ghost its mesh here
 	if (Ghost.IsValid() && Ghost->NeedsMesh())
 	{
-		if (const auto* Mesh =
-				Cast<UStaticMeshComponent>(Pawn->GetRootComponent()))
-		{
-			Ghost->Init(Mesh->GetStaticMesh());
-		}
+		ApplyGhost(GhostChoice == 0 ? MyBest : Imported[GhostChoice - 1]);
 	}
 
 	// Sub-frame timing (2026-10-09, Taylor: "everything in the game should be
@@ -339,19 +352,12 @@ void AODRaceManager::Tick(float DeltaSeconds)
 			const float A = FrameDt > 0.0
 				? FMath::Clamp(float((RaceStart + NextSampleTime - PrevTime) / FrameDt), 0.0f, 1.0f) : 1.0f;
 			RecPositions.Add(FMath::Lerp(PrevPos, Pos, A));
-			RecRotations.Add(FQuat::Slerp(PrevRot, Rot, A).Rotator());
+			RecRotations.Add(FQuat::Slerp(PrevRot, Rot, A));
 			NextSampleTime += SampleInterval;
 		}
 	}
 
 	const FVector Gate = Checkpoints[NextGate].GetLocation();
-
-	// visible marker on the next gate
-	DrawDebugCylinder(GetWorld(), Gate - FVector(0, 0, 100),
-		Gate + FVector(0, 0, 700), GateRadius * 0.5f, 20,
-		NextGate == 0 ? FColor::Green
-		: (NextGate == Checkpoints.Num() - 1 ? FColor::Blue : FColor::Yellow),
-		false, -1.0f, 0, 12.0f);
 
 	if (FVector::Dist2D(Pos, Gate) > GateRadius)
 	{
@@ -426,34 +432,171 @@ void AODRaceManager::StartRun(double CrossTime)
 
 void AODRaceManager::SaveBest()
 {
+	MyBest.Area = AreaKey();
+	MyBest.TrackHash = FODGhostFile::HashTrack(Checkpoints);
+	MyBest.CarId = CurrentCarId();
+	MyBest.Time = BestTime;
+	MyBest.SampleInterval = SampleInterval;
+	MyBest.Positions = RecPositions;
+	MyBest.Rotations = RecRotations;
+	// export (#3): replace our previous file for this track, keep everyone else's
+	if (!MyBest.Path.IsEmpty())
+	{
+		IFileManager::Get().Delete(*MyBest.Path);
+	}
+	const int32 Ms = FMath::RoundToInt(BestTime * 1000.0f);
+	MyBest.Path = FODGhostFile::Dir() / FString::Printf(TEXT("%s_%s_%d-%02d-%03d.odghost"),
+		*MyBest.Area, TrackName.IsEmpty() ? *GetWorld()->GetMapName() : *TrackName,
+		Ms / 60000, Ms / 1000 % 60, Ms % 1000);
+	if (!MyBest.Save(MyBest.Path))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ODRaceManager: couldn't write %s"), *MyBest.Path);
+		MyBest.Path.Empty();
+	}
+
 	UODRaceSave* Save = Cast<UODRaceSave>(
 		UGameplayStatics::CreateSaveGameObject(UODRaceSave::StaticClass()));
 	Save->BestTime = BestTime;
 	Save->SampleInterval = SampleInterval;
 	Save->GhostPositions = RecPositions;
-	Save->GhostRotations = RecRotations;
+	for (const FQuat& Q : RecRotations)
+	{
+		Save->GhostRotations.Add(Q.Rotator());
+	}
 	Save->BestGateTimes = RecGateTimes;
+	Save->GhostCar = MyBest.CarId;
+	Save->GhostFile = MyBest.Path;
 	BestGateTimes = RecGateTimes;
 	UGameplayStatics::SaveGameToSlot(Save, SaveSlot(), 0);
 
-	// the new best becomes the ghost for the next run
-	if (!Ghost.IsValid() && RecPositions.Num() >= 2)
+	// the new best becomes the ghost for the next run - unless the player
+	// picked an imported one to race against
+	if (GhostChoice == 0)
 	{
-		AODGhost* G = GetWorld()->SpawnActor<AODGhost>();
-		if (const APawn* Car = UGameplayStatics::GetPlayerPawn(this, 0))
+		ApplyGhost(MyBest);
+	}
+}
+
+FString AODRaceManager::AreaKey() const
+{
+	for (TActorIterator<AODRoadManager> It(GetWorld()); It; ++It)
+	{
+		const FString Key = It->GetAreaKey();
+		if (!Key.IsEmpty())
 		{
-			if (const auto* Mesh =
-					Cast<UStaticMeshComponent>(Car->GetRootComponent()))
+			return Key;
+		}
+	}
+	return GetWorld()->GetMapName();
+}
+
+FString AODRaceManager::CurrentCarId() const
+{
+	const auto* Car = Cast<AODVehiclePawn>(UGameplayStatics::GetPlayerPawn(this, 0));
+	return Car && Car->GetVehicleDefs().IsValidIndex(Car->GetVehicleIndex())
+		? Car->GetVehicleDefs()[Car->GetVehicleIndex()]->GetName() : FString();
+}
+
+void AODRaceManager::ApplyGhost(const FODGhostFile& File)
+{
+	if (File.Positions.Num() < 2)
+	{
+		if (Ghost.IsValid())
+		{
+			Ghost->Stop();
+			Ghost->Positions.Reset();   // Play() no-ops until there's a run to show
+		}
+		return;
+	}
+	if (!Ghost.IsValid())
+	{
+		Ghost = GetWorld()->SpawnActor<AODGhost>();
+	}
+	Ghost->Stop();   // a new pick shows from the next run start
+	Ghost->SampleInterval = File.SampleInterval;
+	Ghost->Positions = File.Positions;
+	Ghost->Rotations = File.Rotations;
+
+	// the recorded car's mesh when this install has that car, else the player's
+	UStaticMesh* CarMesh = nullptr;
+	const APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (const auto* Car = Cast<AODVehiclePawn>(Pawn))
+	{
+		for (const UODVehicleDef* Def : Car->GetVehicleDefs())
+		{
+			if (Def && !File.CarId.IsEmpty() && Def->GetName() == File.CarId)
 			{
-				G->Init(Mesh->GetStaticMesh());
+				CarMesh = Def->ChassisMesh.LoadSynchronous();
 			}
 		}
-		Ghost = G;
 	}
-	if (Ghost.IsValid())
+	if (!CarMesh && Pawn)
 	{
-		Ghost->SampleInterval = SampleInterval;
-		Ghost->Positions = RecPositions;
-		Ghost->Rotations = RecRotations;
+		if (const auto* Mesh = Cast<UStaticMeshComponent>(Pawn->GetRootComponent()))
+		{
+			CarMesh = Mesh->GetStaticMesh();
+		}
 	}
+	Ghost->Init(CarMesh);
+}
+
+void AODRaceManager::RescanGhosts()
+{
+	if (Checkpoints.Num() < 2)
+	{
+		return;
+	}
+	const FString Area = AreaKey();
+	const uint32 Hash = FODGhostFile::HashTrack(Checkpoints);
+	const FString Was = GhostChoice > 0 ? Imported[GhostChoice - 1].Path : FString();
+	TArray<FString> Names;
+	IFileManager::Get().FindFiles(Names, *(FODGhostFile::Dir() / TEXT("*.odghost")), true, false);
+	Names.Sort();
+	Imported.Reset();
+	GhostChoice = 0;
+	for (const FString& Name : Names)
+	{
+		FODGhostFile F;
+		const FString P = FODGhostFile::Dir() / Name;
+		if (P != MyBest.Path && F.Load(P) && F.Area == Area && F.TrackHash == Hash)
+		{
+			Imported.Add(MoveTemp(F));
+			if (P == Was)
+			{
+				GhostChoice = Imported.Num();
+			}
+		}
+	}
+	if (!Was.IsEmpty() && GhostChoice == 0)
+	{
+		ApplyGhost(MyBest);   // the picked file is gone
+	}
+}
+
+FString AODRaceManager::GetGhostChoiceLabel() const
+{
+	if (Checkpoints.Num() < 2)
+	{
+		return TEXT("No race");
+	}
+	if (GhostChoice == 0)
+	{
+		return MyBest.Positions.Num() >= 2 ? TEXT("My best") : TEXT("None yet");
+	}
+	const FODGhostFile& F = Imported[GhostChoice - 1];
+	const int32 Ms = FMath::RoundToInt(F.Time * 1000.0f);
+	return FString::Printf(TEXT("%s %d:%02d.%03d (%d/%d)"),
+		F.CarId.IsEmpty() ? TEXT("Ghost") : *F.CarId.Replace(TEXT("DA_"), TEXT("")),
+		Ms / 60000, Ms / 1000 % 60, Ms % 1000, GhostChoice, Imported.Num());
+}
+
+void AODRaceManager::CycleGhost(int32 Dir)
+{
+	if (Imported.Num() == 0)
+	{
+		return;
+	}
+	const int32 N = Imported.Num() + 1;
+	GhostChoice = ((GhostChoice + Dir) % N + N) % N;
+	ApplyGhost(GhostChoice == 0 ? MyBest : Imported[GhostChoice - 1]);
 }

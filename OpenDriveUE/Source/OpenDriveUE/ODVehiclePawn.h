@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
 #include "ODCarPaint.h"
+#include "ODIndicator.h"
 #include "InputCoreTypes.h"
 #include "ODVehiclePawn.generated.h"
 
@@ -232,6 +233,11 @@ public:
 	 *  longer pauses the world, so UODVehicleMovement keeps the pawn's last
 	 *  RPM frozen-but-nonzero and the synth kept audibly idling/revving). */
 	bool IsInShowroom() const { return bInShowroom; }
+
+	/** #9 AODReplay: no driving input, wheels spin from the replayed Omega
+	 *  times the playback rate (0 = paused) while the body is kinematic. */
+	bool bInReplay = false;
+	float ReplaySpinScale = 1.0f;
 
 	/** Drop the car at a chosen road point (map spawn pick) and re-arm the
 	 *  existing PM_Asphalt ground-snap so TrySnapToGround settles it on the
@@ -565,6 +571,8 @@ private:
 	static constexpr double SnapHitchFrameSec = 0.075;
 	static constexpr double SnapQuietSec = 0.75;
 	double LastHitchTime = 0.0;
+	float SnapFrameMaxSec = 0.0f;   // longest frame since spawn, for the physics-released log
+	float SnapFrameAvgSec = 0.0f;   // running frame time; a hitch is over 2x it (and SnapHitchFrameSec)
 
 	// 2026-09-03: one-shot nearby-asphalt nudge, tried once a spawn point has
 	// spent a couple of seconds NOT finding PM_Asphalt directly below it (see
@@ -657,4 +665,23 @@ private:
 	void UpdateActiveInputDevice();
 	static void SaveInputDeviceMode(EODInputDevice Mode);
 	static EODInputDevice LoadInputDeviceMode();
+
+	// horn (fun-features #8a): AODVehicleAudio sounds it, AODTrafficManager reacts
+public:
+	bool IsHornOn() const { return bHornKey; }
+	int32 GetHornPresses() const { return HornPresses; }
+private:
+	void HornPressed() { bHornKey = true; ++HornPresses; }
+	void HornReleased() { bHornKey = false; }
+	bool bHornKey = false;
+	int32 HornPresses = 0;
+
+	// indicators (fun-features #8b): AODDayNightController lights the lenses
+public:
+	const FODIndicator& GetIndicator() const { return Indicator; }
+private:
+	void IndicatorLeftPressed() { Indicator.Toggle(FODIndicator::Left); }
+	void IndicatorRightPressed() { Indicator.Toggle(FODIndicator::Right); }
+	void HazardsPressed() { Indicator.Toggle(FODIndicator::Hazard); }
+	FODIndicator Indicator;
 };

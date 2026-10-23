@@ -9,6 +9,10 @@ Usage:  python build_landmarks.py          (needs road_stations.json)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json, OSM via Overpass (cached)
 Writes  OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test_tile_<tx>_<ty>.bin
+        OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test.json
+            (2026-10-22, landmark hunting: [{name, kind, centroid_cm [x, y], radius_cm,
+            height_m}] for AODChallengeManager; checks/verify_landmark_sidecar.py.
+            `--sidecar` rewrites just this from landmarks.json, no OSM or meshes)
         data/road_tiles/<AREA_NAME>_test/landmarks.json   (summary, checks/verify_landmarks.py)
 
 Geometry is OSM only (ODbL, already credited) plus code: no third-party models.
@@ -36,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 
-from build_building_mesh import FACADE_TILE_M, STATIONS_PATH, extrude_footprint, load_stations
+from build_building_mesh import FACADE_TILE_M, STATIONS_PATH, extrude_footprint, load_stations, merge
 import building_roofs
 from building_roofs import make_roof, obb
 from export_building_mesh_bin import pack_tile
@@ -217,14 +221,6 @@ def revolve(profile, seg, cx, cy, dx, dy, z0_cm):
     return verts, uvs, tris
 
 
-def append(mesh, piece):
-    verts, uvs, tris = mesh
-    b = len(verts)
-    verts.extend(piece[0])
-    uvs.extend(piece[1])
-    tris.extend((i + b, j + b, k + b) for i, j, k in piece[2])
-
-
 def extrude(ring, base_z_cm, h_m, roof):
     verts, uvs, tris = extrude_footprint(ring, base_z_cm, h_m * 100.0, 0)
     n_solid, shape = len(verts), "flat"
@@ -239,24 +235,23 @@ def extrude(ring, base_z_cm, h_m, roof):
         if roofed:
             verts, uvs, tris, n_solid = roofed
             shape = roof
-    return [verts, uvs, tris], n_solid, shape
+    return (verts, uvs, tris, n_solid), shape
 
 
 def build(lm, rings, ground_z_cm, road_xy_cm):
+    """Pieces (verts, uvs, tris, n_solid) merged windowed-first; revolved
+    pieces have n_solid 0 (no windows)."""
     ring = rings[lm["way"]]
     cx, cy, dx, dy, hl, _ = obb(ring)
-    shape, n_solid = "flat", 0
+    shape, pieces = "flat", []
     if lm["body"] == "extrude":
-        mesh, n_solid, shape = extrude(ring, ground_z_cm, lm["h"], lm["roof"])
+        piece, shape = extrude(ring, ground_z_cm, lm["h"], lm["roof"])
+        pieces.append(piece)
     elif lm["body"] == "parts":
-        mesh = [[], [], []]
         for way, h in lm["parts"]:
-            part, _, shape = extrude(rings[way], ground_z_cm, h, lm["roof"])
-            append(mesh, part)   # ponytail: end walls of every part get windows, a per-part n_solid split needs ODU5
-        n_solid = len(mesh[0])
-    else:
-        mesh = [[], [], []]
-    top_z = max((v[2] for v in mesh[0]), default=ground_z_cm)
+            piece, shape = extrude(rings[way], ground_z_cm, h, lm["roof"])
+            pieces.append(piece)
+    top_z = max((v[2] for p in pieces for v in p[0]), default=ground_z_cm)
     for p in lm.get("pieces", []):
         if p["at"] == "end":   # long-axis end nearest the road, set in a step from the gable
             ends = [(cx + s * (hl - 250) * dx, cy + s * (hl - 250) * dy) for s in (1, -1)]
@@ -265,8 +260,8 @@ def build(lm, rings, ground_z_cm, road_xy_cm):
             px = cx + 100 * (p["at"][0] * dx - p["at"][1] * dy)
             py = cy + 100 * (p["at"][0] * dy + p["at"][1] * dx)
         z0 = top_z if p["z"] == "top" else ground_z_cm + 100 * p["z"]
-        append(mesh, revolve(p["profile"], p["seg"], px, py, dx, dy, z0))
-    verts, uvs, tris = mesh
+        pieces.append((*revolve(p["profile"], p["seg"], px, py, dx, dy, z0), 0))
+    verts, uvs, tris, n_solid = merge(pieces)
     seed = paint_seed(lm["paint"]) if lm["wall"] in PAINTED_WALLS else 255
     return dict(name=f"landmark_{lm['way']}",
                 vertices=[round(c, 1) for v in verts for c in v],
@@ -350,7 +345,22 @@ def main():
         written.append(path)
     n_stale = delete_stale_tiles(OUT_DIR, f"landmarks_{AREA_NAME}_test_tile_*.bin", written)
     SUMMARY_PATH.write_text(json.dumps(dict(area=AREA_NAME, generation_id=gen_id, landmarks=summary), indent=1))
+    write_sidecar(summary, OUT_DIR)
     print(f"{len(here)} landmark(s) -> {len(written)} tile(s), {n_stale} stale deleted, gen {gen_id} -> {OUT_DIR}")
+
+
+def write_sidecar(summary, out_dir):
+    """The runtime's landmark list: names and centroids, kept out of ODL1
+    (the place labels share that magic)."""
+    out = []
+    for lm in summary:
+        ring = lm["footprint"]
+        cx, cy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+        out.append(dict(name=lm["name"], kind="building", centroid_cm=[round(cx, 1), round(cy, 1)],
+                        radius_cm=round(max(math.dist((cx, cy), p) for p in ring), 1), height_m=lm["height_m"]))
+    path = out_dir / f"landmarks_{AREA_NAME}_test.json"
+    path.write_text(json.dumps(dict(area=AREA_NAME, landmarks=out), indent=1), encoding="utf-8")
+    print(f"wrote {path} ({len(out)} landmark(s))")
 
 
 # ------------------------------------------------------------- --list mode
@@ -428,4 +438,7 @@ out tags center;"""
 
 
 if __name__ == "__main__":
-    list_candidates() if "--list" in sys.argv else main()
+    if "--sidecar" in sys.argv:
+        write_sidecar(json.loads(SUMMARY_PATH.read_text())["landmarks"], OUT_DIR)
+    else:
+        list_candidates() if "--list" in sys.argv else main()

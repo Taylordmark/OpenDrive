@@ -46,6 +46,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
+import shapely
 from scipy.spatial import cKDTree
 
 from bake_job import tile_in_job
@@ -190,6 +191,7 @@ REGION = AREA_REGION.get(AREA_NAME, "generic")
 # houses, outbuildings and small pitched buildings get garage / entry doors.
 FACADE_PUNCHED, FACADE_HOUSE, FACADE_STOREFRONT, FACADE_CURTAIN, FACADE_BALCONY = range(5)
 FACADE_FLOORS = [(3.6, 3.2), (2.9, 2.8), (4.5, 3.3), (5.0, 3.8), (4.0, 3.0)]
+FACADE_BAY_M = [2.5, 3.0, 3.0, 1.5, 3.0]   # window bay width, same table in the material
 TOWER_BALCONY_SHARE = {"tropical": 0.6, "socal": 0.4, "sf": 0.4, "rockies": 0.5, "generic": 0.4}
 CITY_STOREFRONT_SHARE = 0.35
 STOREFRONT_SETBACK_M = 6.0   # SF street-front buildings sit 4-6 m from the carriageway edge
@@ -316,22 +318,120 @@ def load_stations():
     return east, north, elev, half_w
 
 
-def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
+# Footprint cleanup (2026-10-21): OSM rings carry near-collinear jitter and
+# Microsoft's imagery-traced rings are jaggy - every leftover vertex is one
+# more wall quad, and an off-square corner fails building_roofs' bounding-
+# rectangle fill test. simplify_ring drops vertices within SIMPLIFY_CM
+# (Microsoft rings: SIMPLIFY_MS_CM) of their neighbours' line; square_ring
+# then nudges corners within SQUARE_DEG of 90 deg to square (iD's
+# orthogonalize step), keeping the ring as it was if that moves a vertex
+# more than SQUARE_MAX_MOVE_CM, changes the area more than SQUARE_MAX_AREA
+# or leaves it invalid. Vertices another footprint shares (row houses,
+# party walls) never move, so shared walls stay shared.
+SIMPLIFY_CM, SIMPLIFY_MS_CM = 25.0, 50.0
+SQUARE_DEG = 12.0
+SQUARE_MIN_SHARE = 0.75   # share of corners near 90 deg or straight, else not a rectilinear building
+SQUARE_MAX_MOVE_CM = 40.0
+SQUARE_MAX_AREA = 0.03
+SQUARE_ITERS = 200
+SQUARE_DONE = 1e-3        # |cos| of every squared corner below this (~0.06 deg)
+SQUARE_MIN_STEP_CM = 0.05
+
+
+def simplify_ring(ring, pinned, tol_cm):
+    """(ring, pinned) minus unpinned vertices within tol_cm of the line
+    through their neighbours, flattest first, keeping at least 3."""
+    ring, pinned = list(ring), list(pinned)
+    while len(ring) > 3:
+        best, drop = tol_cm, None
+        for i, (px, py) in enumerate(ring):
+            if pinned[i]:
+                continue
+            (ax, ay), (bx, by) = ring[i - 1], ring[(i + 1) % len(ring)]
+            span = math.hypot(bx - ax, by - ay)
+            d = (abs((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / span if span > 0
+                 else math.hypot(px - ax, py - ay))
+            if d < best:
+                best, drop = d, i
+        if drop is None:
+            break
+        del ring[drop], pinned[drop]
+    return ring, pinned
+
+
+def _corners(p):
+    """(cos of each corner, unit vectors to both neighbours, shorter side)."""
+    a, c = np.roll(p, 1, 0) - p, np.roll(p, -1, 0) - p
+    la, lc = np.linalg.norm(a, axis=1), np.linalg.norm(c, axis=1)
+    a, c = a / la[:, None], c / lc[:, None]
+    return (a * c).sum(1), a, c, np.minimum(la, lc)
+
+
+def square_ring(ring, pinned):
+    """(ring with its near-square corners squared, "squared"), or (ring,
+    "not_square" / "too_far") unchanged (see the block above)."""
+    p = np.array(ring, float)
+    if len(p) < 4:
+        return ring, "not_square"
+    near_cos = math.sin(math.radians(SQUARE_DEG))
+    cos0 = _corners(p)[0]
+    near = np.abs(cos0) < near_cos
+    if not near.any() or (near | (np.abs(cos0) > math.cos(math.radians(SQUARE_DEG)))).mean() < SQUARE_MIN_SHARE:
+        return ring, "not_square"
+    movable = near & ~np.array(pinned)
+    q = p.copy()
+    for _ in range(SQUARE_ITERS):
+        cos, a, c, side = _corners(q)
+        if np.abs(cos[near]).max() < SQUARE_DONE:
+            break
+        bis = a + c
+        bis /= np.maximum(np.linalg.norm(bis, axis=1), 1e-9)[:, None]
+        # acute corner (cos > 0): step toward the neighbours, which opens it
+        step = (bis * (0.2 * cos * side)[:, None])[movable]
+        q[movable] += step
+        if not len(step) or np.abs(step).max() < SQUARE_MIN_STEP_CM:
+            break   # stalled: the rest of the skew is held by pinned corners
+    area0, area1 = shapely.area(shapely.Polygon(p)), shapely.area(shapely.Polygon(q))
+    if (np.linalg.norm(q - p, axis=1).max() > SQUARE_MAX_MOVE_CM or abs(area1 - area0) > SQUARE_MAX_AREA * area0
+            or not shapely.Polygon(q).is_valid):
+        return ring, "too_far"
+    return [tuple(v) for v in q.tolist()], "squared"
+
+
+def clean_footprint(ring, pinned, tol_cm):
+    """(ring, square_ring status): simplify_ring then square_ring (see the
+    block above)."""
+    ring, pinned = simplify_ring(ring, pinned, tol_cm)
+    return square_ring(ring, pinned)
+
+
+def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed, bay_m=None):
     """ring_xy_cm: list of (x_cm, y_cm), CCW or CW as OSM gives it (not
     guaranteed) - wall winding is derived per-edge from the edge direction
     so it doesn't matter; the roof fan uses the polygon's own signed area
-    to pick a consistent winding for its own faces."""
+    to pick a consistent winding for its own faces.
+    bay_m (2026-10-21): the facade's window bay width (FACADE_BAY_M). Each
+    wall then runs a whole number of bays, stretched to fit, so no window
+    straddles a corner; a jog under half a bay gets the wall between two
+    bays. Bay numbers keep running round the building (the material hashes
+    them per window). None: U is the plain perimeter distance."""
     n = len(ring_xy_cm)
     verts, uvs, tris = [], [], []
 
     # ---- walls: one quad (2 tris) per edge ----
     s = 0.0   # cumulative perimeter distance, for wall U
+    k = 0     # bays laid so far
     for i in range(n):
         x0, y0 = ring_xy_cm[i]
         x1, y1 = ring_xy_cm[(i + 1) % n]
         edge_len_m = math.hypot(x1 - x0, y1 - y0) / 100.0
         u0, u1 = s / FACADE_TILE_M, (s + edge_len_m) / FACADE_TILE_M
         s += edge_len_m
+        if bay_m:
+            bays = round(edge_len_m / bay_m)
+            u0 = (k * bay_m - (0 if bays else edge_len_m / 2)) / FACADE_TILE_M
+            u1 = (k + bays) * bay_m / FACADE_TILE_M if bays else u0 + edge_len_m / FACADE_TILE_M
+            k += bays
         v_top = height_cm / 100.0 / FACADE_TILE_M
 
         b = len(verts)
@@ -380,6 +480,123 @@ def extrude_footprint(ring_xy_cm, base_z_cm, height_cm, seed):
     return verts, uvs, tris
 
 
+# Parapets (building shaping phase 2, 2026-10-22): a flat roof gets a low
+# wall round its edge - the outer face continues the wall up, a coping top
+# (faces up, so the roof section draws it) and an inner face down to the
+# roof cap - and punched / storefront facades a cornice under the coping,
+# CORNICE_OUT_CM proud of the wall. All of it is window-free (merged after
+# n_solid). Height: the gap between a tagged height (OSM height=*, else
+# Microsoft's) and the whole-storey stack, clamped to PARAPET_MIN_M..
+# PARAPET_MAX_M, so the roof line lands on the real height; untagged
+# buildings take PARAPET_M by archetype (+- PARAPET_JITTER_M). A footprint
+# too thin or too sharp to offset (offset_ring None) keeps a bare roof edge.
+PARAPET_M = [0.9, 0.5, 1.0, 1.2, 1.1]   # by FACADE_* archetype
+PARAPET_JITTER_M = 0.15
+PARAPET_MIN_M, PARAPET_MAX_M = 0.3, 2.5
+PARAPET_THICK_CM = 25.0
+CORNICE_OUT_CM, CORNICE_H_CM = 15.0, 30.0
+CORNICE_FACADES = (FACADE_PUNCHED, FACADE_STOREFRONT)
+MITER_MAX = 3.0   # x the offset distance
+
+
+def offset_ring(ring, d):
+    """ring with every edge moved d cm to its left (inward on a CCW ring),
+    one vertex per corner where the moved edges meet; None if an edge is
+    under 1 cm, a corner's miter runs past MITER_MAX * |d|, an edge flips or
+    the result self-intersects."""
+    n, out = len(ring), []
+    for i in range(n):
+        (ax, ay), (px, py), (bx, by) = ring[i - 1], ring[i], ring[(i + 1) % n]
+        l0, l1 = math.hypot(px - ax, py - ay), math.hypot(bx - px, by - py)
+        if l0 < 1.0 or l1 < 1.0:
+            return None
+        n0 = (-(py - ay) / l0, (px - ax) / l0)
+        n1 = (-(by - py) / l1, (bx - px) / l1)
+        k = 1.0 + n0[0] * n1[0] + n0[1] * n1[1]
+        if k < 1e-6:
+            return None
+        mx, my = (n0[0] + n1[0]) / k * d, (n0[1] + n1[1]) / k * d
+        if math.hypot(mx, my) > MITER_MAX * abs(d):
+            return None
+        out.append((px + mx, py + my))
+    for i in range(n):
+        j = (i + 1) % n
+        if ((ring[j][0] - ring[i][0]) * (out[j][0] - out[i][0])
+                + (ring[j][1] - ring[i][1]) * (out[j][1] - out[i][1])) <= 0:
+            return None
+    return out if shapely.Polygon(out).is_valid else None
+
+
+def _quad(verts, uvs, tris, corners, quad_uvs, up=None):
+    """Append a quad (4 corners in order round it); up True/False winds it
+    to face up/down (CCW in x, y faces up, as the roof cap)."""
+    b = len(verts)
+    verts.extend(corners)
+    uvs.extend(quad_uvs)
+    (x0, y0, _), (x1, y1, _), (x2, y2, _) = corners[:3]
+    flip = up is not None and ((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0) > 0) != up
+    tris.extend([(b, b + 2, b + 1), (b, b + 3, b + 2)] if flip else [(b, b + 1, b + 2), (b, b + 2, b + 3)])
+
+
+def parapet(wall_verts, wall_uvs, n_edges, top_z_cm, h_cm, cornice):
+    """(verts, uvs, tris) of the parapet (and cornice) on the walls
+    extrude_footprint made (edge i = its vertices 4i..4i+3), or None (see
+    the block above)."""
+    ring = [wall_verts[4 * i][:2] for i in range(n_edges)]
+    area2 = sum(ring[i - 1][0] * ring[i][1] - ring[i][0] * ring[i - 1][1] for i in range(n_edges))
+    side = 1.0 if area2 > 0 else -1.0   # left of the edges = inside
+    inner = offset_ring(ring, side * PARAPET_THICK_CM)
+    outer = offset_ring(ring, -side * CORNICE_OUT_CM) if cornice else ring
+    if inner is None or outer is None:
+        return None
+    z0, z2 = top_z_cm, top_z_cm + h_cm
+    z1 = max(z0, z2 - CORNICE_H_CM) if cornice else z2   # wall face up to here, then the cornice
+    verts, uvs, tris = [], [], []
+    t = 100.0 * FACADE_TILE_M
+    base = wall_verts[0][2]   # wall V runs from the wall foot
+    v0, v1, v2 = ((z - base) / t for z in (z0, z1, z2))
+    s_in = 0.0
+    for i in range(n_edges):
+        j = (i + 1) % n_edges
+        (u0, _), (u1, _) = wall_uvs[4 * i], wall_uvs[4 * i + 1]
+        p0, p1, i0, i1, o0, o1 = ring[i], ring[j], inner[i], inner[j], outer[i], outer[j]
+        if z1 > z0:
+            _quad(verts, uvs, tris, [(*p0, z0), (*p1, z0), (*p1, z1), (*p0, z1)],
+                  [(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+        if cornice:
+            lo = math.dist(o0, o1) / t
+            _quad(verts, uvs, tris, [(*p0, z1), (*p1, z1), (*o1, z1), (*o0, z1)],
+                  [(u0, 0.0), (u1, 0.0), (u1, CORNICE_OUT_CM / t), (u0, CORNICE_OUT_CM / t)], up=False)
+            _quad(verts, uvs, tris, [(*o0, z1), (*o1, z1), (*o1, z2), (*o0, z2)],
+                  [(u0, v1), (u0 + lo, v1), (u0 + lo, v2), (u0, v2)])
+        _quad(verts, uvs, tris, [(*o0, z2), (*o1, z2), (*i1, z2), (*i0, z2)],
+              [(x / t, y / t) for x, y in (o0, o1, i1, i0)], up=True)
+        li = math.dist(i0, i1) / t
+        _quad(verts, uvs, tris, [(*i1, z0), (*i0, z0), (*i0, z2), (*i1, z2)],
+              [(s_in, v0), (s_in + li, v0), (s_in + li, v2), (s_in, v2)])
+        s_in += li
+    return verts, uvs, tris
+
+
+def merge(pieces):
+    """[(verts, uvs, tris, n_solid)] -> one (verts, uvs, tris, n_solid): every
+    piece's windowed vertices (below its own n_solid) first, then the rest,
+    so the tile format's single n_solid split still covers all of them."""
+    verts, uvs, tris = [], [], []
+    maps = [[0] * len(p[0]) for p in pieces]
+    for windowed in (True, False):
+        if not windowed:
+            n_solid = len(verts)
+        for m, (v, uv, _, n) in zip(maps, pieces):
+            for i in (range(n) if windowed else range(n, len(v))):
+                m[i] = len(verts)
+                verts.append(v[i])
+                uvs.append(uv[i])
+    for m, (_, _, t, _) in zip(maps, pieces):
+        tris.extend((m[a], m[b], m[c]) for a, b, c in t)
+    return verts, uvs, tris, n_solid
+
+
 # Per-process state for build_chunk (main() in-process, or each bake_map
 # worker): stations, their tile buckets, settlement + known-storey lookups.
 _SHARED = None
@@ -416,7 +633,7 @@ def build_chunk(chunk):
     st_x_cm, st_y_cm, st_half_w_cm, st_elev = S["st_x_cm"], S["st_y_cm"], S["st_half_w_cm"], S["st_elev"]
     known_tree, known_vals = S["known_tree"], S["known_vals"]
     out, stats = [], Counter()
-    for b, ring_xy_cm, (cx_cm, cy_cm), levels in chunk:
+    for b, ring_xy_cm, (cx_cm, cy_cm), levels, pinned in chunk:
         tx = int(cx_cm // SETTLEMENT_CELL_CM)
         ty = int(cy_cm // SETTLEMENT_CELL_CM)
         tile_key = f"{tx},{ty}"
@@ -426,6 +643,13 @@ def build_chunk(chunk):
         if archetype_tile is None:
             stats["not_populated"] += 1
             continue
+
+        n_raw = len(ring_xy_cm)
+        ring_xy_cm, squared = clean_footprint(ring_xy_cm, pinned,
+                                              SIMPLIFY_MS_CM if b.get("source") == "ms" else SIMPLIFY_CM)
+        stats["ring_verts", "in"] += n_raw
+        stats["ring_verts", "out"] += len(ring_xy_cm)
+        stats["square", squared] += 1
 
         # road-corridor exclusion gate: nearest station to ANY footprint
         # vertex (not just centroid - a long/thin building could have its
@@ -474,14 +698,25 @@ def build_chunk(chunk):
         stats["archetype", archetype] += 1
         height_cm = facade_height_m(archetype, levels) * 100.0
 
-        verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"])
+        verts, uvs, tris = extrude_footprint(ring_xy_cm, ground_z_cm, height_cm, b["way_id"],
+                                             FACADE_BAY_M[archetype])
         n_solid = len(verts)
         if shape != "flat":
-            roofed = make_roof(verts, uvs, tris, shape == "hip")
+            roofed = make_roof(verts, uvs, tris, shape == "hip", (b.get("roof_height_m") or 0) * 100.0)
             if roofed:
                 verts, uvs, tris, n_solid = roofed
             else:
                 shape = "flat"
+        if shape == "flat":
+            tagged_m = b.get("height_m") or b.get("ms_height_m")
+            jitter = random.Random(b["way_id"] ^ 0x2C1B3C6D).uniform(-PARAPET_JITTER_M, PARAPET_JITTER_M)
+            parapet_m = (min(max(tagged_m - height_cm / 100.0, PARAPET_MIN_M), PARAPET_MAX_M) if tagged_m
+                         else PARAPET_M[archetype] + jitter)
+            par = parapet(verts, uvs, len(ring_xy_cm), ground_z_cm + height_cm, parapet_m * 100.0,
+                          archetype in CORNICE_FACADES and levels >= 2)
+            if par:
+                verts, uvs, tris, n_solid = merge([(verts, uvs, tris, n_solid), (*par, 0)])
+            stats["parapet", "tagged" if tagged_m else "default", "built" if par else "none"] += 1
         roof_set, roof_rgb = roof_look(b, shape, rng, REGION)
         stats["roof", (shape, roof_set)] += 1
         out.append({
@@ -542,7 +777,10 @@ def main():
               "st_elev": st_elev, "station_tiles": dict(station_tiles), "settlement": settlement,
               "tile_counts": tile_counts, "known_tree": known_tree,
               "known_vals": [known[i] for i in known_idx]}
-    items = list(zip(buildings_raw, rings, centroids_cm.tolist(), known))
+    # a vertex in more than one footprint is a shared wall corner: pinned (clean_footprint)
+    shared_xy = Counter(v for r in rings for v in set(r))
+    pinned = [[shared_xy[v] > 1 for v in r] for r in rings]
+    items = list(zip(buildings_raw, rings, centroids_cm.tolist(), known, pinned))
     # (2026-10-21) a pass-2 job builds only the buildings its tiles own (by
     # centroid tile, the tile export_building_mesh_bin.py files them under)
     items = [it for it in items if tile_in_job(int(it[2][0] // TERRAIN_TILE_SIZE_CM),
@@ -562,6 +800,11 @@ def main():
           f"({stats['not_populated']} outside populated tiles, {stats['excluded_road']} "
           f"excluded - too close to the road) -> {OUT_PATH}")
     print(f"  {stats['ms']} of them Microsoft gap-fill footprints")
+    sq = {k[1]: v for k, v in stats.items() if k[0] == "square"}
+    print(f"footprints: {stats['ring_verts', 'in']} -> {stats['ring_verts', 'out']} ring vertices; squared "
+          + ", ".join(f"{k}={v}" for k, v in sorted(sq.items())))
+    print("parapets (height source, built): " + ", ".join(
+        f"{k[1]}/{k[2]}={v}" for k, v in sorted(stats.items(), key=str) if k[0] == "parapet"))
     print("storeys from: " + ", ".join(f"{k}={v}" for k, v in sorted(level_sources.items())))
     n_pitched = sum(v for (shape, _), v in roof_counts.items() if shape != "flat")
     print(f"roofs: {n_pitched / max(len(out), 1):.1%} pitched; (shape, roof_set) counts: "

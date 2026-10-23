@@ -1,4 +1,5 @@
 #include "ODTerrainManager.h"
+#include "ODTickMeter.h"
 #include "UObject/Package.h" // ODVisualStyle.h uses UPackage (non-unity builds)
 #include "ODVisualStyle.h"
 
@@ -14,6 +15,8 @@
 #include "DynamicMesh/MeshNormals.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
+#include "ImageCore.h"
+#include "ImageCoreUtils.h"
 #include "ImageUtils.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -27,11 +30,89 @@
 #include "Misc/Paths.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Compression.h"
+#include "Tasks/Task.h"
 
 using namespace UE::Geometry;
 
 static void FillTileMesh(FDynamicMesh3& Mesh, const FParsedTerrainTile& Parsed);
 static void TagOutsideOutline(FDynamicMesh3& Mesh, const FVector2D& Origin, const FString& MaskPath);
+
+namespace
+{
+	// One area's rasters + horizon mesh (2026-10-22): decoded/built on
+	// workers from PrewarmArea (the menu kicks it at pin pick), then shared by
+	// the vista's terrain manager and the level's after LoadMap - each used to
+	// spend 2-3 s of game thread on the same three PNGs (livetest7/8).
+	const TCHAR* const AreaTexKinds[] = {TEXT("sat"), TEXT("pave"), TEXT("dem")};
+	constexpr int32 NumAreaTex = UE_ARRAY_COUNT(AreaTexKinds);
+	struct FAreaPng
+	{
+		TSharedPtr<FJsonObject> Meta;
+		FImage Image;   // empty: meta but no readable PNG
+	};
+	struct FAreaHorizon
+	{
+		FDynamicMesh3 Mesh;
+		FVector2D Origin;   // FillTileMesh's local origin
+		int32 NumVerts = 0, NumTris = 0;
+	};
+	struct FAreaCache
+	{
+		FString Key;   // terrain prefix + ODBakeLink status version: a drawn area's re-bake misses
+		UE::Tasks::TTask<TSharedPtr<FAreaPng>> Png[NumAreaTex];
+		bool bTexDone[NumAreaTex] = {};
+		TSharedPtr<FJsonObject> Meta[NumAreaTex];
+		UTexture2D* Tex[NumAreaTex] = {};   // rooted while cached
+		UE::Tasks::TTask<TSharedPtr<const FAreaHorizon>> Horizon;
+	};
+	// ponytail: one area (summit_county ~330 MB of rasters); key by area if hopping back and forth shows up
+	FAreaCache GAreaCache;
+
+	FString AreaMaskBase(const FString& TerrainPrefix, const TCHAR* Kind)
+	{
+		return FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/") + Kind + TEXT("_") + TerrainPrefix.Mid(8);
+	}
+
+	// Game thread: the decoded PNG as a transient, rooted texture - the tail
+	// of FImageUtils::ImportFileAsTexture2D, with the sampler settings set
+	// before the one UpdateResource instead of after a first one.
+	void CreateAreaTexture(int32 K)
+	{
+		FAreaCache& C = GAreaCache;
+		C.bTexDone[K] = true;
+		const TSharedPtr<FAreaPng> Png = C.Png[K].GetResult();
+		if (!Png.IsValid())
+		{
+			return;
+		}
+		C.Meta[K] = Png->Meta;
+		const FImage& Img = Png->Image;
+		if (Img.SizeX <= 0)
+		{
+			return;
+		}
+		const double T0 = FPlatformTime::Seconds();
+		ERawImageFormat::Type RawFormat;
+		const EPixelFormat PixelFormat = FImageCoreUtils::GetPixelFormatForRawImageFormat(Img.Format, &RawFormat);
+		UTexture2D* Tex = UTexture2D::CreateTransient(Img.SizeX, Img.SizeY, PixelFormat);
+		if (!Tex)
+		{
+			return;
+		}
+		Tex->bNotOfflineProcessed = true;
+		Tex->SRGB = true;              // linear values, sRGB-encoded (matches the Color sampler)
+		Tex->AddressX = TA_Clamp;      // border texels = no data / no pave outside the extent
+		Tex->AddressY = TA_Clamp;
+		FByteBulkData& Bulk = Tex->GetPlatformData()->Mips[0].BulkData;
+		FImageCore::CopyImage(Img, FImageView(Bulk.Lock(LOCK_READ_WRITE), Img.SizeX, Img.SizeY, 1, RawFormat, Img.GammaSpace));
+		Bulk.Unlock();
+		Tex->UpdateResource();
+		Tex->AddToRoot();
+		C.Tex[K] = Tex;
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: %s texture %dx%d created in %.0f ms on the game thread"),
+			AreaTexKinds[K], Img.SizeX, Img.SizeY, (FPlatformTime::Seconds() - T0) * 1000.0);
+	}
+}
 
 // ---------------------------------------------------------------------
 // Runtime terrain carve (2026-08-26, Arc 7 rescope): a straight port of
@@ -569,31 +650,109 @@ void AODTerrainManager::LoadRoadStationSidecar()
 		NumStations, *Path, *GenId);
 }
 
+bool AODTerrainManager::PrewarmArea(const FString& TerrainPrefix)
+{
+	check(IsInGameThread());
+	if (!TerrainPrefix.StartsWith(TEXT("terrain_")))
+	{
+		return true;
+	}
+	FAreaCache& C = GAreaCache;
+	const FString Key = FString::Printf(TEXT("%s@%u"), *TerrainPrefix, ODBakeLink::StatusVersion());
+	if (C.Key != Key)
+	{
+		for (UTexture2D*& Tex : C.Tex)
+		{
+			if (Tex)
+			{
+				Tex->RemoveFromRoot();   // managers still showing it hold their own reference
+			}
+		}
+		C = FAreaCache();
+		C.Key = Key;
+		for (int32 K = 0; K < NumAreaTex; ++K)
+		{
+			const FString Base = AreaMaskBase(TerrainPrefix, AreaTexKinds[K]);
+			C.Png[K] = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Base]() -> TSharedPtr<FAreaPng>
+			{
+				FString Json;
+				TSharedPtr<FJsonObject> Meta;
+				if (!FFileHelper::LoadFileToString(Json, *ODTileSource::Fetch(Base + TEXT(".json")))
+					|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
+				{
+					return nullptr;
+				}
+				TSharedPtr<FAreaPng> Png = MakeShared<FAreaPng>();
+				Png->Meta = Meta;
+				FImageUtils::LoadImage(*ODTileSource::Fetch(Base + TEXT(".png")), Png->Image);
+				return Png;
+			});
+		}
+		const FString HorizonPath = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+			/ (TEXT("horizon_") + TerrainPrefix.Mid(8) + TEXT(".bin"));
+		C.Horizon = UE::Tasks::Launch(UE_SOURCE_LOCATION, [HorizonPath]() -> TSharedPtr<const FAreaHorizon>
+		{
+			FString ReadPath;
+			FParsedTerrainTile Parsed;
+			if (ODTileSource::Resolve(HorizonPath, ReadPath) != EODTileSource::Ready || !ParseTerrainTileFile(ReadPath, Parsed)
+				|| Parsed.Verts.Num() < 3)
+			{
+				return nullptr;
+			}
+			TSharedPtr<FAreaHorizon> H = MakeShared<FAreaHorizon>();
+			FillTileMesh(H->Mesh, Parsed);
+			H->Origin = FVector2D(Parsed.Verts[0], Parsed.Verts[1]);
+			H->NumVerts = Parsed.Verts.Num() / 3;
+			H->NumTris = Parsed.Tris.Num() / 3;
+			return H;
+		});
+	}
+	// one texture per call: pave alone is a 233 MB copy (8192x7115 BGRA8)
+	for (int32 K = 0; K < NumAreaTex; ++K)
+	{
+		if (!C.bTexDone[K])
+		{
+			if (C.Png[K].IsCompleted())
+			{
+				CreateAreaTexture(K);
+			}
+			return false;
+		}
+	}
+	return C.Horizon.IsCompleted();
+}
+
 UTexture2D* AODTerrainManager::BindAreaTexture(const TCHAR* Kind, const TCHAR* Param)
 {
 	if (!TerrainTilePrefix.StartsWith(TEXT("terrain_")))
 	{
 		return nullptr;
 	}
-	const FString Base = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks/") + Kind + TEXT("_") + TerrainTilePrefix.Mid(8);
-	FString Json;
-	TSharedPtr<FJsonObject> Meta;
-	if (!FFileHelper::LoadFileToString(Json, *ODTileSource::Fetch(Base + TEXT(".json")))
-		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Meta) || !Meta.IsValid())
+	const FString Base = AreaMaskBase(TerrainTilePrefix, Kind);
+	// the menu's pin pick normally built these already (PrewarmArea); else wait here
+	const double T0 = FPlatformTime::Seconds();
+	PrewarmArea(TerrainTilePrefix);
+	int32 K = 0;
+	while (K < NumAreaTex - 1 && FCString::Strcmp(Kind, AreaTexKinds[K]) != 0)
+	{
+		++K;
+	}
+	if (!GAreaCache.bTexDone[K])
+	{
+		CreateAreaTexture(K);
+	}
+	const TSharedPtr<FJsonObject> Meta = GAreaCache.Meta[K];
+	if (!Meta.IsValid())
 	{
 		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no %s.json - %sAmount stays 0"), *Base, Param);
 		return nullptr;
 	}
-	UTexture2D* Tex = FImageUtils::ImportFileAsTexture2D(ODTileSource::Fetch(Base + TEXT(".png")));
+	UTexture2D* Tex = GAreaCache.Tex[K];
 	if (!Tex)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ODTerrainManager: %s.png missing or unreadable - %sAmount stays 0"), *Base, Param);
 		return nullptr;
 	}
-	Tex->SRGB = true;              // linear values, sRGB-encoded (matches the Color sampler)
-	Tex->AddressX = TA_Clamp;      // border texels = no data / no pave outside the extent
-	Tex->AddressY = TA_Clamp;
-	Tex->UpdateResource();
 	const FString P(Param);
 	const FVector Off = GetActorLocation();   // tiles sit at actor-relative positions
 	TerrainMID->SetTextureParameterValue(*(P + TEXT("Tex")), Tex);
@@ -602,8 +761,8 @@ UTexture2D* AODTerrainManager::BindAreaTexture(const TCHAR* Kind, const TCHAR* P
 	TerrainMID->SetVectorParameterValue(*(P + TEXT("SizeCm")),
 		FLinearColor(Meta->GetNumberField(TEXT("size_x_cm")), Meta->GetNumberField(TEXT("size_y_cm")), 0.0f, 0.0f));
 	TerrainMID->SetScalarParameterValue(*(P + TEXT("Amount")), 1.0f);
-	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: %s %dx%d bound (%s)"),
-		*Base, Tex->GetSizeX(), Tex->GetSizeY(), *Meta->GetStringField(TEXT("attribution")));
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: %s %dx%d bound, waited %.0f ms (%s)"),
+		*Base, Tex->GetSizeX(), Tex->GetSizeY(), (FPlatformTime::Seconds() - T0) * 1000.0, *Meta->GetStringField(TEXT("attribution")));
 	return Tex;
 }
 
@@ -2021,6 +2180,8 @@ void AODTerrainManager::ReleaseTile(const FIntPoint& Key)
 void AODTerrainManager::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	static FODTickMeter Meter(TEXT("ODTerrainManager"));   // see ODTickMeter.h
+	FODTickMeter::FScope MeterScope(Meter);
 
 	ProcessPendingTileBuilds();
 
@@ -2339,31 +2500,28 @@ void AODTerrainManager::LoadHorizon()
 		return;
 	}
 	const double T0 = FPlatformTime::Seconds();
-	const FString Path = FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ (TEXT("horizon_") + TerrainTilePrefix.Mid(8) + TEXT(".bin"));
-	FString ReadPath;
-	FParsedTerrainTile Parsed;
-	if (ODTileSource::Resolve(Path, ReadPath) != EODTileSource::Ready || !ParseTerrainTileFile(ReadPath, Parsed)
-		|| Parsed.Verts.Num() < 3)
+	PrewarmArea(TerrainTilePrefix);   // parsed + built on a worker (2026-10-22); waits only without a prewarm
+	const TSharedPtr<const FAreaHorizon> H = GAreaCache.Horizon.GetResult();
+	if (!H.IsValid())
 	{
-		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no horizon mesh (%s)"), *Path);
+		UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: no horizon mesh (horizon_%s.bin)"), *TerrainTilePrefix.Mid(8));
 		return;
 	}
 	auto* Comp = NewObject<UDynamicMeshComponent>(this);
 	Comp->SetMeshDrawPath(EDynamicMeshDrawPath::StaticDraw);   // built once: cached draw commands, not re-gathered every frame per view/shadow view
 	Comp->SetupAttachment(RootComponent);
-	Comp->SetRelativeLocation(FVector(Parsed.Verts[0], Parsed.Verts[1], 0.0));   // FillTileMesh's local origin
+	Comp->SetRelativeLocation(FVector(H->Origin.X, H->Origin.Y, 0.0));   // FillTileMesh's local origin
 	Comp->SetCollisionProfileName(TEXT("NoCollision"));
 	Comp->SetCastShadow(false);   // 160+ km of low-res ground: not worth shadow-map pages
 	Comp->RegisterComponent();
-	Comp->EditMesh([&](FDynamicMesh3& Mesh) { FillTileMesh(Mesh, Parsed); });
+	Comp->SetMesh(FDynamicMesh3(H->Mesh));   // a copy: RetagHorizon edits this one's material ids
 	if (TerrainMID)
 	{
 		Comp->SetMaterial(0, TerrainMID);
 	}
 	HorizonComp = Comp;
-	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms"),
-		Parsed.Verts.Num() / 3, Parsed.Tris.Num() / 3, (FPlatformTime::Seconds() - T0) * 1000.0);
+	UE_LOG(LogTemp, Display, TEXT("ODTerrainManager: horizon mesh %d verts, %d tris, %.1f ms on the game thread"),
+		H->NumVerts, H->NumTris, (FPlatformTime::Seconds() - T0) * 1000.0);
 }
 
 void AODTerrainManager::RetagHorizon()

@@ -689,6 +689,8 @@ public:
 	float AligningRimNm(float Fy, float Sc) const;
 
 private:
+	friend class AODReplay;   // #9 replay writes the recorded telemetry back
+
 	// (re)build the 4-wheel array for a wheelbase/track/radius + drive layout;
 	// called from the constructor (the placeholder-coupe defaults) and from
 	// ApplyVehicleDef (per-car geometry). Keeps FL,FR,RL,RR order.

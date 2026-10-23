@@ -12,15 +12,18 @@ Usage:  python pipeline/check_lamp_mask.py
 import numpy as np
 
 HEAD, TAIL, REV = np.array([0.93, 0.85, 0.60]), np.array([0.62, 0.05, 0.03]), np.array([0.90, 0.92, 0.95])
+AMBER = np.array([1.00, 0.45, 0.02])                  # indicator cell 23 (2026-10-22)
 HEAD_GLOW, TAIL_GLOW, REV_GLOW = 300.0, 25.0, 0.0     # night, driving forward (reverse off)
 
 
-def lamp(pal, local_x, gated):
+def lamp(pal, local_x, gated, local_y=1.0, ind_l=0.0, ind_r=0.0):
     sat = lambda v: np.clip(v, 0.0, 1.0)
     front = 1.0 if local_x >= 0 else 0.0
-    head = sat((pal[1] - 0.3) * 10.0) * (front if gated else 1.0)
+    ind = sat((0.2 - pal[2]) * 10.0) * sat((pal[1] - 0.25) * 10.0)
+    head = sat((pal[1] - 0.3) * 10.0) * (front if gated else 1.0) * (1.0 - ind)
     rev = sat((pal[2] - 0.75) * 10.0) * ((1.0 - front) if gated else 1.0)
-    e = (1 - head) * np.array([1.0, 0.03, 0.02]) * TAIL_GLOW + head * np.array([1.0, 0.95, 0.85]) * HEAD_GLOW
+    e = (1 - head) * np.array([1.0, 0.03, 0.02]) * TAIL_GLOW * (1.0 - ind) + head * np.array([1.0, 0.95, 0.85]) * HEAD_GLOW
+    e = e + np.array([1.0, 0.45, 0.02]) * (ind_l if local_y < 0 else ind_r) * ind
     return (1 - rev) * e + rev * np.ones(3) * REV_GLOW
 
 
@@ -39,6 +42,15 @@ def main():
     assert new <= TAIL_GLOW + 1e-6, "rear lenses never exceed tail glow while not reversing"
     assert lamp(HEAD, 200.0, True).max() == HEAD_GLOW and lamp(REV, -200.0, True).max() == REV_GLOW
     print("PASS: no head glow on rear lenses")
+    # amber: dark at night with indicators off (was glowing as head / tail),
+    # blinks only its own side, and no other cell picks up indicator glow
+    for x in (200.0, -200.0):
+        assert lamp(AMBER, x, True).max() == 0.0, "amber lens is not head or tail"
+        assert lamp(AMBER, x, True, -50.0, ind_l=80.0).max() == 80.0 and lamp(AMBER, x, True, 50.0, ind_l=80.0).max() == 0.0
+        assert lamp(AMBER, x, True, 50.0, ind_r=80.0).max() == 80.0
+        for c in (HEAD, TAIL, REV):
+            assert np.allclose(lamp(c, x, True, -50.0, 80.0, 80.0), lamp(c, x, True)), "indicator only lights amber"
+    print("PASS: amber lens is indicator only, left = -Y, right = +Y")
 
 
 if __name__ == "__main__":

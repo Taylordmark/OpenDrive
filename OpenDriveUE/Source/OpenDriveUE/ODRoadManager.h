@@ -371,7 +371,9 @@ public:
 	float GetRouteRemainingCm() const { return RouteRemainingCm; }
 	/** Next junction turn ahead: distance (cm) and signed angle (deg, + = right).
 	 *  False if the rest of the route is straight-through. */
-	bool GetNextTurn(float& OutDistCm, float& OutAngleDeg) const;
+	bool GetNextTurn(float& OutDistCm, float& OutAngleDeg, FString* OutRoad = nullptr) const;
+	/** Road name of the nearest PlaceLabel within MaxCm of P, "" if none (road trip "onto <road>"). */
+	FString RoadLabelNear(const FVector2D& P, float MaxCm) const;
 	/** World time of the last arrival (route auto-clears on arrival), <0 = never. */
 	double GetArrivedTime() const { return ArrivedTime; }
 	const FString& GetArrivedName() const { return ArrivedName; }
@@ -408,7 +410,7 @@ private:
 
 	TArray<FVector2D> RoutePts;
 	TArray<float> RouteCum;        // arc length (cm) from RoutePts[0]
-	struct FRouteTurn { float Cum; float AngleDeg; };
+	struct FRouteTurn { float Cum; float AngleDeg; FString Road; };   // Road: "onto <road>", may be empty
 	TArray<FRouteTurn> RouteTurns;
 	FVector2D RouteDest = FVector2D::ZeroVector;
 	FString RouteName;

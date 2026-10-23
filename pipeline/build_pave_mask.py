@@ -31,6 +31,7 @@ from PIL import Image, ImageDraw
 from scipy import ndimage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bake_job import outline_tiles  # noqa: E402
 from build_water_tiles import assemble_outer_rings  # noqa: E402
 from classify_biomes import WC_BUILT, fetch_worldcover, sample_nearest_ll  # noqa: E402
 from fetch_cache import overpass_json  # noqa: E402
@@ -60,8 +61,10 @@ def srgb_lut():
 
 
 def near_tile_rect():
-    """Local-metre rect (e0, n0, e1, n1) of the area's near terrain tiles."""
-    keys = [tuple(map(int, p.stem.rsplit("_", 2)[1:])) for p in MASKS.glob(f"terrain_{AREA_NAME}_test_tile_*.bin")]
+    """Local-metre rect (e0, n0, e1, n1) of the area's near terrain tiles (a
+    drawn area's planned ones: pass 1 runs before any is baked)."""
+    keys = outline_tiles(TERRAIN_TILE_SIZE_CM) or [
+        tuple(map(int, p.stem.rsplit("_", 2)[1:])) for p in MASKS.glob(f"terrain_{AREA_NAME}_test_tile_*.bin")]
     if not keys:
         raise SystemExit(f"no terrain tiles for {AREA_NAME} in {MASKS}")
     tx, ty = np.array(keys).T

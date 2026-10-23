@@ -40,6 +40,10 @@ HIP_FRACTION = 0.45     # hashed pick when the caller passes hip=None (tests)
 PITCH_DEG = (25.0, 35.0)
 MAX_RISE_CM = 500.0     # a 20 m span at 35 deg would put a 7 m attic on a bungalow
 FACADE_TILE_CM = 400.0
+MAX_K = 1.5             # rise per run, tan 56 deg: steeper leaves the 0.55 roof cut (tagged roof:height)
+EAVE_CM = (30.0, 60.0)  # eave overhang, hashed per building
+EAVE_MIN_FILL = 0.99    # eaves on (near) rectangles only
+FASCIA_CM = 20.0        # eave box depth below the roof edge
 COVER_SNAP_CM = 50.0    # footprint coordinates closer than this are one grid line
 COVER_MAX_LINES = 13    # grid lines per axis, else the footprint is too ragged to cover
 COVER_CELL_IN = 0.97    # share of a grid cell inside the footprint to count as inside
@@ -252,10 +256,66 @@ def _end_walls(out_v, out_uv, out_t, skirts, top_edges, top, base, keep_order=Fa
             out_t.append((first, first + j, first + j + 1))
 
 
-def pitch_roof(verts, uvs, tris, flat_roof, hip=None):
+def _push_out(ring, push):
+    """CCW ring with side i moved out by push[i] (corners where the moved
+    sides' lines meet)."""
+    n = len(ring)
+    lines = []
+    for i in range(n):
+        (ax, ay), (bx, by) = ring[i], ring[(i + 1) % n]
+        le = math.dist(ring[i], ring[(i + 1) % n])
+        nx, ny = (by - ay) / le, -(bx - ax) / le
+        lines.append((nx, ny, nx * ax + ny * ay + push[i]))
+    out = []
+    for i in range(n):
+        (a1, b1, c1), (a2, b2, c2) = lines[i - 1], lines[i]
+        det = a1 * b2 - a2 * b1
+        out.append(((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det))
+    return out
+
+
+def _eave_box(out_v, out_uv, out_t, wall, eave, push, z_wall, ze, base):
+    """Under a roof pushed out past the walls: fascia down from the eave, a
+    level soffit back to the wall and, where a side stays on the wall (gable
+    end), the box's end; facing out / down. z_wall = the roof at each wall
+    corner."""
+    zs = ze - FASCIA_CM
+    n = len(wall)
+
+    def quad(pts, out):
+        (ax, ay, az), (bx, by, bz), (cx, cy, cz) = pts[:3]
+        u, v = (bx - ax, by - ay, bz - az), (cx - ax, cy - ay, cz - az)
+        nrm = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+        if sum(a * b for a, b in zip(nrm, out)) < 0:
+            pts = pts[::-1]
+        first = len(out_v)
+        for x, y, z in pts:
+            out_v.append((x, y, z))
+            out_uv.append(((x + y) / FACADE_TILE_CM, (z - base) / FACADE_TILE_CM))
+        out_t.extend([(first, first + 1, first + 2), (first, first + 2, first + 3)])
+
+    def normal(i):
+        (ax, ay), (bx, by) = wall[i], wall[(i + 1) % n]
+        return (by - ay, ax - bx, 0.0)
+
+    for i in range(n):
+        j = (i + 1) % n
+        if push[i] > 0:
+            quad([(*eave[i], zs), (*eave[j], zs), (*eave[j], ze), (*eave[i], ze)], normal(i))
+            quad([(*wall[i], zs), (*wall[j], zs), (*eave[j], zs), (*eave[i], zs)], (0.0, 0.0, -1.0))
+        if (push[i - 1] > 0) != (push[i] > 0):   # corner i: one side out, the other on the wall
+            quad([(*wall[i], zs), (*eave[i], zs), (*eave[i], ze), (*wall[i], z_wall[i])],
+                 normal(i if push[i] == 0 else i - 1))
+
+
+def pitch_roof(verts, uvs, tris, flat_roof, hip=None, rise_cm=None, overhang_cm=None):
     """(verts, uvs, tris, n_solid) with the flat cap replaced by a pitched
     roof, or None to keep the flat cap. Vertices from n_solid on are the end
-    walls (no windows). hip=True/False overrides the hashed pick (tests)."""
+    walls and eave box (no windows). hip=True/False overrides the hashed pick
+    (tests); rise_cm = the tagged roof:height; overhang_cm overrides the
+    hashed eave (0 = none). A (near) rectangle gets eaves, a hip all round, a
+    gable along its two sides parallel to the ridge: the roof plane runs on
+    out and down past the wall, so it still meets the wall top there."""
     if flat_roof:
         return None
     top = max(v[2] for v in verts)
@@ -274,25 +334,34 @@ def pitch_roof(verts, uvs, tris, flat_roof, hip=None):
     if (area < MIN_FILL * 4 * hl * hs or 2 * hs < MIN_SPAN_M * 100
             or 2 * hs > MAX_SPAN_M * 100 or 2 * hl > MAX_LENGTH_M * 100):
         return None
-    ears = triangulate(ring)
-    if ears is None:
-        return None
 
     h = _hash(math.floor(min(v[0] for v in verts)), math.floor(min(v[1] for v in verts)))
     if hip is None:
         hip = (h & 0xFFFF) / 65536.0 < HIP_FRACTION
     pitch = math.radians(PITCH_DEG[0] + (PITCH_DEG[1] - PITCH_DEG[0]) * (h >> 16) / 65536.0)
-    k = min(math.tan(pitch), MAX_RISE_CM / hs)
+    k = min(rise_cm / hs if rise_cm else min(math.tan(pitch), MAX_RISE_CM / hs), MAX_K)
+    if overhang_cm is None:
+        overhang_cm = EAVE_CM[0] + (EAVE_CM[1] - EAVE_CM[0]) * ((h >> 8) & 0xFF) / 255.0
+    wall_ring, push = ring, None
+    if n == 4 and area >= EAVE_MIN_FILL * 4 * hl * hs and overhang_cm > 0:
+        push = [overhang_cm if hip or abs((ring[(i + 1) % 4][0] - ring[i][0]) * dx + (ring[(i + 1) % 4][1]
+                - ring[i][1]) * dy) > 0.7 * math.dist(ring[i], ring[(i + 1) % 4]) else 0.0 for i in range(4)]
+        ring = _push_out(ring, push)
+        area = sum(_cross(*ring[i], *ring[(i + 1) % n]) for i in range(n)) / 2
+    drop = k * overhang_cm if push else 0.0   # roof edge below the wall top
+    ears = triangulate(ring)
+    if ears is None:
+        return None
     slope_cm = FACADE_TILE_CM / math.hypot(1.0, k)
     d = hl - hs
     # one height field for every face, so a point on a crease gets the same
     # height from both sides; faces = (half-planes a*l + b*s <= c, long side)
     if hip:
-        height = lambda l, s: max(k * min(hs - abs(s), hl - abs(l)), 0.0)
+        height = lambda l, s: max(k * min(hs - abs(s), hl - abs(l)), -drop)
         faces = [([(0, -1, 0), (1, -1, d), (-1, -1, d)], True), ([(0, 1, 0), (1, 1, d), (-1, 1, d)], True),
                  ([(-1, 1, -d), (-1, -1, -d)], False), ([(1, 1, -d), (1, -1, -d)], False)]
     else:
-        height = lambda l, s: max(k * (hs - abs(s)), 0.0)
+        height = lambda l, s: max(k * (hs - abs(s)), -drop)
         faces = [([(0, -1, 0)], True), ([(0, 1, 0)], True)]
 
     # walls kept, cap dropped (its vertices are only used by the cap)
@@ -309,7 +378,10 @@ def pitch_roof(verts, uvs, tris, flat_roof, hip=None):
     def world(l, s):
         return cx + l * dx - s * dy, cy + l * dy + s * dx
 
-    local = [((x - cx) * dx + (y - cy) * dy, -(x - cx) * dy + (y - cy) * dx) for x, y in ring]
+    def to_local(x, y):
+        return (x - cx) * dx + (y - cy) * dy, -(x - cx) * dy + (y - cy) * dx
+
+    local = [to_local(*p) for p in ring]
 
     def implicit(line):   # (A, B, C): A*l + B*s = C
         if line[0] == "c":
@@ -341,6 +413,8 @@ def pitch_roof(verts, uvs, tris, flat_roof, hip=None):
     # it only: put it on the other side's edge too (no T-junction crack)
     # ponytail: O(pieces * edges * points), a roof has tens of each
     points = {q[:2] for poly, _ in pieces for q in poly}
+    if push:   # the wall corners on a gable end, where its end wall stops
+        points |= {to_local(*p) for p in wall_ring}
     fixed_pieces = []
     for poly, long_side in pieces:
         fixed = []
@@ -400,11 +474,15 @@ def pitch_roof(verts, uvs, tris, flat_roof, hip=None):
         ring_part = poly[1:] if poly[0][2] is None else poly
         for j in range(len(ring_part)):
             p, q = ring_part[j - 1], ring_part[j]
-            if footprint(q[2]):
-                skirts.append((world(p[0], p[1]), world(q[0], q[1]), height(p[0], p[1]), height(q[0], q[1])))
+            hp, hq = height(p[0], p[1]), height(q[0], q[1])
+            if footprint(q[2]) and min(hp, hq) > -EPS_WELD:   # not the overhang past a gable wall
+                skirts.append((world(p[0], p[1]), world(q[0], q[1]), max(hp, 0.0), max(hq, 0.0)))
 
     n_solid = len(out_v)
     _end_walls(out_v, out_uv, out_t, skirts, top_edges, top, base)
+    if push:
+        _eave_box(out_v, out_uv, out_t, wall_ring, ring, push,
+                  [top + height(*to_local(*p)) for p in wall_ring], top - drop, base)
     return out_v, out_uv, out_t, n_solid
 
 
@@ -457,7 +535,7 @@ def rect_cover(local):
     return rects if rects and covered >= COVER_MIN * poly.area else None
 
 
-def cover_roof(verts, uvs, tris, hip=None):
+def cover_roof(verts, uvs, tris, hip=None, rise_cm=None):
     """(verts, uvs, tris, n_solid) with a gable or hip roof on each of the
     footprint's rect_cover() rectangles, over the kept flat cap; or None."""
     top = max(v[2] for v in verts)
@@ -487,7 +565,7 @@ def cover_roof(verts, uvs, tris, hip=None):
         ml, ms = (l0 + l1) / 2, (s0 + s1) / 2
         along_l = l1 - l0 >= s1 - s0
         a, b = ((l1 - l0) / 2, (s1 - s0) / 2) if along_l else ((s1 - s0) / 2, (l1 - l0) / 2)
-        k = min(tan_pitch, MAX_RISE_CM / b)
+        k = min(rise_cm / b if rise_cm else min(tan_pitch, MAX_RISE_CM / b), MAX_K)
         slope_cm = FACADE_TILE_CM / math.hypot(1.0, k)
         r = max(a - b, 0.0) if hip else a   # ridge half length
 
@@ -521,9 +599,9 @@ def cover_roof(verts, uvs, tris, hip=None):
     return out_v, out_uv, out_t, n_solid
 
 
-def make_roof(verts, uvs, tris, hip):
+def make_roof(verts, uvs, tris, hip, rise_cm=None):
     """pitch_roof(), else cover_roof() for footprints it can't take."""
-    return pitch_roof(verts, uvs, tris, 0, hip) or cover_roof(verts, uvs, tris, hip)
+    return pitch_roof(verts, uvs, tris, 0, hip, rise_cm) or cover_roof(verts, uvs, tris, hip, rise_cm)
 
 
 def read_tile(path):

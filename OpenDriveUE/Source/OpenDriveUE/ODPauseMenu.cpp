@@ -2,6 +2,8 @@
 
 #include "Components/InputComponent.h"
 #include "Containers/Ticker.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -11,7 +13,9 @@
 #include "ODInputConfig.h"
 #include "ODMainMenu.h"
 #include "ODMenuTabs.h"
+#include "ODPhotoMode.h"
 #include "ODRaceHUD.h"
+#include "ODRaceManager.h"
 #include "ODSettingsMenu.h"
 #include "ODVehicleMovement.h"
 #include "ODWheelDevice.h"
@@ -88,6 +92,8 @@ void AODPauseMenu::BeginPlay()
 
 	// keep the current shift feel now that the gearbox row is gone
 	ApplyGearbox();
+	ODEnvironment::MaybeStartSelfCheck(GetWorld());
+	AODPhotoMode::MaybeStartSelfCheck(GetWorld());
 
 	// headless QA: `-odmenu=8` opens the menu at 8 s and screenshots 1.5 s
 	// later. Core ticker, not a world timer - those freeze once paused.
@@ -141,6 +147,56 @@ void AODPauseMenu::RefreshPauseKeyBinding()
 namespace
 {
 const FODMenuTab PauseTab = {TEXT("PAUSED"), AODPauseMenu::RowWorldMap, AODPauseMenu::RowResume};
+const FODMenuTab EnvTab = {TEXT("ENVIRONMENT"), 0, ODEnvironment::NumRows};
+const FODMenuTab PhotoTab = {TEXT("PHOTO"), 0, AODPhotoMode::RowCapture};
+}
+
+int32 AODPauseMenu::NumRows() const
+{
+	return bPhotoOpen ? AODPhotoMode::NumPhotoRows : bEnvOpen ? ODEnvironment::NumRows + 1 : NumPauseRows;
+}
+
+int32 AODPauseMenu::GetFooterRow() const
+{
+	return bPhotoOpen ? AODPhotoMode::RowCapture : bEnvOpen ? ODEnvironment::NumRows : RowResume;
+}
+
+void AODPauseMenu::ExitPhoto()
+{
+	if (bPhotoOpen && PhotoMode)
+	{
+		PhotoMode->Exit();
+	}
+	bPhotoOpen = false;
+}
+
+void AODPauseMenu::TogglePhotoMode()
+{
+	if (bPhotoOpen)
+	{
+		SetOpen(false);   // straight back to driving
+		return;
+	}
+	if (!bOpen)
+	{
+		Toggle();         // same guards as the pause key (world map, front-end)
+		if (!bOpen)
+		{
+			return;
+		}
+	}
+	bSettingsOpen = false;
+	bEnvOpen = false;
+	if (!PhotoMode && GetWorld())
+	{
+		PhotoMode = GetWorld()->SpawnActor<AODPhotoMode>();
+	}
+	if (PhotoMode)
+	{
+		PhotoMode->Enter();
+		bPhotoOpen = PhotoMode->IsActive();
+		Selected = AODPhotoMode::RowFov;
+	}
 }
 
 void AODPauseMenu::Toggle()
@@ -171,13 +227,19 @@ void AODPauseMenu::Toggle()
 
 void AODPauseMenu::SetOpen(bool bInOpen)
 {
+	ExitPhoto();
 	bOpen = bInOpen;
 	bSettingsOpen = false;
+	bEnvOpen = false;
 	bWheelLost = false;
 	Selected = RowResume;
 	if (bOpen)
 	{
 		FODWheelDevice::Rescan();   // the only device search besides startup and the input-type row
+		if (AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld()))
+		{
+			Race->RescanGhosts();   // picks up .odghost files dropped in since
+		}
 	}
 	UGameplayStatics::SetGamePaused(this, bOpen);
 	// before 2026-10-09 the cursor was never shown here, so the mouse did
@@ -207,6 +269,18 @@ void AODPauseMenu::Back()
 		}
 		return;
 	}
+	if (bPhotoOpen)
+	{
+		ExitPhoto();
+		Selected = RowPhoto;
+		return;
+	}
+	if (bEnvOpen)
+	{
+		bEnvOpen = false;
+		Selected = RowEnvironment;
+		return;
+	}
 	if (bOpen)
 	{
 		SetOpen(false);   // resume
@@ -225,7 +299,7 @@ void AODPauseMenu::Up()
 	}
 	if (bOpen)
 	{
-		Selected = ODMenuTabs::Step(PauseTab, RowResume, Selected, -1);
+		Selected = ODMenuTabs::Step(bPhotoOpen ? PhotoTab : bEnvOpen ? EnvTab : PauseTab, GetFooterRow(), Selected, -1);
 	}
 }
 
@@ -241,7 +315,7 @@ void AODPauseMenu::Down()
 	}
 	if (bOpen)
 	{
-		Selected = ODMenuTabs::Step(PauseTab, RowResume, Selected, +1);
+		Selected = ODMenuTabs::Step(bPhotoOpen ? PhotoTab : bEnvOpen ? EnvTab : PauseTab, GetFooterRow(), Selected, +1);
 	}
 }
 
@@ -255,7 +329,7 @@ void AODPauseMenu::SelectRow(int32 Row, int32 Col)
 		}
 		return;
 	}
-	if (bOpen && Row >= 0 && Row < NumPauseRows)
+	if (bOpen && Row >= 0 && Row < NumRows())
 	{
 		Selected = Row;
 	}
@@ -299,8 +373,32 @@ void AODPauseMenu::Activate()
 	{
 		return;
 	}
+	if (bPhotoOpen && PhotoMode && Selected == GetFooterRow())
+	{
+		PhotoMode->Capture();
+		return;
+	}
+	if (bEnvOpen || bPhotoOpen)
+	{
+		if (Selected == GetFooterRow())
+		{
+			Back();
+		}
+		else
+		{
+			Adjust(+1);   // Enter cycles a value row, like Settings
+		}
+		return;
+	}
 	switch (Selected)
 	{
+	case RowEnvironment:   // fun #7
+		bEnvOpen = true;
+		Selected = ODEnvironment::RowTime;
+		break;
+	case RowPhoto:         // fun #4
+		TogglePhotoMode();
+		break;
 	case RowResume:
 		SetOpen(false);
 		break;
@@ -312,6 +410,10 @@ void AODPauseMenu::Activate()
 				Hud->OpenWorldMap();      // hides this overlay, stays paused
 			}
 		}
+		break;
+	case RowRaceAgainst:   // share = copy files in/out of this folder
+		IFileManager::Get().MakeDirectory(*FODGhostFile::Dir(), true);
+		FPlatformProcess::ExploreFolder(*FODGhostFile::Dir());
 		break;
 	case RowSettings:
 		bSettingsOpen = EnsureSettingsMenu() != nullptr;
@@ -335,10 +437,25 @@ void AODPauseMenu::Activate()
 
 void AODPauseMenu::Adjust(int32 Dir)
 {
-	// only Settings has value rows now
+	// Settings, Environment, Photo and the Race-against row take left/right
 	if (bSettingsOpen && SettingsMenu)
 	{
 		SettingsMenu->AdjustSelected(Dir);
+	}
+	else if (bOpen && bPhotoOpen && PhotoMode)
+	{
+		PhotoMode->Adjust(Selected, Dir);
+	}
+	else if (bOpen && bEnvOpen)
+	{
+		ODEnvironment::Adjust(GetWorld(), Selected, Dir);
+	}
+	else if (bOpen && Selected == RowRaceAgainst)
+	{
+		if (AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld()))
+		{
+			Race->CycleGhost(Dir);
+		}
 	}
 }
 
@@ -364,10 +481,33 @@ void AODPauseMenu::ApplyGearbox()
 
 void AODPauseMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 {
+	if (bPhotoOpen && PhotoMode)
+	{
+		PhotoMode->GetRow(Row, OutLabel, OutValue);
+		return;
+	}
+	if (bEnvOpen)
+	{
+		if (Row == GetFooterRow())
+		{
+			OutLabel = TEXT("Back");
+			OutValue.Empty();
+		}
+		else
+		{
+			ODEnvironment::GetRow(GetWorld(), Row, OutLabel, OutValue);
+		}
+		return;
+	}
 	static const TCHAR* const Labels[NumPauseRows] = {
-		TEXT("World Map"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
+		TEXT("World Map"), TEXT("Environment"), TEXT("Photo Mode"), TEXT("Race against"), TEXT("Settings"), TEXT("Main Menu"), TEXT("Quit"), TEXT("Resume")};
 	OutLabel = (Row >= 0 && Row < NumPauseRows) ? Labels[Row] : TEXT("");
 	OutValue.Empty();
+	if (Row == RowRaceAgainst)
+	{
+		const AODRaceManager* Race = FindManager<AODRaceManager>(GetWorld());
+		OutValue = Race ? Race->GetGhostChoiceLabel() : TEXT("No race");
+	}
 }
 
 AODSettingsMenu* AODPauseMenu::EnsureSettingsMenu()

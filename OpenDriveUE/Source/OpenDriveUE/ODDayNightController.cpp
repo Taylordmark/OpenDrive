@@ -19,6 +19,7 @@
 #include "ODSeasonController.h"
 #include "ODSolar.h"
 #include "ODVehicleMovement.h"
+#include "ODVehiclePawn.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ODVisualStyle.h"
@@ -36,6 +37,7 @@ namespace
 AODDayNightController::AODDayNightController()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: Tick holds the clock while paused
 }
 
 void AODDayNightController::BeginPlay()
@@ -211,6 +213,7 @@ float AODDayNightController::HourAtSunElevation(float ElevationDeg, bool bRising
 void AODDayNightController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;   // fun #7: sun follows a paused scrub, clock holds
 	const float NextHour = CycleSeconds > 0.0f ? TimeOfDay + DeltaSeconds / CycleSeconds * 24.0f : TimeOfDay;
 	DayCount += NextHour >= 24.0f ? 1 : 0;
 	TimeOfDay = FMath::Fmod(NextHour, 24.0f);
@@ -411,6 +414,11 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		const float Signal = bOn ? TaillampGlow * 5.0f : BrakelampGlow;
 		// reversing keeps the brake lamps lit too (Taylor 2026-10-09)
 		const float Tail = (bBrake || bReverse) ? Signal : (bOn ? TaillampGlow : 0.0f);
+		// indicators (fun-features #8b) at brake-lamp strength
+		const AODVehiclePawn* VP = Cast<AODVehiclePawn>(*It);
+		const double Now = GetWorld()->GetTimeSeconds();
+		const float IndL = VP && VP->GetIndicator().LitL(Now) ? Signal : 0.0f;
+		const float IndR = VP && VP->GetIndicator().LitR(Now) ? Signal : 0.0f;
 		TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
 		for (UStaticMeshComponent* Mesh : Meshes)
 		{
@@ -427,6 +435,8 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			Lamp->SetScalarParameterValue(TEXT("HeadGlow"), Head);
 			Lamp->SetScalarParameterValue(TEXT("TailGlow"), Tail);
 			Lamp->SetScalarParameterValue(TEXT("ReverseGlow"), bReverse ? Signal : 0.0f);
+			Lamp->SetScalarParameterValue(TEXT("IndicatorL"), IndL);
+			Lamp->SetScalarParameterValue(TEXT("IndicatorR"), IndR);
 		}
 	}
 }

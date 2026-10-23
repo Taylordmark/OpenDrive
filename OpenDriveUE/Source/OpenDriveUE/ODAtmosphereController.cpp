@@ -20,6 +20,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
+#include "ODTerrainManager.h"
 #include "ODVisualStyle.h"
 #include "ODWeatherController.h"
 #include "UObject/ConstructorHelpers.h"
@@ -78,6 +79,16 @@ TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade vo
 TAutoConsoleVariable<float> CVarCloudViewScale(TEXT("od.CloudViewScale"), 0.5f, TEXT("VolumetricCloud ViewSampleCountScale (engine 1)."));
 TAutoConsoleVariable<float> CVarCloudShadowScale(TEXT("od.CloudShadowScale"), 0.5f, TEXT("VolumetricCloud ShadowViewSampleCountScale (engine 1)."));
 TAutoConsoleVariable<float> CVarCloudStopT(TEXT("od.CloudStopT"), 0.02f, TEXT("VolumetricCloud StopTracingTransmittanceThreshold (engine 0.005)."));
+// Cloud shadows on the ground (2026-10-22 lighting audit, Gap 2C): the sun's
+// volumetric cloud shadow map, so the clouds the material's wind moves drag
+// their shadows across the terrain. One 512^2 R11G11B10 trace a frame (+ its
+// temporal history, ~4 MB) over CloudShadowExtentKm around the camera
+// (78 m texels; the engine's 150 km gives 290 m), half the engine's march
+// samples. Deferred lighting reads it with one fetch per pixel.
+// od.CloudShadows 0 turns it off for GPU A/B.
+TAutoConsoleVariable<int32> CVarCloudShadows(TEXT("od.CloudShadows"), 1, TEXT("Sun casts volumetric cloud shadows (0 = off)."));
+constexpr float CloudShadowExtentKm = 40.0f;
+constexpr float CloudShadowRayScale = 0.5f;
 // Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
 // black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
 // The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
@@ -95,9 +106,29 @@ TAutoConsoleVariable<float> CVarWhiteTemp(TEXT("od.WhiteTemp"), -1.0f, TEXT("Gra
 const FLinearColor WarmSkyLightColor(1.0f, 0.8f, 0.6f);
 TAutoConsoleVariable<float> CVarSkyWarm(TEXT("od.SkyWarm"), 0.0f, TEXT("Sky light colour, 0 = white .. 1 = warm."));
 
+// ---- Sky altitude (2026-10-22 lighting audit, Gap 7b) ----
+// World Z is area-relative (Z 0 = the area's datum, e.g. Summit 3435 m), and the
+// planet top used to sit at Z 0 too, so every area's sky rendered as sea level:
+// a pale zenith under the full Rayleigh + boosted Mie column. Tick drops the
+// planet top to the area's real sea level (ground bands sea_z_cm), so the camera
+// sits its true altitude up the atmosphere: thinner air overhead, deeper blue.
+// The cloud layer (measured from the planet top, VolumetricCloudRendering.cpp)
+// rises by the same amount so it stays CloudBaseAboveDatumKm over the area.
+// Mountain aerosol rides a boundary layer that follows the terrain, which the
+// sea-level 1.2 km Mie scale height doesn't: at Summit it would keep e^-2.9 =
+// 6 % of the tuned ridge haze. The Mie scale height stretches so the datum
+// keeps MieAtDatum of it (real high-altitude air is ~1/3 as hazy).
+// od.SkyAltScale scales the drop (0 = the old sea-level sky) for A/B.
+constexpr float CloudBaseAboveDatumKm = 1.5f;
+constexpr float MieScaleHeightKm = 1.2f;   // engine default
+constexpr float MieAtDatum = 1.0f / 3.0f;
+TAutoConsoleVariable<float> CVarSkyAltScale(TEXT("od.SkyAltScale"), 1.0f, TEXT("Planet top at area sea level x this (0 = at the area datum, the old look)."));
+
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
-// Was -1: frames ran ~2/3 stop darker than the reference photos.
-constexpr float AutoExposureBiasEV = -1.0f;
+// Was -1 until 2026-10-22: after the toe ramp, Gasquet noon still metered a
+// mean of 90 vs the reference photo's 109 (x1.21 display = ~x1.5 linear,
+// ~0.6 EV). -0.5 takes ~0.5 EV of that and keeps highlight headroom.
+constexpr float AutoExposureBiasEV = -0.5f;
 // Local exposure: compresses sun vs canopy shade the way a camera's HDR does
 // (1 = off). Forest shade sat 14+ stops under the sunlit road and crushed to 0.
 constexpr float LocalShadowContrast = 0.5f;
@@ -155,6 +186,7 @@ TArray<FVector> AddBoltPath(TArray<FTransform>& Out, FRandomStream& R, FVector A
 AODAtmosphereController::AODAtmosphereController()
 {
 	PrimaryActorTick.bCanEverTick = true;   // Weather W2
+	PrimaryActorTick.bTickEvenWhenPaused = true;   // fun #7: paused scrubbing shows the sky; Tick zeroes Dt while paused
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));   // bolt + flash light attach here
 }
 
@@ -349,9 +381,8 @@ void AODAtmosphereController::EnsureHeightFog()
 	Comp->SetVolumetricFogExtinctionScale(0.5f);
 	Comp->SetVolumetricFogDistance(6000.0f);
 	Comp->SetVolumetricFogStartDistance(0.0f);
-	// Deliberately NOT touching the volumetric fog froxel grid resolution/
-	// density CVars (r.VolumetricFog.GridPixelSize etc.) - perf note from the
-	// task: "keep volumetric fog grid at defaults."
+	// The froxel grid CVars stay out of code: DefaultScalability.ini sets
+	// Epic's r.VolumetricFog.GridPixelSize to 16 for the GPU budget (gap 8).
 
 	FogComp = Comp;
 	BaseFogDensity = Comp->FogDensity;
@@ -409,7 +440,7 @@ void AODAtmosphereController::EnsureVolumetricCloud()
 	// A plausible default cumulus deck: base a couple km up (well above any
 	// terrain/road geometry, which tops out well under 1 km of local relief),
 	// a few hundred meters thick.
-	Comp->LayerBottomAltitude = 1.5f;   // km above ground
+	Comp->LayerBottomAltitude = CloudBaseAboveDatumKm;   // km above the planet top; Tick adds the datum
 	Comp->LayerHeight = 3.5f;           // km
 	Comp->TracingStartMaxDistance = 350.0f;
 	Comp->TracingMaxDistance = 50.0f;
@@ -491,7 +522,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 	// is an exposure/grade issue, not a material-graph or vertex-color one).
 	// Restored to match that proven value rather than re-derived from
 	// scratch, then confirmed by re-render at all three §7.15 vantages.
-	// 2026-10-16: eased to -0.5 (AutoExposureBiasEV) - the lighting audit
+	// 2026-10-22: eased to AutoExposureBiasEV (-0.5) - the lighting audit
 	// found frames ~2/3 stop darker than reference photos of the same places.
 	S.bOverride_AutoExposureBias = true;
 	S.AutoExposureBias = AutoExposureBiasEV;
@@ -542,6 +573,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 void AODAtmosphereController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	DeltaSeconds = GetWorld()->IsPaused() ? 0.0f : DeltaSeconds;   // visuals follow while paused, lightning clocks don't
 
 	if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
 	{
@@ -552,6 +584,17 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		if (CloudComp->ViewSampleCountScale != ViewScale) { CloudComp->SetViewSampleCountScale(ViewScale); }
 		if (CloudComp->ShadowViewSampleCountScale != ShadowScale) { CloudComp->SetShadowViewSampleCountScale(ShadowScale); }
 		if (CloudComp->StopTracingTransmittanceThreshold != StopT) { CloudComp->SetStopTracingTransmittanceThreshold(StopT); }
+	}
+	if (UDirectionalLightComponent* CloudSun = SunComp.Get())
+	{
+		const bool bCloudShadows = CVarCloudShadows.GetValueOnGameThread() != 0;
+		if ((CloudSun->bCastCloudShadows != 0) != bCloudShadows)
+		{
+			CloudSun->bCastCloudShadows = bCloudShadows;
+			CloudSun->CloudShadowExtent = CloudShadowExtentKm;
+			CloudSun->CloudShadowRaySampleCountScale = CloudShadowRayScale;
+			CloudSun->MarkRenderStateDirty();
+		}
 	}
 
 	const UDirectionalLightComponent* SunLight = SunComp.Get();
@@ -578,14 +621,28 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
-	// state isn't dirtied every frame (curvature at 1 km is 8 cm).
+	// state isn't dirtied every frame (curvature at 1 km is 8 cm), at the
+	// area's sea level (Gap 7b; 0 until a terrain manager has its bands).
 	if (USkyAtmosphereComponent* Atmo = AtmoComp.Get())
 	{
+		float SeaZCm = 0.0f;
+		for (TActorIterator<AODTerrainManager> It(GetWorld()); It; ++It)
+		{
+			const float Z = It->GetGroundBandsWorld().SeaZCm;
+			if (Z > -0.5f * FODGroundBands::Off) { SeaZCm = FMath::Min(Z, 0.0f) * FMath::Max(CVarSkyAltScale.GetValueOnGameThread(), 0.0f); break; }
+		}
+		if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
+		{
+			const float BaseKm = CloudBaseAboveDatumKm - SeaZCm / 1e5f;
+			if (!FMath::IsNearlyEqual(CloudComp->LayerBottomAltitude, BaseKm, 1e-3f)) { CloudComp->SetLayerBottomAltitude(BaseKm); }
+		}
+		const float MieKm = FMath::Max(MieScaleHeightKm, -SeaZCm / 1e5f / FMath::Loge(1.0f / MieAtDatum));
+		if (!FMath::IsNearlyEqual(Atmo->MieExponentialDistribution, MieKm, 1e-3f)) { Atmo->SetMieExponentialDistribution(MieKm); }
 		const APlayerController* PC = GetWorld()->GetFirstPlayerController();
 		if (PC && PC->PlayerCameraManager)
 		{
 			const FVector Cam = PC->PlayerCameraManager->GetCameraLocation();
-			const FVector Snap(FMath::RoundToDouble(Cam.X / 1e5) * 1e5, FMath::RoundToDouble(Cam.Y / 1e5) * 1e5, 0.0);
+			const FVector Snap(FMath::RoundToDouble(Cam.X / 1e5) * 1e5, FMath::RoundToDouble(Cam.Y / 1e5) * 1e5, SeaZCm);
 			if (!Atmo->GetComponentLocation().Equals(Snap, 1.0))
 			{
 				Atmo->SetWorldLocation(Snap);
@@ -621,9 +678,10 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		DiagAcc = 0.0f;
 		const UDirectionalLightComponent* S = SunComp.Get();
 		const USkyLightComponent* K = SkyLightComp.Get();
-		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f)"),
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f) | planet top z %.0f"),
 			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
-			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity,
+			AtmoComp.IsValid() ? AtmoComp->GetComponentLocation().Z : 0.0);
 	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
