@@ -47,10 +47,8 @@ AODGameMode::AODGameMode()
 	PrimaryActorTick.bCanEverTick = true;
 }
 
-void AODGameMode::BeginPlay()
+void AODGameMode::StartPlay()
 {
-	Super::BeginPlay();
-
 	// AODRoadManager is the same actor ODMainMenu's -odpick hook reads
 	// (GetTownNodes()) and is placed once per open-world map with its
 	// RoadTilePrefix already baked in for whichever area that map currently
@@ -77,6 +75,22 @@ void AODGameMode::BeginPlay()
 			break;
 		}
 	}
+	// Before any level actor's BeginPlay (2026-10-22): a direct level launch
+	// (-odpick, no menu pin) never prewarmed, so the level-placed forest
+	// waited 2294 ms on its lake index (livetest10). Kicked here, the
+	// workers run under the terrain/road BeginPlays; from the menu it's a
+	// cache hit.
+	if (!HomeArea.IsEmpty())
+	{
+		PrewarmArea(HomeArea);
+	}
+	Super::StartPlay();
+}
+
+void AODGameMode::BeginPlay()
+{
+	Super::BeginPlay();
+
 	// ?odarea=<key> (2026-10-21): the area template level, no road manager of its own
 	const TCHAR* DrawnKey = GetWorld() ? GetWorld()->URL.GetOption(TEXT("odarea="), nullptr) : nullptr;
 	if (HomeArea.IsEmpty() && DrawnKey && *DrawnKey)

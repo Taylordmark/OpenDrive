@@ -68,6 +68,17 @@ const TCHAR* ShrubMeshPaths[] = {
 	TEXT("/Game/OpenDrive/Trees/sagebrush.sagebrush"),
 };
 constexpr int32 NumShrubSpecies = UE_ARRAY_COUNT(ShrubMeshPaths);
+// BuildTile's batches, one per mesh: NumTreeSpecies trees + NumShrubSpecies
+// shrubs (bush, sagebrush) + RockMeshes.Num() rock variants (4 procedural
+// boulder meshes, see RockMeshes' declaration) + scrub (grass_tuft).
+// Extended 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock
+// + scrub) alongside FBiomeRecipe's species-mix extension; rock count
+// bumped 2 -> 4 (2026-09-03, see RockMeshes' header comment).
+constexpr int32 BushBatchBase = NumTreeSpecies;                 // shrub batches start here
+constexpr int32 RockBatchBase = BushBatchBase + NumShrubSpecies; // then rock variants
+constexpr int32 NumRockVariants = 4;
+constexpr int32 ScrubBatchIdx = RockBatchBase + NumRockVariants; // then ground scrub
+constexpr int32 NumBatches = ScrubBatchIdx + 1;
 
 /** Indexed by EODBiome - order MUST match the enum in ODForestManager.h.
  *  FBiomeRecipe itself lives in the header (RecipeAt()/BlendAt() need the
@@ -1973,45 +1984,55 @@ bool AODForestManager::SlopeAt(double WorldX, double WorldY, float& OutSlopeRati
 	return true;
 }
 
-bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
+AODForestManager::ETileBuild AODForestManager::BuildTile(FIntPoint Key, const AActor* Player)
 {
 	// Local until we decide to commit - see this function's header comment:
 	// a tile whose scatter mostly deferred (real terrain not resolvable yet)
 	// is discarded rather than added to Tiles, so it isn't permanently
-	// stuck sparse.
-	FTile Tile;
-	FRandomStream Rng(HashCombine(GetTypeHash(Key), (uint32)RandomSeed));
-	int32 GroundAttempts = 0, GroundDeferred = 0;
-
+	// stuck sparse. Lives in Scatter (2026-10-22) so it can pause when the
+	// tick's StreamDeadline passes and resume next frame.
 	const double X0 = Key.X * (double)TileSizeCm;
 	const double Y0 = Key.Y * (double)TileSizeCm;
-	FBiomeRecipe Recipe;
-	float TileForestWeight;   // -1 = no point data for this tile; fall back to raster ForestWeightAt() per candidate
-	EODBiome DominantBiome;   // nearest classified point (or DefaultBiome) - for the ground-cover stat log only
-	BlendAt(X0 + TileSizeCm * 0.5, Y0 + TileSizeCm * 0.5, Recipe, TileForestWeight, DominantBiome);
 	const float TileSqM = FMath::Square(TileSizeCm / 100.0f);
 	// Landcover gate (2026-10-22, see ForestTreesPerSqM): WorldCover tree
 	// cells decide where trees stand and the far cards set the density, so
 	// the biome's TreeDensityScale only applies without the far-forest bin.
 	const bool bLandcoverGate = FarTileRecs.Num() > 0;
-	const int32 NTrees = bLandcoverGate
-		? FMath::RoundToInt(TileSqM * ForestTreesPerSqM)
-		: FMath::RoundToInt(TileSqM * TreesPerSqM * Recipe.TreeDensityScale);
-	const int32 NBushes =
-		FMath::RoundToInt(TileSqM * BushesPerSqM * Recipe.BushDensityScale);
-
-	// one transform batch per mesh: NumTreeSpecies trees + NumShrubSpecies
-	// shrubs (bush, sagebrush) + RockMeshes.Num() rock variants (4 procedural
-	// boulder meshes, see RockMeshes' declaration) + scrub (grass_tuft).
-	// Extended 2026-08-27 from the original fixed 7 (3 trees + bush + 2 rock
-	// + scrub) alongside FBiomeRecipe's species-mix extension; rock count
-	// bumped 2 -> 4 (2026-09-03, see RockMeshes' header comment).
-	constexpr int32 BushBatchBase = NumTreeSpecies;                 // shrub batches start here
-	constexpr int32 RockBatchBase = BushBatchBase + NumShrubSpecies; // then rock variants
-	constexpr int32 NumRockVariants = 4;
-	constexpr int32 ScrubBatchIdx = RockBatchBase + NumRockVariants; // then ground scrub
-	constexpr int32 NumBatches = ScrubBatchIdx + 1;
-	TArray<FTransform> Batches[NumBatches];
+	if (!Scatter || Scatter->Key != Key)
+	{
+		FTileScatter& N = Scatter.Emplace();
+		N.Key = Key;
+		N.Rng = FRandomStream(HashCombine(GetTypeHash(Key), (uint32)RandomSeed));
+		N.Tile.Batches.SetNum(NumBatches);
+		// TileForestWeight -1 = no point data for this tile; fall back to raster
+		// ForestWeightAt() per candidate. DominantBiome: nearest classified point
+		// (or DefaultBiome) - for the ground-cover stat log only.
+		BlendAt(X0 + TileSizeCm * 0.5, Y0 + TileSizeCm * 0.5, N.Recipe, N.TileForestWeight, N.DominantBiome);
+		N.NTrees = bLandcoverGate
+			? FMath::RoundToInt(TileSqM * ForestTreesPerSqM)
+			: FMath::RoundToInt(TileSqM * TreesPerSqM * N.Recipe.TreeDensityScale);
+		N.NBushes = FMath::RoundToInt(TileSqM * BushesPerSqM * N.Recipe.BushDensityScale);
+		if (bEnableGroundCover)
+		{
+			N.NRocks = FMath::RoundToInt(
+				TileSqM * RocksPerSqM * N.Recipe.RockDensityScale * GroundCoverDensityScale);
+			N.NScrub = FMath::RoundToInt(
+				TileSqM * ScrubPerSqM * N.Recipe.ScrubDensityScale * GroundCoverDensityScale);
+		}
+	}
+	FTileScatter& S = *Scatter;
+	FTile& Tile = S.Tile;
+	FRandomStream& Rng = S.Rng;
+	const FBiomeRecipe& Recipe = S.Recipe;
+	const float TileForestWeight = S.TileForestWeight;
+	const EODBiome DominantBiome = S.DominantBiome;
+	const int32 NTrees = S.NTrees, NBushes = S.NBushes;
+	int32& GroundAttempts = S.GroundAttempts;
+	int32& GroundDeferred = S.GroundDeferred;
+	TArray<TArray<FTransform>>& Batches = Tile.Batches;
+	// at least one candidate per call, so a resumed tile always advances
+	const int32 StartNext = S.Next;
+	auto OutOfTime = [&]() { return S.Next > StartNext && !StreamTimeLeft(); };
 
 	// Retry probe (2026-10-22, livetest8's 80-160 ms frames after the vista
 	// spawned): a held-back tile is retried every frame, and each retry used
@@ -2032,11 +2053,17 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	{
 		TileFirstBuildAttemptTime.FindOrAdd(Key, Now);
 		++TileRetryCount;
-		return false;   // key stays out of Tiles - Tick() retries it next frame
+		Scatter.Reset();
+		return ETileBuild::HeldBack;   // key stays out of Tiles - Tick() retries it next frame
 	};
 
-	for (int32 i = 0; i < NTrees + NBushes; ++i)
+	for (; S.Next < NTrees + NBushes; ++S.Next)
 	{
+		if (OutOfTime())
+		{
+			return ETileBuild::Busy;
+		}
+		const int32 i = S.Next;
 		const bool bTree = i < NTrees;
 		const double Px = X0 + Rng.FRand() * TileSizeCm;
 		const double Py = Y0 + Rng.FRand() * TileSizeCm;
@@ -2120,16 +2147,17 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	// tile-seeded/deterministic) + extra low scrub (forest-weight-gated,
 	// same convention as bushes). Runs alongside trees/bushes in the same
 	// BuildTile() call, so it shares the tile's lifetime/teardown for free.
-	int32 NRocksPlaced = 0, NScrubPlaced = 0;
-	if (bEnableGroundCover)
+	int32& NRocksPlaced = S.NRocksPlaced;
+	int32& NScrubPlaced = S.NScrubPlaced;
 	{
-		const int32 NRocks = FMath::RoundToInt(
-			TileSqM * RocksPerSqM * Recipe.RockDensityScale * GroundCoverDensityScale);
-		const int32 NScrub = FMath::RoundToInt(
-			TileSqM * ScrubPerSqM * Recipe.ScrubDensityScale * GroundCoverDensityScale);
-
-		for (int32 i = 0; i < NRocks + NScrub; ++i)
+		const int32 NRocks = S.NRocks, NScrub = S.NScrub;   // 0 without bEnableGroundCover
+		for (; S.Next < NTrees + NBushes + NRocks + NScrub; ++S.Next)
 		{
+			if (OutOfTime())
+			{
+				return ETileBuild::Busy;
+			}
+			const int32 i = S.Next - (NTrees + NBushes);
 			const bool bRock = i < NRocks;
 			const double Px = X0 + Rng.FRand() * TileSizeCm;
 			const double Py = Y0 + Rng.FRand() * TileSizeCm;
@@ -2256,119 +2284,12 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 	TileFirstBuildAttemptTime.Remove(Key);
 
 	// Per-species instance counts (2026-08-27 verification instrumentation,
-	// see the gated stat log below) - filled in as each batch is turned into
-	// a HISM so the log can show the actual species mix a tile spawned, not
-	// just the recipe's target weights.
+	// see the gated stat log below) - the actual species mix a tile spawned,
+	// not just the recipe's target weights.
 	int32 SpeciesInstanceCounts[NumTreeSpecies] = {};
 	int32 ShrubInstanceCounts[NumShrubSpecies] = {};
-
-	for (int32 m = 0; m < NumBatches; ++m)
-	{
-		if (Batches[m].Num() == 0)
-		{
-			continue;
-		}
-		UStaticMesh* Mesh;
-		const bool bIsTree = m < NumTreeSpecies;
-		const bool bIsShrub = !bIsTree && m < RockBatchBase;
-		if (bIsTree) Mesh = TreeMeshes[m].Get();
-		else if (bIsShrub) Mesh = ShrubMeshes[m - BushBatchBase].Get();
-		else if (m == ScrubBatchIdx) Mesh = ScrubMesh.Get();
-		else Mesh = RockMeshes[m - RockBatchBase].Get();
-		if (!Mesh)
-		{
-			continue;
-		}
-		if (bIsTree) SpeciesInstanceCounts[m] = Batches[m].Num();
-		else if (bIsShrub) ShrubInstanceCounts[m - BushBatchBase] = Batches[m].Num();
-		const bool bLowVeg = bIsShrub || m == ScrubBatchIdx;   // bush/sagebrush/scrub: closer cull, no shadow
-		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
-		Hism->SetupAttachment(RootComponent);
-		Hism->SetStaticMesh(Mesh);
-		// Rock batches only (m >= RockBatchBase, excluding the scrub batch,
-		// which keeps grass_tuft's own material) - see RockMat's header
-		// comment for why this exists: without it, RockMeshes' engine
-		// BasicShapes render with the flat grey engine default.
-		if (m >= RockBatchBase && m != ScrubBatchIdx && RockMat)
-		{
-			Hism->SetMaterial(0, RockMat);
-		}
-		// Seasons feature (2026-09-07): Conifer (evergreen) batch renders with
-		// the shared seasonal foliage MID instead of M_Foliage's plain baked-in
-		// material, so AODSeasonController's SnowCover push actually reaches
-		// this HISM. Deciduous species (every other tree batch) are left alone
-		// for now - see FoliageSeasonMID's header comment.
-		else if (bIsTree && m == ConiferSpeciesIndex && FoliageSeasonMID)
-		{
-			// Slot 1, not 0: import_biome_flora.py's BARK_SLOT/FOLIAGE_SLOT
-			// contract puts opaque bark at slot 0 and the alpha-cutout
-			// foliage cards (the geometry that actually needs SnowCover/
-			// FallBlend) at slot 1 for every two-slot tree mesh.
-			Hism->SetMaterial(1, FoliageSeasonMID);
-		}
-		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): Blob/
-		// tree_blob only (DeciduousSpeciesIndex) - the mesh make_tree_meshes.
-		// py now gives a bare-twig branch structure to, so it's the one
-		// species batch that can actually show FallBlend/LeafDrop's dissolve
-		// progression instead of just going invisible where a card clips.
-		// Both slots get a dynamic MID: slot 1 (foliage cards) for the
-		// orange/dissolve, slot 0 (bark, trunk+branches) for twig snow.
-		else if (bIsTree && m == DeciduousSpeciesIndex)
-		{
-			if (DeciduousBarkMID)
-			{
-				Hism->SetMaterial(0, DeciduousBarkMID);
-			}
-			if (DeciduousFoliageMID)
-			{
-				Hism->SetMaterial(1, DeciduousFoliageMID);
-			}
-		}
-		UseSeasonFoliage(Hism);
-		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		// Scrub (grass_tuft, ~1 m) gets its own short cull (2026-10-14, Oahu
-		// 20-25 fps): it's the largest batch in dense biomes (~45% of a
-		// Rainforest tile) and sub-pixel long before the old shared 450 m
-		// low-veg cull - 250 m end draws ~30% of the old area.
-		const bool bScrub = m == ScrubBatchIdx;
-		Hism->SetCullDistances(bScrub ? 15000 : bLowVeg ? 20000 : 45000, bScrub ? 25000 : bLowVeg ? 45000 : 60000);
-		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
-		Hism->SetCastShadow(!bLowVeg);
-		// Wind WPO is a few cm (see WpoDisableCm): don't let it invalidate
-		// Virtual Shadow Map pages every frame for every tree within 100 m
-		// while driving. Instances never move after AddInstances, so Rigid is
-		// exact apart from the shadow not swaying; Tick() switches swaying
-		// shadows back on when slow (see bSwayShadows).
-		Hism->ShadowCacheInvalidationBehavior = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
-		// Trees stay in Lumen's scene: their canopy bounce and transmission is
-		// most of the light in forest shade (2026-10-16 lighting audit, Gap 1).
-		// Low veg and rocks stay out - small, many, little bounce.
-		Hism->SetAffectDynamicIndirectLighting(bIsTree);
-		Hism->RegisterComponent();
-		Hism->AddInstances(Batches[m], false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
-		Tile.Hisms.Add(Hism);
-
-		// One-time proof-of-fix readback (2026-08-27, "hitting a bush stops/
-		// damages the car" live-drive report) - see bLoggedBushCollisionCheck's
-		// header comment.
-		if (bIsShrub && !bLoggedBushCollisionCheck)
-		{
-			bLoggedBushCollisionCheck = true;
-			UE_LOG(LogTemp, Display,
-				TEXT("ODForestManager: shrub HISM collision readback = %d "
-				     "(0=NoCollision) - trees get real collision separately via "
-				     "the trunk capsule pool, shrubs/rocks/scrub never do"),
-				(int32)Hism->GetCollisionEnabled());
-		}
-		else if (m == ScrubBatchIdx && !bLoggedScrubCollisionCheck)
-		{
-			bLoggedScrubCollisionCheck = true;
-			UE_LOG(LogTemp, Display,
-				TEXT("ODForestManager: scrub HISM collision readback = %d "
-				     "(0=NoCollision)"),
-				(int32)Hism->GetCollisionEnabled());
-		}
-	}
+	for (int32 m = 0; m < NumTreeSpecies; ++m) SpeciesInstanceCounts[m] = Batches[m].Num();
+	for (int32 m = 0; m < NumShrubSpecies; ++m) ShrubInstanceCounts[m] = Batches[BushBatchBase + m].Num();
 
 	// Per-biome species-mix verification log (2026-08-27, "chaparral isn't
 	// working and all the trees are the same" fix) - deliberately
@@ -2446,8 +2367,131 @@ bool AODForestManager::BuildTile(const FIntPoint& Key, const AActor* Player)
 		TileGiveUpCount = 0;
 	}
 
-	Tiles.Add(Key, MoveTemp(Tile));
-	return true;
+	// in Tiles now (collision + release), its HISMs made within this tick's
+	// budget and then Tick()'s CommittingTile
+	FTile& Added = Tiles.Add(Key, MoveTemp(Tile));
+	Scatter.Reset();
+	if (CommitTile(Added, false))
+	{
+		return ETileBuild::Done;
+	}
+	CommittingTile = Key;
+	return ETileBuild::Busy;
+}
+
+bool AODForestManager::CommitTile(FTile& T, bool bForce)
+{
+	for (; T.NextBatch < T.Batches.Num() && (bForce || StreamTimeLeft()); ++T.NextBatch)
+	{
+		const int32 m = T.NextBatch;
+		TArray<FTransform>& Batch = T.Batches[m];
+		if (Batch.Num() == 0)
+		{
+			continue;
+		}
+		bForce = false;
+		UStaticMesh* Mesh;
+		const bool bIsTree = m < NumTreeSpecies;
+		const bool bIsShrub = !bIsTree && m < RockBatchBase;
+		if (bIsTree) Mesh = TreeMeshes[m].Get();
+		else if (bIsShrub) Mesh = ShrubMeshes[m - BushBatchBase].Get();
+		else if (m == ScrubBatchIdx) Mesh = ScrubMesh.Get();
+		else Mesh = RockMeshes[m - RockBatchBase].Get();
+		if (!Mesh)
+		{
+			continue;
+		}
+		const bool bLowVeg = bIsShrub || m == ScrubBatchIdx;   // bush/sagebrush/scrub: closer cull, no shadow
+		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+		Hism->SetupAttachment(RootComponent);
+		Hism->SetStaticMesh(Mesh);
+		// Rock batches only (m >= RockBatchBase, excluding the scrub batch,
+		// which keeps grass_tuft's own material) - see RockMat's header
+		// comment for why this exists: without it, RockMeshes' engine
+		// BasicShapes render with the flat grey engine default.
+		if (m >= RockBatchBase && m != ScrubBatchIdx && RockMat)
+		{
+			Hism->SetMaterial(0, RockMat);
+		}
+		// Seasons feature (2026-09-07): Conifer (evergreen) batch renders with
+		// the shared seasonal foliage MID instead of M_Foliage's plain baked-in
+		// material, so AODSeasonController's SnowCover push actually reaches
+		// this HISM. Deciduous species (every other tree batch) are left alone
+		// for now - see FoliageSeasonMID's header comment.
+		else if (bIsTree && m == ConiferSpeciesIndex && FoliageSeasonMID)
+		{
+			// Slot 1, not 0: import_biome_flora.py's BARK_SLOT/FOLIAGE_SLOT
+			// contract puts opaque bark at slot 0 and the alpha-cutout
+			// foliage cards (the geometry that actually needs SnowCover/
+			// FallBlend) at slot 1 for every two-slot tree mesh.
+			Hism->SetMaterial(1, FoliageSeasonMID);
+		}
+		// Deciduous-arc follow-up (2026-09, next steps.md sec 7.17): Blob/
+		// tree_blob only (DeciduousSpeciesIndex) - the mesh make_tree_meshes.
+		// py now gives a bare-twig branch structure to, so it's the one
+		// species batch that can actually show FallBlend/LeafDrop's dissolve
+		// progression instead of just going invisible where a card clips.
+		// Both slots get a dynamic MID: slot 1 (foliage cards) for the
+		// orange/dissolve, slot 0 (bark, trunk+branches) for twig snow.
+		else if (bIsTree && m == DeciduousSpeciesIndex)
+		{
+			if (DeciduousBarkMID)
+			{
+				Hism->SetMaterial(0, DeciduousBarkMID);
+			}
+			if (DeciduousFoliageMID)
+			{
+				Hism->SetMaterial(1, DeciduousFoliageMID);
+			}
+		}
+		UseSeasonFoliage(Hism);
+		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		// Scrub (grass_tuft, ~1 m) gets its own short cull (2026-10-14, Oahu
+		// 20-25 fps): it's the largest batch in dense biomes (~45% of a
+		// Rainforest tile) and sub-pixel long before the old shared 450 m
+		// low-veg cull - 250 m end draws ~30% of the old area.
+		const bool bScrub = m == ScrubBatchIdx;
+		Hism->SetCullDistances(bScrub ? 15000 : bLowVeg ? 20000 : 45000, bScrub ? 25000 : bLowVeg ? 45000 : 60000);
+		Hism->WorldPositionOffsetDisableDistance = WpoDisableCm;
+		Hism->SetCastShadow(!bLowVeg);
+		// Wind WPO is a few cm (see WpoDisableCm): don't let it invalidate
+		// Virtual Shadow Map pages every frame for every tree within 100 m
+		// while driving. Instances never move after AddInstances, so Rigid is
+		// exact apart from the shadow not swaying; Tick() switches swaying
+		// shadows back on when slow (see bSwayShadows).
+		Hism->ShadowCacheInvalidationBehavior = bSwayShadows ? EShadowCacheInvalidationBehavior::Auto : EShadowCacheInvalidationBehavior::Rigid;
+		// Trees stay in Lumen's scene: their canopy bounce and transmission is
+		// most of the light in forest shade (2026-10-16 lighting audit, Gap 1).
+		// Low veg and rocks stay out - small, many, little bounce.
+		Hism->SetAffectDynamicIndirectLighting(bIsTree);
+		Hism->RegisterComponent();
+		Hism->AddInstances(Batch, false, /*bWorldSpace*/false);   // actor-relative (2026-10-05, menu vistas are offset copies)
+		T.Hisms.Add(Hism);
+		Batch.Empty();
+
+		// One-time proof-of-fix readback (2026-08-27, "hitting a bush stops/
+		// damages the car" live-drive report) - see bLoggedBushCollisionCheck's
+		// header comment.
+		if (bIsShrub && !bLoggedBushCollisionCheck)
+		{
+			bLoggedBushCollisionCheck = true;
+			UE_LOG(LogTemp, Display,
+				TEXT("ODForestManager: shrub HISM collision readback = %d "
+				     "(0=NoCollision) - trees get real collision separately via "
+				     "the trunk capsule pool, shrubs/rocks/scrub never do"),
+				(int32)Hism->GetCollisionEnabled());
+		}
+		else if (m == ScrubBatchIdx && !bLoggedScrubCollisionCheck)
+		{
+			bLoggedScrubCollisionCheck = true;
+			UE_LOG(LogTemp, Display,
+				TEXT("ODForestManager: scrub HISM collision readback = %d "
+				     "(0=NoCollision)"),
+				(int32)Hism->GetCollisionEnabled());
+		}
+	}
+
+	return T.NextBatch >= T.Batches.Num();
 }
 
 bool AODForestManager::BuildGrassCell(const FIntPoint& Key, const AActor* Player)
@@ -2685,7 +2729,8 @@ void AODForestManager::UpdateGrass(const FVector& CarLoc, const AActor* Player)
 		}
 	}
 	Want.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B) { return A.Key < B.Key; });
-	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick); ++i)
+	// the nearest always (it's under the car), more only within StreamMsBudget
+	for (int32 i = 0; i < FMath::Min(Want.Num(), GrassCellsPerTick) && (i == 0 || StreamTimeLeft()); ++i)
 	{
 		BuildGrassCell(Want[i].Value, Player);
 	}
@@ -2924,51 +2969,99 @@ void AODForestManager::Tick(float DeltaSeconds)
 		}
 	}
 
+	// One streaming budget for the whole tick (2026-10-22, livetest10: 99
+	// frames over 8 ms, longest 59.6 ms in one 5 s window). Each streamer
+	// used to force a whole unit through per frame - one near tile (~10 ms
+	// of ground traces + up to 17 HISMs), one far chunk (up to 25 ms of
+	// HISMs), two grass cells - on top of its own budget. Now grass, near
+	// tiles and far chunks share StreamMsBudget, checked between ~1 ms
+	// units (a scatter candidate, one HISM), and an unfinished tile/chunk
+	// resumes next tick. Grass first: it's the cells under the car. While
+	// the far forest has work, near tiles leave it a third of the budget.
+	const double StreamStart = FPlatformTime::Seconds();
+	const double BudgetS = StreamMsBudget / 1000.0;
+	double PartStart = StreamStart;
+	auto EndPart = [&](int32 Part)
+	{
+		const double T = FPlatformTime::Seconds();
+		StreamMaxMs[Part] = FMath::Max(StreamMaxMs[Part], (T - PartStart) * 1000.0);
+		PartStart = T;
+	};
+	StreamDeadline = StreamStart + BudgetS;
+	if (!Vista.bActive && bEnableGrass && bEnableGroundCover)
+	{
+		UpdateGrass(Loc, Player);
+	}
+	EndPart(0);
+
 	// spawn missing tiles nearest-first, a few per tick - capped by BOTH the
-	// TilesPerTick count ceiling and TileBuildMsBudget of actual frame time
-	// (2026-09-07, see TileBuildMsBudget's header comment: 40 unbudgeted
-	// tiles in one frame was a measured hitch source, not the assumed
-	// "cheap" burst). bBudgetSpent is checked AFTER each build so at least
-	// one tile always completes per tick and the fill can never stall.
+	// TilesPerTick count ceiling and the streaming budget (2026-09-07: 40
+	// unbudgeted tiles in one frame was a measured hitch source, not the
+	// assumed "cheap" burst). The tile in flight (Scatter / CommittingTile)
+	// always advances first, so the fill can never stall.
+	StreamDeadline = StreamStart + BudgetS * (bFarBusy ? 2.0 / 3.0 : 1.0);
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / TileSizeCm),
 	                       FMath::FloorToInt(Loc.Y / TileSizeCm));
 	const int32 Reach = FMath::CeilToInt(SpawnRadius / TileSizeCm);
-	const double BuildStart = FPlatformTime::Seconds();
-	bool bBudgetSpent = false;
-	int32 Built = 0;
-	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick && !bBudgetSpent; ++Ring)
+	auto WantsTile = [&](const FIntPoint& Key)
 	{
-		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dy)
+		// not this area's tile (2026-10-05, large world) - see FElevData::Bounds
+		return FMath::Max(FMath::Abs(Key.X - Center.X), FMath::Abs(Key.Y - Center.Y)) <= Reach
+			&& !(bUseElevationGrid && !Elev->Bounds.Intersect(FBox2D(
+				FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
+				FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
+			&& Vista.WantsTile(Key, TileSizeCm);
+	};
+	bool bBusy = false;
+	if (CommittingTile)
+	{
+		FTile* T = Tiles.Find(*CommittingTile);   // gone = released mid-commit
+		bBusy = T && !CommitTile(*T, true);
+		if (!bBusy)
 		{
-			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick && !bBudgetSpent; ++dx)
+			CommittingTile.Reset();
+		}
+	}
+	if (!bBusy && Scatter)
+	{
+		if (WantsTile(Scatter->Key))
+		{
+			bBusy = BuildTile(Scatter->Key, Player) == ETileBuild::Busy;
+		}
+		else
+		{
+			Scatter.Reset();   // drove away from it - nothing made yet
+		}
+	}
+	int32 Built = 0;
+	for (int32 Ring = 0; Ring <= Reach && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++Ring)
+	{
+		for (int32 dy = -Ring; dy <= Ring && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++dy)
+		{
+			for (int32 dx = -Ring; dx <= Ring && Built < TilesPerTick && !bBusy && StreamTimeLeft(); ++dx)
 			{
 				if (FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring)
 				{
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				// not this area's tile (2026-10-05, large world) - see FElevData::Bounds
-				if ((bUseElevationGrid && !Elev->Bounds.Intersect(FBox2D(
-						FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
-						FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
-					|| !Vista.WantsTile(Key, TileSizeCm))
+				if (!WantsTile(Key))
 				{
 					continue;
 				}
 				if (!Tiles.Contains(Key))
 				{
-					// BuildTile() returning false (see its own comment) leaves
-					// Key out of Tiles - it's still "missing" next Tick(), so
-					// this same nearest-first loop retries it automatically
-					// with no extra bookkeeping here.
-					BuildTile(Key, Player);
+					// a HeldBack tile (see BuildTile's comment) stays out of
+					// Tiles - it's still "missing" next Tick(), so this same
+					// nearest-first loop retries it automatically with no
+					// extra bookkeeping here.
+					bBusy = BuildTile(Key, Player) == ETileBuild::Busy;
 					++Built;
-					bBudgetSpent = (FPlatformTime::Seconds() - BuildStart) * 1000.0
-						> TileBuildMsBudget;
 				}
 			}
 		}
 	}
+	EndPart(1);
 
 	// retire tiles far outside the radius (hysteresis: +2 tiles)
 	TArray<FIntPoint> Gone;
@@ -2985,18 +3078,25 @@ void AODForestManager::Tick(float DeltaSeconds)
 		ReleaseTile(Key);
 	}
 
-	const int32 FarBefore = FarChunks.Num();
+	StreamDeadline = StreamStart + BudgetS;
 	UpdateFarForest(Loc);   // vista too: the backdrop's hills are what it shows
-	bSettled = Built == 0 && FarChunks.Num() == FarBefore;
+	EndPart(2);
+	bSettled = Built == 0 && !bBusy && !Scatter && !CommittingTile && !bFarBusy;
+	if (const double Now = FPlatformTime::Seconds(); Now - StreamLogAt > 5.0)
+	{
+		if (StreamLogAt > 0.0)
+		{
+			UE_LOG(LogTemp, Display, TEXT("ODForestManager: stream 5s longest - grass %.1f ms, near tiles %.1f ms, far %.1f ms (budget %.1f ms)"),
+				StreamMaxMs[0], StreamMaxMs[1], StreamMaxMs[2], StreamMsBudget);
+		}
+		StreamLogAt = Now;
+		FMemory::Memzero(StreamMaxMs);
+	}
 	if (Vista.bActive)
 	{
 		return;
 	}
 	UpdateCollision(Loc);
-	if (bEnableGrass && bEnableGroundCover)
-	{
-		UpdateGrass(Loc, Player);
-	}
 
 	// headless visual QA: `-odshot=25` captures a screenshot 25 s after boot.
 	// ShotAt/bShotParsed/bShotDone are instance members (see ODForestManager.h)

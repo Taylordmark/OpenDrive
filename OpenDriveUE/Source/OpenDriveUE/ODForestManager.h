@@ -183,9 +183,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	float FarForestRadius = 500000.0f;
 
-	/** Game-thread ms per tick for far chunk builds (at least one per tick). */
+	/** Game-thread ms per tick for all forest streaming: grass cells, near
+	 *  tile scatter + HISM commit, far chunk HISMs (2026-10-22, livetest10:
+	 *  one tile plus one far chunk per frame, each forced through whole, made
+	 *  60 ms frames). Checked between ~1 ms work units, so a frame's forest
+	 *  work stays near this; streaming just takes more frames. */
 	UPROPERTY(EditAnywhere, Category = "Forest")
-	float FarBuildMsBudget = 2.0f;
+	float StreamMsBudget = 6.0f;
 
 	/** Trees per m^2 at forest weight 1. Thinned 0.075 -> 0.05 (2026-07-25) so
 	 *  the roadside canopy reads as forest, not a wall right over the camera. */
@@ -531,7 +535,34 @@ private:
 		TArray<FVector> Trunks;        // world tree positions (collision)
 		TArray<float> TrunkScales;
 		TArray<FVector4> Rocks;        // rock collision spheres: xyz centre, w radius (cm)
+		TArray<TArray<FTransform>> Batches;   // per mesh batch, HISMs not made yet (CommitTile)
+		int32 NextBatch = 0;
 	};
+	/** A near tile's scatter in progress (2026-10-22): BuildTile stops when
+	 *  StreamDeadline passes and Tick resumes it next frame. Same RNG stream,
+	 *  so the layout doesn't depend on where it paused. */
+	struct FTileScatter
+	{
+		FIntPoint Key;
+		FTile Tile;
+		FRandomStream Rng;
+		FBiomeRecipe Recipe;
+		float TileForestWeight = -1.0f;
+		EODBiome DominantBiome = EODBiome::DeciduousForest;
+		int32 NTrees = 0, NBushes = 0, NRocks = 0, NScrub = 0, Next = 0;
+		int32 GroundAttempts = 0, GroundDeferred = 0, NRocksPlaced = 0, NScrubPlaced = 0;
+	};
+	TOptional<FTileScatter> Scatter;
+	TOptional<FIntPoint> CommittingTile;   // in Tiles, HISMs still pending
+	enum class ETileBuild : uint8 { Done, HeldBack, Busy };   // Busy = out of time, resume next tick
+	/** Makes T's pending HISMs while StreamDeadline lasts (bForce: at least
+	 *  one). True when none are left. */
+	bool CommitTile(FTile& T, bool bForce);
+	double StreamDeadline = 0.0;   // FPlatformTime::Seconds() this tick's streaming stops at
+	bool StreamTimeLeft() const { return FPlatformTime::Seconds() < StreamDeadline; }
+	bool bFarBusy = false;   // last UpdateFarForest started or still commits a chunk
+	double StreamLogAt = 0.0;
+	double StreamMaxMs[3] = {};   // longest grass / near tiles / far forest tick part, last 5 s
 
 	bool LoadMask();
 	bool LoadBiomePoints();
@@ -574,7 +605,7 @@ private:
 	                          FVector& OutHit) const;
 	bool HeightOnlyAt(double WorldX, double WorldY, float& OutZ) const;
 	bool SlopeAt(double WorldX, double WorldY, float& OutSlopeRatio) const;
-	/** Returns false if the tile's own scatter was mostly deferred (real
+	/** Returns HeldBack if the tile's own scatter was mostly deferred (real
 	 *  terrain collision not resolvable yet at most candidate points - see
 	 *  RaycastRuntimeGround) rather than committed sparse/empty - Tick()
 	 *  leaves the key out of Tiles in that case so its own `!Tiles.Contains`
@@ -589,7 +620,7 @@ private:
 	 *  5285 elevation-grid candidates) - without this, the tiles NEAREST the
 	 *  player (built first, in ring order) would each get permanently
 	 *  committed near-empty, since a committed tile is never revisited. */
-	bool BuildTile(const FIntPoint& Key, const AActor* Player);
+	ETileBuild BuildTile(FIntPoint Key, const AActor* Player);   // by value: Tick passes Scatter->Key, which a finished build resets
 	bool BuildGrassCell(const FIntPoint& Key, const AActor* Player);
 	void UpdateGrass(const FVector& Loc, const AActor* Player);
 	void UseSeasonFoliage(UMeshComponent* Comp) const;
@@ -619,7 +650,9 @@ private:
 		TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BandHisms;   // hidden near the player, one per 200 m band square (FarBandSubCells)
 		TArray<FVector2D> BandCenters;   // parallel to BandHisms
 		TArray<FVector> Trunks;   // off-band cards + street trees (collision)
+		TArray<TPair<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>>> Pending;   // batches without a HISM yet
 	};
+	void CommitFarBatch(const FIntPoint& Key, FFarChunk& Chunk);
 	bool LoadFarForest();
 	/** WorldCover tree at this 20 m far-forest cell (bRing: or any of its 8
 	 *  neighbours) - the near trees' landcover gate. Reads a 2 km tile's
@@ -1062,5 +1095,7 @@ private:
 	// even at highway speed, and the budget clears several tiles per
 	// SECOND at 60 fps).
 	static constexpr int32 TilesPerTick = 40;
-	static constexpr double TileBuildMsBudget = 2.5;
+	// 2026-10-22: the "at least one tile" floor made each tile a ~10 ms
+	// frame on its own (livetest10); TileBuildMsBudget is now the shared
+	// StreamMsBudget, and a tile pauses mid-scatter instead.
 };
