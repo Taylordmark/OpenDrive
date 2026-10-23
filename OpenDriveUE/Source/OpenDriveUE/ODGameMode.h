@@ -36,6 +36,7 @@ class OPENDRIVEUE_API AODGameMode : public AGameModeBase
 public:
 	AODGameMode();
 
+	virtual void StartPlay() override;   // HomeArea + area prewarm, before the level's BeginPlays
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 

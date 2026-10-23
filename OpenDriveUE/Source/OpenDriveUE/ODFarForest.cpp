@@ -339,44 +339,53 @@ void AODForestManager::BuildFarChunk(const FIntPoint& Key)
 		}
 	}
 
-	for (TPair<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>>& B : Batches)
+	// HISMs within this tick's StreamMsBudget, the rest from UpdateFarForest
+	// next ticks (2026-10-22: a whole chunk was up to 25 ms in one frame)
+	Chunk.Pending = Batches.Array();
+	while (Chunk.Pending.Num() > 0 && StreamTimeLeft())
 	{
-		UStaticMesh* Mesh = B.Key.Get<0>();
-		const int32 BandSub = B.Key.Get<1>();
-		const bool bCard = CardMeshes.Contains(Mesh);
-		auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
-		Hism->SetupAttachment(RootComponent);
-		Hism->SetStaticMesh(Mesh);
-		UseSeasonFoliage(Hism);
-		if (!bCard && TreeMeshes.IsValidIndex(FarDeciduousSpecies) && Mesh == TreeMeshes[FarDeciduousSpecies])
-		{
-			if (DeciduousBarkMID) { Hism->SetMaterial(0, DeciduousBarkMID); }
-			if (DeciduousFoliageMID) { Hism->SetMaterial(1, DeciduousFoliageMID); }
-		}
-		Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		// cards: whole far radius (extras FarExtraCullCm); street trees: the near trees' 450/600 m
-		const int32 CullEnd = !bCard ? 60000 : B.Key.Get<2>() ? FarExtraCullCm : (int32)FarForestRadius;
-		Hism->SetCullDistances(bCard ? (int32)(CullEnd * 0.9f) : 45000, CullEnd);
-		// ponytail: cards cast no shadow (100k+ instances in VSM); street trees do
-		Hism->SetCastShadow(!bCard);
-		Hism->WorldPositionOffsetDisableDistance = 10000;   // ODForestManager.cpp WpoDisableCm
-		Hism->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
-		Hism->SetAffectDynamicIndirectLighting(false);
-		// cards stand past Lumen's ~200 m trace range and cast no shadow: keep
-		// their ~350k instances out of the TLAS
-		Hism->bVisibleInRayTracing = !bCard;
-		Hism->RegisterComponent();
-		Hism->AddInstances(B.Value, false, /*bWorldSpace*/false);   // actor-relative, same as BuildTile
-		if (BandSub < 0)
-		{
-			Chunk.Hisms.Add(Hism);
-			continue;
-		}
-		Hism->SetVisibility(false);   // UpdateFarForest shows it once the square is past the near scatter
-		Chunk.BandHisms.Add(Hism);
-		const FIntPoint Sq(BandSub % FarBandSubs, BandSub / FarBandSubs);
-		Chunk.BandCenters.Add(FVector2D(Key) * FarChunkCm + (FVector2D(Sq) + 0.5) * (FarBandSubCells * FarCellCm));
+		CommitFarBatch(Key, Chunk);
 	}
+}
+
+void AODForestManager::CommitFarBatch(const FIntPoint& Key, FFarChunk& Chunk)
+{
+	TPair<TTuple<UStaticMesh*, int32, bool>, TArray<FTransform>> B = Chunk.Pending.Pop(EAllowShrinking::No);
+	UStaticMesh* Mesh = B.Key.Get<0>();
+	const int32 BandSub = B.Key.Get<1>();
+	const bool bCard = CardMeshes.Contains(Mesh);
+	auto* Hism = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+	Hism->SetupAttachment(RootComponent);
+	Hism->SetStaticMesh(Mesh);
+	UseSeasonFoliage(Hism);
+	if (!bCard && TreeMeshes.IsValidIndex(FarDeciduousSpecies) && Mesh == TreeMeshes[FarDeciduousSpecies])
+	{
+		if (DeciduousBarkMID) { Hism->SetMaterial(0, DeciduousBarkMID); }
+		if (DeciduousFoliageMID) { Hism->SetMaterial(1, DeciduousFoliageMID); }
+	}
+	Hism->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	// cards: whole far radius (extras FarExtraCullCm); street trees: the near trees' 450/600 m
+	const int32 CullEnd = !bCard ? 60000 : B.Key.Get<2>() ? FarExtraCullCm : (int32)FarForestRadius;
+	Hism->SetCullDistances(bCard ? (int32)(CullEnd * 0.9f) : 45000, CullEnd);
+	// ponytail: cards cast no shadow (100k+ instances in VSM); street trees do
+	Hism->SetCastShadow(!bCard);
+	Hism->WorldPositionOffsetDisableDistance = 10000;   // ODForestManager.cpp WpoDisableCm
+	Hism->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
+	Hism->SetAffectDynamicIndirectLighting(false);
+	// cards stand past Lumen's ~200 m trace range and cast no shadow: keep
+	// their ~350k instances out of the TLAS
+	Hism->bVisibleInRayTracing = !bCard;
+	Hism->RegisterComponent();
+	Hism->AddInstances(B.Value, false, /*bWorldSpace*/false);   // actor-relative, same as BuildTile
+	if (BandSub < 0)
+	{
+		Chunk.Hisms.Add(Hism);
+		return;
+	}
+	Hism->SetVisibility(false);   // UpdateFarForest shows it once the square is past the near scatter
+	Chunk.BandHisms.Add(Hism);
+	const FIntPoint Sq(BandSub % FarBandSubs, BandSub / FarBandSubs);
+	Chunk.BandCenters.Add(FVector2D(Key) * FarChunkCm + (FVector2D(Sq) + 0.5) * (FarBandSubCells * FarCellCm));
 }
 
 void AODForestManager::UpdateFarForest(const FVector& Loc)
@@ -388,7 +397,19 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 	const FIntPoint Center(FMath::FloorToInt(Loc.X / FarChunkCm), FMath::FloorToInt(Loc.Y / FarChunkCm));
 	const int32 Reach = FMath::CeilToInt(FarForestRadius / FarChunkCm);
 	const double Start = FPlatformTime::Seconds();
-	bool bSpent = false;
+	// chunks still making HISMs first, at least one batch a tick
+	bool bForce = true;
+	bFarBusy = false;
+	for (TPair<FIntPoint, FFarChunk>& C : FarChunks)
+	{
+		while (C.Value.Pending.Num() > 0 && (bForce || StreamTimeLeft()))
+		{
+			bForce = false;
+			CommitFarBatch(C.Key, C.Value);
+		}
+		bFarBusy |= C.Value.Pending.Num() > 0;
+	}
+	bool bSpent = bFarBusy;
 	for (int32 Ring = 0; Ring <= Reach && !bSpent; ++Ring)
 	{
 		for (int32 dy = -Ring; dy <= Ring && !bSpent; ++dy)
@@ -406,16 +427,22 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 				{
 					continue;
 				}
-				const double T0 = FPlatformTime::Seconds();
+				bFarBusy = true;   // wanted and missing: near tiles leave time next tick
+				if (!StreamTimeLeft())
+				{
+					bSpent = true;
+					continue;
+				}
 				BuildFarChunk(Key);
-				const double Ms = (FPlatformTime::Seconds() - T0) * 1000.0;
-				FarBuildMs += Ms;
-				FarBuildMaxMs = FMath::Max(FarBuildMaxMs, Ms);
 				++FarBuilt;
-				bSpent = (FPlatformTime::Seconds() - Start) * 1000.0 > FarBuildMsBudget;
+				bSpent = FarChunks[Key].Pending.Num() > 0 || !StreamTimeLeft();
 			}
 		}
 	}
+
+	const double Ms = (FPlatformTime::Seconds() - Start) * 1000.0;
+	FarBuildMs += Ms;
+	FarBuildMaxMs = FMath::Max(FarBuildMaxMs, Ms);
 
 	// release beyond the radius (+1 chunk hysteresis); a band square's cards
 	// hide while its centre is inside the near scatter's SpawnRadius
@@ -462,7 +489,7 @@ void AODForestManager::UpdateFarForest(const FVector& Loc)
 			}
 		}
 		UE_LOG(LogTemp, Display,
-			TEXT("ODForestManager: far forest chunks=%d cards=%d (%d LOD0 tris) street=%d bandHidden=%d | built %d chunk(s) last 5s, %.2f ms total, %.2f ms max"),
+			TEXT("ODForestManager: far forest chunks=%d cards=%d (%d LOD0 tris) street=%d bandHidden=%d | built %d chunk(s) last 5s, %.2f ms total, %.2f ms max tick"),
 			FarChunks.Num(), NumCards, NumCards * 8, NumStreet, NumBandHidden, FarBuilt, FarBuildMs, FarBuildMaxMs);
 		FarBuilt = 0;
 		FarBuildMs = FarBuildMaxMs = 0.0;
