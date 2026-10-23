@@ -110,6 +110,7 @@ private:
 		float GreenWait = 0.0f;   // seconds the player has sat in front of it on a green
 		uint32 Seed = 0;
 		uint8 Lane = 0;           // 0 = kerb lane
+		int8 Signal = 0;          // indicator: -1 left, +1 right (fun-features #8b)
 		uint8 Model = 0;
 		bool bCleared = false;    // may enter the junction at the link end
 		FVector PrevPos = FVector::ZeroVector, CurPos = FVector::ZeroVector;
@@ -223,6 +224,9 @@ private:
 	TArray<FModel> Models;
 	TArray<TArray<FTransform>> BodyXf, BrakeXf, WheelXf;
 	TArray<TArray<FTransform>> BodyPrevXf, BrakePrevXf, WheelPrevXf;
+	// indicator custom data per (model, tier) slot: 2 floats an instance, and what each ISM shows
+	TArray<TArray<float>> BodyCd, BrakeCd, BodyCdShown, BrakeCdShown;
+	float IndicatorGlow = 400.0f;   // UpdateLights: brake-lamp strength
 	bool bNightLights = false;
 	bool bLightsSet = false;
 

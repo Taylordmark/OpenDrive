@@ -1079,6 +1079,9 @@ void AODVehiclePawn::RefreshODManagedKeyBindings(UInputComponent* Input)
 		{EODInputAction::ShiftUp, &AODVehiclePawn::KeyShiftUp, nullptr},
 		{EODInputAction::ShiftDown, &AODVehiclePawn::KeyShiftDown, nullptr},
 		{EODInputAction::Horn, &AODVehiclePawn::HornPressed, &AODVehiclePawn::HornReleased},
+		{EODInputAction::IndicatorLeft, &AODVehiclePawn::IndicatorLeftPressed, nullptr},
+		{EODInputAction::IndicatorRight, &AODVehiclePawn::IndicatorRightPressed, nullptr},
+		{EODInputAction::Hazards, &AODVehiclePawn::HazardsPressed, nullptr},
 	};
 	for (const FActionFn& B : KeyboardBinds)
 	{
@@ -1848,6 +1851,7 @@ void AODVehiclePawn::Tick(float DeltaSeconds)
 		Movement->SetBrakeInput(0.0f);
 		Movement->SetHandbrakeInput(false);
 	}
+	Indicator.UpdateCancel(Movement->GetSteeringInput());
 
 	// wheel visuals: suspension travel + steer + spin from our sim, plus the
 	// garage setup's tire diameter/width and camber (the wheel mesh - in

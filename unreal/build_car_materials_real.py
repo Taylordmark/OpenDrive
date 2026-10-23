@@ -459,8 +459,16 @@ def lights(g):
     ins = {"Pal": pal}
     for n in ("Head", "Tail", "Reverse"):
         ins[n] = g.param(f"{n}Glow", 0.0)
+    lp = g.local_pos()
     ins["LocalX"] = g.node(unreal.MaterialExpressionComponentMask, r=True)
-    g.wire(g.local_pos(), ins["LocalX"], "")
+    g.wire(lp, ins["LocalX"], "")
+    ins["LocalY"] = g.node(unreal.MaterialExpressionComponentMask, g=True)
+    g.wire(lp, ins["LocalY"], "")
+    for idx, side in enumerate("LR"):   # player MID param, or traffic ISM custom data
+        mx = g.node(unreal.MaterialExpressionMax)
+        g.wire(g.param(f"Indicator{side}", 0.0), mx, "A")
+        g.wire(g.node(unreal.MaterialExpressionPerInstanceCustomData, data_index=idx), mx, "B")
+        ins[f"Ind{side}"] = mx
     g.pin(g.custom(LAMP_HLSL, F3, **ins), MP.MP_EMISSIVE_COLOR)
 
 

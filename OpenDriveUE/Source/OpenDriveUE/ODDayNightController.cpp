@@ -19,6 +19,7 @@
 #include "ODSeasonController.h"
 #include "ODSolar.h"
 #include "ODVehicleMovement.h"
+#include "ODVehiclePawn.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "ODVisualStyle.h"
@@ -413,6 +414,11 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 		const float Signal = bOn ? TaillampGlow * 5.0f : BrakelampGlow;
 		// reversing keeps the brake lamps lit too (Taylor 2026-10-09)
 		const float Tail = (bBrake || bReverse) ? Signal : (bOn ? TaillampGlow : 0.0f);
+		// indicators (fun-features #8b) at brake-lamp strength
+		const AODVehiclePawn* VP = Cast<AODVehiclePawn>(*It);
+		const double Now = GetWorld()->GetTimeSeconds();
+		const float IndL = VP && VP->GetIndicator().LitL(Now) ? Signal : 0.0f;
+		const float IndR = VP && VP->GetIndicator().LitR(Now) ? Signal : 0.0f;
 		TInlineComponentArray<UStaticMeshComponent*> Meshes(*It);
 		for (UStaticMeshComponent* Mesh : Meshes)
 		{
@@ -429,6 +435,8 @@ void AODDayNightController::UpdateHeadlights(bool bOn)
 			Lamp->SetScalarParameterValue(TEXT("HeadGlow"), Head);
 			Lamp->SetScalarParameterValue(TEXT("TailGlow"), Tail);
 			Lamp->SetScalarParameterValue(TEXT("ReverseGlow"), bReverse ? Signal : 0.0f);
+			Lamp->SetScalarParameterValue(TEXT("IndicatorL"), IndL);
+			Lamp->SetScalarParameterValue(TEXT("IndicatorR"), IndR);
 		}
 	}
 }

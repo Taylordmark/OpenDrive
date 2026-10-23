@@ -23,6 +23,7 @@
 #include "ODDayNightController.h"
 #include "ODEngineSynth.h"
 #include "ODHornSynth.h"
+#include "ODIndicator.h"
 #include "ODMenuVista.h"
 #include "ODRaceManager.h"
 #include "ODRoadManager.h"
@@ -176,6 +177,26 @@ bool Oncoming(const FVector& Pos, const FQuat& Rot, float Lat, const FVector& BP
 	const FVector D = BPos - Pos;
 	const double Along = FVector::DotProduct(D, F);
 	return Along > -CarLenCm && Along < 3000.0 + BV * 4.0 && FMath::Abs(FVector::DotProduct(D, Rot.GetRightVector()) - Lat) < LaneWidthCm;
+}
+
+// ---- traffic indicators (fun-features #8b), pure for the self-check ----
+constexpr float TurnSignalCm = 4000.0f;   // signal this far before a junction
+
+// -1 left / 0 / +1 right for a turn from heading In to Out (UE: +X forward, +Y right)
+int8 TurnSignal(FVector2f In, FVector2f Out)
+{
+	const float Cross = In.X * Out.Y - In.Y * Out.X;
+	if ((In | Out) < -0.5f)
+	{
+		return -1;   // U-turn: across the oncoming side (right-hand traffic)
+	}
+	return FMath::Abs(Cross) < 0.5f ? 0 : (Cross > 0.0f ? 1 : -1);   // past 30 degrees
+}
+
+// a lane change / pull-over under way: lateral distance still to go (cm, + = right)
+int8 LaneSignal(float ToGo)
+{
+	return FMath::Abs(ToGo) < 60.0f ? 0 : (ToGo > 0.0f ? 1 : -1);
 }
 
 // the player sat in front of this car through a green: honk after GreenHonkS of it, then
@@ -692,7 +713,8 @@ TSharedPtr<FODTrafficGraph, ESPMode::ThreadSafe> LoadGraph(const FString& GraphP
 	return GP;
 }
 
-void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf, const TArray<FTransform>& PrevXf)
+void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf, const TArray<FTransform>& PrevXf,
+	const TArray<float>* Cd = nullptr, TArray<float>* CdShown = nullptr)
 {
 	if (!Ism)
 	{
@@ -722,6 +744,21 @@ void SyncIsm(UInstancedStaticMeshComponent* Ism, const TArray<FTransform>& Xf, c
 	if (Have < Xf.Num())
 	{
 		Ism->AddInstances(TArray<FTransform>(Xf.GetData() + Have, Xf.Num() - Have), false, true, false);
+	}
+	if (Cd)
+	{
+		// per-instance custom data (2 floats each), written only where it changed:
+		// removals come off the tail and new instances start at 0, as SetNumZeroed
+		CdShown->SetNumZeroed(Cd->Num());
+		for (int32 i = 0; i + 1 < Cd->Num(); i += 2)
+		{
+			if ((*Cd)[i] != (*CdShown)[i] || (*Cd)[i + 1] != (*CdShown)[i + 1])
+			{
+				Ism->SetCustomData(i / 2, TArrayView<const float>(Cd->GetData() + i, 2), false);
+				(*CdShown)[i] = (*Cd)[i];
+				(*CdShown)[i + 1] = (*Cd)[i + 1];
+			}
+		}
 	}
 }
 }
@@ -860,6 +897,7 @@ void AODTrafficManager::BuildModels()
 			Ism->SetCastShadow(bShadow && !bFar);
 			Ism->SetCullDistances(0, (int32)CullCm);
 			Ism->SetHasPerInstancePrevTransforms(true);
+			Ism->SetNumCustomDataFloats(2);   // M_CarLights PerInstanceCustomData 0/1: indicator L/R nits
 			// moving instances re-voxelise into the global distance field every frame
 			Ism->bAffectDistanceFieldLighting = false;
 			Ism->bVisibleInRayTracing = !bFar;
@@ -1824,6 +1862,24 @@ void AODTrafficManager::Step(float Dt)
 		// ease toward the lane centre (lane changes and lane-count changes)
 		const float LatTarget = LaneLat(Ag.Link, Ag.Lane) + Ag.Dodge;
 		Ag.Lat += FMath::Clamp(LatTarget - Ag.Lat, -150.0f * Dt, 150.0f * Dt);
+		// indicators: the turn at the junction ahead (or inside it), else a lane
+		// change / pull-over still under way. ponytail: looks one link ahead and
+		// stops at the junction exit, so a two-stage median crossover signals late
+		// and nobody blinks on through the corner's tail
+		Ag.Signal = 0;
+		if (const FODTrafficGraph::FLink& CL = G.Links[Ag.Link]; Ag.Next >= 0 && CL.EndCluster >= 0
+			&& (CL.StartCluster == CL.EndCluster || CL.Length - Ag.S < TurnSignalCm))
+		{
+			const FODTrafficGraph::FLink& X = G.Links[Ag.Next];
+			const bool bInternal = X.StartCluster == X.EndCluster;   // its end is the junction exit
+			const float S0 = bInternal ? FMath::Max(0.0f, X.Length - 1500.0f) : 0.0f;
+			const float S1 = bInternal ? X.Length : FMath::Min(X.Length, 1500.0f);
+			Ag.Signal = TurnSignal(Ag.Approach, FVector2f(FVector2D(PosAt(Ag.Next, S1, -1) - PosAt(Ag.Next, S0, -1))).GetSafeNormal());
+		}
+		if (Ag.Signal == 0)
+		{
+			Ag.Signal = LaneSignal(LatTarget - Ag.Lat);
+		}
 		Ag.PrevPos = Ag.CurPos;
 		Ag.PrevRot = Ag.CurRot;
 		Pose(Ag, Ag.CurPos, Ag.CurRot);
@@ -1876,8 +1932,15 @@ void AODTrafficManager::Render(float Alpha)
 	for (TArray<FTransform>& X : BodyPrevXf) { X.Reset(); }
 	for (TArray<FTransform>& X : BrakePrevXf) { X.Reset(); }
 	for (TArray<FTransform>& X : WheelPrevXf) { X.Reset(); }
+	for (TArray<float>& X : BodyCd) { X.Reset(); }
+	for (TArray<float>& X : BrakeCd) { X.Reset(); }
 	BodyXf.SetNum(NumSlots);
 	BrakeXf.SetNum(NumSlots);
+	BodyCd.SetNum(NumSlots);
+	BrakeCd.SetNum(NumSlots);
+	BodyCdShown.SetNum(NumSlots);
+	BrakeCdShown.SetNum(NumSlots);
+	const double Now = GetWorld()->GetTimeSeconds();
 	BodyPrevXf.SetNum(NumSlots);
 	BrakePrevXf.SetNum(NumSlots);
 	WheelPrevXf.SetNum(WheelIsms.Num());
@@ -1895,6 +1958,11 @@ void AODTrafficManager::Render(float Alpha)
 		const bool bBrake = Ag.A < -150.0f || Ag.V < 50.0f;
 		(bBrake ? BrakeXf : BodyXf)[Slot].Add(Xf);
 		(bBrake ? BrakePrevXf : BodyPrevXf)[Slot].Add(Was);
+		// each car blinks on its own phase
+		const float Ind = Ag.Signal != 0 && FODIndicator::BlinkOn(Now + Unit(Ag.Seed) / FODIndicator::BlinkHz) ? IndicatorGlow : 0.0f;
+		TArray<float>& Cd = (bBrake ? BrakeCd : BodyCd)[Slot];
+		Cd.Add(Ag.Signal < 0 ? Ind : 0.0f);
+		Cd.Add(Ag.Signal > 0 ? Ind : 0.0f);
 		if (const int32 W = M.Wheel[Tier]; W >= 0)
 		{
 			const FVector Sc(M.WheelR / TrafficWheelMeshRadiusCm);
@@ -1910,8 +1978,8 @@ void AODTrafficManager::Render(float Alpha)
 	{
 		for (int32 t = 0; t < 2; ++t)
 		{
-			SyncIsm(Models[m].Body[t], BodyXf[m * 2 + t], BodyPrevXf[m * 2 + t]);
-			SyncIsm(Models[m].Braking[t], BrakeXf[m * 2 + t], BrakePrevXf[m * 2 + t]);
+			SyncIsm(Models[m].Body[t], BodyXf[m * 2 + t], BodyPrevXf[m * 2 + t], &BodyCd[m * 2 + t], &BodyCdShown[m * 2 + t]);
+			SyncIsm(Models[m].Braking[t], BrakeXf[m * 2 + t], BrakePrevXf[m * 2 + t], &BrakeCd[m * 2 + t], &BrakeCdShown[m * 2 + t]);
 		}
 	}
 	for (int32 w = 0; w < WheelIsms.Num(); ++w)
@@ -1933,6 +2001,7 @@ void AODTrafficManager::UpdateLights()
 	const float HeadGlow = DN ? DN->HeadlampGlow : 300.0f;
 	const float TailGlow = DN ? DN->TaillampGlow : 25.0f;
 	const float BrakeGlow = bNight ? TailGlow * 5.0f : (DN ? DN->BrakelampGlow : 400.0f);   // AODDayNightController's rule
+	IndicatorGlow = BrakeGlow;
 	for (const FModel& M : Models)
 	{
 		for (int32 t = 0; t < 2; ++t)
@@ -2506,5 +2575,64 @@ bool FODTrafficHornCheck::RunTest(const FString& Parameters)
 		Honks += GreenWaitHonk(Wait, k % 40 < 39, StepS) ? 1 : 0;
 	}
 	TestEqual(TEXT("player that keeps moving off: no honk"), Honks, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FODIndicatorCheck, "OpenDrive.Traffic.Indicator",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FODIndicatorCheck::RunTest(const FString& Parameters)
+{
+	// ---- blink: 1.5 Hz, half lit, the same at 20 and 60 Hz sampling (world time, not frames) ----
+	for (const float Dt : {StepS, 1.0f / 60.0f})
+	{
+		int32 Lit = 0, Flashes = 0, Samples = 0;
+		bool bWas = false;
+		for (double T = 0.0; T < 10.0; T += Dt, ++Samples)
+		{
+			const bool bOn = FODIndicator::BlinkOn(T);
+			Lit += bOn ? 1 : 0;
+			Flashes += bOn && !bWas ? 1 : 0;
+			bWas = bOn;
+		}
+		TestEqual(TEXT("15 flashes in 10 s"), Flashes, 15);
+		TestEqual(TEXT("lit half the time"), float(Lit) / Samples, 0.5f, 0.03f);
+	}
+
+	// ---- player switch: toggle, hazards, self-cancel on the steer back ----
+	FODIndicator I;
+	I.Toggle(FODIndicator::Left);
+	TestTrue(TEXT("left on"), I.State == FODIndicator::Left && I.LitL(0.1) && !I.LitR(0.1) && !I.LitL(0.4));
+	I.UpdateCancel(0.05f);
+	TestTrue(TEXT("straight ahead: stays on"), I.State == FODIndicator::Left);
+	I.UpdateCancel(0.6f);
+	I.UpdateCancel(0.0f);
+	TestTrue(TEXT("steered the other way and back: stays on"), I.State == FODIndicator::Left);
+	I.UpdateCancel(-0.6f);
+	I.UpdateCancel(-0.2f);
+	TestTrue(TEXT("still turning: stays on"), I.State == FODIndicator::Left);
+	I.UpdateCancel(-0.05f);
+	TestTrue(TEXT("turned left and straightened: cancels"), I.State == FODIndicator::Off);
+	I.Toggle(FODIndicator::Right);
+	I.Toggle(FODIndicator::Right);
+	TestTrue(TEXT("second press turns it off"), I.State == FODIndicator::Off);
+	I.Toggle(FODIndicator::Hazard);
+	I.UpdateCancel(1.0f);
+	I.UpdateCancel(0.0f);
+	TestTrue(TEXT("hazards ignore steering, both sides"), I.State == FODIndicator::Hazard && I.LitL(0.1) && I.LitR(0.1));
+	I.Toggle(FODIndicator::Left);
+	TestTrue(TEXT("indicator from hazards"), I.State == FODIndicator::Left);
+
+	// ---- AI: which way the turn ahead goes ----
+	const FVector2f E(1, 0), S(0, 1), N(0, -1), W(-1, 0);
+	TestEqual(TEXT("east to south (+Y) is a right turn"), (int32)TurnSignal(E, S), 1);
+	TestEqual(TEXT("east to north is a left turn"), (int32)TurnSignal(E, N), -1);
+	TestEqual(TEXT("straight on: no signal"), (int32)TurnSignal(E, E), 0);
+	TestEqual(TEXT("a 20 degree bend: no signal"), (int32)TurnSignal(E, FVector2f(0.94f, 0.34f)), 0);
+	TestEqual(TEXT("U-turn signals left"), (int32)TurnSignal(E, W), -1);
+	TestEqual(TEXT("no heading yet: no signal"), (int32)TurnSignal(FVector2f::ZeroVector, S), 0);
+	TestEqual(TEXT("lane change right under way"), (int32)LaneSignal(250.0f), 1);
+	TestEqual(TEXT("lane change left under way"), (int32)LaneSignal(-250.0f), -1);
+	TestEqual(TEXT("settled in the lane"), (int32)LaneSignal(20.0f), 0);
 	return true;
 }

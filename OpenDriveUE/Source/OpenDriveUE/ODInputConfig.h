@@ -64,6 +64,9 @@ enum class EODInputAction : uint8
 	MediaPrev,
 	Replay,      // #9 instant replay
 	Horn,         // fun-features #8a; traffic reacts (ODTrafficManager)
+	IndicatorLeft,   // fun-features #8b; self-cancel on steer return (ODIndicator.h)
+	IndicatorRight,
+	Hazards,
 	Count  // sentinel, not a real action
 };
 

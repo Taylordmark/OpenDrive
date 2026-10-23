@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
 #include "ODCarPaint.h"
+#include "ODIndicator.h"
 #include "InputCoreTypes.h"
 #include "ODVehiclePawn.generated.h"
 
@@ -674,4 +675,13 @@ private:
 	void HornReleased() { bHornKey = false; }
 	bool bHornKey = false;
 	int32 HornPresses = 0;
+
+	// indicators (fun-features #8b): AODDayNightController lights the lenses
+public:
+	const FODIndicator& GetIndicator() const { return Indicator; }
+private:
+	void IndicatorLeftPressed() { Indicator.Toggle(FODIndicator::Left); }
+	void IndicatorRightPressed() { Indicator.Toggle(FODIndicator::Right); }
+	void HazardsPressed() { Indicator.Toggle(FODIndicator::Hazard); }
+	FODIndicator Indicator;
 };
