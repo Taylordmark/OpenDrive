@@ -1,6 +1,7 @@
 """Weather W2 (next steps.md sec 7.40): synthesizes the two weather sounds
 AODAmbientSoundManager needs that the freesound ambient set (manifest.json)
-doesn't have - a rain loop and a thunder one-shot - straight into
+doesn't have - a rain loop and a thunder one-shot (plus, 2026-10-23, the
+river_rush loop AODWaterManager plays at rapids and waterfalls) - straight into
 normalized/, next to normalize_ambient_audio.py's output, for
 unreal/import_ambient_audio.py to import (SW_Rain looping, SW_Thunder not).
 
@@ -28,6 +29,8 @@ RAIN_SECONDS = 40.0
 RAIN_XFADE_SECONDS = 1.0
 THUNDER_SECONDS = 8.0
 THUNDER_LUFS = TARGET_LUFS + 5.0   # a strike sits above the ambience beds
+RUSH_SECONDS = 30.0
+RUSH_BUBBLES_HZ = 60.0
 
 
 def band(x, lo, hi, order=4):
@@ -81,6 +84,33 @@ def thunder(rng):
     return x
 
 
+def river_rush(rng):
+    """Rapids / waterfall roar (flowing rivers, 2026-10-23) for AODWaterManager's
+    point emitters: a broadband low roar, a midband rush, short resonant
+    bubble pops (the gurgle that tells running water from wind), and a slow
+    surge. Rendered with an end-into-start crossfade like rain() so it loops."""
+    n = int(SR * (RUSH_SECONDS + RAIN_XFADE_SECONDS))
+    t = np.arange(n) / SR
+    roar = lowpass(rng.standard_normal(n), 400.0) * 1.4
+    rush = band(rng.standard_normal(n), 600.0, 5000.0) * 0.5
+    bubbles = np.zeros(n)
+    for _ in range(int(RUSH_BUBBLES_HZ * n / SR)):
+        f0, dur = rng.uniform(300.0, 1400.0), rng.uniform(0.015, 0.05)
+        k = np.arange(int(SR * dur))
+        tk = k / SR
+        # rising chirp, the classic Minnaert bubble shape
+        pop = np.sin(2 * np.pi * f0 * tk * (1 + 2.0 * tk / dur)) * np.exp(-tk / (dur / 3))
+        s0 = rng.integers(0, n - len(k))
+        bubbles[s0:s0 + len(k)] += pop * rng.uniform(0.1, 0.5)
+    x = roar + rush + bubbles * 0.35
+    x *= 10 ** (2.0 * np.sin(2 * np.pi * t / 9.0) * np.sin(2 * np.pi * t / 5.3) / 20.0)
+    m = int(SR * RAIN_XFADE_SECONDS)
+    out = x[: n - m].copy()
+    f = np.arange(m) / m
+    out[:m] = x[:m] * np.sin(f * np.pi / 2) + x[n - m:] * np.cos(f * np.pi / 2)
+    return out
+
+
 def write(name, x, lufs, loop):
     meter = pyln.Meter(SR)
     loud = meter.integrated_loudness(x)
@@ -99,7 +129,9 @@ def main():
     rng = np.random.default_rng(20260925)
     r = write("rain", rain(rng), TARGET_LUFS, loop=True)
     write("thunder", thunder(rng), THUNDER_LUFS, loop=False)
+    rr = write("river_rush", river_rush(rng), TARGET_LUFS, loop=True)
     assert abs(loop_seam_jump_db(r, SR)) < 1.5, "rain loop seam too loud"
+    assert abs(loop_seam_jump_db(rr, SR)) < 1.5, "river_rush loop seam too loud"
     print("Done.")
 
 

@@ -18,8 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from build_terrain_mesh_tiles import GENERATION_ID_BYTES, OUT_DIR, WATER_TILE_GLOB
 
 
-def parse_tile(raw):
-    """Mirrors AODWaterManager's ODL1 parser; returns (gen_id, lakes) or raises."""
+def parse_tile(raw, kinds=None):
+    """Mirrors AODWaterManager's ODL1 parser; returns (gen_id, lakes) or raises.
+    `kinds`, if a list, gets each lake's ODF1 kind (empty for a pre-trailer tile)."""
     assert raw[:4] == b"ODL1", "bad magic"
     cur = 4
     gen_id = raw[cur:cur + GENERATION_ID_BYTES]; cur += GENERATION_ID_BYTES
@@ -33,6 +34,12 @@ def parse_tile(raw):
         uvs = np.frombuffer(raw, "<f4", vcount * 2, cur).reshape(-1, 2); cur += vcount * 8
         tris = np.frombuffer(raw, "<u4", tcount * 3, cur).reshape(-1, 3); cur += tcount * 12
         lakes.append((verts, uvs, tris))
+    if raw[cur:cur + 4] == b"ODF1":   # flow trailer: per lake uint8 kind + vcount*(speed, white)
+        cur += 4
+        for verts, _, _ in lakes:
+            if kinds is not None:
+                kinds.append(raw[cur])
+            cur += 1 + len(verts) * 8
     assert cur == len(raw), f"{len(raw) - cur} trailing bytes"
     return gen_id, lakes
 
@@ -43,7 +50,8 @@ def check_all():
     gen_ids, n_lakes, n_tris, errors = set(), 0, 0, []
     for p in paths:
         try:
-            gen_id, lakes = parse_tile(p.read_bytes())
+            kinds = []
+            gen_id, lakes = parse_tile(p.read_bytes(), kinds)
         except (AssertionError, struct.error) as e:
             errors.append(f"{p.name}: {e}")
             continue
@@ -58,7 +66,7 @@ def check_all():
                 errors.append(f"{where}: tri index {tris.max()} >= {len(verts)} verts"); continue
             v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
             nz = np.cross(v2 - v0, v1 - v0)[:, 2]  # same winding convention build_lake_mesh() enforces
-            if (nz < 0).any():
+            if (i >= len(kinds) or kinds[i] < 3) and (nz < 0).any():   # falls/mist (3, 4) stand upright
                 errors.append(f"{where}: {(nz < 0).sum()}/{len(tris)} tris face down (invisible from above)")
             n_lakes += 1
             n_tris += len(tris)

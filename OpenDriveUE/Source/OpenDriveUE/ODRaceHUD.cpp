@@ -37,6 +37,9 @@
 #include "UnrealClient.h"
 #include "ODWeatherController.h"
 #include "ODHudStyle.h"
+#include "ODBakeLink.h"
+#include "CompGeom/Delaunay2.h"
+#include "Curve/GeneralPolygon2.h"
 #include "Rendering/SlateRenderer.h"
 
 using namespace ODHud;
@@ -133,6 +136,79 @@ namespace
 bool IsCenterlineBreak(const FVector2D& P)
 {
 	return FMath::IsNaN(P.X) || FMath::IsNaN(P.Y);
+}
+
+// Drawn area's outside on the maps (2026-10-23): the region between a box
+// 200 km past the outline and the outline itself, as world-space triangles
+// (3 points each). Empty when the outline doesn't triangulate (self-crossing).
+TArray<FVector2D> OutsideTriangles(const TArray<FVector2D>& Outline)
+{
+	using namespace UE::Geometry;
+	TArray<FVector2d> Hole;
+	FBox2D Box(ForceInit);
+	for (const FVector2D& P : Outline)
+	{
+		if (Hole.Num() == 0 || FVector2D::DistSquared(Hole.Last(), P) > 1.0)
+		{
+			Hole.Add(P);
+			Box += P;
+		}
+	}
+	if (Hole.Num() > 1 && FVector2D::DistSquared(Hole[0], Hole.Last()) <= 1.0)
+	{
+		Hole.Pop();
+	}
+	TArray<FVector2D> Out;
+	if (Hole.Num() < 3)
+	{
+		return Out;
+	}
+	Box = Box.ExpandBy(2.0e7);
+	FGeneralPolygon2d Poly(FPolygon2d(TArray<FVector2d>{Box.Min, FVector2d(Box.Max.X, Box.Min.Y), Box.Max, FVector2d(Box.Min.X, Box.Max.Y)}));
+	FPolygon2d HolePoly(Hole);
+	if (HolePoly.IsClockwise() == Poly.OuterIsClockwise())
+	{
+		HolePoly.Reverse();
+	}
+	Poly.AddHole(HolePoly, false, false);
+	FDelaunay2 Delaunay;
+	TArray<FIndex3i> Tris;
+	TArray<FVector2d> Verts;
+	if (!Delaunay.Triangulate(Poly, &Tris, &Verts))
+	{
+		return Out;
+	}
+	for (const FIndex3i& T : Tris)
+	{
+		Out.Append({Verts[T.A], Verts[T.B], Verts[T.C]});
+	}
+	return Out;
+}
+
+// Sutherland-Hodgman: Poly clipped to the convex polygon Clip (same winding).
+TArray<FVector2D> ClipToConvex(TArray<FVector2D> Poly, const TArray<FVector2D>& Clip)
+{
+	for (int32 e = 0; e < Clip.Num() && Poly.Num() > 0; ++e)
+	{
+		const FVector2D A = Clip[e], B = Clip[(e + 1) % Clip.Num()];
+		auto Side = [&](const FVector2D& P) { return FVector2D::CrossProduct(B - A, P - A); };
+		TArray<FVector2D> In = MoveTemp(Poly);
+		Poly.Reset();
+		for (int32 i = 0; i < In.Num(); ++i)
+		{
+			const FVector2D P = In[i], Q = In[(i + 1) % In.Num()];
+			const double Sp = Side(P), Sq = Side(Q);
+			if (Sp >= 0.0)
+			{
+				Poly.Add(P);
+			}
+			if ((Sp >= 0.0) != (Sq >= 0.0))
+			{
+				Poly.Add(P + (Q - P) * (Sp / (Sp - Sq)));
+			}
+		}
+	}
+	return Poly;
 }
 
 // Catmull-Rom subdivision so the polyline reads as a smooth road instead of
@@ -428,6 +504,67 @@ void AODRaceHUD::DrawStageMap(const TArray<FVector2D>* Centerline,
 	}
 	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.02f, 0.025f, 0.035f, 0.6f), 5.5f * UiS); }
 	for (const TArray<FVector2D>* L : RoadLines) { DrawRoads(*L, FLinearColor(0.96f, 0.97f, 0.98f, 0.95f), 3.0f * UiS); }
+
+	// drawn area's edge (2026-10-23): everything outside the outline dimmed,
+	// the outline a thin light line over a dark casing
+	if (const TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> Outline = ODBakeLink::ActiveOutline();
+		Outline.IsValid() && Outline->Num() >= 3)
+	{
+		if (OutsideTrisFor != Outline)
+		{
+			OutsideTris = OutsideTriangles(*Outline);
+			OutsideTrisFor = Outline;
+		}
+		// the panel as a convex clip polygon, wound like ClipToConvex expects
+		// (screen y down: clockwise on screen = positive cross)
+		TArray<FVector2D> Clip;
+		if (bCircular)
+		{
+			for (int32 k = 0; k < 48; ++k)
+			{
+				const float A = 2.0f * PI * k / 48;
+				Clip.Add(PanelMid + FVector2D(FMath::Cos(A), FMath::Sin(A)) * (PanelSize * 0.5f));
+			}
+		}
+		else
+		{
+			const FVector2D Lo(FMath::Max(PanelX, 0.0f), FMath::Max(PanelY, 0.0f));
+			const FVector2D Hi(FMath::Min(PanelX + PanelSize, Canvas->ClipX), FMath::Min(PanelY + PanelSize, Canvas->ClipY));
+			Clip = {Lo, FVector2D(Hi.X, Lo.Y), Hi, FVector2D(Lo.X, Hi.Y)};
+		}
+		FBox2D ClipBox(Clip);
+		const FLinearColor Shade(0.0f, 0.0f, 0.0f, 0.5f);
+		TArray<FCanvasUVTri> Tris;
+		for (int32 i = 0; i + 2 < OutsideTris.Num(); i += 3)
+		{
+			TArray<FVector2D> P = {ToMap(FVector(OutsideTris[i], 0)), ToMap(FVector(OutsideTris[i + 1], 0)), ToMap(FVector(OutsideTris[i + 2], 0))};
+			if (!ClipBox.Intersect(FBox2D(P)))
+			{
+				continue;
+			}
+			if (FVector2D::CrossProduct(P[1] - P[0], P[2] - P[0]) < 0.0)
+			{
+				Swap(P[1], P[2]);
+			}
+			P = ClipToConvex(MoveTemp(P), Clip);
+			for (int32 k = 2; k < P.Num(); ++k)
+			{
+				FCanvasUVTri& T = Tris.AddDefaulted_GetRef();
+				T.V0_Pos = P[0]; T.V1_Pos = P[k - 1]; T.V2_Pos = P[k];
+				T.V0_Color = T.V1_Color = T.V2_Color = Shade;
+			}
+		}
+		if (Tris.Num() > 0)
+		{
+			FCanvasTriangleItem Item(Tris, GWhiteTexture);
+			Item.BlendMode = SE_BLEND_Translucent;
+			Canvas->DrawItem(Item);
+		}
+		TArray<FVector2D> Ring = *Outline;
+		Ring.Add((*Outline)[0]);
+		DrawRoads(Ring, FLinearColor(0.02f, 0.025f, 0.035f, 0.5f), 4.0f * UiS);
+		DrawRoads(Ring, FLinearColor(0.9f, 0.93f, 0.97f, 0.85f), 1.5f * UiS);
+	}
 
 	// navigation route (SS7.37) - on every map panel (mini, pause, world);
 	// from the nav (nearest) road manager (2026-10-05, large world)
@@ -2325,19 +2462,35 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 			return;
 		}
 		const int32 T = TownNear(S, 18.0f);
-		FVector2D Snap;
-		FString LandmarkName;
+		FVector2D Dest;
+		FString Name;
 		const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld());
-		const bool bOk = Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Snap, LandmarkName)
-			? RoadMgr->SetRouteDestination(Snap, LandmarkName)
-			: T != INDEX_NONE
-			? RoadMgr->SetRouteDestination(Towns[T].Pos, Towns[T].Name)
-			: RoadMgr->SnapToRouteGraph(ToWorld(S), Snap)
-				&& RoadMgr->SetRouteDestination(Snap, TEXT("Waypoint"));
-		if (!bOk)
+		if (Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Dest, Name))
+		{
+			// Dest + Name set: the landmark's snapped road point
+		}
+		else if (T != INDEX_NONE)
+		{
+			Dest = Towns[T].Pos;
+			Name = Towns[T].Name;
+		}
+		else if (RoadMgr->SnapToRouteGraph(ToWorld(S), Dest))
+		{
+			Name = TEXT("Waypoint");
+		}
+		if (Name.IsEmpty() || !RoadMgr->SetRouteDestination(Dest, Name))
 		{
 			NoRouteMsgTime = RealNow;
+			return;
 		}
+		// every map route is a road trip (2026-10-22): start banner + arrival card
+		for (TActorIterator<AODRoadTrip> It(GetWorld()); It; ++It)
+		{
+			It->Destroy();
+		}
+		AODRoadTrip* Trip = GetWorld()->SpawnActor<AODRoadTrip>();
+		Trip->Dest = Dest;
+		Trip->DestName = Name;
 	};
 
 	// ---- input (polled; the game is paused, so only this map reads it).

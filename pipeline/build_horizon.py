@@ -40,28 +40,6 @@ HORIZON_MAX_ERROR_M = 10.0
 HORIZON_SINK_M = 15.0      # > HORIZON_MAX_ERROR_M: stays under every streamed tile
 EARTH_R_M = 6371000.0
 OUT_PATH = B.OUT_DIR / f"horizon_{AREA_NAME}_test.bin"
-# (2026-10-21) a drawn area's boundary curtain posts (AODBoundaryEffect) stand
-# on these ground heights until collision under them streams in
-CURTAIN_PATH = B.OUT_DIR / f"curtain_{AREA_NAME}_test.bin"
-CURTAIN_STEP_M = 25.0
-CURTAIN_ZOOM = 13          # ~15 m pixels: well inside the curtain's 50 m buried foot
-
-
-def curtain_points(outline, elev_fn, step_m=CURTAIN_STEP_M):
-    """(x_cm, y_cm, z_cm) UE points every step_m along a drawn outline (a
-    shapely Polygon in east/north metres), z from elev_fn(east, north)."""
-    ring = outline.exterior
-    pts = [ring.interpolate(d) for d in np.arange(0.0, ring.length, step_m)]
-    e, n = np.array([p.x for p in pts]), np.array([p.y for p in pts])
-    z = elev_fn(e, n)
-    return np.c_[e * 100.0, -n * 100.0, (z - ORIGIN_HEIGHT_M) * 100.0].astype(np.float32)
-
-
-def write_curtain(path, pts):
-    """'ODC1' + uint32 N (LE) + N * (float32 X_cm, Y_cm, Z_cm)."""
-    path.write_bytes(b"ODC1" + np.uint32(len(pts)).tobytes() + pts.astype("<f4").tobytes())
-
-
 def baked_extent_m():
     """(e0, n0, e1, n1) of every terrain tile on disk for this area (metres)."""
     # (2026-10-21) a drawn area: its outline's extent - pass 1 builds the
@@ -151,14 +129,6 @@ def main():
         return B.sample_dem(lat.reshape(-1), lon.reshape(-1), HORIZON_ZOOM, sess, cache).reshape(e.shape).astype(np.float64)
 
     tile, st = build(ext, elev_fn, tile_verts_cm())
-    outline = outline_local()
-    if outline is not None:
-        def curtain_elev(e, n):
-            lon, lat = to_lonlat(e, n)
-            return B.sample_dem(lat, lon, CURTAIN_ZOOM, sess, {}).astype(np.float64)
-        pts = curtain_points(outline, curtain_elev)
-        write_curtain(CURTAIN_PATH, pts)
-        print(f"curtain: {len(pts)} posts every {CURTAIN_STEP_M:.0f} m -> {CURTAIN_PATH}")
     B.write_tile_bin(OUT_PATH, tile, pack_generation_id(compute_generation_id()))
     print(f"horizon: baked extent {(ext[2] - ext[0]) / 1000:.0f} x {(ext[3] - ext[1]) / 1000:.0f} km, "
           f"mesh +-{st['half_km']:.0f} km at {st['cell_m']:.0f} m, {st['verts']} verts, {st['tris']} tris, "

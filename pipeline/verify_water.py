@@ -50,6 +50,8 @@ def main():
         kinds = set()
         for i, (verts, _uvs, tris) in enumerate(parse_tile(p.read_bytes())[1]):
             k = int(tf[i]) if i < len(tf) else KIND_LAKE
+            if k not in tris_by_kind:
+                continue   # waterfall sheets / mist cards: not surfaces (checks/verify_river_flow.py)
             kinds.add(k)
             tris_by_kind[k].append(verts[:, :2].astype(np.float64)[tris.astype(np.int64)])
         for k in kinds:

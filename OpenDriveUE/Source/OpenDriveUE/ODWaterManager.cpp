@@ -5,6 +5,7 @@
 #include "ODBinSidecarUtil.h"
 #include "ODTileSource.h"
 #include "Async/Async.h"
+#include "Components/AudioComponent.h"
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
@@ -15,6 +16,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Sound/SoundBase.h"
 
 using namespace UE::Geometry;
 
@@ -45,6 +47,25 @@ void AODWaterManager::BeginPlay()
 		// header comment for the identical reasoning (one instance for every
 		// resident component, not one per lake).
 		WaterMID = UMaterialInstanceDynamic::Create(WaterMat, this);
+	}
+
+	// Flowing rivers (2026-10-23): no fallback - without them ribbons/falls
+	// keep the lake look and mist renders with the default material.
+	RiverMat = ODVisualStyle::Pick(LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_WaterRiver.M_WaterRiver")));
+	MistMat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Game/OpenDrive/Materials/M_WaterMist.M_WaterMist"));
+	if (!RushSound)
+	{
+		RushSound = LoadObject<USoundBase>(
+			nullptr, TEXT("/Game/OpenDrive/Audio/Ambient/SW_RiverRush.SW_RiverRush"));
+	}
+	if (!RiverMat || !MistMat || !RushSound)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ODWaterManager: missing M_WaterRiver=%d M_WaterMist=%d SW_RiverRush=%d - run "
+			     "unreal/apply_water_material.py / import_ambient_audio.py"),
+			RiverMat != nullptr, MistMat != nullptr, RushSound != nullptr);
 	}
 }
 
@@ -127,6 +148,38 @@ bool AODWaterManager::ParseWaterTileFile(const FString& Path, FParsedWaterTile& 
 			Lake.Tris[t * 3 + 0] = ReadU32LE(TrisBase + t * 12 + 0);
 			Lake.Tris[t * 3 + 1] = ReadU32LE(TrisBase + t * 12 + 4);
 			Lake.Tris[t * 3 + 2] = ReadU32LE(TrisBase + t * 12 + 8);
+		}
+	}
+
+	// ODF1 flow trailer (build_water_tiles.py write_tile): optional - an
+	// older tile ends here and stays all-lake. A short/bad trailer drops
+	// only the flow data, never the tile.
+	if (Remaining() >= 4 && Cur[0] == 'O' && Cur[1] == 'D' && Cur[2] == 'F' && Cur[3] == '1')
+	{
+		Cur += 4;
+		TArray<uint8> Kinds;
+		TArray<TArray<float>> Flows;
+		for (const FParsedLake& Lake : Out.Lakes)
+		{
+			const int32 VCount = Lake.Verts.Num() / 3;
+			if (Remaining() < 1 + (int64)VCount * 8)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("ODWaterManager: %s has a truncated ODF1 trailer - flow ignored"), *Path);
+				return true;
+			}
+			Kinds.Add(*Cur++);
+			TArray<float>& F = Flows.AddDefaulted_GetRef();
+			F.SetNumUninitialized(VCount * 2);
+			for (int32 i = 0; i < VCount * 2; ++i)
+			{
+				F[i] = ReadF32LE(Cur + i * 4);
+			}
+			Cur += (int64)VCount * 8;
+		}
+		for (int32 l = 0; l < Out.Lakes.Num(); ++l)
+		{
+			Out.Lakes[l].Kind = Kinds[l];
+			Out.Lakes[l].Flow = MoveTemp(Flows[l]);
 		}
 	}
 	return true;
@@ -217,13 +270,22 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsed
 	{
 		Mesh.EnableAttributes();
 		FDynamicMeshUVOverlay* UV = Mesh.Attributes()->PrimaryUV();
+		// UV1 = (speed m/s, whitewater) for M_WaterRiver / (intensity, 0)
+		// for M_WaterMist; slot 0 lake+sea, 1 river+waterfall, 2 mist
+		Mesh.Attributes()->SetNumUVLayers(2);
+		FDynamicMeshUVOverlay* FlowUV = Mesh.Attributes()->GetUVLayer(1);
+		Mesh.Attributes()->EnableMaterialID();
+		FDynamicMeshMaterialAttribute* MatId = Mesh.Attributes()->GetMaterialID();
 
 		for (const FParsedLake& Lk : InLakes)
 		{
+			const int32 Slot = (Lk.Kind == 1 || Lk.Kind == 3) ? 1 : Lk.Kind == 4 ? 2 : 0;
+			const bool bHasFlow = Lk.Flow.Num() == Lk.Verts.Num() / 3 * 2;
 			const uint32 VCount = Lk.Verts.Num() / 3;
 			const uint32 TCount = Lk.Tris.Num() / 3;
 			TArray<int32> VertIds; VertIds.SetNumUninitialized(VCount);
 			TArray<int32> UvIds; UvIds.SetNumUninitialized(VCount);
+			TArray<int32> FlowIds; FlowIds.SetNumUninitialized(VCount);
 
 			for (uint32 v = 0; v < VCount; ++v)
 			{
@@ -231,6 +293,8 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsed
 					Lk.Verts[v * 3 + 0] - Origin.X, Lk.Verts[v * 3 + 1] - Origin.Y, Lk.Verts[v * 3 + 2]));
 				UvIds[v] = UV->AppendElement(
 					FVector2f(Lk.Uvs[v * 2 + 0], Lk.Uvs[v * 2 + 1]));
+				FlowIds[v] = FlowUV->AppendElement(bHasFlow
+					? FVector2f(Lk.Flow[v * 2 + 0], Lk.Flow[v * 2 + 1]) : FVector2f::ZeroVector);
 			}
 			for (uint32 t = 0; t < TCount; ++t)
 			{
@@ -241,6 +305,8 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsed
 				if (Tid >= 0)
 				{
 					UV->SetTriangle(Tid, FIndex3i(UvIds[I0], UvIds[I1], UvIds[I2]));
+					FlowUV->SetTriangle(Tid, FIndex3i(FlowIds[I0], FlowIds[I1], FlowIds[I2]));
+					MatId->SetValue(Tid, Slot);
 				}
 			}
 		}
@@ -258,8 +324,78 @@ void AODWaterManager::CreateLakeComponent(FWaterTile& Tile, const TArray<FParsed
 	{
 		Comp->SetMaterial(0, WaterMID);
 	}
+	Comp->SetMaterial(1, RiverMat ? RiverMat.Get() : WaterMID.Get());
+	Comp->SetMaterial(2, MistMat);
 
 	Tile.Lakes.Add(Comp);
+}
+
+void AODWaterManager::CreateRushSounds(FWaterTile& Tile, const TArray<FParsedLake>& InLakes)
+{
+	if (!RushSound)
+	{
+		return;
+	}
+	struct FEmitter { FVector Loc; float Scale; };
+	TArray<FEmitter> Emitters;
+	auto Centroid = [](const FParsedLake& Lk)
+	{
+		FVector C = FVector::ZeroVector;
+		const int32 N = Lk.Verts.Num() / 3;
+		for (int32 v = 0; v < N; ++v)
+		{
+			C += FVector(Lk.Verts[v * 3 + 0], Lk.Verts[v * 3 + 1], Lk.Verts[v * 3 + 2]);
+		}
+		return C / FMath::Max(N, 1);
+	};
+	// falls first (their mist), so the spacing rule thins rapids around them
+	for (const FParsedLake& Lk : InLakes)
+	{
+		if (Lk.Kind == 4 && Lk.Flow.Num() >= 2)
+		{
+			Emitters.Add({ Centroid(Lk), 1.0f + Lk.Flow[0] });
+		}
+	}
+	for (const FParsedLake& Lk : InLakes)
+	{
+		if (Lk.Kind != 1 || Lk.Flow.Num() < 2 || Emitters.Num() >= MaxRushSoundsPerTile)
+		{
+			continue;
+		}
+		float White = 0.0f;
+		for (int32 v = 1; v < Lk.Flow.Num(); v += 2)
+		{
+			White += Lk.Flow[v];
+		}
+		White /= Lk.Flow.Num() / 2;
+		const FVector C = Centroid(Lk);
+		if (White >= RapidsWhiteMin && !Emitters.ContainsByPredicate([&](const FEmitter& E)
+			{ return FVector::DistSquared(E.Loc, C) < FMath::Square(RushEmitterSpacingCm); }))
+		{
+			Emitters.Add({ C, White });
+		}
+	}
+	for (int32 i = 0; i < FMath::Min(Emitters.Num(), MaxRushSoundsPerTile); ++i)
+	{
+		const FEmitter& E = Emitters[i];
+		auto* Audio = NewObject<UAudioComponent>(this);
+		Audio->SetupAttachment(RootComponent);
+		Audio->SetWorldLocation(E.Loc);
+		Audio->SetSound(RushSound);
+		Audio->bAutoActivate = false;
+		Audio->bOverrideAttenuation = true;
+		Audio->AttenuationOverrides.bAttenuate = true;
+		Audio->AttenuationOverrides.bSpatialize = true;
+		Audio->AttenuationOverrides.AttenuationShape = EAttenuationShape::Sphere;
+		Audio->AttenuationOverrides.AttenuationShapeExtents = FVector(RushInnerRadiusCm * FMath::Min(E.Scale, 2.0f), 0, 0);
+		Audio->AttenuationOverrides.FalloffDistance = RushFalloffCm * FMath::Min(E.Scale, 2.0f);
+		Audio->SetVolumeMultiplier(FMath::Clamp(0.5f + 0.4f * E.Scale, 0.5f, 1.3f));
+		// bigger falls rumble lower; emitters de-phased so neighbours don't comb
+		Audio->SetPitchMultiplier(FMath::Clamp(1.1f - 0.12f * E.Scale, 0.8f, 1.05f));
+		Audio->RegisterComponent();
+		Audio->Play(FMath::FRandRange(0.0f, 20.0f));
+		Tile.Sounds.Add(Audio);
+	}
 }
 
 void AODWaterManager::FinalizeTile(const FIntPoint& Key, FParsedWaterTile&& Parsed)
@@ -267,6 +403,7 @@ void AODWaterManager::FinalizeTile(const FIntPoint& Key, FParsedWaterTile&& Pars
 	FWaterTile& Tile = Tiles.Add(Key);
 	Tile.NumLakes = Parsed.Lakes.Num();
 	CreateLakeComponent(Tile, Parsed.Lakes);
+	CreateRushSounds(Tile, Parsed.Lakes);
 
 	// Per-tile surface-Z log (verification evidence for the headless bake
 	// check - "confirm the three named lakes produce meshes at plausible
@@ -294,6 +431,13 @@ void AODWaterManager::ReleaseTile(const FIntPoint& Key)
 			if (Comp)
 			{
 				Comp->DestroyComponent();
+			}
+		}
+		for (const auto& Audio : Tile->Sounds)
+		{
+			if (Audio)
+			{
+				Audio->DestroyComponent();
 			}
 		}
 		Tiles.Remove(Key);

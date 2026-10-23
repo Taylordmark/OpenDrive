@@ -137,9 +137,12 @@ void AODRoadTrip::BeginTrip()
 		}
 		return Best ? Best->Name : FString();
 	};
-	// ponytail: names from the nearest turnout (towns-only picks); any-point picks would want a "near <town>"
-	DestName = NearestTown(Dest);
-	DestName = DestName.IsEmpty() ? FString(TEXT("Destination")) : DestName;
+	// the world map presets the name it routed with; ?oddest= picks name the nearest turnout
+	if (DestName.IsEmpty())
+	{
+		DestName = NearestTown(Dest);
+		DestName = DestName.IsEmpty() ? FString(TEXT("Destination")) : DestName;
+	}
 	StartName = NearestTown(FVector2D(Pawn->GetActorLocation()));
 	StartName = StartName.IsEmpty() ? R->CurrentCityLabel : StartName;
 	if (!R->SetRouteDestination(Dest, DestName))

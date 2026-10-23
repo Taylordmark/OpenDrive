@@ -166,6 +166,8 @@ private:
 	void HandleNewAreaMouse(AODMainMenu* Menu, APlayerController* PC, const FVector2D& Mouse);
 	int32 DrawnPinAt(const AODMainMenu* Menu, const FVector2D& Mouse) const;   // Coverage index of a drawn area's pin, or INDEX_NONE
 	mutable FBox2D NewAreaBtn = FBox2D(ForceInit);   // World's "+ New Area", this frame
+	mutable TArray<FVector2D> OutsideTris;   // DrawStageMap: the drawn area's outside, world triangles
+	mutable TSharedPtr<const TArray<FVector2D>, ESPMode::ThreadSafe> OutsideTrisFor;   // ... built for this outline
 	int32 AreaDragVert = INDEX_NONE;   // pressed on this vertex ...
 	int32 AreaDragMid = INDEX_NONE;    // ... or on the midpoint after this vertex (inserts one when dragged)
 	FVector2D AreaPressAt = FVector2D::ZeroVector;

@@ -14,13 +14,28 @@ from pathlib import Path
 PIPE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPE))
 sys.path.insert(0, str(PIPE / "checks"))
-from build_landmarks import revolve, paint_seed   # noqa: E402
+from build_landmarks import revolve, paint_seed, pick_pois, MAX_POIS   # noqa: E402
 from verify_landmarks import paint_of   # noqa: E402
 
 
 def test_paint_seed():
     for paint in (None, 0, 1, 2, 3, 4):
         assert paint_of(paint_seed(paint)) == paint, paint
+
+
+def test_pick_pois():
+    def row(name, x, road_m=10.0, **kw):
+        return {**dict(name=name, kind="tower", h=20.0, osm="n1", road_m=road_m, xy_cm=(x, 0.0),
+                       built=False, part=False, notable=True), **kw}
+    rows = [row("Built", 0.0, built=True), row("Near built", 5000.0), row("Far off road", 50000.0, road_m=500.0),
+            row("Part", 60000.0, part=True), row("Tower", 70000.0), row("Tower", 90000.0), row("Next to tower", 75000.0),
+            row("Same name", 200000.0), row("Old Road/5", 300000.0, kind="bridge"), row("Hyatt", 400000.0, kind="hotel"),
+            row("Regency Tower", 500000.0, kind="apartments", notable=False)]
+    got = [p["name"] for p in pick_pois(rows, [(0.0, 0.0)], {"Same name"})]
+    assert got == ["Tower"], got
+    many = [row(f"P{i}", i * 20000.0) for i in range(MAX_POIS + 5)]
+    out = pick_pois(many, [], set())
+    assert len(out) == MAX_POIS and all(p["kind"] == "poi" and p["radius_cm"] > 0 for p in out)
 
 
 def test_revolve():
@@ -53,3 +68,5 @@ if __name__ == "__main__":
     print("PASS paint_seed")
     test_revolve()
     print("PASS revolve")
+    test_pick_pois()
+    print("PASS pick_pois")
