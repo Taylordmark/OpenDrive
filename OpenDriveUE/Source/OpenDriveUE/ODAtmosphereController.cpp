@@ -381,9 +381,8 @@ void AODAtmosphereController::EnsureHeightFog()
 	Comp->SetVolumetricFogExtinctionScale(0.5f);
 	Comp->SetVolumetricFogDistance(6000.0f);
 	Comp->SetVolumetricFogStartDistance(0.0f);
-	// Deliberately NOT touching the volumetric fog froxel grid resolution/
-	// density CVars (r.VolumetricFog.GridPixelSize etc.) - perf note from the
-	// task: "keep volumetric fog grid at defaults."
+	// The froxel grid CVars stay out of code: DefaultScalability.ini sets
+	// Epic's r.VolumetricFog.GridPixelSize to 16 for the GPU budget (gap 8).
 
 	FogComp = Comp;
 	BaseFogDensity = Comp->FogDensity;
