@@ -5,7 +5,9 @@
 #include "ODMenuVista.h"
 #include "ODWaterManager.generated.h"
 
+class UAudioComponent;
 class UDynamicMeshComponent;
+class USoundBase;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 
@@ -24,6 +26,12 @@ struct FParsedLake
 	                         // collision has streamed in yet.
 	TArray<float> Uvs;      // flat u,v
 	TArray<uint32> Tris;    // flat i0,i1,i2
+
+	// ODF1 trailer (2026-10-23, flowing rivers): 0 lake, 1 river ribbon,
+	// 2 sea, 3 waterfall sheet, 4 mist. A tile without it is all lakes.
+	uint8 Kind = 0;
+	TArray<float> Flow;     // flat (speed m/s, whitewater 0..1) per vertex - mist: (intensity, 0);
+	                         // empty without the trailer. Goes to UV1 for M_WaterRiver/M_WaterMist.
 };
 
 /** One parsed tile file's worth of lakes - the off-thread output of
@@ -45,6 +53,7 @@ struct FParsedWaterTile
 struct FWaterTile
 {
 	TArray<TObjectPtr<UDynamicMeshComponent>> Lakes;
+	TArray<TObjectPtr<UAudioComponent>> Sounds;   // rapids / waterfall rush loops
 	int32 NumLakes = 0;
 };
 
@@ -52,9 +61,10 @@ struct FWaterTile
  * WATER feature (2026-08-27): streams baked, flat, stylized lake surfaces
  * in the same world-space tiles AODTerrainManager/AODBuildingManager already
  * use (TERRAIN_TILE_SIZE_CM) - a separate actor per this project's
- * one-actor-per-data-domain convention. Lakes only (OSM natural=water/
- * landuse=reservoir CLOSED WAYS) - linear waterways (rivers/streams,
- * OSM waterway=*) are out of scope for this pass, see build_water_tiles.py.
+ * one-actor-per-data-domain convention. Lakes (OSM natural=water/
+ * landuse=reservoir closed ways), sea, and since 2026-10-23 flowing river
+ * ribbons, waterfall sheets and their mist (ODF1 trailer kinds 1/3/4), with
+ * a rushing-water loop at rapids and falls - see build_water_tiles.py.
  *
  * Deliberately the SIMPLEST tile-streaming manager in this project:
  * AODBuildingManager's ground-trace/retry-queue machinery exists because a
@@ -105,6 +115,31 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Water")
 	int32 MaxNewLoadsPerTick = 2;
 
+	/** Rushing-water loop (SW_RiverRush, content_src/audio/ambient/
+	 *  generate_weather_audio.py) placed at each fall's mist and along white
+	 *  ribbon stretches - on top of AODAmbientSoundManager's calm creek bed. */
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	TObjectPtr<USoundBase> RushSound;
+
+	/** A ribbon this white (mean whitewater) gets a rapids emitter. */
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	float RapidsWhiteMin = 0.6f;
+
+	/** Rapids emitters closer than this to another emitter are skipped. */
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	float RushEmitterSpacingCm = 8000.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	int32 MaxRushSoundsPerTile = 16;
+
+	/** Full volume inside this radius, silent at radius + falloff (cm). A
+	 *  waterfall's both scale up with its mist intensity (up to 2x). */
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	float RushInnerRadiusCm = 1500.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Water|Sound")
+	float RushFalloffCm = 12000.0f;
+
 	/** Seasons feature (2026-09-07) - see AODTerrainManager::GetGroundMID's
 	 *  identical reasoning. AODSeasonController drives FreezeBlend on this. */
 	UMaterialInstanceDynamic* GetWaterMID() const { return WaterMID; }
@@ -129,6 +164,9 @@ private:
 	 *  world Z from the pipeline bake. */
 	void CreateLakeComponent(FWaterTile& Tile, const TArray<FParsedLake>& InLakes);
 
+	/** Rush loops at falls (mist features) and white ribbon stretches. */
+	void CreateRushSounds(FWaterTile& Tile, const TArray<FParsedLake>& InLakes);
+
 	TMap<FIntPoint, FWaterTile> Tiles;
 	TSet<FIntPoint> PendingTiles;
 	TSet<FIntPoint> MissingTiles;
@@ -148,6 +186,15 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> WaterMID;
+
+	/** M_WaterRiver (ribbons + waterfall sheets, slot 1) and M_WaterMist
+	 *  (slot 2) - apply_water_material.py. Rivers don't freeze or take the
+	 *  storm chop: the season controller only drives WaterMID. */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RiverMat;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> MistMat;
 
 	double LastDiagTime = 0.0;
 };

@@ -123,6 +123,14 @@ magic since ODW2/ODW3/ODU2/ODB1/ODT1/ODS1 are all already spoken for by other si
         vertex_count * (float32 x, float32 y, float32 z)   cm, UE world frame
         vertex_count * (float32 u, float32 v)
         tri_count   * (uint32 i0, uint32 i1, uint32 i2)
+    'O','D','F','1'                                   flow trailer (2026-10-23)
+    per lake, same order:
+        uint8      kind (0 lake, 1 river ribbon, 2 sea, 3 waterfall sheet, 4 mist)
+        vertex_count * (float32 speed m/s, float32 whitewater 0..1)
+
+FLOWING RIVERS / WATERFALLS (2026-10-23): ribbon and waterfall UVs are
+flow-aligned (U across, V downstream, metres / UV_TILE_M); see the "river
+flow" block below for speeds, rapids, knickpoints and the fall sheets.
 """
 
 import json
@@ -502,7 +510,241 @@ def build_sea_features():
     return out
 
 
-KIND_LAKE, KIND_RIBBON, KIND_SEA = 0, 1, 2
+KIND_LAKE, KIND_RIBBON, KIND_SEA, KIND_WATERFALL, KIND_MIST = 0, 1, 2, 3, 4
+
+
+# --------------------------------------------------------------- river flow
+# Flowing rivers (2026-10-23). Ribbon UVs are flow-aligned (U across the
+# channel, V = distance downstream, both metres / UV_TILE_M like the lakes'
+# world UVs) and every vertex carries (speed m/s, whitewater 0..1) in the
+# ODF1 trailer (see write_tile). M_WaterRiver pans along +V at that speed.
+FLOW_SPEED_MIN_MS, FLOW_SPEED_MAX_MS = 0.4, 4.0   # a shallow creek can't run faster
+FLOW_SPEED_K = 10.0           # v = min + K*sqrt(slope): 1.4 m/s at 1 %, 3.6 at 10 %
+WHITE_SLOPE_LO, WHITE_SLOPE_HI = 0.02, 0.12   # riffles start / full cascade
+WHITE_SLOPE_MAX = 0.8         # slope alone never goes fully white - rapids/falls do
+RAPIDS_RADIUS_M = 40.0        # ribbon samples this close to an OSM rapids tag
+RAPIDS_WHITE, RAPIDS_SPEED_MS = 0.9, 3.0
+# Knickpoints: a 40 m raw-DEM drop well above the reach's own grade. Steep
+# Appalachian branches run 10-30 % for kilometres - grade alone is a cascade,
+# not a fall. Deals Gap: ~12 hits (Slickrock Creek's falls, Calderwood dam).
+# ponytail: DEM heuristic; an OSM waterfall tag always wins (see build_falls).
+KNICK_MIN_DROP_M = 8.0
+KNICK_MIN_SLOPE = 0.25
+KNICK_REACH_RATIO = 3.0
+KNICK_REACH_SAMPLES = 10      # +-200 m reach at WATERWAY_RESAMPLE_M
+FALL_SNAP_M = 40.0            # an OSM waterfall this close to a ribbon sits on it
+FALL_DEDUPE_M = 80.0          # a knickpoint this close to an OSM fall is that fall
+FALL_DEFAULT_WIDTH_M = 4.0    # an OSM fall on a stream we don't bake
+FALL_MIN_H_M, FALL_MAX_H_M = 3.0, 60.0
+FALL_LIP_SPEED_MS = 1.5       # horizontal speed over the lip (ballistic sheet)
+FALL_SHEET_LIFT_M = 0.3       # sheet rides this far over the DEM where it lies on rock
+FALL_MAX_RUN_M = 80.0
+
+
+def flow_attributes(smooth_elev, s_m, rapids_mask, knick_mask):
+    """Per-sample (speed m/s, whitewater 0..1) from the smoothed, already
+    monotonic profile's local grade (centred gradient), raised to rapids
+    values near an OSM rapids tag and to a full white fall at knickpoints."""
+    slope = np.clip(-np.gradient(smooth_elev, s_m), 0.0, None) if len(s_m) > 1 else np.zeros(len(s_m))
+    speed = np.minimum(FLOW_SPEED_MIN_MS + FLOW_SPEED_K * np.sqrt(slope), FLOW_SPEED_MAX_MS)
+    t = np.clip((slope - WHITE_SLOPE_LO) / (WHITE_SLOPE_HI - WHITE_SLOPE_LO), 0.0, 1.0)
+    white = t * t * (3 - 2 * t) * WHITE_SLOPE_MAX
+    white = np.where(rapids_mask, np.maximum(white, RAPIDS_WHITE), white)
+    speed = np.where(rapids_mask, np.maximum(speed, RAPIDS_SPEED_MS), speed)
+    white = np.where(knick_mask, 1.0, white)
+    speed = np.where(knick_mask, FLOW_SPEED_MAX_MS, speed)
+    return speed, white
+
+
+def find_knickpoints(raw_elev, smooth_elev):
+    """Sample indices where the river drops sharply (see KNICK_*). Chain
+    ends are skipped - a centreline starting on a hillside isn't a fall."""
+    n = len(raw_elev)
+    hit = np.zeros(n, dtype=bool)
+    if n < 7:
+        return hit
+    d40 = np.zeros(n)
+    d40[1:-1] = raw_elev[:-2] - raw_elev[2:]
+    k = KNICK_REACH_SAMPLES
+    sp = np.pad(smooth_elev, k, mode="edge")
+    reach = (sp[:-2 * k] - sp[2 * k:]) / (2 * k * WATERWAY_RESAMPLE_M)
+    local = d40 / (2 * WATERWAY_RESAMPLE_M)
+    hit = (d40 >= KNICK_MIN_DROP_M) & (local >= np.maximum(KNICK_MIN_SLOPE, KNICK_REACH_RATIO * reach))
+    hit[:3] = hit[-3:] = False
+    return hit
+
+
+def fetch_flow_features():
+    """OSM waterfalls (waterway=waterfall / natural=waterfall, node or way)
+    and rapids (waterway=rapids, whitewater=*, water=rapids areas) as
+    points: [{"kind": "waterfall"|"rapids", "lat", "lon", "height_m",
+    "name"}]. A way contributes every node (rapids) or its centroid (fall)."""
+    s, w, n_, e = BBOX_SNWE
+    bb = f"({s},{w},{n_},{e})"
+    data = overpass_json(f"""
+    [out:json][timeout:180];
+    (
+      nwr["waterway"="waterfall"]{bb};
+      nwr["natural"="waterfall"]{bb};
+      nwr["waterway"="rapids"]{bb};
+      nwr["whitewater"]{bb};
+      nwr["water"="rapids"]{bb};
+    );
+    (._;>;);
+    out body;
+    """, HEADERS)
+    nodes = {el["id"]: (el["lat"], el["lon"]) for el in data["elements"] if el["type"] == "node"}
+    out = []
+    for el in data["elements"]:
+        tags = el.get("tags", {})
+        is_fall = tags.get("waterway") == "waterfall" or tags.get("natural") == "waterfall"
+        is_rapid = (tags.get("waterway") == "rapids" or "whitewater" in tags
+                    or tags.get("water") == "rapids")
+        if not (is_fall or is_rapid):
+            continue
+        if el["type"] == "node":
+            pts = [(el["lat"], el["lon"])]
+        elif el["type"] == "way":
+            pts = [nodes[nid] for nid in el.get("nodes", []) if nid in nodes]
+        else:
+            continue   # a relation (rare) - its member ways come back on their own
+        if not pts:
+            continue
+        if is_fall:
+            pts = [tuple(np.mean(pts, axis=0))]
+        h = _parse_width_m(tags.get("height"))   # same "8", "8 m" free text as width=
+        for lat, lon in pts:
+            out.append({"kind": "waterfall" if is_fall else "rapids", "lat": lat, "lon": lon,
+                        "height_m": h if is_fall else None, "name": tags.get("name", "")})
+    (RAW_DIR / "osm_flow_features.json").write_text(json.dumps(out))
+    print(f"  got {sum(f['kind'] == 'waterfall' for f in out)} OSM waterfall(s), "
+          f"{sum(f['kind'] == 'rapids' for f in out)} rapids point(s) -> {RAW_DIR / 'osm_flow_features.json'}")
+    return out
+
+
+def _dem_along(e0, n0, dx, dy, d, session, dem_cache):
+    lon, lat = to_lonlat(e0 + dx * d, n0 + dy * d)
+    return sample_dem(np.atleast_1d(lat), np.atleast_1d(lon), NEAR_DEM_ZOOM, session, dem_cache)
+
+
+def build_fall_sheet(e0, n0, top_m, dx, dy, width_m, height_m, session, dem_cache):
+    """A falling-water sheet starting at the lip (e0, n0, top_m - metres,
+    ASL) heading (dx, dy): a ballistic arc out over the lip that rides
+    FALL_SHEET_LIFT_M over the DEM wherever the rock is further out (a
+    cascade lies on its slope, a free fall hangs), down to top - height.
+    Returns (feature dict, base (e, n, z_m)) - the feature uses the river
+    material (flow UVs, V down the sheet, full whitewater)."""
+    d = np.concatenate([np.linspace(-1.0, 3.0, 17), np.arange(3.5, FALL_MAX_RUN_M, 1.0)])
+    dem = _dem_along(e0, n0, dx, dy, d, session, dem_cache)
+    fall = 4.905 * (np.clip(d, 0.0, None) / FALL_LIP_SPEED_MS) ** 2
+    z = np.maximum(top_m - fall, dem + FALL_SHEET_LIFT_M)
+    z = np.minimum.accumulate(np.minimum(z, top_m))
+    bottom = top_m - height_m
+    end = int(np.argmax(z <= bottom)) if (z <= bottom).any() else len(z) - 1
+    d, z = d[:end + 1], np.maximum(z[:end + 1], bottom)
+    seg = np.hypot(np.diff(d), np.diff(z))
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    drop = top_m - z
+    nx, ny = -dy, dx   # left normal
+    hw = width_m * 0.55   # a touch wider than the channel - spills over the banks' DEM blur
+    verts, uvs, flow = [], [], []
+    for di, zi, si, dropi in zip(d, z, s, drop):
+        for side in (1.0, -1.0):
+            ex, ny_ = e0 + dx * di + nx * hw * side, n0 + dy * di + ny * hw * side
+            verts.append((ex * 100.0, -ny_ * 100.0, (zi - ORIGIN_HEIGHT_M) * 100.0))
+            uvs.append(((0.0 if side > 0 else 2 * hw) / UV_TILE_M, si / UV_TILE_M))
+            flow.append((min(FALL_LIP_SPEED_MS + math.sqrt(2 * 9.81 * max(dropi, 0.0)), 12.0), 1.0))
+    tris = []
+    for r in range(len(d) - 1):
+        a, b, c, e_ = 2 * r, 2 * r + 1, 2 * r + 2, 2 * r + 3
+        tris += [(a, c, b), (b, c, e_)]
+    verts = np.array(verts, np.float32)
+    tris = np.array(tris, np.uint32).reshape(-1, 3)
+    # face downstream/up (the side a driver below sees), same cross test as build_lake_mesh
+    v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    nrm = np.cross(v2 - v0, v1 - v0)
+    facing = nrm[:, 0] * dx + nrm[:, 1] * -dy + nrm[:, 2]
+    flip = facing < 0
+    tris[flip, 1], tris[flip, 2] = tris[flip, 2].copy(), tris[flip, 1].copy()
+    base = (e0 + dx * d[-1], n0 + dy * d[-1], float(z[-1]))
+    return ({"verts": verts, "uvs": np.array(uvs, np.float32), "tris": tris,
+             "flow": np.array(flow, np.float32), "kind": KIND_WATERFALL,
+             "centroid_cm": (base[0] * 100.0, -base[1] * 100.0)}, base)
+
+
+def build_mist(e, n, z_m, width_m, height_m):
+    """Spray/mist at a fall's base: three crossed vertical cards (UV 0..1,
+    v = 0 at the bottom) the translucent M_WaterMist animates. Flow channel
+    x = intensity 0..1 (taller fall, thicker mist), read by the material and
+    by AODWaterManager's sound emitters."""
+    r = float(np.clip(0.5 * width_m + 0.25 * height_m, 3.0, 15.0))
+    h = float(np.clip(0.6 * height_m, 3.0, 20.0))
+    inten = float(np.clip(height_m / 20.0, 0.35, 1.0))
+    verts, uvs, tris = [], [], []
+    z0 = z_m - 0.5
+    for k in range(3):
+        a = math.pi * k / 3.0
+        cx, cy = math.cos(a) * r, math.sin(a) * r
+        base = len(verts)
+        for (sx, sz) in ((-1, 0), (1, 0), (1, 1), (-1, 1)):
+            verts.append(((e + cx * sx) * 100.0, -(n + cy * sx) * 100.0, (z0 + h * sz - ORIGIN_HEIGHT_M) * 100.0))
+            uvs.append(((sx + 1) / 2.0, float(sz)))
+        tris += [(base, base + 2, base + 1), (base, base + 3, base + 2)]
+    verts = np.array(verts, np.float32)
+    return {"verts": verts, "uvs": np.array(uvs, np.float32), "tris": np.array(tris, np.uint32),
+            "flow": np.tile(np.float32([inten, 0.0]), (len(verts), 1)), "kind": KIND_MIST,
+            "centroid_cm": (e * 100.0, -n * 100.0)}
+
+
+def build_falls(flow_points, knicks, chain_summaries, session, dem_cache):
+    """Waterfall sheets + base mist for every OSM waterfall (snapped onto a
+    baked ribbon when one is within FALL_SNAP_M, else on its own DEM
+    downhill), plus mist only at DEM knickpoints (the ribbon there is
+    already painted as a white fall - see flow_attributes). Returns (features,
+    summaries)."""
+    samples = [(c["east_m"][i], c["north_m"][i], c["water_elev_m"][i], c["half_width_m"], ci, i)
+               for ci, c in enumerate(chain_summaries) for i in range(len(c["east_m"]))]
+    tree = cKDTree([(s_[0], s_[1]) for s_ in samples]) if samples else None
+    feats, out = [], []
+    osm_fall_xy = []
+    for fp in flow_points:
+        if fp["kind"] != "waterfall":
+            continue
+        e0, n0 = (float(v[0]) for v in to_local(np.array([fp["lon"]]), np.array([fp["lat"]])))
+        dist, idx = tree.query([e0, n0]) if tree is not None else (np.inf, -1)
+        if dist <= FALL_SNAP_M:
+            se, sn, top_m, hw, ci, i = samples[idx]
+            c = chain_summaries[ci]
+            j0, j1 = max(0, i - 1), min(len(c["east_m"]) - 1, i + 1)
+            dx, dy = c["east_m"][j1] - c["east_m"][j0], c["north_m"][j1] - c["north_m"][j0]
+            e0, n0, width = se, sn, 2 * hw
+        else:
+            top_m = float(_dem_along(e0, n0, 0, 0, np.array([0.0]), session, dem_cache)[0]) - WATERWAY_DEPTH_M
+            ring = np.linspace(0, 2 * math.pi, 16, endpoint=False)
+            lon, lat = to_lonlat(e0 + 15 * np.cos(ring), n0 + 15 * np.sin(ring))
+            k = int(np.argmin(sample_dem(lat, lon, NEAR_DEM_ZOOM, session, dem_cache)))
+            dx, dy, width = math.cos(ring[k]), math.sin(ring[k]), FALL_DEFAULT_WIDTH_M
+        ln = math.hypot(dx, dy) or 1.0
+        dx, dy = dx / ln, dy / ln
+        if fp["height_m"]:
+            h = fp["height_m"]
+        else:
+            ahead = _dem_along(e0, n0, dx, dy, np.array([30.0]), session, dem_cache)[0]
+            h = top_m + WATERWAY_DEPTH_M - float(ahead)
+        h = float(np.clip(h, FALL_MIN_H_M, FALL_MAX_H_M))
+        sheet, base = build_fall_sheet(e0, n0, top_m, dx, dy, width, h, session, dem_cache)
+        feats += [sheet, build_mist(base[0], base[1], base[2], width, top_m - base[2])]
+        osm_fall_xy.append((e0, n0))
+        out.append({"source": "osm", "name": fp["name"] or "(unnamed)", "east_m": e0, "north_m": n0,
+                    "height_m": h, "drop_m": top_m - base[2], "snapped": bool(dist <= FALL_SNAP_M),
+                    "sheet_rows": len(sheet["verts"]) // 2})
+    fall_tree = cKDTree(osm_fall_xy) if osm_fall_xy else None
+    for k in knicks:
+        if fall_tree is not None and fall_tree.query([k["east_m"], k["north_m"]])[0] < FALL_DEDUPE_M:
+            continue
+        feats.append(build_mist(k["east_m"], k["north_m"], k["z_m"], k["width_m"], k["drop_m"]))
+        out.append({"source": "dem", **k})
+    return feats, out
 
 
 # --------------------------------------------------------------- waterways
@@ -883,7 +1125,7 @@ def retained_t_intervals(gap_intervals):
     return retained
 
 
-def build_waterway_ribbons(chains, session, dem_cache, road_idx):
+def build_waterway_ribbons(chains, session, dem_cache, road_idx, rapids_xy=()):
     """Centerline (lat/lon chain) -> list of per-segment flat ribbon quads
     ("lake" dicts, SAME shape build_lake_mesh's caller already produces) +
     a summary dict for verify_waterways_stats.txt. See module docstring for
@@ -894,6 +1136,8 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
     n_crossings = n_crossings_bridged = n_parallel_clipped = 0
     n_gap_segments = n_gap_fragments_dropped = 0
     total_ribbon_km = 0.0
+    knicks = []   # DEM knickpoints, for build_falls' mist
+    rapids_tree = cKDTree(rapids_xy) if len(rapids_xy) else None
 
     for chain in chains:
         lat = np.array([lat for lat, lon in chain["latlon"]])
@@ -931,6 +1175,20 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
         else:
             n_width_default += 1
         half_width_m = half_width_m / 2.0
+
+        s_m = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(rs_e), np.diff(rs_n)))])
+        rapids_mask = (rapids_tree.query(np.c_[rs_e, rs_n])[0] <= RAPIDS_RADIUS_M
+                       if rapids_tree is not None else np.zeros(len(rs_e), dtype=bool))
+        knick_mask = find_knickpoints(raw_elev, smooth_elev)
+        speed, white = flow_attributes(smooth_elev, s_m, rapids_mask, knick_mask)
+        for i in np.nonzero(knick_mask & ~np.r_[False, knick_mask[:-1]])[0]:
+            j = i
+            while j + 1 < len(knick_mask) and knick_mask[j + 1]:
+                j += 1
+            j = min(j + 1, len(rs_e) - 1)   # the fall's foot is past its last steep sample
+            knicks.append({"name": chain["name"], "east_m": float(rs_e[j]), "north_m": float(rs_n[j]),
+                           "z_m": float(water_elev[j]), "width_m": 2 * half_width_m,
+                           "drop_m": float(raw_elev[max(i - 1, 0)] - raw_elev[j])})
 
         left_e, left_n, right_e, right_n = offset_polyline(rs_e, rs_n, half_width_m)
         clip_left_e, clip_left_n = left_e.copy(), left_n.copy()
@@ -1004,9 +1262,21 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
                 if len(tris) == 0:
                     return 0.0
                 tilt_ribbon_quad(verts, q_xy_cm, za, zb)
+                # flow UVs: U across (left bank 0), V downstream - the ring's
+                # first 4 verts are its corners in q_xy_cm order (ear clip
+                # keeps them; the fan fallback appends one centroid)
+                va = (s_m[i] + seg_len_m * ta) / UV_TILE_M
+                vb = (s_m[i] + seg_len_m * tb) / UV_TILE_M
+                uw = 2 * half_width_m / UV_TILE_M
+                fa = (_lerp(speed[i], speed[i + 1], ta), _lerp(white[i], white[i + 1], ta))
+                fb = (_lerp(speed[i], speed[i + 1], tb), _lerp(white[i], white[i + 1], tb))
+                uvs = np.array([(0.0, va), (uw, va), (uw, vb), (0.0, vb)] +
+                               [(uw / 2, (va + vb) / 2)] * (len(verts) - 4), np.float32)
+                flow = np.array([fa, fa, fb, fb] + [((fa[0] + fb[0]) / 2, (fa[1] + fb[1]) / 2)]
+                                * (len(verts) - 4), np.float32)
                 cx_cm = float(np.mean([p[0] for p in q_xy_cm]))
                 cy_cm = float(np.mean([p[1] for p in q_xy_cm]))
-                ribbons.append({"verts": verts, "uvs": uvs, "tris": tris,
+                ribbons.append({"verts": verts, "uvs": uvs, "tris": tris, "flow": flow,
                                  "centroid_cm": (cx_cm, cy_cm)})
                 return seg_len_m * (tb - ta)
 
@@ -1034,6 +1304,8 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
             "east_m": rs_e.tolist(), "north_m": rs_n.tolist(),
             "raw_elev_m": raw_elev.tolist(), "smooth_elev_m": smooth_elev.tolist(),
             "water_elev_m": water_elev.tolist(),
+            "speed_ms": speed.tolist(), "white": white.tolist(),
+            "n_knick": int(knick_mask.sum()), "n_rapids": int(rapids_mask.sum()),
             "left_e": clip_left_e.tolist(), "left_n": clip_left_n.tolist(),
             "right_e": clip_right_e.tolist(), "right_n": clip_right_n.tolist(),
             # gap intervals for the verify-script overlay: (segment index,
@@ -1049,7 +1321,7 @@ def build_waterway_ribbons(chains, session, dem_cache, road_idx):
         "n_parallel_clipped": n_parallel_clipped, "total_ribbon_km": total_ribbon_km,
         "n_gap_segments": n_gap_segments, "n_gap_fragments_dropped": n_gap_fragments_dropped,
     }
-    return ribbons, summaries, stats
+    return ribbons, summaries, stats, knicks
 
 
 def tilt_ribbon_quad(verts, q_xy_cm, za, zb):
@@ -1260,6 +1532,18 @@ def write_tile(path, lakes, gen_id_bytes):
             f.write(struct.pack(f"<{verts.size}f", *verts.reshape(-1)))
             f.write(struct.pack(f"<{uvs.size}f", *uvs.reshape(-1)))
             f.write(struct.pack(f"<{tris.size}I", *tris.reshape(-1)))
+        # ODF1 trailer (2026-10-23, flowing rivers): per feature, in order,
+        # uint8 kind + vertex_count * (float32 speed m/s, float32 whitewater
+        # 0..1) - mist uses (intensity, 0). Readers that stop after the
+        # features (terrain, forest, parking, older AODWaterManager) never
+        # see it; a tile without it loads as all-lake, as before.
+        f.write(b"ODF1")
+        for lk in lakes:
+            flow = lk.get("flow")
+            if flow is None:
+                flow = np.zeros((len(lk["verts"]), 2), np.float32)
+            f.write(struct.pack("<B", lk["kind"]))
+            f.write(np.ascontiguousarray(flow, dtype="<f4").tobytes())
 
 
 def main():
@@ -1337,13 +1621,16 @@ def main():
 
     # ------------------------------------------------------------ waterways
     n_lake_tiles = len(buckets)
+    flow_points = fetch_flow_features()
+    rapids_xy = [tuple(float(v[0]) for v in to_local(np.array([fp["lon"]]), np.array([fp["lat"]])))
+                 for fp in flow_points if fp["kind"] == "rapids"]
     raw_ways, ww_nodes = fetch_waterways()
     chains = chain_waterways(raw_ways, ww_nodes)
     road_idx = build_road_point_index()
     if road_idx is None:
         print("  WARNING: no road points loaded - waterway/road overlap check skipped")
-    ribbons, chain_summaries, ww_stats = build_waterway_ribbons(
-        chains, session, dem_cache, road_idx)
+    ribbons, chain_summaries, ww_stats, knicks = build_waterway_ribbons(
+        chains, session, dem_cache, road_idx, rapids_xy)
     # A river's OSM line runs on through the lakes and river polygons it
     # feeds; its flat-profile ribbon there floated metres over (or under) the
     # polygon's own surface (Calderwood tailrace, Deals Gap 2026-10-21).
@@ -1357,7 +1644,17 @@ def main():
         cx_cm, cy_cm = rb["centroid_cm"]
         tx = int(cx_cm // TERRAIN_TILE_SIZE_CM)
         ty = int(cy_cm // TERRAIN_TILE_SIZE_CM)
-        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"], "kind": KIND_RIBBON})
+        buckets[(tx, ty)].append({"verts": rb["verts"], "uvs": rb["uvs"], "tris": rb["tris"],
+                                  "flow": rb["flow"], "kind": KIND_RIBBON})
+    fall_feats, fall_summaries = build_falls(flow_points, knicks, chain_summaries, session, dem_cache)
+    for ft in fall_feats:
+        cx_cm, cy_cm = ft["centroid_cm"]
+        buckets[(int(cx_cm // TERRAIN_TILE_SIZE_CM), int(cy_cm // TERRAIN_TILE_SIZE_CM))].append(ft)
+    print(f"waterfalls: {sum(f['source'] == 'osm' for f in fall_summaries)} OSM fall sheet(s), "
+          f"{sum(f['source'] == 'dem' for f in fall_summaries)} DEM knickpoint mist(s)")
+    for f_ in fall_summaries:
+        print(f"  {f_['source']} \"{f_['name']}\" at ({f_['east_m']:.0f}, {f_['north_m']:.0f}) m "
+              f"drop {f_['drop_m']:.1f} m")
     n_before_sea = len(buckets)
     for key, feat in sea_tiles.items():
         buckets[key].append(feat)
@@ -1454,6 +1751,7 @@ def main():
             for s in lake_summaries
         ],
         "chain_summaries": chain_summaries,
+        "fall_summaries": fall_summaries,
         "ww_stats": ww_stats,
         "n_lake_tiles": n_lake_tiles,
         "n_total_tiles": len(buckets),

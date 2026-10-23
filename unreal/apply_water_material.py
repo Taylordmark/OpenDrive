@@ -318,6 +318,24 @@ class G:
         self._req(MEL.connect_material_expressions(a, a_out, n, ""), "Clamp.Input")
         return n
 
+    def custom(self, code, out_type, **inputs):
+        """Custom HLSL node; inputs = {pin name: (source node, source out pin)}."""
+        n = self.node(unreal.MaterialExpressionCustom, code=code, output_type=out_type)
+        pins = []
+        for name in inputs:
+            i = unreal.CustomInput()
+            i.set_editor_property("input_name", name)
+            pins.append(i)
+        n.set_editor_property("inputs", pins)
+        for name, (src, src_out) in inputs.items():
+            self._req(MEL.connect_material_expressions(src, src_out, n, name), f"Custom.{name}")
+        return n
+
+    def mask(self, src, r=False, gg=False, b=False, a=False):
+        n = self.node(unreal.MaterialExpressionComponentMask, r=r, g=gg, b=b, a=a)
+        self._req(MEL.connect_material_expressions(src, "", n, ""), "ComponentMask")
+        return n
+
     def two_sided_sign_vec(self):
         # 2026-09-03 fix (dillon_shore3.png QA finding: a dark cliff-like
         # wedge under the water's leading edge from some shore angles): this
@@ -484,3 +502,133 @@ log(f"built + saved {MAT_NAME} (color={WATER_COLOR}, sky_tint={SKY_TINT_COLOR}, 
     f"normal_strength={NORMAL_STRENGTH}, two_sided=True+TwoSidedSign normal fix, "
     f"blend=Opaque, ripple tiles={RIPPLE_A_TILE_CM}/{RIPPLE_B_TILE_CM}cm, "
     f"seasons_param=FreezeBlend, storm_param=WaveRoughness)")
+
+
+# ==== M_WaterRiver + M_WaterMist (flowing rivers, 2026-10-23) ==============
+# River ribbons and waterfall sheets (build_water_tiles.py kinds 1/3) carry
+# flow-aligned UVs - U across the channel, V = distance downstream, both in
+# UV_TILE_M (20 m) units - and a second UV layer (AODWaterManager's FlowUV)
+# of (speed m/s, whitewater 0..1). M_WaterRiver advects the ripple normal and
+# a streaky foam mask down V at that speed with the classic two-phase flow
+# trick (two copies half a period apart, each reset while its weight is 0,
+# weights sum to 1), so the pattern really moves at the baked speed instead of
+# a fixed Panner rate. Everything runs off Time, so it's frame-rate
+# independent. Steep stretches and OSM rapids (whitewater ~1) get stronger
+# chop and broken white foam; a waterfall sheet (whitewater 1, up to 12 m/s)
+# reads as falling white water. Not driven by AODSeasonController (only
+# M_Water's MID is) - rivers don't freeze.
+RIVER_NAME = "M_WaterRiver"
+MIST_NAME = "M_WaterMist"
+RIVER_COLOR = (0.016, 0.048, 0.042)   # shallower, greener and a touch brighter than reservoir water
+FOAM_COLOR = (0.78, 0.82, 0.84)
+RIVER_ROUGHNESS = 0.3
+FOAM_ROUGHNESS = 0.75
+
+RIVER_HLSL = """
+float2 m = UV * 20.0;   // metres: x across the channel, y downstream
+float3 nrm = 0;
+float foam = 0;
+const float P = 1.6;    // flow phase period, s
+for (int i = 0; i < 2; i++) {
+  float ph = frac(T / P + 0.5 * i);
+  float w = 1 - abs(2 * ph - 1);
+  float2 p = m - float2(0, Flow.x * P * ph) + i * float2(3.7, 11.3);
+  nrm.xy += (Texture2DSample(Tex, TexSampler, p / 4.0).rg * 2 - 1) * w;
+  float2 q = p / float2(1.2, 5.0);   // foam streaks stretched along the flow
+  float2 c = floor(q), f = frac(q);
+  f = f * f * (3 - 2 * f);
+  float a = frac(sin(dot(c, float2(127.1, 311.7))) * 43758.5453);
+  float b = frac(sin(dot(c + float2(1, 0), float2(127.1, 311.7))) * 43758.5453);
+  float d = frac(sin(dot(c + float2(0, 1), float2(127.1, 311.7))) * 43758.5453);
+  float e = frac(sin(dot(c + float2(1, 1), float2(127.1, 311.7))) * 43758.5453);
+  foam += lerp(lerp(a, b, f.x), lerp(d, e, f.x), f.y) * w;
+}
+float white = saturate(Flow.y);
+nrm.xy *= 1.5 + 2.5 * white;
+nrm = normalize(float3(nrm.xy, 1));
+foam = saturate((foam - 1.0 + white) * 3.0) * saturate(white * 2.5);
+return float4(nrm, foam);
+"""
+
+# Mist: three crossed vertical cards per fall (kind 4), UV 0..1 with v = 0 at
+# the base, FlowUV.x = intensity. Translucent, soft rising noise, faded at the
+# card edges, edge-on to the camera, and right in front of it (no hard card
+# lines when driving through spray).
+MIST_HLSL = """
+float2 p = float2(UV.x * 3.0, UV.y * 2.0 - T * 0.35);
+float2 c = floor(p), f = frac(p);
+f = f * f * (3 - 2 * f);
+float a = frac(sin(dot(c, float2(127.1, 311.7))) * 43758.5453);
+float b = frac(sin(dot(c + float2(1, 0), float2(127.1, 311.7))) * 43758.5453);
+float d = frac(sin(dot(c + float2(0, 1), float2(127.1, 311.7))) * 43758.5453);
+float e = frac(sin(dot(c + float2(1, 1), float2(127.1, 311.7))) * 43758.5453);
+float n = lerp(lerp(a, b, f.x), lerp(d, e, f.x), f.y);
+float edge = sin(3.14159 * saturate(UV.x)) * saturate(UV.y * 6) * saturate((1 - UV.y) * 1.5);
+float facing = saturate(abs(dot(normalize(N), normalize(V))) * 2 - 0.2);
+float near = saturate((Depth - 150.0) / 600.0);
+return saturate(edge * facing * near * (0.35 + 0.65 * n) * Flow.x * 0.55);
+"""
+
+
+def fresh_material(name):
+    path = f"{MAT_DIR}/{name}"
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        m = unreal.load_asset(path)
+        for _e in list(MEL.get_material_expressions(m)):
+            MEL.delete_material_expression(m, _e)
+    else:
+        m = tools.create_asset(name, MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    m.set_editor_property("two_sided", True)
+    return m, path
+
+
+def verify(path, props):
+    m = unreal.load_asset(path)
+    bad = [p for p, e in props if MEL.get_material_property_input_node(m, e) is None]
+    for p, e in props:
+        node = MEL.get_material_property_input_node(m, e)
+        log(f"  {path.rsplit('/', 1)[1]} MP_{p}: {node.get_class().get_name() if node else 'UNCONNECTED (FAIL)'}")
+    if bad:
+        raise RuntimeError(f"{path}: unconnected {bad} - see the verification log above")
+
+
+river, river_path = fresh_material(RIVER_NAME)
+river.set_editor_property("blend_mode", unreal.BlendMode.BLEND_OPAQUE)
+g = G(river)
+flow = g.custom(RIVER_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT4,
+                Tex=(g.node(unreal.MaterialExpressionTextureObject, texture=water_normal_tex), ""),
+                UV=(g.tex_coord(0), ""), Flow=(g.tex_coord(1), ""),
+                T=(g.node(unreal.MaterialExpressionTime), ""))
+foam = g.mask(flow, a=True)
+river_normal = g.mul(g.mask(flow, r=True, gg=True, b=True), g.two_sided_sign_vec())
+fresnel = g.fresnel(FRESNEL_EXPONENT, FRESNEL_BASE_REFLECT)
+river_color = g.lerp(g.const3(*RIVER_COLOR), g.const3(*SKY_TINT_COLOR), g.clamp(fresnel, 0.0, BASE_COLOR_FRESNEL_CAP))
+MEL.connect_material_property(g.lerp(river_color, g.const3(*FOAM_COLOR), foam), "", unreal.MaterialProperty.MP_BASE_COLOR)
+MEL.connect_material_property(g.lerp(g.const(RIVER_ROUGHNESS), g.const(FOAM_ROUGHNESS), foam), "", unreal.MaterialProperty.MP_ROUGHNESS)
+MEL.connect_material_property(g.lerp(g.const(SPECULAR_BASE), g.const(SPECULAR_GRAZING), fresnel), "", unreal.MaterialProperty.MP_SPECULAR)
+MEL.connect_material_property(river_normal, "", unreal.MaterialProperty.MP_NORMAL)
+MEL.recompile_material(river)
+unreal.EditorAssetLibrary.save_asset(river_path, only_if_is_dirty=False)
+
+mist, mist_path = fresh_material(MIST_NAME)
+mist.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+g = G(mist)
+opacity = g.custom(MIST_HLSL, unreal.CustomMaterialOutputType.CMOT_FLOAT1,
+                   UV=(g.tex_coord(0), ""), Flow=(g.tex_coord(1), ""),
+                   T=(g.node(unreal.MaterialExpressionTime), ""),
+                   N=(g.node(unreal.MaterialExpressionVertexNormalWS), ""),
+                   V=(g.node(unreal.MaterialExpressionCameraVectorWS), ""),
+                   Depth=(g.node(unreal.MaterialExpressionPixelDepth), ""))
+MEL.connect_material_property(g.const3(0.85, 0.88, 0.9), "", unreal.MaterialProperty.MP_BASE_COLOR)
+MEL.connect_material_property(g.const(1.0), "", unreal.MaterialProperty.MP_ROUGHNESS)
+MEL.connect_material_property(opacity, "", unreal.MaterialProperty.MP_OPACITY)
+MEL.recompile_material(mist)
+unreal.EditorAssetLibrary.save_asset(mist_path, only_if_is_dirty=False)
+
+log("--- post-save verification (river/mist) ---")
+verify(river_path, (("BaseColor", unreal.MaterialProperty.MP_BASE_COLOR),
+                    ("Roughness", unreal.MaterialProperty.MP_ROUGHNESS),
+                    ("Normal", unreal.MaterialProperty.MP_NORMAL)))
+verify(mist_path, (("BaseColor", unreal.MaterialProperty.MP_BASE_COLOR),
+                   ("Opacity", unreal.MaterialProperty.MP_OPACITY)))
+log(f"built + saved {RIVER_NAME} (two-phase flow advection, foam by whitewater) and {MIST_NAME} (translucent spray)")

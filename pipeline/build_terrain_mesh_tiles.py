@@ -575,8 +575,9 @@ def load_lake_beds():
         tile_flags = ribbon_flags.get(f"{m.group(1)},{m.group(2)}", []) if m else []
         for feature_idx, (verts, tris) in enumerate(_read_lake_bin_tile(path)):
             kind = int(tile_flags[feature_idx]) if feature_idx < len(tile_flags) else 0
-            if len(tris) == 0 or kind == 2:
-                continue   # Phase 4: the sea (kind 2) is datum water - no bed, no crossing
+            if len(tris) == 0 or kind >= 2:
+                continue   # Phase 4: the sea (kind 2) is datum water - no bed, no crossing;
+                           # waterfall sheets (3) / mist cards (4) aren't surfaces at all
             is_ribbon = kind == 1
             rings = _extract_boundary_rings(tris)
             holes = []

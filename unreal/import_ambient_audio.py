@@ -53,6 +53,8 @@ ROLE_TO_ASSET = {
     # content_src/audio/ambient/generate_weather_audio.py, not manifest.json.
     "rain": "SW_Rain",
     "thunder": "SW_Thunder",
+    # flowing rivers (2026-10-23): AODWaterManager's rapids/waterfall emitters
+    "river_rush": "SW_RiverRush",
 }
 # One-shots (PlaySound2D per strike) - everything else is a looping bed.
 NON_LOOPING = {"thunder"}
