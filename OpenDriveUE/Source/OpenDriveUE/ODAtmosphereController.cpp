@@ -20,6 +20,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "ODAmbientSoundManager.h"
+#include "ODTerrainManager.h"
 #include "ODVisualStyle.h"
 #include "ODWeatherController.h"
 #include "UObject/ConstructorHelpers.h"
@@ -94,6 +95,24 @@ TAutoConsoleVariable<float> CVarWhiteTemp(TEXT("od.WhiteTemp"), -1.0f, TEXT("Gra
 // sky term, not the visible sky). 0 = white = unchanged.
 const FLinearColor WarmSkyLightColor(1.0f, 0.8f, 0.6f);
 TAutoConsoleVariable<float> CVarSkyWarm(TEXT("od.SkyWarm"), 0.0f, TEXT("Sky light colour, 0 = white .. 1 = warm."));
+
+// ---- Sky altitude (2026-10-22 lighting audit, Gap 7b) ----
+// World Z is area-relative (Z 0 = the area's datum, e.g. Summit 3435 m), and the
+// planet top used to sit at Z 0 too, so every area's sky rendered as sea level:
+// a pale zenith under the full Rayleigh + boosted Mie column. Tick drops the
+// planet top to the area's real sea level (ground bands sea_z_cm), so the camera
+// sits its true altitude up the atmosphere: thinner air overhead, deeper blue.
+// The cloud layer (measured from the planet top, VolumetricCloudRendering.cpp)
+// rises by the same amount so it stays CloudBaseAboveDatumKm over the area.
+// Mountain aerosol rides a boundary layer that follows the terrain, which the
+// sea-level 1.2 km Mie scale height doesn't: at Summit it would keep e^-2.9 =
+// 6 % of the tuned ridge haze. The Mie scale height stretches so the datum
+// keeps MieAtDatum of it (real high-altitude air is ~1/3 as hazy).
+// od.SkyAltScale scales the drop (0 = the old sea-level sky) for A/B.
+constexpr float CloudBaseAboveDatumKm = 1.5f;
+constexpr float MieScaleHeightKm = 1.2f;   // engine default
+constexpr float MieAtDatum = 1.0f / 3.0f;
+TAutoConsoleVariable<float> CVarSkyAltScale(TEXT("od.SkyAltScale"), 1.0f, TEXT("Planet top at area sea level x this (0 = at the area datum, the old look)."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
 // Was -1 until 2026-10-22: after the toe ramp, Gasquet noon still metered a
@@ -412,7 +431,7 @@ void AODAtmosphereController::EnsureVolumetricCloud()
 	// A plausible default cumulus deck: base a couple km up (well above any
 	// terrain/road geometry, which tops out well under 1 km of local relief),
 	// a few hundred meters thick.
-	Comp->LayerBottomAltitude = 1.5f;   // km above ground
+	Comp->LayerBottomAltitude = CloudBaseAboveDatumKm;   // km above the planet top; Tick adds the datum
 	Comp->LayerHeight = 3.5f;           // km
 	Comp->TracingStartMaxDistance = 350.0f;
 	Comp->TracingMaxDistance = 50.0f;
@@ -582,14 +601,28 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 	}
 
 	// Keep the planet top under the camera, snapped to 1 km so the render
-	// state isn't dirtied every frame (curvature at 1 km is 8 cm).
+	// state isn't dirtied every frame (curvature at 1 km is 8 cm), at the
+	// area's sea level (Gap 7b; 0 until a terrain manager has its bands).
 	if (USkyAtmosphereComponent* Atmo = AtmoComp.Get())
 	{
+		float SeaZCm = 0.0f;
+		for (TActorIterator<AODTerrainManager> It(GetWorld()); It; ++It)
+		{
+			const float Z = It->GetGroundBandsWorld().SeaZCm;
+			if (Z > -0.5f * FODGroundBands::Off) { SeaZCm = FMath::Min(Z, 0.0f) * FMath::Max(CVarSkyAltScale.GetValueOnGameThread(), 0.0f); break; }
+		}
+		if (UVolumetricCloudComponent* CloudComp = Cloud.IsValid() ? Cloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
+		{
+			const float BaseKm = CloudBaseAboveDatumKm - SeaZCm / 1e5f;
+			if (!FMath::IsNearlyEqual(CloudComp->LayerBottomAltitude, BaseKm, 1e-3f)) { CloudComp->SetLayerBottomAltitude(BaseKm); }
+		}
+		const float MieKm = FMath::Max(MieScaleHeightKm, -SeaZCm / 1e5f / FMath::Loge(1.0f / MieAtDatum));
+		if (!FMath::IsNearlyEqual(Atmo->MieExponentialDistribution, MieKm, 1e-3f)) { Atmo->SetMieExponentialDistribution(MieKm); }
 		const APlayerController* PC = GetWorld()->GetFirstPlayerController();
 		if (PC && PC->PlayerCameraManager)
 		{
 			const FVector Cam = PC->PlayerCameraManager->GetCameraLocation();
-			const FVector Snap(FMath::RoundToDouble(Cam.X / 1e5) * 1e5, FMath::RoundToDouble(Cam.Y / 1e5) * 1e5, 0.0);
+			const FVector Snap(FMath::RoundToDouble(Cam.X / 1e5) * 1e5, FMath::RoundToDouble(Cam.Y / 1e5) * 1e5, SeaZCm);
 			if (!Atmo->GetComponentLocation().Equals(Snap, 1.0))
 			{
 				Atmo->SetWorldLocation(Snap);
@@ -625,9 +658,10 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		DiagAcc = 0.0f;
 		const UDirectionalLightComponent* S = SunComp.Get();
 		const USkyLightComponent* K = SkyLightComp.Get();
-		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f)"),
+		UE_LOG(LogTemp, Display, TEXT("ODAtmo: cloud %.2f cloudW %.2f fogW %.2f | sun %s %.0f (base %.0f) angle %.1f elev %.1f | sky %.2f (base %.2f) | planet top z %.0f"),
 			Weather->CloudCover, CloudW, FogW, S ? *S->GetOwner()->GetName() : TEXT("none"), S ? S->Intensity : -1.0f, BaseSunIntensity,
-			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity);
+			S ? S->LightSourceAngle : -1.0f, SunElevDeg, K ? K->Intensity : -1.0f, BaseSkyLightIntensity,
+			AtmoComp.IsValid() ? AtmoComp->GetComponentLocation().Z : 0.0);
 	}
 
 	// Weather scalars ramp over ~90 s - skip the render-state writes when
