@@ -288,7 +288,7 @@ FString Root()
 FString BakeDir(const FString& Key) { return Root() / TEXT("data/bake") / Key; }
 FString MasksDir() { return FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks"); }
 
-TSharedPtr<FJsonObject> ReadJson(const FString& Path)
+TSharedPtr<FJsonObject> ReadAreaJson(const FString& Path)
 {
 	FString Text;
 	TSharedPtr<FJsonObject> J;
@@ -334,7 +334,7 @@ TSharedRef<FJsonValue> LLValue(const FVector2D& P)
 }
 
 // contract: write *.tmp, then rename
-bool WriteAtomic(const FString& Path, const FString& Text)
+bool WriteAreaAtomic(const FString& Path, const FString& Text)
 {
 	const FString Tmp = Path + TEXT(".tmp");
 	return FFileHelper::SaveStringToFile(Text, *Tmp, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)
@@ -601,7 +601,7 @@ bool FODAreaDraw::Send(const FVector2D& StartLL, const FString& Key)
 	FJsonSerializer::Serialize(J, TJsonWriterFactory<>::Create(&Text));
 	const FString Path = Root() / TEXT("data/bake/requests") / K + TEXT(".json");
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
-	if (!WriteAtomic(Path, Text) || !RunRunner(FString::Printf(TEXT("--run \"%s\""), *Path)))
+	if (!WriteAreaAtomic(Path, Text) || !RunRunner(FString::Printf(TEXT("--run \"%s\""), *Path)))
 	{
 		Message = TEXT("Couldn't start the bake: is Python on PATH? See the log");
 		return false;
@@ -701,7 +701,7 @@ void FODAreaDraw::LoadUserAreas()
 	AreaZone.Reset();
 	DrawnPolys.Reset();
 	DrawnNames.Reset();
-	const TSharedPtr<FJsonObject> J = ReadJson(Root() / TEXT("data/user_areas.json"));
+	const TSharedPtr<FJsonObject> J = ReadAreaJson(Root() / TEXT("data/user_areas.json"));
 	const TSharedPtr<FJsonObject>* W = nullptr;
 	const TSharedPtr<FJsonObject>* A = nullptr;
 	if (J.IsValid() && J->TryGetObjectField(TEXT("worlds"), W))
@@ -731,7 +731,7 @@ void FODAreaDraw::LoadCoverage()
 {
 	// {"areas": {"<key>": {"name", "drawn", "outline_ll", "tiles": [{"ll": [[lon, lat] x4], "state"}]}}} (build_world_manifest.py)
 	Coverage.Reset();
-	const TSharedPtr<FJsonObject> J = ReadJson(MasksDir() / TEXT("coverage.json"));
+	const TSharedPtr<FJsonObject> J = ReadAreaJson(MasksDir() / TEXT("coverage.json"));
 	const TSharedPtr<FJsonObject>* Areas = nullptr;
 	if (J.IsValid() && J->TryGetObjectField(TEXT("areas"), Areas))
 	{
@@ -793,7 +793,7 @@ void FODAreaDraw::LoadStatus()
 	const FString Was = Status.State;
 	Status = FStatus();
 	CellState.Reset();
-	const TSharedPtr<FJsonObject> J = ReadJson(BakeDir(JobKey) / TEXT("status.json"));
+	const TSharedPtr<FJsonObject> J = ReadAreaJson(BakeDir(JobKey) / TEXT("status.json"));
 	if (!J.IsValid())
 	{
 		Holes.Reset();
