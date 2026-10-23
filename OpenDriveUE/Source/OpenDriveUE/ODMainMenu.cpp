@@ -1,5 +1,4 @@
 #include "ODMainMenu.h"
-#include "ODRoadTrip.h"
 
 #include "AssetRegistry/ARFilter.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -232,7 +231,7 @@ enum ERow : int32
 	RowCar, RowEngine, RowDrivetrain, RowTuning, RowExhaust, RowSound, RowPaint,   // Garage
 	RowLoudness, RowRasp, RowMuffler, RowPop,                            // Sound (from Garage)
 	RowColor, RowFinish, RowPattern, RowAccent, RowRims,   // Paint (from Garage)
-	RowTime, RowSeason, RowWeather, RowDest,                             // Conditions: season before the weather it allows; road trip
+	RowTime, RowSeason, RowWeather,                                      // Conditions: season before the weather it allows
 	RowOpenDrive, RowTrackSelect, RowGarage, RowSettings,                // Main
 	RowDrive, RowBack, RowQuit,                                          // footers
 	RowPick,                                                             // AreaMap: RowPick + i = Picks[i]
@@ -241,7 +240,7 @@ const FODMenuTab MainTabs[] = {{TEXT("MAIN"), RowOpenDrive, 4}};          // foo
 const FODMenuTab GarageTabs[] = {{TEXT("GARAGE"), RowCar, 7}};            // footer Back
 const FODMenuTab SoundTabs[] = {{TEXT("SOUND"), RowLoudness, 4}};         // footer Back
 const FODMenuTab PaintTabs[] = {{TEXT("PAINT"), RowColor, 5}};            // footer Back
-const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 4}};   // Start screen, footer Drive
+const FODMenuTab ConditionsTabs[] = {{TEXT("CONDITIONS"), RowTime, 3}};   // Start screen, footer Drive
 // globe pins: areas whose centres are closer than this (deg) share one pin,
 // and the AreaMap screen gets a tab per area (green_valley / oahu / ...)
 constexpr double ClusterDeg = 0.5;
@@ -999,7 +998,6 @@ void AODMainMenu::Activate()
 			{
 				TownPick = Picks[Pick].Town;     // one of the two is always empty:
 				TrackPick = Picks[Pick].Track;   // Open Drive is free roam, a track starts at its line
-				DestPick = INDEX_NONE;
 				ShowStartVista(AreaIdx);   // no-op when preloaded; the globe holds until it streams (Tick)
 				AreaEnterTime = GetWorld()->GetRealTimeSeconds();   // the cap counts from here, reused set or not
 				SetScreen(EODMenuScreen::Start, RowDrive);
@@ -1570,10 +1568,6 @@ void AODMainMenu::DriveGo()
 	}
 	ApplyTrack();
 	StartAtTown(TownPick);
-	if (const FODMenuPick* Dest = TripDest())
-	{
-		GetWorld()->SpawnActor<AODRoadTrip>()->Dest = Dest->Pos;   // same as ?oddest=, this level
-	}
 }
 
 void AODMainMenu::StartAtTown(const FString& Town)
@@ -1802,17 +1796,6 @@ void AODMainMenu::Adjust(int32 Dir)
 		ApplyTimeOfDay();
 		GConfig->SetInt(TimeConfigSection, TEXT("TimeIdx"), TimeIdx, GGameUserSettingsIni);
 		GConfig->Flush(false, GGameUserSettingsIni);
-		break;
-	case RowDest:
-		// road trip (2026-10-22): free roam, then each other named turnout (towns only, v1)
-		for (int32 n = 0; n <= Picks.Num() && TrackPick.IsEmpty(); ++n)
-		{
-			DestPick = (DestPick + 1 + Dir + Picks.Num() + 1) % (Picks.Num() + 1) - 1;
-			if (DestPick == INDEX_NONE || (Picks[DestPick].bHasPos && !Picks[DestPick].Town.IsEmpty() && Picks[DestPick].Town != TownPick))
-			{
-				break;
-			}
-		}
 		break;
 	case RowWeather:
 		// only states the active climate can produce (2026-10-05) in the picked
@@ -2270,10 +2253,6 @@ void AODMainMenu::OpenArea()
 		Weather && WeatherIdx == 0 && VistaArea != INDEX_NONE)
 	{
 		Options += FString::Printf(TEXT("?odweather=%d"), (int32)Weather->State);   // StartAtTown resumes Auto from it
-	}
-	if (const FODMenuPick* Dest = TripDest())
-	{
-		Options += FString::Printf(TEXT("?oddest=%.0f,%.0f"), Dest->Pos.X, Dest->Pos.Y);   // AODGameMode -> AODRoadTrip
 	}
 	UE_LOG(LogTemp, Display, TEXT("ODMainMenu: Area -> %s (%s)"), *AreaLevels[AreaIdx], *Options);
 	UGameplayStatics::OpenLevel(this, FName(*AreaLevels[AreaIdx]), true, Options);
@@ -2801,10 +2780,6 @@ void AODMainMenu::GetRow(int32 Row, FString& OutLabel, FString& OutValue) const
 	case RowWeather:
 		OutLabel = TEXT("Weather");
 		OutValue = FName::NameToDisplayString(WeatherNames[WeatherIdx], false);   // "HeavyRain" -> "Heavy Rain"
-		break;
-	case RowDest:
-		OutLabel = TEXT("Destination");
-		OutValue = !TrackPick.IsEmpty() ? TEXT("-") : Picks.IsValidIndex(DestPick) ? Picks[DestPick].Label : TEXT("Free Roam");
 		break;
 	case RowOpenDrive:
 		OutLabel = TEXT("Open Drive");

@@ -2325,19 +2325,35 @@ void AODRaceHUD::DrawWorldMap(AODRoadManager* MapTexMgr, const TArray<FVector2D>
 			return;
 		}
 		const int32 T = TownNear(S, 18.0f);
-		FVector2D Snap;
-		FString LandmarkName;
+		FVector2D Dest;
+		FString Name;
 		const AODChallengeManager* Challenges = AODChallengeManager::Find(GetWorld());
-		const bool bOk = Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Snap, LandmarkName)
-			? RoadMgr->SetRouteDestination(Snap, LandmarkName)
-			: T != INDEX_NONE
-			? RoadMgr->SetRouteDestination(Towns[T].Pos, Towns[T].Name)
-			: RoadMgr->SnapToRouteGraph(ToWorld(S), Snap)
-				&& RoadMgr->SetRouteDestination(Snap, TEXT("Waypoint"));
-		if (!bOk)
+		if (Challenges && Challenges->LandmarkNear(ToWorld(S), 18.0f / Scale(), Dest, Name))
+		{
+			// Dest + Name set: the landmark's snapped road point
+		}
+		else if (T != INDEX_NONE)
+		{
+			Dest = Towns[T].Pos;
+			Name = Towns[T].Name;
+		}
+		else if (RoadMgr->SnapToRouteGraph(ToWorld(S), Dest))
+		{
+			Name = TEXT("Waypoint");
+		}
+		if (Name.IsEmpty() || !RoadMgr->SetRouteDestination(Dest, Name))
 		{
 			NoRouteMsgTime = RealNow;
+			return;
 		}
+		// every map route is a road trip (2026-10-22): start banner + arrival card
+		for (TActorIterator<AODRoadTrip> It(GetWorld()); It; ++It)
+		{
+			It->Destroy();
+		}
+		AODRoadTrip* Trip = GetWorld()->SpawnActor<AODRoadTrip>();
+		Trip->Dest = Dest;
+		Trip->DestName = Name;
 	};
 
 	// ---- input (polled; the game is paused, so only this map reads it).

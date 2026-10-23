@@ -5,10 +5,11 @@
 #include "ODRoadTrip.generated.h"
 
 /**
- * Road trip mode (2026-10-22, fun feature #6): the main menu's Start screen
- * "Destination" pick rides OpenArea()'s travel URL as ?oddest=<x>,<y> (area-local
- * cm). AODGameMode spawns one of these; once the route graph is loaded and the
- * menu has started the drive, it routes there (AODRoadManager::SetRouteDestination),
+ * Road trip mode (2026-10-22, fun feature #6): picking a destination on the
+ * in-game world map (Tab) spawns one of these with Dest + DestName preset; a
+ * ?oddest=<x>,<y> URL option (area-local cm, used by -odtripcheck) makes
+ * AODGameMode spawn one too. Once the route graph is loaded and the menu has
+ * started the drive, it routes there (AODRoadManager::SetRouteDestination),
  * shows a start banner, tracks the trip and shows an arrival card.
  *
  * Headless self-check: -odtripcheck logs "ODRoadTrip: SELFCHECK PASS/FAIL ..."

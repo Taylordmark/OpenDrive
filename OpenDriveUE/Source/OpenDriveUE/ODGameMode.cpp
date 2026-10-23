@@ -122,8 +122,8 @@ void AODGameMode::BeginPlay()
 	EnsureAmbientSoundManager();
 	LoadWorldManifest();
 
-	// road trip (2026-10-22): ?oddest=<x>,<y> from the menu's Destination pick;
-	// the trip routes there itself once the graph is loaded and the drive started
+	// road trip (2026-10-22): ?oddest=<x>,<y> (the -odtripcheck self-check; players
+	// pick on the world map); the trip routes there once the graph is loaded and the drive started
 	FVector2D Dest;
 	if (const TCHAR* D = GetWorld() ? GetWorld()->URL.GetOption(TEXT("oddest="), nullptr) : nullptr; D && AODRoadTrip::ParseDest(D, Dest))
 	{
