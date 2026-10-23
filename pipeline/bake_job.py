@@ -97,6 +97,23 @@ def in_outline(east_m, north_m):
     return shapely.contains_xy(poly, e, n)
 
 
+def outline_tiles(tile_cm):
+    """(tx, ty) of every UE tile of side tile_cm that overlaps the drawn
+    outline - the terrain tiles the pass-2 jobs bake (build_terrain_mesh_tiles
+    tile_touches_outline) - or None for a hand area. Known in pass 1, before
+    any terrain tile exists."""
+    poly = outline_local()
+    if poly is None:
+        return None
+    import math
+    import shapely
+    t = tile_cm / 100.0
+    e0, n0, e1, n1 = poly.bounds
+    return [(tx, ty) for tx in range(math.floor(e0 / t) - 1, math.floor(e1 / t) + 1)
+            for ty in range(math.floor(-n1 / t) - 1, math.floor(-n0 / t) + 1)
+            if poly.intersects(shapely.box(tx * t, -(ty + 1) * t, (tx + 1) * t, -ty * t))]
+
+
 def outline_sdf_m(east_m, north_m):
     """Signed distance (m) to the drawn outline, + inside, - outside."""
     import shapely
