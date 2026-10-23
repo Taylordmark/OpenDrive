@@ -5,7 +5,6 @@
 #include "Components/InputComponent.h"
 #include "Dom/JsonObject.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "DrawDebugHelpers.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -16,6 +15,7 @@
 #include "Misc/ScopeExit.h"
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
+#include "ODMarkers.h"
 #include "ODRoadManager.h"
 #include "ODVehicleDef.h"
 #include "ODVehiclePawn.h"
@@ -229,6 +229,14 @@ void AODRaceManager::BeginPlay()
 	{
 		LoadCenterline();
 	}
+	// a gantry on every gate: start green, finish blue, the rest yellow
+	if (Checkpoints.Num() >= 2)
+	{
+		const TArrayView<const FTransform> G(Checkpoints);
+		ODMarkers::AddGantries(this, G.Left(1), FLinearColor::Green, GateRadius * 0.5f);
+		ODMarkers::AddGantries(this, G.Slice(1, G.Num() - 2), FLinearColor::Yellow, GateRadius * 0.5f);
+		ODMarkers::AddGantries(this, G.Right(1), FLinearColor::Blue, GateRadius * 0.5f);
+	}
 
 	if (const UODRaceSave* Save = Cast<UODRaceSave>(
 			UGameplayStatics::LoadGameFromSlot(SaveSlot(), 0)))
@@ -350,13 +358,6 @@ void AODRaceManager::Tick(float DeltaSeconds)
 	}
 
 	const FVector Gate = Checkpoints[NextGate].GetLocation();
-
-	// visible marker on the next gate
-	DrawDebugCylinder(GetWorld(), Gate - FVector(0, 0, 100),
-		Gate + FVector(0, 0, 700), GateRadius * 0.5f, 20,
-		NextGate == 0 ? FColor::Green
-		: (NextGate == Checkpoints.Num() - 1 ? FColor::Blue : FColor::Yellow),
-		false, -1.0f, 0, 12.0f);
 
 	if (FVector::Dist2D(Pos, Gate) > GateRadius)
 	{

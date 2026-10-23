@@ -1,10 +1,10 @@
 #include "ODChallengeManager.h"
 #include "CanvasItem.h"
 #include "Dom/JsonObject.h"
-#include "DrawDebugHelpers.h"
 #include "Engine/Canvas.h"
 #include "EngineUtils.h"
 #include "GlobalRenderResources.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -12,6 +12,7 @@
 #include "Misc/ScopeExit.h"
 #include "ODGaugeCluster.h"
 #include "ODHudStyle.h"
+#include "ODMarkers.h"
 #include "ODRoadManager.h"
 #include "ODTileSource.h"
 #include "ODVehicleMovement.h"
@@ -24,7 +25,8 @@ namespace
 	using ODHud::EMenuWeight;
 
 	constexpr float GateHalfWidthCm = 1500.0f;    // a crossing counts this far either side of the road point
-	constexpr float MarkerRangeCm = 150000.0f;    // markers drawn within 1.5 km
+	constexpr float MarkerRangeCm = 150000.0f;    // markers culled past 1.5 km
+	constexpr float MarkerHalfWidthCm = 700.0f;   // a 14 m gantry
 	constexpr float DiscoverPadCm = 15000.0f;     // landmark found within its radius + 150 m
 	constexpr float ZoneMinAvgCmS = 500.0f;       // a zone run slower than 5 m/s on average is dropped
 	constexpr double ToastSeconds = 4.5;
@@ -106,6 +108,22 @@ void AODChallengeManager::BeginPlay()
 	{
 		Progress = Cast<UODAreaSave>(UGameplayStatics::CreateSaveGameObject(UODAreaSave::StaticClass()));
 	}
+	auto Gate = [](const FVector& At, const FVector2D& Dir)
+	{
+		return FTransform(FRotator(0.0, FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X)), 0.0), At);
+	};
+	TArray<FTransform> TrapGates, ZoneGates;
+	for (const FTrap& Trap : Traps)
+	{
+		TrapGates.Add(Gate(Trap.Pos, Trap.Dir));
+	}
+	for (const FZone& Z : Zones)
+	{
+		ZoneGates.Add(Gate(Z.Line[0], Z.StartDir));
+		ZoneGates.Add(Gate(Z.Line.Last(), Z.EndDir));
+	}
+	ODMarkers::AddGantries(this, TrapGates, TrapCol, MarkerHalfWidthCm, MarkerRangeCm);
+	ODMarkers::AddGantries(this, ZoneGates, ZoneCol, MarkerHalfWidthCm, MarkerRangeCm);
 	UE_LOG(LogTemp, Log, TEXT("ODChallengeManager: %s - %d trap(s), %d zone(s), %d landmark(s), %d discovered"),
 		*AreaKey, Traps.Num(), Zones.Num(), Landmarks.Num(), Progress->Discovered.Num());
 }
@@ -218,14 +236,6 @@ void AODChallengeManager::Tick(float DeltaSeconds)
 	// ---- speed traps: speed at the sub-frame crossing, either direction
 	for (const FTrap& Trap : Traps)
 	{
-		if (FVector::DistSquared2D(Pos, Trap.Pos) > FMath::Square(MarkerRangeCm))
-		{
-			continue;
-		}
-		// ponytail: debug-draw markers, like AODRaceManager's gates (stripped
-		// in Shipping) - a mesh post when the race gates get one
-		DrawDebugCylinder(GetWorld(), Trap.Pos - FVector(0, 0, 100), Trap.Pos + FVector(0, 0, 700),
-			600.0f, 20, TrapCol.ToFColor(true), false, -1.0f, 0, 10.0f);
 		if (GateCross(PrevPos, Pos, Trap.Pos, Trap.Dir, GateHalfWidthCm, T))
 		{
 			const float Kmh = FMath::Lerp(PrevSpeed, Speed, float(T)) * 0.036f;
@@ -247,14 +257,6 @@ void AODChallengeManager::Tick(float DeltaSeconds)
 	for (int32 i = 0; i < Zones.Num(); ++i)
 	{
 		const FZone& Z = Zones[i];
-		for (const FVector& G : {Z.Line[0], Z.Line.Last()})
-		{
-			if (FVector::DistSquared2D(Pos, G) < FMath::Square(MarkerRangeCm))
-			{
-				DrawDebugCylinder(GetWorld(), G - FVector(0, 0, 100), G + FVector(0, 0, 700),
-					600.0f, 20, ZoneCol.ToFColor(true), false, -1.0f, 0, 10.0f);
-			}
-		}
 		double T0 = 0.0, T1 = 0.0;
 		const int32 C0 = GateCross(PrevPos, Pos, Z.Line[0], Z.StartDir, GateHalfWidthCm, T0);
 		const int32 C1 = GateCross(PrevPos, Pos, Z.Line.Last(), Z.EndDir, GateHalfWidthCm, T1);
@@ -492,5 +494,57 @@ bool FODChallengeCrossing::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("zone at 1/%.0f: %.4f km/h"), 1.0 / Step, Kmh));
 		TestTrue(TEXT("zone average 90 km/h"), FMath::Abs(Kmh - 90.0) < 1e-3);
 	}
+	return true;
+}
+
+// ---- headless: Automation RunTests OpenDrive.Challenges.Markers - the gantry
+// ISMs for an area: 3 instances per trap, 6 per zone (needs its sidecar in Masks)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FODChallengeMarkers, "OpenDrive.Challenges.Markers",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FODChallengeMarkers::RunTest(const FString& Parameters)
+{
+	const FString Area = TEXT("green_valley");
+	FString Text;
+	TSharedPtr<FJsonObject> Root;
+	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir()
+		/ FString::Printf(TEXT("OpenDrive/Masks/challenges_%s_test.json"), *Area));
+	if (!FFileHelper::LoadFileToString(Text, *Path) || !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Root))
+	{
+		AddError(TEXT("no sidecar: ") + Path);
+		return false;
+	}
+	const int32 NumTraps = Root->GetArrayField(TEXT("traps")).Num(), NumZones = Root->GetArrayField(TEXT("zones")).Num();
+
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
+	FWorldContext& Ctx = GEngine->CreateNewWorldContext(EWorldType::Game);
+	Ctx.SetCurrentWorld(World);
+	World->InitializeActorsForPlay(FURL());
+	World->BeginPlay();
+	AODChallengeManager* M = World->SpawnActorDeferred<AODChallengeManager>(
+		AODChallengeManager::StaticClass(), FTransform::Identity);
+	M->AreaKey = Area;
+	M->FinishSpawning(FTransform::Identity);
+	if (!M->HasActorBegunPlay())
+	{
+		M->DispatchBeginPlay();   // a bare test world has no game mode to start play
+	}
+	TArray<UInstancedStaticMeshComponent*> Isms;
+	M->GetComponents(Isms);
+	AddInfo(FString::Printf(TEXT("%s: %d trap(s), %d zone(s), %d ISM(s)"), *Area, NumTraps, NumZones, Isms.Num()));
+	if (TestEqual(TEXT("one ISM for traps, one for zone gates"), Isms.Num(), 2))
+	{
+		TestEqual(TEXT("trap gantries"), Isms[0]->GetInstanceCount(), 3 * NumTraps);
+		TestEqual(TEXT("zone gantries"), Isms[1]->GetInstanceCount(), 6 * NumZones);
+		for (const UInstancedStaticMeshComponent* I : Isms)
+		{
+			TestTrue(TEXT("has a mesh and material"), I->GetStaticMesh() && I->GetMaterial(0));
+			TestEqual(TEXT("culled at 1.5 km"), I->InstanceEndCullDistance, int32(MarkerRangeCm));
+			TestEqual(TEXT("no collision"), I->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+		}
+	}
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
 	return true;
 }
