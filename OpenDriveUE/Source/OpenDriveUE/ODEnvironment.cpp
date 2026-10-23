@@ -23,15 +23,15 @@ T* Find(const UWorld* World)
 	return nullptr;
 }
 
-// CycleSeconds = real seconds per 24 h; 3600 is AODDayNightController's default
+// CycleSeconds = real seconds per 24 h; 14400 (1 h per 10 min) is AODDayNightController's default
 struct FSpeed
 {
 	const TCHAR* Name;
 	float CycleSeconds;
 };
 const FSpeed Speeds[] = {
-	{TEXT("Frozen"), 0.0f}, {TEXT("Real time"), 86400.0f}, {TEXT("1 h per min"), 1440.0f},
-	{TEXT("Default"), 3600.0f}, {TEXT("Time-lapse"), 60.0f},
+	{TEXT("Frozen"), 0.0f}, {TEXT("Real time"), 86400.0f}, {TEXT("Default"), 14400.0f},
+	{TEXT("1 h per min"), 1440.0f}, {TEXT("Time-lapse"), 60.0f},
 };
 constexpr int32 NumSpeeds = UE_ARRAY_COUNT(Speeds);
 

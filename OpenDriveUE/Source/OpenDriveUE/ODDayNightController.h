@@ -26,9 +26,9 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 
-	/** Real seconds for a full 24h cycle (default 1 hour). */
+	/** Real seconds for a full 24h cycle (default 4 h: 1 game hour per 10 real minutes). */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
-	float CycleSeconds = 3600.0f;
+	float CycleSeconds = 14400.0f;
 
 	/** Clock time at level start, hours [0-24). */
 	UPROPERTY(EditAnywhere, Category = "DayNight")
