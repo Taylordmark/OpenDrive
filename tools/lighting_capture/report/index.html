@@ -287,6 +287,26 @@ code { font-family: var(--mono); font-size: .86em; }
 </section>
 
 <section class="find">
+  <div class="rank">2026-10-22</div>
+  <h2>Exposure, sky altitude and cloud shadows: built, not yet seen</h2>
+  <p>Three commits on <code>claude/wheel-ffb-e4d93a</code>, each checked against the engine source and compiled clean. No captures were run.</p>
+  <div class="tbl"><table>
+    <tr><th>Gap</th><th>Change</th><th>Expected</th><th>GPU</th></tr>
+    <tr><td>7A</td><td>Exposure bias −1 → −0.5 EV. After the toe ramp, noon metered 90 against the photo's 109, about 0.6 EV.</td><td>Every scene about ½ stop brighter: shade lifts, the sky brightens a little.</td><td class="n">0</td></tr>
+    <tr><td>7B</td><td>The planet top sits at the area's sea level (<code>sea_z_cm</code>), not at its datum. The cloud base rises by the same amount. The Mie scale height stretches so the datum keeps ⅓ of its haze.</td><td>Summit and Breckenridge get a deeper, more saturated zenith (35 % less Rayleigh overhead) and somewhat crisper far ridges. Sea-level areas are unchanged.</td><td class="n">0</td></tr>
+    <tr><td>2C</td><td>The sun casts the volumetric cloud shadow map: 512², over 40 km, at half the march samples.</td><td>Soft cloud shadows drifting over terrain and road. Sun shafts may appear in the haze.</td><td class="n">~0.3–0.6 ms est., ~4 MB</td></tr>
+  </table></div>
+  <h3>In-game checks</h3>
+  <ol>
+    <li><b>Summit noon, clear:</b> the zenith should be deep blue, closer to the Breckenridge photo's (29,144,210) than the old (69,106,148). Far ridges should keep some blue-grey haze. If they read too crisp or too dark, compare against the old sky with <code>od.SkyAltScale 0</code>. The ODAtmo log line should show <code>planet top z -343530</code> at Summit and <code>0</code> at Tail of the Dragon.</li>
+    <li><b>Summit, partly cloudy:</b> the clouds should still sit about 2 km above the valley, not on the peaks or out of sight.</li>
+    <li><b>Any area, partly cloudy, sun above about 30°:</b> soft dark patches should drift across the ground and the car. To cost it, toggle <code>od.CloudShadows 0</code>/<code>1</code> and read <code>stat gpu</code> or the ODPerf line. Expect under 1 ms. If the patches don't move, the cloud material's wind is off.</li>
+    <li><b>Gasquet noon and 17:30:</b> the forest shade should be about ½ stop brighter, with the sunlit road not clipping. At 08:00, check that the clipped road (9 % ≥250 before) hasn't got worse.</li>
+    <li><b>Night:</b> no glare from the brighter exposure. The toe ramp still holds the blacks.</li>
+  </ol>
+</section>
+
+<section class="find">
   <h3>Out of scope, seen in passing</h3>
   <ul>
     <li><b>SF Russian Hill shows no buildings</b> near Hyde St, though ODBuildingManager logs <span class="nums">placed=983, minDeltaCm=-9380</span> (sunk ~94 m?). See <code>sf_h12_clear.png</code>.</li>
