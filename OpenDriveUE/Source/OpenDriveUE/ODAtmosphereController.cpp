@@ -96,8 +96,10 @@ const FLinearColor WarmSkyLightColor(1.0f, 0.8f, 0.6f);
 TAutoConsoleVariable<float> CVarSkyWarm(TEXT("od.SkyWarm"), 0.0f, TEXT("Sky light colour, 0 = white .. 1 = warm."));
 
 // ---- Exposure (2026-10-16 lighting audit, Gaps 1/7) ----
-// Was -1: frames ran ~2/3 stop darker than the reference photos.
-constexpr float AutoExposureBiasEV = -1.0f;
+// Was -1 until 2026-10-22: after the toe ramp, Gasquet noon still metered a
+// mean of 90 vs the reference photo's 109 (x1.21 display = ~x1.5 linear,
+// ~0.6 EV). -0.5 takes ~0.5 EV of that and keeps highlight headroom.
+constexpr float AutoExposureBiasEV = -0.5f;
 // Local exposure: compresses sun vs canopy shade the way a camera's HDR does
 // (1 = off). Forest shade sat 14+ stops under the sunlit road and crushed to 0.
 constexpr float LocalShadowContrast = 0.5f;
@@ -492,7 +494,7 @@ void AODAtmosphereController::SpawnGradeVolume()
 	// is an exposure/grade issue, not a material-graph or vertex-color one).
 	// Restored to match that proven value rather than re-derived from
 	// scratch, then confirmed by re-render at all three §7.15 vantages.
-	// 2026-10-16: eased to -0.5 (AutoExposureBiasEV) - the lighting audit
+	// 2026-10-22: eased to AutoExposureBiasEV (-0.5) - the lighting audit
 	// found frames ~2/3 stop darker than reference photos of the same places.
 	S.bOverride_AutoExposureBias = true;
 	S.AutoExposureBias = AutoExposureBiasEV;
