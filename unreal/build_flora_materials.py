@@ -595,8 +595,13 @@ must_connect_property(snowed_base_color, "", unreal.MaterialProperty.MP_BASE_COL
 # "still plain green" at driving distance even where BaseColor itself was
 # heavily blended toward snow_color. Fade it toward a pale winter subsurface
 # tint on the same snow_amount curve so backlit needles read frosted too.
+# 2026-10-22: the pale tint (0.75, 0.80, 0.86) was the snow-card glow - a
+# backlit snowy card transmitted ~80% of the sun on top of its 0.92 front
+# diffuse, so snowed trees and grass tufts lit up like lamps. Snow is opaque:
+# fade the transmission to a dim neutral instead (same idea as
+# build_ground_cover_real.py's snow subsurface).
 snow_subsurface_color = MEL.create_material_expression(m_fol, unreal.MaterialExpressionConstant3Vector, -400, 500)
-snow_subsurface_color.set_editor_property("constant", unreal.LinearColor(0.75, 0.80, 0.86, 1.0))
+snow_subsurface_color.set_editor_property("constant", unreal.LinearColor(0.06, 0.06, 0.07, 1.0))
 snowed_subsurface = MEL.create_material_expression(m_fol, unreal.MaterialExpressionLinearInterpolate, -200, 450)
 if not MEL.connect_material_expressions(sss, "", snowed_subsurface, "A"):
     raise RuntimeError("could not connect base subsurface color -> canopy-snow-subsurface Lerp.A")
