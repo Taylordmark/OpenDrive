@@ -100,6 +100,17 @@ struct FBiomeRecipe
 	float AmbientVegFloor = 0.f;
 };
 
+/** One area's worker-built T (AODForestManager::PrewarmArea), defined in
+ *  ODForestManager.cpp. Game thread only. */
+template <typename T>
+struct TODAreaCache
+{
+	FString Key;   // prefix + ODBakeLink status version: a drawn area's re-bake misses
+	UE::Tasks::TTask<TSharedPtr<const T>> Task;
+	bool Prewarm(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&));   // true once built
+	TSharedPtr<const T> Get(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&), const TCHAR* What);   // waits, logs
+};
+
 /**
  * Runtime forest (replaces landscape-grass trees, 2026-07-15): deterministic
  * seeded scatter of trees + understory bushes on 96 m tiles around the player,
@@ -491,12 +502,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Forest")
 	FString WaterTilePrefix;
 
-	/** Game thread (2026-10-22): start building WaterPrefix's lakes on a
-	 *  worker, so the vista's and then the level's forest manager both pick
-	 *  them up instead of each spending 1-5 s on 518 tile files in
-	 *  BeginPlay. Holds one area: another prefix drops the old one. True
-	 *  once built; call again to poll. */
-	static bool PrewarmLakes(const FString& WaterPrefix);
+	/** Game thread (2026-10-22): start building an area's lakes (WaterPrefix),
+	 *  elevation grid and far-forest index (ElevPrefix, elev_<area>_test) on
+	 *  workers, so the vista's and then the level's forest manager both pick
+	 *  them up instead of each spending 1-5 s in BeginPlay (livetest7: lakes
+	 *  4.7 s, 518 files; elevation 0.27 s, 1.65M points; far forest 0.22 s).
+	 *  Holds one area: another prefix drops the old one. True once built;
+	 *  call again to poll. */
+	static bool PrewarmArea(const FString& WaterPrefix, const FString& ElevPrefix);
 
 	// --- trunk collision (moved from the retired ODForestCollisionManager) ---
 	UPROPERTY(EditAnywhere, Category = "Collision")
@@ -620,6 +633,15 @@ private:
 	UStaticMesh* MakeCardMesh(int32 AtlasRow, int32 AtlasCol);
 	TUniquePtr<IFileHandle> FarFile;
 	TMap<FIntPoint, TPair<int64, int32>> FarTileRecs;   // 2 km tile -> (record byte offset, count)
+	/** farforest_*.bin's tile index, scanned on a worker (PrewarmArea). */
+	struct FFarIndex
+	{
+		FString Path;
+		TMap<FIntPoint, TPair<int64, int32>> TileRecs;
+		int64 NRecs = 0, Size = 0;
+	};
+	static TSharedPtr<const FFarIndex> LoadFarIndex(const FString& ElevPrefix);   // any thread, null when none
+	static TODAreaCache<FFarIndex>& FarCache();
 	TMap<FIntPoint, FFarChunk> FarChunks;
 	UPROPERTY()
 	TArray<TObjectPtr<UStaticMesh>> CardMeshes;   // [0] needle (pine cell), [1] broadleaf (aspen cell)
@@ -795,16 +817,24 @@ private:
 		FVector2D WorldXY;   // cm
 		float Z = 0.0f;      // cm
 	};
-	TArray<FGroundPoint> ElevationGrid;
-	TMap<FIntPoint, TArray<int32>> ElevationBuckets;
+	/** Built on a worker, shared read-only (2026-10-22, PrewarmArea). The
+	 *  vista keeps the whole grid now (was its wedge only): Vista.WantsTile
+	 *  already limits what it plants. */
+	struct FElevData
+	{
+		TArray<FGroundPoint> Grid;
+		TMap<FIntPoint, TArray<int32>> Buckets;
+		// XY bounds of Grid (2026-10-05, large world): Tick() skips tiles
+		// outside it, so two area sets' forest managers don't both plant every
+		// tile (BlendAt falls back to DefaultBiome, it never says "not mine").
+		// ponytail: AABB only - neighbouring areas still double-plant where their
+		// boxes overlap; switch to the area's own rect from worlds.json if visible.
+		FBox2D Bounds = FBox2D(ForceInit);
+	};
+	TSharedPtr<const FElevData> Elev;
+	static TSharedPtr<const FElevData> LoadElevation(const FString& ElevPrefix);   // any thread, null when none
 	bool bUseElevationGrid = false;
 	static constexpr float ElevationCellCm = 6000.0f;   // 60 m, > the grid's own ~30 m spacing
-	// XY bounds of ElevationGrid (2026-10-05, large world): Tick() skips tiles
-	// outside it, so two area sets' forest managers don't both plant every
-	// tile (BlendAt falls back to DefaultBiome, it never says "not mine").
-	// ponytail: AABB only - neighbouring areas still double-plant where their
-	// boxes overlap; switch to the area's own rect from worlds.json if visible.
-	FBox2D ElevationBounds = FBox2D(ForceInit);
 
 	TArray<FVector2D> RoadCenterline;
 	TMap<FIntPoint, TArray<int32>> CenterlineBuckets;
@@ -841,7 +871,7 @@ private:
 	struct FLakeSeg { int32 Ring; int32 I; };
 	static constexpr double LakeGridCellCm = 5000.0;
 	/** Plain data, built on a worker and shared read-only by every forest
-	 *  manager of the area (2026-10-22, LoadLakes/PrewarmLakes). */
+	 *  manager of the area (2026-10-22, LoadLakes/PrewarmArea). */
 	struct FLakeData
 	{
 		TArray<FLakeRing> Rings;
@@ -853,12 +883,8 @@ private:
 	};
 	TSharedPtr<const FLakeData> Lakes;
 	static TSharedPtr<const FLakeData> LoadLakes(const FString& WaterPrefix);   // any thread, null when none
-	struct FLakeCache
-	{
-		FString Key;   // prefix + ODBakeLink status version: a drawn area's re-bake misses
-		UE::Tasks::TTask<TSharedPtr<const FLakeData>> Task;
-	};
-	static FLakeCache& LakeCache();
+	static TODAreaCache<FLakeData>& LakeCache();
+	static TODAreaCache<FElevData>& ElevCache();
 	bool bUseWaterExclusion = false;
 
 	// Road-station exclusion (2026-08-26) - see RoadStationFilePrefix's
@@ -973,6 +999,8 @@ private:
 	// a modest fraction here reliably catches "this tile ran way too early".
 	static constexpr float TileRetryDeferralRatio = 0.5f;
 	static constexpr double TileBuildGiveUpAfterSec = 10.0;
+	// candidates a retry looks at before deciding to wait (see BuildTile)
+	static constexpr int32 TileProbeAttempts = 24;
 	mutable int32 TileRetryCount = 0;
 	mutable int32 TileGiveUpCount = 0;
 

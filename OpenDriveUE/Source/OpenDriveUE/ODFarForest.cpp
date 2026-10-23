@@ -99,42 +99,70 @@ bool AODForestManager::LoadFarForest()
 	{
 		return false;
 	}
-	const FString Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
-		/ (TEXT("farforest_") + ElevationFilePrefix.Mid(5) + TEXT(".bin")));
-	// Only the per-tile index stays in memory; BuildFarChunk reads a tile's
-	// records on demand (Summit County's file is ~50 MB).
-	FarFile.Reset(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*Path));
-	uint8 Head[12];
-	if (!FarFile || !FarFile->Read(Head, 8) || FMemory::Memcmp(Head, "ODF1", 4) != 0)
+	const TSharedPtr<const FFarIndex> Index = FarCache().Get(ElevationFilePrefix, &LoadFarIndex, TEXT("far forest index"));
+	if (!Index.IsValid())
 	{
-		FarFile.Reset();
 		return false;
 	}
-	const int64 Size = FarFile->Size();
-	int64 Off = 8, NRecs = 0;
+	// Only the per-tile index stays in memory; BuildFarChunk reads a tile's
+	// records on demand (Summit County's file is ~50 MB).
+	FarFile.Reset(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*Index->Path));
+	if (!FarFile)
+	{
+		return false;
+	}
+	FarTileRecs = Index->TileRecs;   // ~1.2k entries
+	const double T0 = FPlatformTime::Seconds();
+	CardMeshes = {MakeCardMesh(0, 0), MakeCardMesh(1, 0)};   // flora_common: pine_needle, aspen_leaf
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: far forest %s - %d tile(s), %lld record(s), %.1f MB on disk, card meshes %.1f ms"),
+		*Index->Path, FarTileRecs.Num(), Index->NRecs, Index->Size / 1.0e6, (FPlatformTime::Seconds() - T0) * 1000.0);
+	return true;
+}
+
+TSharedPtr<const AODForestManager::FFarIndex> AODForestManager::LoadFarIndex(const FString& ElevPrefix)
+{
+	if (!ElevPrefix.StartsWith(TEXT("elev_")))
+	{
+		return nullptr;
+	}
+	const double T0 = FPlatformTime::Seconds();
+	const TSharedRef<FFarIndex> D = MakeShared<FFarIndex>();
+	D->Path = ODTileSource::Fetch(FPaths::ProjectContentDir() / TEXT("OpenDrive/Masks")
+		/ (TEXT("farforest_") + ElevPrefix.Mid(5) + TEXT(".bin")));
+	TUniquePtr<IFileHandle> File(FPlatformFileManager::Get().GetPlatformFile().OpenRead(*D->Path));
+	uint8 Head[12];
+	if (!File || !File->Read(Head, 8) || FMemory::Memcmp(Head, "ODF1", 4) != 0)
+	{
+		return nullptr;
+	}
+	D->Size = File->Size();
+	int64 Off = 8;
 	const uint32 NTiles = *(const uint32*)(Head + 4);
-	for (uint32 t = 0; t < NTiles && Off + 12 <= Size; ++t)
+	for (uint32 t = 0; t < NTiles && Off + 12 <= D->Size; ++t)
 	{
 		int32 Tx, Ty; uint32 N;
-		FarFile->Seek(Off);
-		FarFile->Read(Head, 12);
+		File->Seek(Off);
+		File->Read(Head, 12);
 		FMemory::Memcpy(&Tx, Head, 4);
 		FMemory::Memcpy(&Ty, Head + 4, 4);
 		FMemory::Memcpy(&N, Head + 8, 4);
 		Off += 12;
-		if (Off + (int64)N * FarRecBytes > Size)
+		if (Off + (int64)N * FarRecBytes > D->Size)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("ODForestManager: %s truncated at tile %d"), *Path, t);
+			UE_LOG(LogTemp, Warning, TEXT("ODForestManager: %s truncated at tile %d"), *D->Path, t);
 			break;
 		}
-		FarTileRecs.Add(FIntPoint(Tx, Ty), TPair<int64, int32>(Off, (int32)N));
+		D->TileRecs.Add(FIntPoint(Tx, Ty), TPair<int64, int32>(Off, (int32)N));
 		Off += (int64)N * FarRecBytes;
-		NRecs += N;
+		D->NRecs += N;
 	}
-	CardMeshes = {MakeCardMesh(0, 0), MakeCardMesh(1, 0)};   // flora_common: pine_needle, aspen_leaf
-	UE_LOG(LogTemp, Display, TEXT("ODForestManager: far forest %s - %d tile(s), %lld record(s), %.1f MB on disk"),
-		*Path, FarTileRecs.Num(), NRecs, Size / 1.0e6);
-	return FarTileRecs.Num() > 0;
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: far forest index %s - %d tile(s) in %.0f ms on a worker"),
+		*D->Path, D->TileRecs.Num(), (FPlatformTime::Seconds() - T0) * 1000.0);
+	if (D->TileRecs.Num() == 0)
+	{
+		return nullptr;
+	}
+	return D;
 }
 
 // Three vertical cards 60 deg apart plus a horizontal cap at 55% height (for
