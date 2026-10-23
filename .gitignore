@@ -94,3 +94,5 @@ content_src/realistic/road/*/
 content_src/realistic/terrain/*/
 content_src/realistic/buildings/*/
 content_src/realistic/guardrails/*/
+
+tools/lighting_capture/out/
