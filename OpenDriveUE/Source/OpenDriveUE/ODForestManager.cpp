@@ -229,6 +229,7 @@ const FBiomeRecipe& AODForestManager::RecipeForBiome(EODBiome Biome)
 void AODForestManager::BeginPlay()
 {
 	Super::BeginPlay();
+	const double BeginT0 = FPlatformTime::Seconds();
 
 	// ExtendedTreeMeshPaths, not the shared TreeMeshPaths[3] - see that
 	// array's own comment for why ODForestManager keeps its own superset.
@@ -340,6 +341,7 @@ void AODForestManager::BeginPlay()
 		Pool.Add(Cap);
 	}
 	PoolAt.Init(FVector(UE_BIG_NUMBER), PoolSize);
+	const double AssetsMs = (FPlatformTime::Seconds() - BeginT0) * 1000.0;   // LoadObject + MIDs + pool: game thread by nature
 
 	// ground-truth elevation grid + road centerline (open-world levels,
 	// 2026-07-20) - independent of the biome/mask path below, loaded
@@ -358,6 +360,8 @@ void AODForestManager::BeginPlay()
 	bUsePointBiomes = LoadBiomePoints();
 	bReady = bUsePointBiomes || LoadMask();
 	LoadFarForest();   // realism T3 far canopy cards + street trees (ODFarForest.cpp)
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: BeginPlay %.0f ms on the game thread (assets/pool %.0f ms)"),
+		(FPlatformTime::Seconds() - BeginT0) * 1000.0, AssetsMs);
 	if (!bReady)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -505,15 +509,22 @@ bool AODForestManager::LoadElevationGrid()
 	{
 		return false;   // Tail of the Dragon's actor instance - unaffected
 	}
+	Elev = ElevCache().Get(ElevationFilePrefix, &LoadElevation, TEXT("elevation"));
+	return Elev.IsValid();
+}
+
+TSharedPtr<const AODForestManager::FElevData> AODForestManager::LoadElevation(const FString& ElevPrefix)
+{
+	const double T0 = FPlatformTime::Seconds();
 	// 'ODE1', uint32 LE N, N * (float32 X_cm, float32 Y_cm, float32 Z_cm) -
 	// pipeline/build_forest_elevation.py
 	TArray<uint8> Bin;
 	const FString BinPath = ODTileSource::Fetch(FPaths::ProjectContentDir()
-		/ TEXT("OpenDrive/Masks") / (ElevationFilePrefix + TEXT(".bin")));
+		/ TEXT("OpenDrive/Masks") / (ElevPrefix + TEXT(".bin")));
 	if (!FFileHelper::LoadFileToArray(Bin, *BinPath) || Bin.Num() < 8
 		|| Bin[0] != 'O' || Bin[1] != 'D' || Bin[2] != 'E' || Bin[3] != '1')
 	{
-		return false;
+		return nullptr;
 	}
 	const int32 N = (int32)Bin[4] | (int32)Bin[5] << 8
 		| (int32)Bin[6] << 16 | (int32)Bin[7] << 24;
@@ -523,10 +534,10 @@ bool AODForestManager::LoadElevationGrid()
 		UE_LOG(LogTemp, Warning,
 			TEXT("ODForestManager: %s truncated/corrupt (N=%d, %lld bytes)"),
 			*BinPath, N, Bin.Num());
-		return false;
+		return nullptr;
 	}
-	// menu vista (2026-10-05): keep only the points near the wedge
-	ElevationGrid.Reserve(Vista.bActive ? 0 : N);
+	const TSharedRef<FElevData> D = MakeShared<FElevData>();
+	D->Grid.SetNumUninitialized(N);
 	const uint8* P = Bin.GetData() + 8;
 	for (int32 i = 0; i < N; ++i, P += RecordBytes)
 	{
@@ -534,22 +545,17 @@ bool AODForestManager::LoadElevationGrid()
 		FMemory::Memcpy(&X, P, 4);
 		FMemory::Memcpy(&Y, P + 4, 4);
 		FMemory::Memcpy(&Z, P + 8, 4);
-		if (!Vista.WantsPoint(FVector2D(X, Y), VistaLoadPadCm))
-		{
-			continue;
-		}
-		const int32 Idx = ElevationGrid.AddUninitialized();
-		ElevationGrid[Idx].WorldXY = FVector2D(X, Y);
-		ElevationGrid[Idx].Z = Z;
-		ElevationBounds += FVector2D(X, Y);
+		D->Grid[i].WorldXY = FVector2D(X, Y);
+		D->Grid[i].Z = Z;
+		D->Bounds += FVector2D(X, Y);
 		const int32 CellX = FMath::FloorToInt(X / ElevationCellCm);
 		const int32 CellY = FMath::FloorToInt(Y / ElevationCellCm);
-		ElevationBuckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(Idx);
+		D->Buckets.FindOrAdd(FIntPoint(CellX, CellY)).Add(i);
 	}
 	UE_LOG(LogTemp, Display,
-		TEXT("ODForestManager: loaded %d elevation grid point(s) from %s"),
-		ElevationGrid.Num(), *BinPath);
-	return true;
+		TEXT("ODForestManager: loaded %d elevation grid point(s) from %s in %.0f ms on a worker"),
+		N, *BinPath, (FPlatformTime::Seconds() - T0) * 1000.0);
+	return D;
 }
 
 bool AODForestManager::LoadCenterline()
@@ -706,31 +712,62 @@ bool AODForestManager::LoadWaterLakes()
 	{
 		return false;   // no baked water for this area/actor instance - unaffected
 	}
-	const double T0 = FPlatformTime::Seconds();
-	PrewarmLakes(WaterTilePrefix);   // no-op once the menu's pin pick started it
-	Lakes = LakeCache().Task.GetResult();
-	UE_LOG(LogTemp, Display, TEXT("ODForestManager: lakes '%s' waited %.0f ms on the game thread (%s)"),
-		*WaterTilePrefix, (FPlatformTime::Seconds() - T0) * 1000.0, Lakes.IsValid() ? TEXT("found") : TEXT("none"));
+	Lakes = LakeCache().Get(WaterTilePrefix, &LoadLakes, TEXT("lakes"));   // no wait once the menu's pin pick prewarmed it
 	return Lakes.IsValid();
 }
 
-AODForestManager::FLakeCache& AODForestManager::LakeCache()
+template <typename T>
+bool TODAreaCache<T>::Prewarm(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&))
 {
-	static FLakeCache Cache;   // ponytail: one area; key by area if hopping back and forth shows up
+	check(IsInGameThread());
+	const FString NewKey = FString::Printf(TEXT("%s@%u"), *Prefix, ODBakeLink::StatusVersion());
+	if (Key != NewKey || !Task.IsValid())
+	{
+		Key = NewKey;
+		Task = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Prefix, Load]() { return Load(Prefix); });
+	}
+	return Task.IsCompleted();
+}
+
+template <typename T>
+TSharedPtr<const T> TODAreaCache<T>::Get(const FString& Prefix, TSharedPtr<const T> (*Load)(const FString&), const TCHAR* What)
+{
+	const double T0 = FPlatformTime::Seconds();
+	Prewarm(Prefix, Load);
+	TSharedPtr<const T> Out = Task.GetResult();
+	UE_LOG(LogTemp, Display, TEXT("ODForestManager: %s '%s' waited %.0f ms on the game thread (%s)"),
+		What, *Prefix, (FPlatformTime::Seconds() - T0) * 1000.0, Out.IsValid() ? TEXT("found") : TEXT("none"));
+	return Out;
+}
+
+TODAreaCache<AODForestManager::FLakeData>& AODForestManager::LakeCache()
+{
+	static TODAreaCache<FLakeData> Cache;
 	return Cache;
 }
 
-bool AODForestManager::PrewarmLakes(const FString& WaterPrefix)
+TODAreaCache<AODForestManager::FElevData>& AODForestManager::ElevCache()
 {
-	check(IsInGameThread());
-	FLakeCache& C = LakeCache();
-	const FString Key = FString::Printf(TEXT("%s@%u"), *WaterPrefix, ODBakeLink::StatusVersion());
-	if (C.Key != Key || !C.Task.IsValid())
-	{
-		C.Key = Key;
-		C.Task = UE::Tasks::Launch(UE_SOURCE_LOCATION, [WaterPrefix]() { return LoadLakes(WaterPrefix); });
-	}
-	return C.Task.IsCompleted();
+	static TODAreaCache<FElevData> Cache;
+	return Cache;
+}
+
+TODAreaCache<AODForestManager::FFarIndex>& AODForestManager::FarCache()
+{
+	static TODAreaCache<FFarIndex> Cache;
+	return Cache;
+}
+
+// Get() is only called from ODFarForest.cpp, which can't see the template body.
+template struct TODAreaCache<AODForestManager::FFarIndex>;
+
+bool AODForestManager::PrewarmArea(const FString& WaterPrefix, const FString& ElevPrefix)
+{
+	// all three every call: each starts its worker on the first one
+	const bool bLakes = LakeCache().Prewarm(WaterPrefix, &LoadLakes);
+	const bool bElev = ElevCache().Prewarm(ElevPrefix, &LoadElevation);
+	const bool bFar = FarCache().Prewarm(ElevPrefix, &LoadFarIndex);
+	return bLakes && bElev && bFar;
 }
 
 TSharedPtr<const AODForestManager::FLakeData> AODForestManager::LoadLakes(const FString& WaterPrefix)
@@ -1187,6 +1224,10 @@ bool AODForestManager::FLakeData::IsInsideBruteForce(double WorldX, double World
 
 bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float& OutZ) const
 {
+	if (!Elev.IsValid())
+	{
+		return false;
+	}
 	const FVector2D Here(WorldX, WorldY);
 	const int32 CellX = FMath::FloorToInt(WorldX / ElevationCellCm);
 	const int32 CellY = FMath::FloorToInt(WorldY / ElevationCellCm);
@@ -1198,14 +1239,14 @@ bool AODForestManager::ElevationGridHeightAt(double WorldX, double WorldY, float
 	{
 		for (int32 dx = -1; dx <= 1; ++dx)
 		{
-			const TArray<int32>* Bucket = ElevationBuckets.Find(FIntPoint(CellX + dx, CellY + dy));
+			const TArray<int32>* Bucket = Elev->Buckets.Find(FIntPoint(CellX + dx, CellY + dy));
 			if (!Bucket)
 			{
 				continue;
 			}
 			for (int32 Idx : *Bucket)
 			{
-				const FGroundPoint& Pt = ElevationGrid[Idx];
+				const FGroundPoint& Pt = Elev->Grid[Idx];
 				const float D2 = FVector2D::DistSquared(Pt.WorldXY, Here);
 				bFoundAny = true;
 				if (D2 < BestD2)
@@ -2879,8 +2920,8 @@ void AODForestManager::Tick(float DeltaSeconds)
 					continue;
 				}
 				const FIntPoint Key = Center + FIntPoint(dx, dy);
-				// not this area's tile (2026-10-05, large world) - see ElevationBounds
-				if ((bUseElevationGrid && !ElevationBounds.Intersect(FBox2D(
+				// not this area's tile (2026-10-05, large world) - see FElevData::Bounds
+				if ((bUseElevationGrid && !Elev->Bounds.Intersect(FBox2D(
 						FVector2D(Key.X * TileSizeCm, Key.Y * TileSizeCm),
 						FVector2D((Key.X + 1) * TileSizeCm, (Key.Y + 1) * TileSizeCm))))
 					|| !Vista.WantsTile(Key, TileSizeCm))

@@ -170,8 +170,9 @@ bool AODGameMode::PrewarmArea(const FString& Area)
 {
 	// both run every call: each starts its workers on the first one
 	const bool bTerrain = AODTerrainManager::PrewarmArea(FString::Printf(TEXT("terrain_%s_test"), *Area));
-	const bool bLakes = AODForestManager::PrewarmLakes(FString::Printf(TEXT("water_%s_test"), *Area));
-	return bTerrain && bLakes;
+	const bool bForest = AODForestManager::PrewarmArea(FString::Printf(TEXT("water_%s_test"), *Area),
+		FString::Printf(TEXT("elev_%s_test"), *Area));
+	return bTerrain && bForest;
 }
 
 void AODGameMode::FreezeStreaming(bool bFreeze)
