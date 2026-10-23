@@ -209,7 +209,7 @@ STAGES = [
     ("build_ground_bands.py", "per-area ground bands (treeline/snow/sea) -> groundbands_*.json"),
     ("build_sat_albedo.py", "Sentinel-2 ground albedo over the near tiles -> sat_*.png/json (Realistic)"),
     ("build_pave_mask.py", "OSM lots/plazas + WorldCover built-up -> pave_*.png/json (Realistic paved ground)"),
-    ("build_terrain_relief.py", "cached z15 DEM slope detail + gully/ridge -> dem_*.png/json (Realistic relief)"),
+    ("build_terrain_relief.py", "cached z15 DEM slope detail + gully/ridge -> dem_*.png/json (Realistic relief; pass 2: the job's rect)"),
     ("build_map_texture.py", "build map_texture.png + map_texture_meta.json"),
     ("build_forest_elevation.py", "bake tree ground-truth elevation -> elev_*.bin"),
     ("build_far_forest.py", "WorldCover canopy cards + town street trees -> farforest_*.bin"),
@@ -238,7 +238,9 @@ PASS1 = {
     # Tail of the Dragon test). Sat masks the pre-pad road footprint.
     "build_sat_albedo.py", "build_pave_mask.py",
 }
-PASS_BOTH = {"build_road_network.py", "build_road_furniture.py", "build_world_manifest.py"}
+# build_terrain_relief: pass 1 lays out the whole-area texture, each job fills its rect
+PASS_BOTH = {"build_road_network.py", "build_road_furniture.py", "build_world_manifest.py",
+             "build_terrain_relief.py"}
 GATES = {"verify_terrain_fit.py", "verify_road_fit.py"}
 
 
