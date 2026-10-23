@@ -79,6 +79,16 @@ TAutoConsoleVariable<float> CVarSkyLeak(TEXT("od.SkyLeak"), 0.6f, TEXT("Grade vo
 TAutoConsoleVariable<float> CVarCloudViewScale(TEXT("od.CloudViewScale"), 0.5f, TEXT("VolumetricCloud ViewSampleCountScale (engine 1)."));
 TAutoConsoleVariable<float> CVarCloudShadowScale(TEXT("od.CloudShadowScale"), 0.5f, TEXT("VolumetricCloud ShadowViewSampleCountScale (engine 1)."));
 TAutoConsoleVariable<float> CVarCloudStopT(TEXT("od.CloudStopT"), 0.02f, TEXT("VolumetricCloud StopTracingTransmittanceThreshold (engine 0.005)."));
+// Cloud shadows on the ground (2026-10-22 lighting audit, Gap 2C): the sun's
+// volumetric cloud shadow map, so the clouds the material's wind moves drag
+// their shadows across the terrain. One 512^2 R11G11B10 trace a frame (+ its
+// temporal history, ~4 MB) over CloudShadowExtentKm around the camera
+// (78 m texels; the engine's 150 km gives 290 m), half the engine's march
+// samples. Deferred lighting reads it with one fetch per pixel.
+// od.CloudShadows 0 turns it off for GPU A/B.
+TAutoConsoleVariable<int32> CVarCloudShadows(TEXT("od.CloudShadows"), 1, TEXT("Sun casts volumetric cloud shadows (0 = off)."));
+constexpr float CloudShadowExtentKm = 40.0f;
+constexpr float CloudShadowRayScale = 0.5f;
 // Tone-curve toe (2026-10-20 audit sweep at Gasquet noon, toe 0.55/0.4/0.25/0.1:
 // black 42/25/9/1.6 %, DR 16.4/16.4/11.5/9.7 stops vs the photo's ~1 %, 8.8).
 // The engine 0.55 toe crushed sunlit-scene shade to black; 0.1 at night lit the
@@ -575,6 +585,17 @@ void AODAtmosphereController::Tick(float DeltaSeconds)
 		if (CloudComp->ViewSampleCountScale != ViewScale) { CloudComp->SetViewSampleCountScale(ViewScale); }
 		if (CloudComp->ShadowViewSampleCountScale != ShadowScale) { CloudComp->SetShadowViewSampleCountScale(ShadowScale); }
 		if (CloudComp->StopTracingTransmittanceThreshold != StopT) { CloudComp->SetStopTracingTransmittanceThreshold(StopT); }
+	}
+	if (UDirectionalLightComponent* CloudSun = SunComp.Get())
+	{
+		const bool bCloudShadows = CVarCloudShadows.GetValueOnGameThread() != 0;
+		if ((CloudSun->bCastCloudShadows != 0) != bCloudShadows)
+		{
+			CloudSun->bCastCloudShadows = bCloudShadows;
+			CloudSun->CloudShadowExtent = CloudShadowExtentKm;
+			CloudSun->CloudShadowRaySampleCountScale = CloudShadowRayScale;
+			CloudSun->MarkRenderStateDirty();
+		}
 	}
 
 	const UDirectionalLightComponent* SunLight = SunComp.Get();
