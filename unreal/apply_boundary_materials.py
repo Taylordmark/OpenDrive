@@ -9,8 +9,9 @@ always shown; otherwise the surface dissolves away in 3 m blocks over 2 s
 (AODTerrainManager::SpawnSyncIn sets it).
 
 M_ODCurtain - translucent, two-sided, default-lit (NOT Unlit - see
-apply_snow_particle_material.py's docstring) ribbon AODBoundaryEffect stands
-on the outline: slow bands sliding along it, fading out upward.
+apply_snow_particle_material.py's docstring) clear glass for AODBoundaryEffect's
+pyramid wall: refracts the terrain, white hint from fresnel + edge glow, shown
+only within 8..22 m of the car, tips breathe (WPO) while "Breath" > 0.
 
 Stylised on purpose, and only at the edge: everything inside the outline keeps
 the realism bar. Same build shape as apply_tornado_material.py.
@@ -124,24 +125,88 @@ finish(mat, path, (unreal.MaterialProperty.MP_BASE_COLOR, unreal.MaterialPropert
                    unreal.MaterialProperty.MP_OPACITY_MASK))
 
 # ---- M_ODCurtain -----------------------------------------------------------
+# AODBoundaryEffect's glass pyramids. Mesh data (see Rebuild): UV0 barycentric
+# per facet (edge glow), UV1 = (Rise, Phase), vertex colour rgb = inward dir
+# (*0.5+0.5), tip alpha = breath amplitude / 100 cm (0 on base verts).
+# "Center" = the car in the wall's local space; "Breath" 0..1 (slow = 1).
 mat, path = fresh("M_ODCurtain")
 mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
 mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
 mat.set_editor_property("two_sided", True)
+for prop, val in (("tangent_space_normal", False),
+                  ("translucency_lighting_mode", "TLM_SURFACE"),
+                  ("refraction_method", "RM_INDEX_OF_REFRACTION")):
+    try:
+        if isinstance(val, str):
+            enum = unreal.TranslucencyLightingMode if prop.startswith("translucency") else unreal.RefractionMode
+            val = getattr(enum, val)
+        mat.set_editor_property(prop, val)
+    except Exception as ex:
+        log(f"M_ODCurtain: {prop} not set ({ex})")
 
-uv = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -900, 0)
-t = MEL.create_material_expression(mat, unreal.MaterialExpressionTime, -900, 150)
-# UV.x = 1 per 100 m along the outline, UV.y = 0 at the foot (50 m under the
-# ground) to 1 at the top (150 m up) - fades out upward, gone at the foot's tip
-opacity = custom(mat,
-                 "float s = 0.5 + 0.5 * sin(UV.x * 30.0 - T * 1.5 + UV.y * 8.0);\n"
-                 "return saturate(1.0 - UV.y) * (0.15 + 0.3 * s);",
-                 ["UV", "T"], -600, 0)
-req(MEL.connect_material_expressions(uv, "", opacity, "UV"), "curtain UV")
-req(MEL.connect_material_expressions(t, "", opacity, "T"), "curtain T")
+lp = MEL.create_material_expression(mat, unreal.MaterialExpressionLocalPosition, -1200, 0)
+lp_wpo = MEL.create_material_expression(mat, unreal.MaterialExpressionLocalPosition, -1200, 600)
+try:
+    lp_wpo.set_editor_property("included_offsets", unreal.PositionIncludedOffsets.EXCLUDE_OFFSETS)
+except Exception as ex:
+    log(f"LocalPosition offsets not set ({ex})")
+cam = MEL.create_material_expression(mat, unreal.MaterialExpressionCameraVectorWS, -1200, 100)
+uv0 = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -1200, 200)
+uv1 = MEL.create_material_expression(mat, unreal.MaterialExpressionTextureCoordinate, -1200, 300)
+uv1.set_editor_property("coordinate_index", 1)
+vc = MEL.create_material_expression(mat, unreal.MaterialExpressionVertexColor, -1200, 700)
+t = MEL.create_material_expression(mat, unreal.MaterialExpressionTime, -1200, 800)
+center = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -1200, 400)
+center.set_editor_property("parameter_name", "Center")
+breath = MEL.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -1200, 900)
+breath.set_editor_property("parameter_name", "Breath")
+breath.set_editor_property("default_value", 1.0)
 
-req(MEL.connect_material_property(const3(mat, (0.4, 0.6, 0.8), -400, -200), "", unreal.MaterialProperty.MP_BASE_COLOR), "BaseColor")
-req(MEL.connect_material_property(const3(mat, (0.15, 0.4, 0.7), -400, -100), "", unreal.MaterialProperty.MP_EMISSIVE_COLOR), "Emissive")
-req(MEL.connect_material_property(opacity, "", unreal.MaterialProperty.MP_OPACITY), "Opacity")
-finish(mat, path, (unreal.MaterialProperty.MP_BASE_COLOR, unreal.MaterialProperty.MP_EMISSIVE_COLOR,
-                   unreal.MaterialProperty.MP_OPACITY))
+NEAR = "float d = length(P.xy - C.xy); float n = saturate(1.0 - (d - 800.0) / 1400.0); "
+near = custom(mat, NEAR + "return n * n;", ["P", "C"], -900, 0)
+req(MEL.connect_material_expressions(lp, "", near, "P"), "near P")
+req(MEL.connect_material_expressions(center, "", near, "C"), "near C")
+
+nrm = custom(mat, "float3 n = normalize(cross(ddy(P), ddx(P))); return dot(n, V) < 0 ? -n : n;",
+             ["P", "V"], -900, 150, unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+req(MEL.connect_material_expressions(lp, "", nrm, "P"), "normal P")
+req(MEL.connect_material_expressions(cam, "", nrm, "V"), "normal V")
+
+EDGE = "float e = min(min(B.x, B.y), 1.0 - B.x - B.y); float edge = 1.0 - smoothstep(0.0, 0.05, e); "
+opacity = custom(mat, EDGE + "float fres = pow(1.0 - saturate(abs(dot(N, V))), 3.0);\n"
+                 "return Near * I.x * saturate(0.05 + 0.35 * fres + 0.3 * edge);",
+                 ["B", "N", "V", "Near", "I"], -600, 0)
+for src, pin in ((uv0, "B"), (nrm, "N"), (cam, "V"), (near, "Near"), (uv1, "I")):
+    req(MEL.connect_material_expressions(src, "", opacity, pin), f"opacity {pin}")
+
+emis = custom(mat, EDGE + "return (Near * I.x * (0.04 + 0.25 * edge)).xxx;",
+              ["B", "Near", "I"], -600, 200, unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+for src, pin in ((uv0, "B"), (near, "Near"), (uv1, "I")):
+    req(MEL.connect_material_expressions(src, "", emis, pin), f"emissive {pin}")
+
+refr = custom(mat, "return lerp(1.0, 1.2, Near * I.x);", ["Near", "I"], -600, 350)
+req(MEL.connect_material_expressions(near, "", refr, "Near"), "refraction Near")
+req(MEL.connect_material_expressions(uv1, "", refr, "I"), "refraction I")
+
+wpo = custom(mat, NEAR + "n *= n;\n"
+             "float pulse = 0.5 + 0.5 * sin(6.2831853 * (T * 0.5 + I.y));\n"
+             "return (VC.rgb * 2.0 - 1.0) * (VC.a * 100.0) * (pulse - 0.5) * Br * n;",
+             ["P", "C", "VC", "T", "I", "Br"], -600, 600, unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+for src, pin in ((lp_wpo, "P"), (center, "C"), (vc, "VC"), (t, "T"), (uv1, "I"), (breath, "Br")):
+    req(MEL.connect_material_expressions(src, "", wpo, pin), f"wpo {pin}")
+
+rough = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -300, -50)
+rough.set_editor_property("r", 0.05)
+spec = MEL.create_material_expression(mat, unreal.MaterialExpressionConstant, -300, 0)
+spec.set_editor_property("r", 0.5)
+
+P = unreal.MaterialProperty
+req(MEL.connect_material_property(const3(mat, (0.9, 0.95, 1.0), -300, -150), "", P.MP_BASE_COLOR), "BaseColor")
+req(MEL.connect_material_property(rough, "", P.MP_ROUGHNESS), "Roughness")
+req(MEL.connect_material_property(spec, "", P.MP_SPECULAR), "Specular")
+req(MEL.connect_material_property(nrm, "", P.MP_NORMAL), "Normal")
+req(MEL.connect_material_property(emis, "", P.MP_EMISSIVE_COLOR), "Emissive")
+req(MEL.connect_material_property(opacity, "", P.MP_OPACITY), "Opacity")
+req(MEL.connect_material_property(refr, "", P.MP_REFRACTION), "Refraction")
+req(MEL.connect_material_property(wpo, "", P.MP_WORLD_POSITION_OFFSET), "WPO")
+finish(mat, path, (P.MP_BASE_COLOR, P.MP_OPACITY, P.MP_WORLD_POSITION_OFFSET))
