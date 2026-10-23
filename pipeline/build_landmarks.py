@@ -6,6 +6,7 @@ whatever procedural building stands on that footprint.
 
 Usage:  python build_landmarks.py          (needs road_stations.json)
         python build_landmarks.py --list   (rank OSM candidates -> docs/landmarks/<area>.md)
+        python build_landmarks.py --pois   (refresh just the discover-only pois + sidecar)
 
 Reads   data/road_tiles/<AREA_NAME>_test/road_stations.json, OSM via Overpass (cached)
 Writes  OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test_tile_<tx>_<ty>.bin
@@ -14,6 +15,11 @@ Writes  OpenDriveUE/Content/OpenDrive/Masks/landmarks_<AREA_NAME>_test_tile_<tx>
             height_m}] for AODChallengeManager; checks/verify_landmark_sidecar.py.
             `--sidecar` rewrites just this from landmarks.json, no OSM or meshes)
         data/road_tiles/<AREA_NAME>_test/landmarks.json   (summary, checks/verify_landmarks.py)
+
+Discover-only landmarks (2026-10-23): every area, drawn ones included, also gets
+up to MAX_POIS of the top-ranked --list candidates (lighthouses, towers, dams, waterfalls,
+historic sites, attractions, tall or wikidata buildings) within POI_ROAD_M of a
+road, as kind "poi" entries in the sidecar: map pin + discovery, no new mesh.
 
 Geometry is OSM only (ODbL, already credited) plus code: no third-party models.
 
@@ -344,20 +350,22 @@ def main():
         path.write_bytes(pack_landmark_tile(foot_tiles[tile], mesh_tiles[tile], gen_id_bytes))
         written.append(path)
     n_stale = delete_stale_tiles(OUT_DIR, f"landmarks_{AREA_NAME}_test_tile_*.bin", written)
-    SUMMARY_PATH.write_text(json.dumps(dict(area=AREA_NAME, generation_id=gen_id, landmarks=summary), indent=1))
-    write_sidecar(summary, OUT_DIR)
+    pois = poi_landmarks(summary)
+    SUMMARY_PATH.write_text(json.dumps(dict(area=AREA_NAME, generation_id=gen_id, landmarks=summary, pois=pois), indent=1))
+    write_sidecar(summary, OUT_DIR, pois)
     print(f"{len(here)} landmark(s) -> {len(written)} tile(s), {n_stale} stale deleted, gen {gen_id} -> {OUT_DIR}")
 
 
-def write_sidecar(summary, out_dir):
+def write_sidecar(summary, out_dir, pois=()):
     """The runtime's landmark list: names and centroids, kept out of ODL1
-    (the place labels share that magic)."""
+    (the place labels share that magic). Built ones first, then the pois."""
     out = []
     for lm in summary:
         ring = lm["footprint"]
         cx, cy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
         out.append(dict(name=lm["name"], kind="building", centroid_cm=[round(cx, 1), round(cy, 1)],
                         radius_cm=round(max(math.dist((cx, cy), p) for p in ring), 1), height_m=lm["height_m"]))
+    out += pois
     path = out_dir / f"landmarks_{AREA_NAME}_test.json"
     path.write_text(json.dumps(dict(area=AREA_NAME, landmarks=out), indent=1), encoding="utf-8")
     print(f"wrote {path} ({len(out)} landmark(s))")
@@ -365,7 +373,7 @@ def write_sidecar(summary, out_dir):
 
 # ------------------------------------------------------------- --list mode
 SKIP_HISTORIC = "memorial|marker|wayside_shrine|boundary_stone|milestone|mine_shaft|ruins|archaeological_site|grave|tomb"
-TYPE_HEIGHT_M = {"tower": 20, "water_tower": 15, "lighthouse": 15, "chimney": 30, "silo": 20, "bridge": 10, "dam": 10}
+TYPE_HEIGHT_M = {"waterfall": 15, "tower": 20, "water_tower": 15, "lighthouse": 15, "chimney": 30, "silo": 20, "bridge": 10, "dam": 10}
 
 
 def guess_height(t):
@@ -377,18 +385,23 @@ def guess_height(t):
     try:
         return float(t["building:levels"]) * 3.2, "levels"
     except (KeyError, ValueError):
-        return TYPE_HEIGHT_M.get(t.get("man_made"), 8.0), "guess"
+        k = "waterfall" if "waterfall" in (t.get("waterway"), t.get("natural")) else t.get("man_made")
+        return TYPE_HEIGHT_M.get(k, 8.0), "guess"
 
 
-def list_candidates():
+def candidates():
+    """Ranked OSM landmark candidates, best first: dicts with score, osm, name,
+    kind, h, src, road_m, xy_cm, part, notable, built."""
     s, w, n, e = BBOX_SNWE
     b = f"({s},{w},{n},{e})"
     q = f"""[out:json][timeout:300];
 (
- nwr["tourism"="attraction"]{b};
+ nwr["tourism"~"^(attraction|viewpoint|museum)$"]{b};
  nwr["historic"]["historic"!~"^({SKIP_HISTORIC})$"]{b};
  nwr["man_made"~"^(tower|water_tower|lighthouse|bridge|dam|chimney|silo)$"]{b};
  way["waterway"="dam"]{b};
+ nwr["waterway"="waterfall"]{b};
+ nwr["natural"="waterfall"]{b};
  nwr["building"]["wikidata"]{b};
  nwr["building:part"]{b};
  way["building"]["height"](if:number(t["height"])>=40){b};
@@ -409,15 +422,59 @@ out tags center;"""
         h, src = guess_height(t)
         d, _ = tree.query(np.array(to_local(c["lon"], c["lat"])).ravel())
         score = h / max(d, 15.0) * (1.5 if "wikidata" in t else 1.0) * (1.3 if "tourism" in t or "historic" in t else 1.0)
-        kind = t.get("man_made") or t.get("historic") or t.get("tourism") or t.get("building") or t.get("building:part")
-        rows.append((score, el["type"][0] + str(el["id"]), t["name"], kind, h, src, d, el["type"] == "way" and el["id"] in chosen))
-    rows.sort(reverse=True)
-    seen, lines = set(), []
+        kind = t.get("man_made") or ("waterfall" if "waterfall" in (t.get("waterway"), t.get("natural")) else None) or t.get("historic") or t.get("tourism") or t.get("building") or t.get("building:part")
+        x, y = (float(v) for v in np.ravel(to_local(c["lon"], c["lat"])))
+        rows.append(dict(score=score, osm=el["type"][0] + str(el["id"]), name=t["name"], kind=kind, h=h, src=src,
+                         road_m=float(d), xy_cm=(x * 100.0, -y * 100.0), part="building:part" in t and "building" not in t,
+                         notable=any(k in t for k in ("tourism", "historic", "man_made", "waterway", "wikidata")) or t.get("natural") == "waterfall",
+                         built=el["type"] == "way" and el["id"] in chosen))
+    rows.sort(key=lambda r: -r["score"])
+    return rows
+
+
+MAX_POIS = 12          # checklist length stays readable
+POI_ROAD_M = 150.0     # AODChallengeManager discovers within radius (15 m) + 150 m
+POI_RADIUS_CM = 1500.0
+POI_SPACING_M = 100.0  # one pin per spot: skip near a built landmark or a chosen poi
+
+
+def pick_pois(rows, built_xy_cm, built_names):
+    """The discover-only picks from candidates() rows (pure, tested)."""
+    taken, out = list(built_xy_cm), []
     for r in rows:
-        if r[2] in seen:
+        if len(out) == MAX_POIS:
+            break
+        if (r["built"] or r["part"] or r["road_m"] > POI_ROAD_M or r["name"] in built_names
+                or not r["notable"]   # a plain tall building: Honolulu's apartment towers
+                or r["kind"] == "hotel"   # tall + wikidata, but not what you'd drive to see
+                or (r["kind"] == "bridge" and "bridge" not in r["name"].lower())   # "Old Road/5" overpasses
+                or r["name"] in (o["name"] for o in out)
+                or any(math.dist(r["xy_cm"], p) < POI_SPACING_M * 100 for p in taken)):
             continue
-        seen.add(r[2])
-        lines.append(f"| {'**built**' if r[7] else ''} | {r[2]} | {r[1]} | {r[3]} | {r[4]:.0f} ({r[5]}) | {r[6]:.0f} | {r[0]:.2f} |")
+        taken.append(r["xy_cm"])
+        out.append(dict(name=r["name"], kind="poi", centroid_cm=[round(v, 1) for v in r["xy_cm"]],
+                        radius_cm=POI_RADIUS_CM, height_m=round(r["h"], 1), osm=r["osm"], what=r["kind"]))
+    return out
+
+
+def poi_landmarks(summary):
+    built_xy = [(sum(p[0] for p in lm["footprint"]) / len(lm["footprint"]),
+                 sum(p[1] for p in lm["footprint"]) / len(lm["footprint"])) for lm in summary]
+    pois = pick_pois(candidates(), built_xy, {lm["name"] for lm in summary})
+    for p in pois:
+        print(ascii(f"  poi {p['name']} ({p['what']}, {p['osm']})")[1:-1])   # cp1252 console vs OSM names
+    return pois
+
+
+def list_candidates():
+    chosen = {lm["way"] for lm in LANDMARKS}
+    seen, lines = set(), []
+    for r in candidates():
+        if r["name"] in seen:
+            continue
+        seen.add(r["name"])
+        lines.append(f"| {'**built**' if r['built'] else ''} | {r['name']} | {r['osm']} | {r['kind']} | "
+                     f"{r['h']:.0f} ({r['src']}) | {r['road_m']:.0f} | {r['score']:.2f} |")
         if len(lines) == 25:
             break
     ways = fetch_ways(chosen)
@@ -425,7 +482,7 @@ out tags center;"""
              if lm["way"] in ways and in_bbox(ways[lm["way"]]["geometry"])]
     doc = [f"# Landmarks: {AREA_NAME}", "",
            "Generated by `python pipeline/build_landmarks.py --list` (OD_AREA set). OSM candidates "
-           "(tourism=attraction, historic, man_made towers/chimneys/bridges/dams, wikidata or tall buildings), "
+           "(tourism=attraction/viewpoint/museum, historic, man_made towers/chimneys/bridges/dams, waterfalls, wikidata or tall buildings), "
            "ranked by height / max(distance to the nearest road station, 15 m), x1.5 with a wikidata link, "
            "x1.3 for tourism/historic. Height source: height tag, levels x 3.2 m, or a guess by type.", "",
            "| | name | OSM | kind | height m | road m | score |", "|---|---|---|---|---|---|---|", *lines, "",
@@ -438,7 +495,13 @@ out tags center;"""
 
 
 if __name__ == "__main__":
-    if "--sidecar" in sys.argv:
-        write_sidecar(json.loads(SUMMARY_PATH.read_text())["landmarks"], OUT_DIR)
+    if "--pois" in sys.argv:   # refresh the pois of an already-baked area; meshes and tiles untouched
+        d = json.loads(SUMMARY_PATH.read_text()) if SUMMARY_PATH.exists() else dict(area=AREA_NAME, landmarks=[])
+        d["pois"] = poi_landmarks(d["landmarks"])
+        SUMMARY_PATH.write_text(json.dumps(d, indent=1))
+        write_sidecar(d["landmarks"], OUT_DIR, d["pois"])
+    elif "--sidecar" in sys.argv:
+        d = json.loads(SUMMARY_PATH.read_text())
+        write_sidecar(d["landmarks"], OUT_DIR, d.get("pois", []))
     else:
         list_candidates() if "--list" in sys.argv else main()
